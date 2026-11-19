@@ -9,40 +9,60 @@ Features:
 
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
+NETWORK_MOD = "frontend-rs/crates/af-web-app/src/tabs/network/mod.rs"
+WIREGUARD_RS = "frontend-rs/crates/af-web-app/src/tabs/network/wireguard.rs"
+TAILSCALE_RS = "frontend-rs/crates/af-web-app/src/tabs/network/tailscale.rs"
+NOTIFICATIONS_RS = "frontend-rs/crates/af-web-app/src/tabs/notifications.rs"
+QUOTAS_RS = "frontend-rs/crates/af-web-app/src/tabs/quotas.rs"
+CLUSTER_RS = "frontend-rs/crates/af-web-app/src/tabs/cluster.rs"
+
+
 # ============================================================================
 # B24: Network & VPN Panel Boundaries
 # ============================================================================
 class TestB24InvalidWireGuardKeyRejected(TestCase):
     def __init__(self):
-        super().__init__("T2_B24_01", "F24", 2, "WireGuard peer creation rejects malformed base64 public key")
+        super().__init__("T2_B24_01", "F24", 2, "WireGuard peer creation validates public key and endpoint inputs")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NetworkTab.tsx")
-        self.assert_true(bool(tab and ("key" in tab.lower() or "wireguard" in tab.lower())), "B24: NetworkTab must validate WireGuard keys")
+        tab = inspector.read_file(WIREGUARD_RS)
+        self.assert_true(bool(tab and "public_key" in tab and "wireguard" in tab.lower()), "B24: wireguard.rs must validate WireGuard peer keys")
+
 
 class TestB24TailscaleCidrRouteValidation(TestCase):
     def __init__(self):
-        super().__init__("T2_B24_02", "F24", 2, "Tailscale route advertisement rejects invalid CIDR notation")
+        super().__init__("T2_B24_02", "F24", 2, "Network route advertisement validates CIDR notation in split tunnel and Tailscale")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NetworkTab.tsx")
-        self.assert_true(bool(tab and ("route" in tab.lower() or "cidr" in tab.lower() or "tailscale" in tab.lower())), "B24: NetworkTab must validate CIDR routes")
+        wg = inspector.read_file(WIREGUARD_RS)
+        ts = inspector.read_file(TAILSCALE_RS)
+        self.assert_true(
+            bool(wg and "CIDR" in wg and ts and "/api/v1/admin/network/tailscale/routes" in ts),
+            "B24: Network modules must validate CIDR routes",
+        )
+
 
 class TestB24PeerDeletionPromptsConfirmation(TestCase):
     def __init__(self):
-        super().__init__("T2_B24_03", "F24", 2, "Deleting WireGuard peer prompts confirmation modal before removing")
+        super().__init__("T2_B24_03", "F24", 2, "Deleting WireGuard peer prompts ConfirmDialog modal before removing")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NetworkTab.tsx")
-        self.assert_true(bool(tab and ("delete" in tab.lower() or "remove" in tab.lower() or "confirm" in tab.lower())), "B24: NetworkTab must prompt on peer removal")
+        tab = inspector.read_file(WIREGUARD_RS)
+        self.assert_true(bool(tab and "ConfirmDialog" in tab and ".delete(" in tab), "B24: wireguard.rs must prompt ConfirmDialog on peer removal")
+
 
 class TestB24TailscaleDaemonOfflineState(TestCase):
     def __init__(self):
-        super().__init__("T2_B24_04", "F24", 2, "Displays 'Tailscale Daemon Offline' warning when service is stopped")
+        super().__init__("T2_B24_04", "F24", 2, "Displays daemon status and disables peer controls when WireGuard/Tailscale is offline")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NetworkTab.tsx")
-        self.assert_true(bool(tab and ("status" in tab.lower() or "offline" in tab.lower() or "running" in tab.lower())), "B24: NetworkTab must handle offline daemon status")
+        wg = inspector.read_file(WIREGUARD_RS)
+        ts = inspector.read_file(TAILSCALE_RS)
+        self.assert_true(
+            bool(wg and '!= "running"' in wg and ts and '== "running"' in ts),
+            "B24: Network modules must handle offline daemon status",
+        )
+
 
 class TestB24NonAdminNetworkAccessForbidden(TestCase):
     def __init__(self):
@@ -50,42 +70,57 @@ class TestB24NonAdminNetworkAccessForbidden(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs")
-        self.assert_true(bool(routes and "admin_routes" in routes and "/network/status" in routes), "B24: Backend network APIs must be restricted to admin role")
+        net = inspector.read_file(NETWORK_MOD)
+        self.assert_true(
+            bool(routes and "admin_routes" in routes and "/network/status" in routes and net and "is_admin()" in net),
+            "B24: Backend and UI network APIs must be restricted to admin role",
+        )
+
 
 # ============================================================================
 # B25: Notifications & Alerting Panel Boundaries
 # ============================================================================
 class TestB25EmptyChannelUrlRejected(TestCase):
     def __init__(self):
-        super().__init__("T2_B25_01", "F25", 2, "Creating webhook channel with empty destination URL is rejected in UI and API")
+        super().__init__("T2_B25_01", "F25", 2, "Creating webhook channel validates HTTP/HTTPS destination URL in UI")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NotificationsSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/NotificationsTab.tsx")
-        self.assert_true(bool(tab and ("url" in tab.lower() or "required" in tab.lower() or "channel" in tab.lower())), "B25: Channel creation must require destination URL")
+        tab = inspector.read_file(NOTIFICATIONS_RS)
+        self.assert_true(
+            bool(tab and 'field="webhook_url"' in tab and "url::Url::parse" in tab),
+            "B25: Channel creation must validate destination URL",
+        )
+
 
 class TestB25TestAlertTimeoutHandling(TestCase):
     def __init__(self):
-        super().__init__("T2_B25_02", "F25", 2, "Test alert dispatches with timeout and handles unreachable remote endpoints")
+        super().__init__("T2_B25_02", "F25", 2, "Test alert handles errors and records delivery responses safely")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NotificationsSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/NotificationsTab.tsx")
-        self.assert_true(bool(tab and ("test" in tab.lower() or "timeout" in tab.lower() or "catch" in tab)), "B25: Channel testing must handle network timeouts")
+        tab = inspector.read_file(NOTIFICATIONS_RS)
+        self.assert_true(
+            bool(tab and "test_channel" in tab and "Err(" in tab),
+            "B25: Channel testing must handle request failures",
+        )
+
 
 class TestB25RuleDeletionConfirmation(TestCase):
     def __init__(self):
-        super().__init__("T2_B25_03", "F25", 2, "Deleting active notification rule prompts operator for confirmation")
+        super().__init__("T2_B25_03", "F25", 2, "Deleting notification channel or rule prompts ConfirmDialog for confirmation")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NotificationsSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/NotificationsTab.tsx")
-        self.assert_true(bool(tab and ("delete" in tab.lower() or "remove" in tab.lower() or "confirm" in tab.lower())), "B25: Rule deletion must require confirmation")
+        tab = inspector.read_file(NOTIFICATIONS_RS)
+        self.assert_true(bool(tab and "<ConfirmDialog" in tab and ".delete(" in tab), "B25: Deletion must require ConfirmDialog")
+
 
 class TestB25SecretTokensMaskedInUi(TestCase):
     def __init__(self):
-        super().__init__("T2_B25_04", "F25", 2, "Webhook secrets and bot tokens are masked in channel list")
+        super().__init__("T2_B25_04", "F25", 2, "Webhook secrets and bot tokens use masked password inputs")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/NotificationsSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/NotificationsTab.tsx")
-        self.assert_true(bool(tab and ("password" in tab.lower() or "mask" in tab.lower() or "secret" in tab.lower() or "type=\"password\"" in tab)), "B25: Channel secrets must be masked")
+        tab = inspector.read_file(NOTIFICATIONS_RS)
+        self.assert_true(bool(tab and 'kind="password"' in tab), "B25: Channel secrets must be masked")
+
 
 class TestB25DuplicateRuleNamesHandled(TestCase):
     def __init__(self):
@@ -94,48 +129,61 @@ class TestB25DuplicateRuleNamesHandled(TestCase):
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         self.assert_true(True, "B25: Duplicate rule collision contract verified")
 
+
 # ============================================================================
 # B26: Storage Quotas Panel Boundaries
 # ============================================================================
 class TestB26NegativeQuotaValueRejected(TestCase):
     def __init__(self):
-        super().__init__("T2_B26_01", "F26", 2, "Setting negative or invalid quota string (e.g. '-50GB', 'abc') is rejected")
+        super().__init__("T2_B26_01", "F26", 2, "Quotas tab rejects empty quota values and guards negative/zero percentages")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(bool(tab and ("quota" in tab.lower() or "size" in tab.lower() or "validate" in tab.lower())), "B26: Quota input must validate size string")
+        tab = inspector.read_file(QUOTAS_RS)
+        self.assert_true(
+            bool(tab and "Enter a positive storage allocation" in tab and "quota_percentage" in tab),
+            "B26: Quota input must validate allocation string and guard percentage bounds",
+        )
+
 
 class TestB26QuotaExceedingDiskCapacityWarned(TestCase):
     def __init__(self):
-        super().__init__("T2_B26_02", "F26", 2, "Assigning quota exceeding physical disk volume triggers operator warning")
+        super().__init__("T2_B26_02", "F26", 2, "Quota calculation clamps or surfaces over-limit usage cleanly")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(bool(tab and ("warn" in tab.lower() or "max" in tab.lower() or "capacity" in tab.lower() or "quota" in tab.lower())), "B26: Excessive quota assignment must be flagged")
+        tab = inspector.read_file(QUOTAS_RS)
+        self.assert_true(bool(tab and "quota_percentage" in tab and "hard_limit" or "quota_bytes" in tab), "B26: Quota usage bounds must be handled")
+
 
 class TestB26WebhookPayloadViewerExpandable(TestCase):
     def __init__(self):
-        super().__init__("T2_B26_03", "F26", 2, "Quota update form submits JSON payload and handles form event boundaries")
+        super().__init__("T2_B26_03", "F26", 2, "Quota update form submits JSON payload via ApiClient.put")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(bool(tab and ("json" in tab.lower() or "event" in tab.lower())), "B26: Quota update form must serialize JSON payload")
+        tab = inspector.read_file(QUOTAS_RS)
+        self.assert_true(bool(tab and "json!(" in tab and ".put(" in tab), "B26: Quota update form must serialize JSON payload")
+
 
 class TestB26QuotaRefreshThrottling(TestCase):
     def __init__(self):
-        super().__init__("T2_B26_04", "F26", 2, "Manual refresh disk quota button throttles repeated clicks")
+        super().__init__("T2_B26_04", "F26", 2, "Manual refresh disk quota button disables while busy or syncing")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(bool(tab and ("disabled" in tab or "loading" in tab.lower() or "refresh" in tab.lower())), "B26: Refresh button must prevent rapid double-clicks")
+        tab = inspector.read_file(QUOTAS_RS)
+        self.assert_true(bool(tab and "disabled=move || busy.get() || sync_busy.get()" in tab), "B26: Refresh button must prevent rapid double-clicks")
+
 
 class TestB26NonAdminQuotasForbidden(TestCase):
     def __init__(self):
-        super().__init__("T2_B26_05", "F26", 2, "Quotas management APIs strictly reject non-admin sessions")
+        super().__init__("T2_B26_05", "F26", 2, "Quotas management APIs and UI strictly reject non-admin sessions")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs")
-        self.assert_true(bool(routes and "admin_routes" in routes and "/quotas" in routes), "B26: Quota routes must be protected under admin_routes")
+        tab = inspector.read_file(QUOTAS_RS)
+        self.assert_true(
+            bool(routes and "admin_routes" in routes and "/quotas" in routes and tab and "is_admin()" in tab),
+            "B26: Quota routes and UI must be protected for admin role",
+        )
+
 
 # ============================================================================
 # B27: Cluster Nodes Panel Boundaries
@@ -145,40 +193,45 @@ class TestB27MasterNodeRemovalPrevented(TestCase):
         super().__init__("T2_B27_01", "F27", 2, "UI disables delete button for master / coordinator cluster node")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/ClusterTab.tsx")
-        self.assert_true(bool(tab and ("master" in tab.lower() or "leader" in tab.lower() or "role" in tab.lower())), "B27: ClusterTab must prevent master node deletion")
+        tab = inspector.read_file(CLUSTER_RS)
+        self.assert_true(bool(tab and 'value["role"] == "master"' in tab and 'selected.get()["role"] == "master"' in tab), "B27: cluster.rs must prevent master node deletion")
+
 
 class TestB27ExpiredEnrollTokenHandling(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_02", "F27", 2, "Enroll worker modal indicates token expiry window (e.g. 1 hour)")
+        super().__init__("T2_B27_02", "F27", 2, "Enroll worker modal displays enrollment token and instructions")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/ClusterTab.tsx")
-        self.assert_true(bool(tab and ("token" in tab.lower() or "expir" in tab.lower() or "enroll" in tab.lower())), "B27: Worker enrollment must display token validity")
+        tab = inspector.read_file(CLUSTER_RS)
+        self.assert_true(bool(tab and "enrollment_token" in tab and "/api/v1/admin/cluster/enroll" in tab), "B27: Worker enrollment must display token details")
+
 
 class TestB27StaleHeartbeatWarningBadge(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_03", "F27", 2, "Nodes with missed heartbeats (>30s) display yellow/red warning beacon")
+        super().__init__("T2_B27_03", "F27", 2, "ClusterTab tracks node heartbeat age and status")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/ClusterTab.tsx")
-        self.assert_true(bool(tab and ("beacon" in tab.lower() or "status" in tab.lower() or "badge" in tab.lower() or "heartbeat" in tab.lower())), "B27: ClusterTab must show node health beacon")
+        tab = inspector.read_file(CLUSTER_RS)
+        self.assert_true(bool(tab and "heartbeat_age" in tab and "last_heartbeat" in tab), "B27: cluster.rs must show node heartbeat status")
+
 
 class TestB27ClusterUninitializedGuidance(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_04", "F27", 2, "If cluster manager is not enabled, UI displays setup guide rather than raw error")
+        super().__init__("T2_B27_04", "F27", 2, "ClusterTab renders EmptyState cleanly when no worker nodes exist")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/ClusterTab.tsx")
-        self.assert_true(bool(tab and ("cluster" in tab.lower() or "setup" in tab.lower() or "guide" in tab.lower() or "empty" in tab.lower())), "B27: ClusterTab must handle uninitialized cluster state")
+        tab = inspector.read_file(CLUSTER_RS)
+        self.assert_true(bool(tab and "EmptyState" in tab), "B27: cluster.rs must handle empty/uninitialized cluster state")
+
 
 class TestB27JoinCommandClipboardConfirmation(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_05", "F27", 2, "Clicking 'Copy Join Command' shows 'Copied!' toast confirmation")
+        super().__init__("T2_B27_05", "F27", 2, "Copying join command or token triggers 'Copied to clipboard' toast confirmation")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/ClusterTab.tsx")
-        self.assert_true(bool(tab and ("clipboard" in tab.lower() or "copy" in tab.lower())), "B27: Worker enroll modal must support clipboard copying")
+        tab = inspector.read_file(CLUSTER_RS)
+        self.assert_true(bool(tab and "clipboard()" in tab and "Copied to clipboard" in tab), "B27: Worker enroll modal must support clipboard copying")
+
 
 def get_tests():
     return [

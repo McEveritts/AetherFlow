@@ -1,8 +1,8 @@
 use af_models::{
     AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse, NetworkRunnerRequest, Package,
-    PackageAutomation, PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse,
-    SandboxRunnerRequest, SelfUpdateJobStatus, SelfUpdateRequest, SelfUpdateStatusRequest,
-    SystemctlRequest,
+    PackageAutomation, PackageRunnerRequest, QuotaRunnerRequest, RunnerApacheVhostRequest,
+    RunnerResponse, SandboxRunnerRequest, SelfUpdateJobStatus, SelfUpdateRequest,
+    SelfUpdateStatusRequest, SystemctlRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -171,16 +171,12 @@ pub fn runner_socket_path() -> String {
 pub fn is_runner_available() -> bool {
     let p = resolve_runner_socket_path();
     let path = Path::new(&p);
-    if !path.exists() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
-        if let Ok(meta) = fs::metadata(path) {
-            return meta.file_type().is_socket() || meta.is_file();
-        }
-        false
+        fs::metadata(path)
+            .map(|meta| meta.file_type().is_socket())
+            .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
@@ -342,6 +338,8 @@ pub fn build_runner_router() -> Router {
             "/v1/dispatcharr-credentials",
             post(handle_dispatcharr_credentials),
         )
+        .route("/v1/ingress/vhost", post(handle_ingress_vhost))
+        .route("/v1/certbot-sync", post(handle_certbot_sync))
 }
 
 async fn handle_health() -> Json<RunnerResponse> {
@@ -3325,6 +3323,77 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
     apply_package_sandbox_reserved(pkg_id, &guard).await
 }
 
+fn write_file_atomically_with_mode(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+    let temp_path = parent.join(format!(".{}.tmp.{}", file_name, uuid::Uuid::new_v4()));
+    let write_res = (|| -> anyhow::Result<()> {
+        let mut opts = fs::OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(mode)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut temp_file = opts.open(&temp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp_path, fs::Permissions::from_mode(mode))?;
+        }
+        temp_file.write_all(bytes)?;
+        temp_file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn apply_sandbox_dropins_in_dir(
+    sys_dir: &Path,
+    units: &[String],
+    sandbox_profile: &str,
+    sandbox_read_write: &[String],
+) -> anyhow::Result<()> {
+    for raw_unit in units {
+        let norm_unit = normalize_systemd_unit(raw_unit);
+        let dropin_dir = sys_dir.join(format!("{}.d", norm_unit));
+        let dropin_aether = dropin_dir.join("aetherflow-sandbox.conf");
+        let dropin_10 = dropin_dir.join("10-aetherflow-sandbox.conf");
+        if sandbox_profile == "privileged"
+            || sandbox_profile == "none"
+            || is_exempt_sandbox_unit(&norm_unit)
+        {
+            remove_file_if_exists(&dropin_aether)?;
+            remove_file_if_exists(&dropin_10)?;
+            continue;
+        }
+        fs::create_dir_all(&dropin_dir)?;
+        let content =
+            render_systemd_sandbox_dropin(sandbox_profile, &norm_unit, sandbox_read_write);
+        write_file_atomically_with_mode(&dropin_10, content.as_bytes(), 0o644)?;
+        remove_file_if_exists(&dropin_aether)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn apply_package_sandbox_reserved(
     pkg_id: &str,
     guard: &af_release::ReleaseLockGuard,
@@ -3374,30 +3443,14 @@ pub(crate) async fn apply_package_sandbox_reserved(
                 })
         });
 
-    // 1. If systemd root override is set (or on Linux when writing drop-ins directly), write drop-in files
+    // 1. If systemd root override is set, write canonical 10-aetherflow-sandbox.conf drop-in files
     if let Some(ref sys_root) = systemd_root_override {
-        for raw_unit in &units {
-            let norm_unit = normalize_systemd_unit(raw_unit);
-            let dropin_dir = Path::new(sys_root).join(format!("{}.d", norm_unit));
-            let dropin_aether = dropin_dir.join("aetherflow-sandbox.conf");
-            let dropin_10 = dropin_dir.join("10-aetherflow-sandbox.conf");
-            if pkg.sandbox_profile == "privileged"
-                || pkg.sandbox_profile == "none"
-                || is_exempt_sandbox_unit(&norm_unit)
-            {
-                let _ = fs::remove_file(&dropin_aether);
-                let _ = fs::remove_file(&dropin_10);
-                continue;
-            }
-            fs::create_dir_all(&dropin_dir)?;
-            let content = render_systemd_sandbox_dropin(
-                &pkg.sandbox_profile,
-                &norm_unit,
-                &pkg.sandbox_read_write,
-            );
-            fs::write(&dropin_aether, &content)?;
-            fs::write(&dropin_10, &content)?;
-        }
+        apply_sandbox_dropins_in_dir(
+            Path::new(sys_root),
+            &units,
+            &pkg.sandbox_profile,
+            &pkg.sandbox_read_write,
+        )?;
         return Ok("sandbox applied".to_string());
     }
 
@@ -3432,37 +3485,27 @@ pub(crate) async fn apply_package_sandbox_reserved(
         }
     }
 
-    // 3. Direct drop-in fallback in /etc/systemd/system/<unit>.service.d/aetherflow-sandbox.conf
+    // 3. Direct drop-in fallback in /etc/systemd/system/<unit>.service.d/10-aetherflow-sandbox.conf
     let sys_dir = Path::new("/etc/systemd/system");
     if sys_dir.exists() {
-        for raw_unit in &units {
-            let norm_unit = normalize_systemd_unit(raw_unit);
-            let dropin_dir = sys_dir.join(format!("{}.d", norm_unit));
-            let dropin_aether = dropin_dir.join("aetherflow-sandbox.conf");
-            let dropin_10 = dropin_dir.join("10-aetherflow-sandbox.conf");
-            if pkg.sandbox_profile == "privileged"
-                || pkg.sandbox_profile == "none"
-                || is_exempt_sandbox_unit(&norm_unit)
-            {
-                let _ = fs::remove_file(&dropin_aether);
-                let _ = fs::remove_file(&dropin_10);
-                continue;
-            }
-            if fs::create_dir_all(&dropin_dir).is_ok() {
-                let content = render_systemd_sandbox_dropin(
-                    &pkg.sandbox_profile,
-                    &norm_unit,
-                    &pkg.sandbox_read_write,
-                );
-                let _ = fs::write(&dropin_aether, &content);
-                let _ = fs::write(&dropin_10, &content);
-            }
-        }
+        apply_sandbox_dropins_in_dir(
+            sys_dir,
+            &units,
+            &pkg.sandbox_profile,
+            &pkg.sandbox_read_write,
+        )?;
         let mut command = Command::new("systemctl");
         command.arg("daemon-reload").kill_on_drop(true);
         #[cfg(unix)]
         guard.preserve_in_child(command.as_std_mut())?;
-        let _ = command.output().await;
+        let out = command
+            .output()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to execute systemctl daemon-reload: {err}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("systemctl daemon-reload failed: {}", stderr.trim());
+        }
     }
 
     Ok("sandbox applied".to_string())
@@ -6758,6 +6801,573 @@ pub async fn probe_package_version_via_runner(package_id: &str) -> anyhow::Resul
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Privileged Apache Ingress Vhost & Certbot Sync Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+static SAFE_INGRESS_APP_NAME: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,47}$").unwrap());
+
+#[derive(Debug)]
+enum PrevEnabledVhostState {
+    Missing,
+    Symlink(PathBuf),
+    RegularFile(Vec<u8>, u32),
+}
+
+fn ensure_non_symlink_dir(dir: &Path, create_if_missing: bool) -> anyhow::Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                anyhow::bail!("refusing non-directory or symlinked path {}", dir.display());
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if create_if_missing {
+                fs::create_dir_all(dir)?;
+                let meta = fs::symlink_metadata(dir)?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    anyhow::bail!("refusing non-directory or symlinked path {}", dir.display());
+                }
+            }
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_regular_file_nofollow(path: &Path) -> anyhow::Result<Option<(Vec<u8>, u32)>> {
+    use std::io::Read;
+    match fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!("refusing symlinked vhost target {}", path.display());
+            }
+            if !meta.is_file() {
+                anyhow::bail!("refusing non-regular vhost target {}", path.display());
+            }
+        }
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = opts.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        anyhow::bail!("refusing non-regular vhost target {}", path.display());
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o777
+    };
+    #[cfg(not(unix))]
+    let mode = 0o644;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(Some((buf, mode)))
+}
+
+fn snapshot_enabled_vhost(path: &Path) -> anyhow::Result<PrevEnabledVhostState> {
+    match fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(PrevEnabledVhostState::Missing)
+        }
+        Err(err) => Err(err.into()),
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                Ok(PrevEnabledVhostState::Symlink(fs::read_link(path)?))
+            } else if meta.is_file() {
+                let (bytes, mode) = read_regular_file_nofollow(path)?
+                    .ok_or_else(|| anyhow::anyhow!("vhost disappeared during snapshot"))?;
+                Ok(PrevEnabledVhostState::RegularFile(bytes, mode))
+            } else {
+                anyhow::bail!("refusing non-regular enabled vhost path {}", path.display());
+            }
+        }
+    }
+}
+
+fn rollback_ingress_vhost(
+    avail_path: &Path,
+    enabled_path: &Path,
+    prev_avail: &Option<(Vec<u8>, u32)>,
+    prev_enabled: &PrevEnabledVhostState,
+) -> anyhow::Result<()> {
+    match prev_enabled {
+        PrevEnabledVhostState::Missing => remove_file_if_exists(enabled_path)?,
+        PrevEnabledVhostState::Symlink(target) => {
+            remove_file_if_exists(enabled_path)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, enabled_path)?;
+            #[cfg(not(unix))]
+            let _ = target;
+        }
+        PrevEnabledVhostState::RegularFile(bytes, mode) => {
+            remove_file_if_exists(enabled_path)?;
+            write_file_atomically_with_mode(enabled_path, bytes, *mode)?;
+        }
+    }
+    match prev_avail {
+        Some((bytes, mode)) => write_file_atomically_with_mode(avail_path, bytes, *mode)?,
+        None => remove_file_if_exists(avail_path)?,
+    }
+    Ok(())
+}
+
+async fn run_apache_configtest_if_present() -> anyhow::Result<()> {
+    for bin in [
+        "/usr/sbin/apache2ctl",
+        "/usr/sbin/apachectl",
+        "apache2ctl",
+        "apachectl",
+    ] {
+        let mut cmd = Command::new(bin);
+        cmd.arg("-t").kill_on_drop(true);
+        match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
+            Ok(Ok(out)) => {
+                if out.status.success() {
+                    return Ok(());
+                }
+                let combined = format!(
+                    "{} {}",
+                    String::from_utf8_lossy(&out.stderr).trim(),
+                    String::from_utf8_lossy(&out.stdout).trim()
+                );
+                anyhow::bail!("apache2ctl -t failed: {}", combined.trim());
+            }
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(Err(err)) => anyhow::bail!("failed to execute {} -t: {}", bin, err),
+            Err(_) => anyhow::bail!("{} -t timed out", bin),
+        }
+    }
+    Ok(())
+}
+
+async fn reload_apache_if_active() -> anyhow::Result<()> {
+    let active_out = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new("systemctl")
+            .args(["is-active", "--quiet", "apache2"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let is_active = match active_out {
+        Ok(Ok(out)) => out.status.success(),
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(Err(err)) => anyhow::bail!("failed to check apache2 status: {}", err),
+        Err(_) => anyhow::bail!("systemctl is-active apache2 timed out"),
+    };
+    if !is_active {
+        return Ok(());
+    }
+    let reload_out = tokio::time::timeout(
+        Duration::from_secs(20),
+        Command::new("systemctl")
+            .args(["reload", "apache2"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("systemctl reload apache2 timed out"))?
+    .map_err(|err| anyhow::anyhow!("failed to execute systemctl reload apache2: {}", err))?;
+    if !reload_out.status.success() {
+        let combined = format!(
+            "{} {}",
+            String::from_utf8_lossy(&reload_out.stderr).trim(),
+            String::from_utf8_lossy(&reload_out.stdout).trim()
+        );
+        anyhow::bail!("systemctl reload apache2 failed: {}", combined.trim());
+    }
+    Ok(())
+}
+
+fn validate_vhost_content(field: &str, content: Option<&str>) -> Result<(), String> {
+    let Some(content) = content else {
+        return Err(format!("{field} is required when enabled is true"));
+    };
+    if content.trim().is_empty() {
+        return Err(format!("{field} must not be empty when enabled is true"));
+    }
+    if content.contains('\0') {
+        return Err(format!("{field} must not contain NUL bytes"));
+    }
+    if content.len() > 1_048_576 {
+        return Err(format!("{field} exceeds maximum size (1 MiB)"));
+    }
+    if !content.to_ascii_lowercase().contains("<virtualhost") {
+        return Err(format!("{field} must contain a <VirtualHost block"));
+    }
+    Ok(())
+}
+
+fn validate_ingress_vhost_request(req: &RunnerApacheVhostRequest) -> Result<(), String> {
+    if !SAFE_INGRESS_APP_NAME.is_match(&req.app_name) {
+        return Err("invalid app_name: must match ^[a-z0-9][a-z0-9-]{0,47}$".to_string());
+    }
+    if req.enabled {
+        validate_vhost_content("vhost_content", req.vhost_content.as_deref())?;
+    }
+    if req.external_enabled {
+        validate_vhost_content(
+            "external_vhost_content",
+            req.external_vhost_content.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+struct VhostBackup {
+    avail_path: PathBuf,
+    enabled_path: PathBuf,
+    prev_avail: Option<(Vec<u8>, u32)>,
+    prev_enabled: PrevEnabledVhostState,
+}
+
+fn apply_single_ingress_vhost(
+    enabled: bool,
+    content: Option<&str>,
+    conf_name: &str,
+    avail_path: &Path,
+    enabled_path: &Path,
+) -> anyhow::Result<()> {
+    if enabled {
+        let body = content.unwrap_or_default();
+        write_file_atomically_with_mode(avail_path, body.as_bytes(), 0o644)?;
+        remove_file_if_exists(enabled_path)?;
+        #[cfg(unix)]
+        {
+            let target = format!("../sites-available/{conf_name}");
+            std::os::unix::fs::symlink(target, enabled_path)?;
+        }
+    } else {
+        remove_file_if_exists(enabled_path)?;
+        remove_file_if_exists(avail_path)?;
+    }
+    Ok(())
+}
+
+fn rollback_vhost_backups(backups: &[VhostBackup]) -> anyhow::Result<()> {
+    let mut errors = Vec::new();
+    for backup in backups {
+        if let Err(err) = rollback_ingress_vhost(
+            &backup.avail_path,
+            &backup.enabled_path,
+            &backup.prev_avail,
+            &backup.prev_enabled,
+        ) {
+            errors.push(format!("{}: {err}", backup.avail_path.display()));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("; "))
+    }
+}
+
+async fn apply_ingress_vhost_with_hooks<FTest, FutTest, FReload, FutReload>(
+    req: &RunnerApacheVhostRequest,
+    apache_dir: &Path,
+    configtest_fn: FTest,
+    reload_fn: FReload,
+) -> anyhow::Result<String>
+where
+    FTest: FnOnce() -> FutTest,
+    FutTest: std::future::Future<Output = anyhow::Result<()>>,
+    FReload: FnOnce() -> FutReload,
+    FutReload: std::future::Future<Output = anyhow::Result<()>>,
+{
+    if let Err(msg) = validate_ingress_vhost_request(req) {
+        anyhow::bail!("{msg}");
+    }
+
+    let any_enabled = req.enabled || req.external_enabled;
+    let avail_dir = apache_dir.join("sites-available");
+    let enabled_dir = apache_dir.join("sites-enabled");
+
+    if any_enabled {
+        ensure_non_symlink_dir(apache_dir, true)?;
+        ensure_non_symlink_dir(&avail_dir, true)?;
+        ensure_non_symlink_dir(&enabled_dir, true)?;
+    } else {
+        if apache_dir.exists() {
+            ensure_non_symlink_dir(apache_dir, false)?;
+        }
+        if avail_dir.exists() {
+            ensure_non_symlink_dir(&avail_dir, false)?;
+        }
+        if enabled_dir.exists() {
+            ensure_non_symlink_dir(&enabled_dir, false)?;
+        }
+    }
+
+    let int_conf_name = format!("aetherflow-app-{}.conf", req.app_name);
+    let ext_conf_name = format!("aetherflow-ext-{}.conf", req.app_name);
+    let targets = [
+        (
+            req.enabled,
+            req.vhost_content.as_deref(),
+            int_conf_name.as_str(),
+            avail_dir.join(&int_conf_name),
+            enabled_dir.join(&int_conf_name),
+        ),
+        (
+            req.external_enabled,
+            req.external_vhost_content.as_deref(),
+            ext_conf_name.as_str(),
+            avail_dir.join(&ext_conf_name),
+            enabled_dir.join(&ext_conf_name),
+        ),
+    ];
+
+    let mut backups = Vec::with_capacity(targets.len());
+    for (_, _, _, avail_path, enabled_path) in &targets {
+        let prev_avail = read_regular_file_nofollow(avail_path)?;
+        let prev_enabled = snapshot_enabled_vhost(enabled_path)?;
+        backups.push(VhostBackup {
+            avail_path: avail_path.clone(),
+            enabled_path: enabled_path.clone(),
+            prev_avail,
+            prev_enabled,
+        });
+    }
+
+    for (enabled, content, conf_name, avail_path, enabled_path) in &targets {
+        if let Err(err) =
+            apply_single_ingress_vhost(*enabled, *content, conf_name, avail_path, enabled_path)
+        {
+            let _ = rollback_vhost_backups(&backups);
+            return Err(err);
+        }
+    }
+
+    if let Err(test_err) = configtest_fn().await {
+        if let Err(rb_err) = rollback_vhost_backups(&backups) {
+            anyhow::bail!("{test_err}; rollback failed: {rb_err}");
+        }
+        return Err(test_err);
+    }
+
+    if req.reload_apache {
+        if let Err(reload_err) = reload_fn().await {
+            if let Err(rb_err) = rollback_vhost_backups(&backups) {
+                anyhow::bail!("{reload_err}; rollback failed: {rb_err}");
+            }
+            return Err(reload_err);
+        }
+    }
+
+    Ok(format!(
+        "synced apache vhosts ({}={}, {}={})",
+        int_conf_name,
+        if req.enabled { "enabled" } else { "disabled" },
+        ext_conf_name,
+        if req.external_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ))
+}
+
+async fn handle_ingress_vhost(
+    Json(req): Json<RunnerApacheVhostRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    if let Err(msg) = validate_ingress_vhost_request(&req) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: msg,
+            }),
+        );
+    }
+
+    let apache_dir = resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2");
+    let is_live_etc = apache_dir == Path::new("/etc/apache2");
+
+    let res = apply_ingress_vhost_with_hooks(
+        &req,
+        &apache_dir,
+        || async move {
+            if is_live_etc {
+                run_apache_configtest_if_present().await
+            } else {
+                Ok(())
+            }
+        },
+        || async move {
+            if is_live_etc {
+                reload_apache_if_active().await
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await;
+
+    match res {
+        Ok(output) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output,
+                error: String::new(),
+            }),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err.to_string(),
+            }),
+        ),
+    }
+}
+
+pub async fn sync_apache_vhost_via_runner(
+    req: &RunnerApacheVhostRequest,
+) -> anyhow::Result<RunnerResponse> {
+    if let Err(msg) = validate_ingress_vhost_request(req) {
+        anyhow::bail!("{msg}");
+    }
+    let result = post_runner_json("/v1/ingress/vhost", req, Duration::from_secs(30)).await?;
+    if !result.success {
+        anyhow::bail!("runner ingress vhost error: {}", result.error);
+    }
+    Ok(result)
+}
+
+async fn execute_certbot_sync_with_candidates(
+    candidates: &[&Path],
+    require_root_owner: bool,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let mut selected: Option<&Path> = None;
+    for candidate in candidates {
+        match fs::symlink_metadata(candidate) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "refusing symlinked certbot-sync executable: {}",
+                        candidate.display()
+                    );
+                }
+                if !meta.is_file() {
+                    anyhow::bail!(
+                        "refusing non-regular certbot-sync path: {}",
+                        candidate.display()
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if require_root_owner && meta.uid() != 0 {
+                        anyhow::bail!(
+                            "certbot-sync executable {} must be owned by root",
+                            candidate.display()
+                        );
+                    }
+                    let mode = meta.mode();
+                    if (mode & 0o022) != 0 {
+                        anyhow::bail!(
+                            "certbot-sync executable {} must not be group/world writable",
+                            candidate.display()
+                        );
+                    }
+                    if (mode & 0o111) == 0 {
+                        anyhow::bail!(
+                            "certbot-sync executable {} is not executable",
+                            candidate.display()
+                        );
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = require_root_owner;
+                selected = Some(candidate);
+                break;
+            }
+        }
+    }
+
+    let bin = selected.ok_or_else(|| {
+        anyhow::anyhow!("af-certbot-sync executable not found in /usr/local/bin or /usr/bin")
+    })?;
+
+    let mut cmd = Command::new(bin);
+    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let out = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("af-certbot-sync timed out after {}s", timeout.as_secs()))?
+        .map_err(|err| anyhow::anyhow!("failed to execute {}: {}", bin.display(), err))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        let combined = [stdout, stderr]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        anyhow::bail!(
+            "af-certbot-sync exited with {:?}: {}",
+            out.status.code(),
+            combined
+        );
+    }
+    Ok(if stdout.is_empty() {
+        "certbot-sync completed".to_string()
+    } else {
+        stdout
+    })
+}
+
+async fn handle_certbot_sync() -> (StatusCode, Json<RunnerResponse>) {
+    let candidates = [
+        Path::new("/usr/local/bin/af-certbot-sync"),
+        Path::new("/usr/bin/af-certbot-sync"),
+    ];
+    match execute_certbot_sync_with_candidates(&candidates, true, Duration::from_secs(120)).await {
+        Ok(output) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output,
+                error: String::new(),
+            }),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err.to_string(),
+            }),
+        ),
+    }
+}
+
+pub async fn trigger_certbot_sync_via_runner() -> anyhow::Result<RunnerResponse> {
+    let result = post_runner_json("/v1/certbot-sync", &json!({}), Duration::from_secs(130)).await?;
+    if !result.success {
+        anyhow::bail!("runner certbot-sync error: {}", result.error);
+    }
+    Ok(result)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // UNIX Domain Socket Client Dispatchers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -7421,11 +8031,44 @@ pub async fn dispatch_app_meta(app_name: &str) -> anyhow::Result<AppRuntimeMeta>
 /// Permits:
 /// - `uid == 0` (root)
 /// - `uid == euid` (same effective user running the runner process)
-/// - the `aetherflow` service user UID resolved via `getpwnam` on Unix
+/// - the `aetherflow` service user UID resolved via thread-safe `getpwnam_r` on Unix
 /// - any explicit UID listed in `AETHERFLOW_ALLOWED_RUNNER_UIDS` (comma-separated)
 ///
 /// Furthermore, destructive endpoints (`/v1/self-update`, `/v1/backup` with `restore_execute` or `delete`)
 /// require either `uid == 0`, `uid == euid`, the `aetherflow` service account, or an explicitly authorized UID.
+#[cfg(unix)]
+fn lookup_passwd_uid_reentrant(username: &str) -> Option<u32> {
+    let c_name = std::ffi::CString::new(username).ok()?;
+    let mut buf_len = 1024usize;
+    const MAX_BUF_LEN: usize = 16 * 1024;
+    while buf_len <= MAX_BUF_LEN {
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut res: *mut libc::passwd = std::ptr::null_mut();
+        let mut buf = vec![0 as libc::c_char; buf_len];
+        let rc = unsafe {
+            libc::getpwnam_r(
+                c_name.as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut res,
+            )
+        };
+        if rc == 0 {
+            if res.is_null() {
+                return None;
+            }
+            return Some(pwd.pw_uid as u32);
+        }
+        if rc == libc::ERANGE {
+            buf_len *= 2;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
 pub fn authorize_runner_peer_credentials(
     peer_uid: u32,
     peer_gid: u32,
@@ -7452,13 +8095,9 @@ pub fn authorize_runner_peer_credentials(
 
     #[cfg(unix)]
     {
-        if let Ok(c_name) = std::ffi::CString::new("aetherflow") {
-            let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
-            if !pw.is_null() {
-                let af_uid = unsafe { (*pw).pw_uid as u32 };
-                if peer_uid == af_uid {
-                    return Ok(());
-                }
+        if let Some(af_uid) = lookup_passwd_uid_reentrant("aetherflow") {
+            if peer_uid == af_uid {
+                return Ok(());
             }
         }
     }
@@ -9453,5 +10092,512 @@ mod tests {
             !rendered.contains("/home/"),
             "librespeed drop-in must not expose /home paths, got:\n{rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn authorize_runner_peer_credentials_is_thread_safe_under_concurrent_load() {
+        let mut handles = Vec::new();
+        for tid in 0..8usize {
+            handles.push(tokio::task::spawn_blocking(move || {
+                for iter in 0..50u32 {
+                    assert!(authorize_runner_peer_credentials(0, 0, "/v1/health").is_ok());
+                    let denied = authorize_runner_peer_credentials(
+                        60_000 + tid as u32 * 100 + iter,
+                        65534,
+                        "/v1/ingress/vhost",
+                    );
+                    assert!(denied.is_err());
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn is_runner_available_requires_unix_socket_and_rejects_regular_files() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let prev_sock = env::var_os("AETHERFLOW_RUNNER_SOCK");
+        let scratch = PathBuf::from("/tmp").join(format!(
+            "af-sock-test-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        ));
+        fs::create_dir_all(&scratch).unwrap();
+
+        let reg_file = scratch.join("stale.sock");
+        fs::write(&reg_file, b"stale").unwrap();
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &reg_file);
+        assert!(
+            !is_runner_available(),
+            "regular file must NOT be reported as an available runner socket"
+        );
+
+        let dir_path = scratch.join("dir.sock");
+        fs::create_dir_all(&dir_path).unwrap();
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &dir_path);
+        assert!(
+            !is_runner_available(),
+            "directory must NOT be reported as an available runner socket"
+        );
+
+        let real_sock = scratch.join("real.sock");
+        let _listener = tokio::net::UnixListener::bind(&real_sock).unwrap();
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &real_sock);
+        assert!(
+            is_runner_available(),
+            "real UnixListener socket must be reported as available"
+        );
+
+        match prev_sock {
+            Some(v) => env::set_var("AETHERFLOW_RUNNER_SOCK", v),
+            None => env::remove_var("AETHERFLOW_RUNNER_SOCK"),
+        }
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn sandbox_dropin_writes_only_canonical_10_conf_removes_legacy_and_propagates_errors() {
+        let scratch = env::temp_dir().join(format!("af-sandbox-unit-{}", uuid::Uuid::new_v4()));
+        let dropin_dir = scratch.join("sonarr.service.d");
+        fs::create_dir_all(&dropin_dir).unwrap();
+        let legacy = dropin_dir.join("aetherflow-sandbox.conf");
+        let canonical = dropin_dir.join("10-aetherflow-sandbox.conf");
+        let unrelated = dropin_dir.join("local-policy.conf");
+        fs::write(&legacy, "stale legacy content\n").unwrap();
+        fs::write(&unrelated, "keep-policy\n").unwrap();
+
+        apply_sandbox_dropins_in_dir(
+            &scratch,
+            &["sonarr.service".to_string()],
+            "native",
+            &["/var/lib/sonarr".to_string()],
+        )
+        .unwrap();
+
+        assert!(canonical.is_file(), "10-aetherflow-sandbox.conf must exist");
+        assert!(
+            !legacy.exists(),
+            "legacy aetherflow-sandbox.conf must be removed"
+        );
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep-policy\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&canonical).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644);
+        }
+
+        // Real filesystem write errors must propagate instead of being swallowed.
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() != 0 } {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dropin_dir, fs::Permissions::from_mode(0o555)).unwrap();
+            let err = apply_sandbox_dropins_in_dir(
+                &scratch,
+                &["sonarr.service".to_string()],
+                "native",
+                &["/var/lib/sonarr".to_string()],
+            );
+            let _ = fs::set_permissions(&dropin_dir, fs::Permissions::from_mode(0o755));
+            assert!(err.is_err(), "unwritable drop-in directory must return Err");
+        }
+
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ingress_vhost_validates_rejects_symlinks_and_rolls_back_on_configtest_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = env::temp_dir().join(format!("af-vhost-unit-{}", uuid::Uuid::new_v4()));
+        let avail_dir = scratch.join("sites-available");
+        let enabled_dir = scratch.join("sites-enabled");
+        fs::create_dir_all(&avail_dir).unwrap();
+        fs::create_dir_all(&enabled_dir).unwrap();
+
+        // 1. Validation rejects traversal / invalid app names.
+        for bad in [
+            "",
+            "../evil",
+            "sonarr.conf",
+            "Sonarr",
+            "-sonarr",
+            "a".repeat(49).as_str(),
+        ] {
+            let (code, Json(resp)) = handle_ingress_vhost(Json(RunnerApacheVhostRequest {
+                app_name: bad.to_string(),
+                enabled: true,
+                vhost_content: Some("<VirtualHost *:80></VirtualHost>\n".to_string()),
+                ..Default::default()
+            }))
+            .await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "bad app_name {bad:?}");
+            assert!(!resp.success);
+        }
+
+        // 2. Enable writes 0644 sites-available + sites-enabled symlink.
+        let initial_vhost = "<VirtualHost *:80>\nServerName sonarr.aether.local\n</VirtualHost>\n";
+        apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: true,
+                vhost_content: Some(initial_vhost.to_string()),
+                ..Default::default()
+            },
+            &scratch,
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap();
+
+        let avail_file = avail_dir.join("aetherflow-app-sonarr.conf");
+        let enabled_link = enabled_dir.join("aetherflow-app-sonarr.conf");
+        assert_eq!(fs::read_to_string(&avail_file).unwrap(), initial_vhost);
+        assert_eq!(
+            fs::metadata(&avail_file).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::read_link(&enabled_link).unwrap(),
+            PathBuf::from("../sites-available/aetherflow-app-sonarr.conf")
+        );
+
+        // 3. Configtest failure rolls back to prior vhost content.
+        let broken_vhost = "<VirtualHost *:80>\nBrokenDirective\n";
+        let err = apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: true,
+                vhost_content: Some(broken_vhost.to_string()),
+                ..Default::default()
+            },
+            &scratch,
+            || async { anyhow::bail!("apache2ctl -t syntax error") },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("syntax error"));
+        assert_eq!(fs::read_to_string(&avail_file).unwrap(), initial_vhost);
+        assert_eq!(
+            fs::read_link(&enabled_link).unwrap(),
+            PathBuf::from("../sites-available/aetherflow-app-sonarr.conf")
+        );
+
+        // 4. Symlink refusal on sites-available target.
+        let evil_target = scratch.join("evil-target.conf");
+        fs::write(&evil_target, "keep").unwrap();
+        let sym_avail = avail_dir.join("aetherflow-app-radarr.conf");
+        std::os::unix::fs::symlink(&evil_target, &sym_avail).unwrap();
+        let sym_err = apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "radarr".to_string(),
+                enabled: true,
+                vhost_content: Some("<VirtualHost *:80></VirtualHost>\n".to_string()),
+                ..Default::default()
+            },
+            &scratch,
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(sym_err.to_string().contains("symlink"));
+        assert_eq!(fs::read_to_string(&evil_target).unwrap(), "keep");
+
+        // 5. Disable removes sites-enabled and sites-available files.
+        apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: false,
+                vhost_content: None,
+                ..Default::default()
+            },
+            &scratch,
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert!(fs::symlink_metadata(&enabled_link).is_err());
+        assert!(!avail_file.exists());
+
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ingress_vhost_syncs_and_rolls_back_internal_and_external_configs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = env::temp_dir().join(format!("af-vhost-ext-unit-{}", uuid::Uuid::new_v4()));
+        let avail_dir = scratch.join("sites-available");
+        let enabled_dir = scratch.join("sites-enabled");
+
+        // Validation rejects invalid external_vhost_content when external_enabled is true.
+        for bad_ext in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("ServerName bad.example\n"),
+            Some("<VirtualHost *:80>\0</VirtualHost>"),
+        ] {
+            let err = validate_ingress_vhost_request(&RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: false,
+                vhost_content: None,
+                external_enabled: true,
+                external_vhost_content: bad_ext.map(str::to_string),
+                reload_apache: false,
+            })
+            .unwrap_err();
+            assert!(
+                err.contains("external_vhost_content"),
+                "unexpected error for bad external_vhost_content: {err}"
+            );
+        }
+
+        // Enable both internal and external vhosts.
+        let int_v1 = "<VirtualHost *:80>\nServerName sonarr.aether.local\n</VirtualHost>\n";
+        let ext_v1 = "<VirtualHost *:80>\nServerName sonarr.example.com\n</VirtualHost>\n";
+        apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: true,
+                vhost_content: Some(int_v1.to_string()),
+                external_enabled: true,
+                external_vhost_content: Some(ext_v1.to_string()),
+                reload_apache: false,
+            },
+            &scratch,
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap();
+
+        let int_avail = avail_dir.join("aetherflow-app-sonarr.conf");
+        let int_enabled = enabled_dir.join("aetherflow-app-sonarr.conf");
+        let ext_avail = avail_dir.join("aetherflow-ext-sonarr.conf");
+        let ext_enabled = enabled_dir.join("aetherflow-ext-sonarr.conf");
+        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
+        assert_eq!(fs::read_to_string(&ext_avail).unwrap(), ext_v1);
+        assert_eq!(
+            fs::metadata(&ext_avail).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::read_link(&ext_enabled).unwrap(),
+            PathBuf::from("../sites-available/aetherflow-ext-sonarr.conf")
+        );
+
+        // Configtest failure rolls back BOTH internal and external vhosts.
+        let int_v2 = "<VirtualHost *:80>\nServerName broken-int\n</VirtualHost>\n";
+        let ext_v2 = "<VirtualHost *:80>\nServerName broken-ext\n</VirtualHost>\n";
+        let cfg_err = apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: true,
+                vhost_content: Some(int_v2.to_string()),
+                external_enabled: true,
+                external_vhost_content: Some(ext_v2.to_string()),
+                reload_apache: false,
+            },
+            &scratch,
+            || async { anyhow::bail!("apache2ctl -t failed") },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(cfg_err.to_string().contains("apache2ctl -t failed"));
+        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
+        assert_eq!(fs::read_to_string(&ext_avail).unwrap(), ext_v1);
+
+        // Reload failure ALSO rolls back BOTH internal and external vhosts.
+        let reload_err = apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: true,
+                vhost_content: Some(int_v2.to_string()),
+                external_enabled: false,
+                external_vhost_content: None,
+                reload_apache: true,
+            },
+            &scratch,
+            || async { Ok(()) },
+            || async { anyhow::bail!("systemctl reload apache2 failed") },
+        )
+        .await
+        .unwrap_err();
+        assert!(reload_err
+            .to_string()
+            .contains("systemctl reload apache2 failed"));
+        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
+        assert_eq!(fs::read_to_string(&ext_avail).unwrap(), ext_v1);
+        assert!(fs::symlink_metadata(&ext_enabled).is_ok());
+
+        // Disabling external while keeping internal removes only external files.
+        apply_ingress_vhost_with_hooks(
+            &RunnerApacheVhostRequest {
+                app_name: "sonarr".to_string(),
+                enabled: true,
+                vhost_content: Some(int_v1.to_string()),
+                external_enabled: false,
+                external_vhost_content: None,
+                reload_apache: false,
+            },
+            &scratch,
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
+        assert!(fs::symlink_metadata(&int_enabled).is_ok());
+        assert!(!ext_avail.exists());
+        assert!(fs::symlink_metadata(&ext_enabled).is_err());
+
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn certbot_sync_rejects_symlinks_and_executes_verified_script_with_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = env::temp_dir().join(format!("af-certbot-unit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch).unwrap();
+
+        let real_script = scratch.join("af-certbot-sync");
+        fs::write(&real_script, "#!/bin/sh\necho synced-ok\n").unwrap();
+        fs::set_permissions(&real_script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Symlink must be refused.
+        let sym_script = scratch.join("af-certbot-sync-link");
+        std::os::unix::fs::symlink(&real_script, &sym_script).unwrap();
+        let sym_err = execute_certbot_sync_with_candidates(
+            &[sym_script.as_path()],
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(sym_err.to_string().contains("symlink"));
+
+        // Non-root owner rejected when require_root_owner=true (unless running test as root).
+        if unsafe { libc::geteuid() != 0 } {
+            let owner_err = execute_certbot_sync_with_candidates(
+                &[real_script.as_path()],
+                true,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+            assert!(owner_err.to_string().contains("owned by root"));
+        }
+
+        // Valid regular executable succeeds.
+        let missing = scratch.join("missing");
+        let out = execute_certbot_sync_with_candidates(
+            &[missing.as_path(), real_script.as_path()],
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "synced-ok");
+
+        // Timeout bounds execution.
+        let slow_script = scratch.join("slow-sync");
+        fs::write(&slow_script, "#!/bin/sh\nsleep 5\n").unwrap();
+        fs::set_permissions(&slow_script, fs::Permissions::from_mode(0o755)).unwrap();
+        let timeout_err = execute_certbot_sync_with_candidates(
+            &[slow_script.as_path()],
+            false,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(timeout_err.to_string().contains("timed out"));
+
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ingress_vhost_router_end_to_end_via_runner_socket() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let prev_sock = env::var_os("AETHERFLOW_RUNNER_SOCK");
+        let prev_apache = env::var_os("AETHERFLOW_APACHE_DIR");
+
+        let scratch = PathBuf::from("/tmp").join(format!(
+            "af-vhost-e2e-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        ));
+        fs::create_dir_all(&scratch).unwrap();
+        let sock_path = scratch.join("runner.sock");
+        let apache_dir = scratch.join("apache2");
+        fs::create_dir_all(apache_dir.join("sites-available")).unwrap();
+        fs::create_dir_all(apache_dir.join("sites-enabled")).unwrap();
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+        env::set_var("AETHERFLOW_APACHE_DIR", &apache_dir);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_runner_connections(
+            listener,
+            build_runner_router(),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let resp = sync_apache_vhost_via_runner(&RunnerApacheVhostRequest {
+            app_name: "sonarr".to_string(),
+            enabled: true,
+            vhost_content: Some("<VirtualHost *:80>\n</VirtualHost>\n".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(resp.success);
+        assert!(apache_dir
+            .join("sites-available/aetherflow-app-sonarr.conf")
+            .is_file());
+        assert!(apache_dir
+            .join("sites-enabled/aetherflow-app-sonarr.conf")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let disable_resp = sync_apache_vhost_via_runner(&RunnerApacheVhostRequest {
+            app_name: "sonarr".to_string(),
+            enabled: false,
+            vhost_content: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(disable_resp.success);
+        assert!(!apache_dir
+            .join("sites-available/aetherflow-app-sonarr.conf")
+            .exists());
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+        match prev_sock {
+            Some(v) => env::set_var("AETHERFLOW_RUNNER_SOCK", v),
+            None => env::remove_var("AETHERFLOW_RUNNER_SOCK"),
+        }
+        match prev_apache {
+            Some(v) => env::set_var("AETHERFLOW_APACHE_DIR", v),
+            None => env::remove_var("AETHERFLOW_APACHE_DIR"),
+        }
+        let _ = fs::remove_dir_all(&scratch);
     }
 }

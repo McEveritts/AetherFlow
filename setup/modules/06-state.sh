@@ -425,7 +425,7 @@ ALL_STEPS=(
     build_modern
     apacheconf fix_cert makedirs
     installftpd ftpdconfig boot
-    firewall harden_perms perms bbr bcm
+    firewall harden_perms perms bbr
 )
 
 # Detect previous install and print summary

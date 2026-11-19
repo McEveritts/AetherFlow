@@ -16,8 +16,9 @@ use crate::fs_security::{
     set_dir_mode, OwnershipMetadata,
 };
 use crate::health::{
-    poll_readiness_probe, sync_cli_entrypoints, verify_isolated_systemd_lifecycle_authorized,
-    HealthProber, LifecycleController, ReqwestHealthProber, SystemdLifecycleController,
+    poll_readiness_probe, sync_cli_entrypoints, verify_deployed_frontend_assets,
+    verify_isolated_systemd_lifecycle_authorized, HealthProber, LifecycleController,
+    ReqwestHealthProber, SystemdLifecycleController,
 };
 use crate::lock::{RecoveryState, ReleaseLockGuard, ReleasePhase};
 use crate::snapshot::{
@@ -925,6 +926,9 @@ where
             cfg.health_interval,
         )?;
         self.lifecycle.verify_running_release(cfg)?;
+        if let Some(active_release) = read_current_link_target(&cfg.current_link) {
+            verify_deployed_frontend_assets(&active_release)?;
+        }
         Ok(status)
     }
 
@@ -1098,7 +1102,12 @@ where
                 cfg.health_interval,
             )
             .and_then(|_| self.lifecycle.verify_running_release(cfg))
-            {
+            .and_then(|_| {
+                if let Some(active_release) = read_current_link_target(&cfg.current_link) {
+                    verify_deployed_frontend_assets(&active_release)?;
+                }
+                Ok(())
+            }) {
                 recovery.phase = ReleasePhase::Failed;
                 recovery.last_error = Some(err.to_string());
                 let _ = recovery.save(&cfg.releases_dir);

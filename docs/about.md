@@ -7,7 +7,7 @@ Designed as a unified **Mission Control** for cloud and local Linux systems, Aet
 Rather than treating the server as a loose collection of scripts and container panels, AetherFlow treats it as a cohesive managed platform: one place to operate services, manage files, observe real-time hardware telemetry, automate ingress, and safely delegate remediation through an AI-assisted interface.
 
 > [!NOTE]
-> AetherFlow v4.0.0 is built around a compiled 11-crate, single-binary **Rust (`Axum` + `Tokio`)** control plane (`aetherflow-api`), the unified **`af` (`af-cli`)** administrative CLI, an embedded **Next.js 16 (Obsidian V2)** static frontend, a privileged UNIX socket runner (`aetherflow-runner`), **Native McBrowser** (`af-files`), and native **systemd** service orchestration.
+> AetherFlow v4.0.0 is built around an 11-crate **Rust (`Axum` + `Tokio`)** control plane (`backend-rs` → `aetherflow-api`), the unified **`af` (`af-cli`)** administrative CLI, a 4-crate **Leptos Rust WebAssembly (`frontend-rs`)** dashboard served from `web/dist` (`STATIC_DIR`), a privileged UNIX socket runner (`aetherflow-runner`), **Native McBrowser** (`af-files`), and native **systemd** service orchestration.
 
 ---
 
@@ -15,7 +15,7 @@ Rather than treating the server as a loose collection of scripts and container p
 
 AetherFlow is engineered for bare-metal performance and strict privilege separation:
 
-- **12-Crate Single-Binary Rust Control Plane**: The compiled **Rust (`Axum` + `Tokio`)** backend (`backend-rs`) embeds the **Next.js 16 (Obsidian V2)** static export directly via `rust-embed` (`af-api`), eliminating separate Node.js runtime daemons, Go binaries, and external Redis dependencies.
+- **11-Crate Rust Control Plane + 4-Crate WASM UI**: The compiled **Rust (`Axum` + `Tokio`)** backend (`backend-rs`) serves the **Leptos Rust WebAssembly (`frontend-rs`)** dashboard from external `web/dist` assets (`STATIC_DIR`), eliminating separate Node.js runtime daemons, Go binaries, and external Redis dependencies.
 - **Zero-Sudo Socket Boundary (`aetherflow-runner`)**: Privileged root operations (`systemctl`, Marketplace installers, WireGuard/Tailscale control, quotas, and isolated `aetherflow-self-update.service` deployments) are isolated behind `/run/aetherflow/runner.sock` (`aetherflow-runner.service`) with strict allowlists and ancestor-symlink guards.
 - **Native McBrowser (`af-files`)**: Built-in left-sidebar file manager with capability-scoped per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads up to 64 GiB, ETag-guarded Ace code editing, 9-format archive tools, and FlowAI natural-language BFS file search.
 - **Frame-0 Real-Time Telemetry**: Immediate hardware, process, and NVML GPU telemetry delivered via full-duplex WebSockets ("Hyperspeed") with decoupled UI layout updates.
@@ -32,7 +32,7 @@ AetherFlow is shaped by three core beliefs:
 ## Core Capabilities
 
 ### 1. Unified Obsidian V2 Dashboard
-A high-fidelity "Mission Control" interface built on Next.js 16 and React 19:
+A high-fidelity "Mission Control" interface built on **Leptos Rust WebAssembly (`frontend-rs`)**:
 - **Open-Canvas Telemetry**: Density-aware real-time hardware tracking (CPU, RAM, Disk I/O, NVML/DRM GPU, Network BDP) with hover-pause sparklines.
 - **Canonical Streaming Analytics**: Live Jellyfin & Plex session cards paired with a snapshot-consistent playback history archive, server-identity verification, and CSV/JSON portability.
 - **Native Network & VPN Control**: Built-in **WireGuard** (`wg0` peer and QR management) and **Tailscale** mesh VPN routing controls.
@@ -45,7 +45,7 @@ A multi-provider infrastructure assistant integrated directly into the control p
 
 ### 3. AetherMarketplace (77 Bare-Metal Apps)
 A managed ecosystem of **77 native Linux applications** (including Plex, Jellyfin, the `*Arr` stack, Palate, Maintainerr, Dispatcharr, Threadfin, qBittorrent, Qui, Autobrr, McVNC, KasmVNC, Tailscale, and WireGuard):
-- **One-Click Deploy & In-Place Updates**: Idempotent installation, update, and removal lifecycles backed by 15 declarative Rust recipes and locked Bash installers.
+- **One-Click Deploy & In-Place Updates**: Idempotent installation, update, and removal lifecycles backed by 12 declarative Rust recipes and locked Bash installers.
 - **Whatbox-Style Automatic Subdomain Ingress**: Automatically provisions `<app>.<baseDomain>` through Apache2, the streaming Subdomain Gateway, and `af-certbot-sync`.
 - **Service Orchestration**: Manages dedicated `systemd` units and `af-systemd-sandbox` profiles for every installed application.
 

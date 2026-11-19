@@ -686,7 +686,7 @@ PY
     echo "[INFO] Running Playwright E2E suite against the external WASM frontend (${BASE_URL}) ..."
     PLAYWRIGHT_SPECS="${E2E_PLAYWRIGHT_SPECS:-[.]live[.]spec[.]ts$}"
     (
-        cd "${ROOT_DIR}/frontend"
+        cd "${ROOT_DIR}/e2e"
         E2E_ADMIN_USER="${ADMIN_USER}" \
         E2E_ADMIN_PASS="${ADMIN_PASS}" \
         E2E_MEMBER_USER="${MEMBER_USER}" \

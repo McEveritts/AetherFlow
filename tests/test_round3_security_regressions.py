@@ -647,11 +647,16 @@ af_logged my_shell_fn
         fin_src = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
         self.assertIn('data-snapshot" \\) -prune', fin_src)
         self.assertNotIn("Admin Password:", fin_src)
-        for p in sorted((ROOT / "packages/plugin").rglob("*")):
-            if p.is_file():
-                txt = p.read_text(encoding="utf-8")
-                self.assertNotIn("/tmp/rutorrent-git-$$", txt, msg=str(p))
-                self.assertNotIn(">>", txt, msg=str(p))
+        plugin_files = (
+            [p for p in (ROOT / "packages/plugin").rglob("*") if p.is_file()]
+            if (ROOT / "packages/plugin").exists()
+            else []
+        )
+        self.assertEqual(
+            plugin_files,
+            [],
+            "Obsolete QuickBox packages/plugin scripts must remain purged",
+        )
 
     def test_round9_logs_confinement_manifest_fail_closed_and_nextcloud_vhost_scope(self) -> None:
         fin_src = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
@@ -659,11 +664,19 @@ af_logged my_shell_fn
         self.assertIn('chmod 700 "${af_root}/logs"', fin_src)
         self.assertIn('-exec chmod 600 {} +', fin_src)
 
-        for pkg in ("filebrowser", "vaultwarden", "nextcloud"):
+        for pkg in ("filebrowser", "nextcloud"):
             pkg_src = (ROOT / f"packages/package/install/installpackage-{pkg}").read_text(
                 encoding="utf-8"
             )
             self.assertIn("install -d -m 0700 /opt/AetherFlow/logs", pkg_src)
+
+        vw_src = (ROOT / "packages/package/install/installpackage-vaultwarden").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("/opt/AetherFlow/logs", vw_src)
+        self.assertIn("install -d -m 0750 /etc/vaultwarden", vw_src)
+        self.assertIn("write_config_file /etc/vaultwarden/admin_token.txt 0600", vw_src)
+        self.assertIn("write_config_file /etc/vaultwarden/vaultwarden.env 0600", vw_src)
 
         nc_src = (ROOT / "packages/package/install/installpackage-nextcloud").read_text(
             encoding="utf-8"

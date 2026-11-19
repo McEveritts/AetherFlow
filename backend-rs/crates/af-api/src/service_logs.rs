@@ -185,6 +185,35 @@ fn tail(path: &std::path::Path) -> io::Result<String> {
     Ok(text)
 }
 
+static ISO_LOG_TS_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)(?:\s|\]|$)",
+    )
+    .expect("valid ISO log timestamp regex")
+});
+
+static SYSLOG_TS_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r"^((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})(?:\s|$)",
+    )
+    .expect("valid syslog timestamp regex")
+});
+
+fn extract_log_timestamp(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if let Some(caps) = ISO_LOG_TS_RE.captures(trimmed) {
+        if let Some(m) = caps.get(1) {
+            return m.as_str().to_string();
+        }
+    }
+    if let Some(caps) = SYSLOG_TS_RE.captures(trimmed) {
+        if let Some(m) = caps.get(1) {
+            return m.as_str().to_string();
+        }
+    }
+    String::new()
+}
+
 fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
     let files: Vec<(&str, &str)> = match source {
         "application" | "deploy" => vec![
@@ -207,9 +236,17 @@ fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
         ],
         _ => Vec::new(),
     };
+    let resolved: Vec<(&str, PathBuf)> = files
+        .into_iter()
+        .map(|(src, path)| (src, log_path(path)))
+        .collect();
+    file_entries_from_paths(&resolved, line_limit)
+}
+
+fn file_entries_from_paths(files: &[(&str, PathBuf)], line_limit: usize) -> io::Result<Vec<Value>> {
     let mut entries = Vec::new();
     for (source, path) in files {
-        let content = match tail(&log_path(path)) {
+        let content = match tail(path) {
             Ok(content) => content,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
@@ -224,7 +261,8 @@ fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
         {
             if !line.trim().is_empty() {
                 let safe_message = af_services::redact_secrets(line.trim());
-                entries.push(json!({"timestamp":chrono::Utc::now().to_rfc3339(),"source":source,"service":source,"level":infer_log_level(&safe_message),"message":safe_message}));
+                let timestamp = extract_log_timestamp(&safe_message);
+                entries.push(json!({"timestamp":timestamp,"source":*source,"service":*source,"level":infer_log_level(&safe_message),"message":safe_message}));
             }
         }
     }
@@ -328,5 +366,56 @@ mod tests {
         let _all = LOG_READERS.clone().acquire_many_owned(8).await.unwrap();
         let response = get_logs(Query(HashMap::new())).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn file_entries_extract_leading_timestamps_and_do_not_fabricate_now() {
+        assert_eq!(
+            extract_log_timestamp("2026-11-19T14:42:44Z INFO service started"),
+            "2026-11-19T14:42:44Z"
+        );
+        assert_eq!(
+            extract_log_timestamp("2026-11-19 14:42:44.123+02:00 WARN disk near full"),
+            "2026-11-19 14:42:44.123+02:00"
+        );
+        assert_eq!(
+            extract_log_timestamp("[2026-11-19T14:42:44Z] deploy completed"),
+            "2026-11-19T14:42:44Z"
+        );
+        assert_eq!(
+            extract_log_timestamp("Nov  5 08:15:22 host sshd[12]: accepted"),
+            "Nov  5 08:15:22"
+        );
+        assert_eq!(
+            extract_log_timestamp("Nov 19 14:42:44 host kernel: ready"),
+            "Nov 19 14:42:44"
+        );
+        assert_eq!(extract_log_timestamp("plain message without timestamp"), "");
+        assert_eq!(
+            extract_log_timestamp("Error occurred on 2026-11-19T14:42:44Z"),
+            ""
+        );
+
+        let root = std::env::temp_dir().join(format!("af-log-ts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("deploy.log");
+        fs::write(
+            &path,
+            concat!(
+                "2026-11-19T10:00:00Z deploy step 1\n",
+                "Nov  5 08:15:22 host daemon: started\n",
+                "untimestamped diagnostic line\n",
+            ),
+        )
+        .unwrap();
+
+        let entries = file_entries_from_paths(&[("application", path)], 10).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["timestamp"], "2026-11-19T10:00:00Z");
+        assert_eq!(entries[1]["timestamp"], "Nov  5 08:15:22");
+        assert_eq!(entries[2]["timestamp"], "");
+        assert_eq!(entries[2]["message"], "untimestamped diagnostic line");
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

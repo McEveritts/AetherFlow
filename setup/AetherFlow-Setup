@@ -839,11 +839,7 @@ _run_step "harden_perms" "Hardening file permissions" _harden_permissions
 _run_step "perms" "Setting permissions on ${username}" _perms
 
 if [[ ${bbr} == "yes" ]]; then
-	_run_step "bbr" "Installing BBR" _insbbr
-fi
-# shellcheck disable=2312
-if command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -i bcm >/dev/null; then
-	_run_step "bcm" "Installing firmware for BCM NIC" _insbcm
+	_run_step "bbr" "Configuring TCP BBR congestion control" _configure_bbr
 fi
 
 # Post-installation security validation

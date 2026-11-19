@@ -1110,6 +1110,156 @@ mod tests {
         drop(op);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn pihole_and_adguardhome_are_mutually_exclusive_on_install_only() {
+        let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
+        struct FsRootRestore {
+            prev: Option<std::ffi::OsString>,
+            root: std::path::PathBuf,
+        }
+        impl Drop for FsRootRestore {
+            fn drop(&mut self) {
+                match &self.prev {
+                    Some(v) => std::env::set_var("AETHERFLOW_FS_ROOT", v),
+                    None => std::env::remove_var("AETHERFLOW_FS_ROOT"),
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let prev_fs_root = std::env::var_os("AETHERFLOW_FS_ROOT");
+        let (root, db_path, conn, _) = fixture();
+        std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+        let _restore = FsRootRestore {
+            prev: prev_fs_root,
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(root.join("install")).unwrap();
+
+        let pihole_pkg = Package {
+            name: "pihole".into(),
+            label: "Pi-hole".into(),
+            lock_file: "/install/.pihole.lock".into(),
+            service_name: "pihole-FTL".into(),
+            service_type: "systemd".into(),
+            default_port: 8089,
+            ..Default::default()
+        };
+        let adguard_pkg = Package {
+            name: "adguardhome".into(),
+            label: "AdGuard Home".into(),
+            lock_file: "/install/.adguardhome.lock".into(),
+            service_name: "adguardhome".into(),
+            service_type: "systemd".into(),
+            default_port: 3080,
+            ..Default::default()
+        };
+
+        // 1. When AdGuard Home is installed, installing Pi-hole must fail with a :53 conflict error.
+        std::fs::write(root.join("install/.adguardhome.lock"), "installed\n").unwrap();
+        let err = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "pihole".into(),
+                action: "install".into(),
+                script_name: "installpackage-pihole".into(),
+                ..Default::default()
+            },
+            pihole_pkg.clone(),
+            vec!["pihole-FTL".into()],
+        )
+        .err()
+        .expect("pihole install must be rejected when adguardhome is installed");
+        let msg = err.to_string();
+        assert!(msg.contains(":53") && msg.contains("AdGuard Home"), "{msg}");
+
+        // Updating/removing already-installed AdGuard Home must still be admitted.
+        let upd_adguard = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "adguardhome".into(),
+                action: "update".into(),
+                script_name: "installpackage-adguardhome".into(),
+                expected_target_version: Some("0.107.52".into()),
+                ..Default::default()
+            },
+            adguard_pkg.clone(),
+            vec!["adguardhome".into()],
+        )
+        .unwrap();
+        drop(upd_adguard);
+        conn.execute("DELETE FROM package_lifecycle_jobs", [])
+            .unwrap();
+
+        let rm_adguard = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "adguardhome".into(),
+                action: "remove".into(),
+                script_name: "removepackage-adguardhome".into(),
+                ..Default::default()
+            },
+            adguard_pkg.clone(),
+            vec!["adguardhome".into()],
+        )
+        .unwrap();
+        drop(rm_adguard);
+        conn.execute("DELETE FROM package_lifecycle_jobs", [])
+            .unwrap();
+
+        // 2. Swap: remove AdGuard Home lock, create Pi-hole lock; installing AdGuard Home must fail.
+        std::fs::remove_file(root.join("install/.adguardhome.lock")).unwrap();
+        std::fs::write(root.join("install/.pihole.lock"), "installed\n").unwrap();
+        let err2 = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "adguardhome".into(),
+                action: "install".into(),
+                script_name: "installpackage-adguardhome".into(),
+                ..Default::default()
+            },
+            adguard_pkg,
+            vec!["adguardhome".into()],
+        )
+        .err()
+        .expect("adguardhome install must be rejected when pihole is installed");
+        let msg2 = err2.to_string();
+        assert!(msg2.contains(":53") && msg2.contains("Pi-hole"), "{msg2}");
+
+        // Updating/removing already-installed Pi-hole must still be admitted.
+        let upd_pihole = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "pihole".into(),
+                action: "update".into(),
+                script_name: "installpackage-pihole".into(),
+                expected_target_version: Some("6.0.0".into()),
+                ..Default::default()
+            },
+            pihole_pkg.clone(),
+            vec!["pihole-FTL".into()],
+        )
+        .unwrap();
+        drop(upd_pihole);
+        conn.execute("DELETE FROM package_lifecycle_jobs", [])
+            .unwrap();
+
+        let rm_pihole = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "pihole".into(),
+                action: "remove".into(),
+                script_name: "removepackage-pihole".into(),
+                ..Default::default()
+            },
+            pihole_pkg,
+            vec!["pihole-FTL".into()],
+        )
+        .unwrap();
+        drop(rm_pihole);
+        conn.execute("DELETE FROM package_lifecycle_jobs", [])
+            .unwrap();
+    }
 }
 
 async fn run_direct(
@@ -1396,6 +1546,32 @@ impl CoordinatedOperation {
         );
         conn.busy_timeout(Duration::from_secs(5))?;
         lifecycle::initialize_schema(&conn)?;
+        if matches!(request.action.as_str(), "install" | "reinstall") {
+            let conflicting_dns = match request.package_id.as_str() {
+                "pihole" => Some(("adguardhome", "AdGuard Home", "/install/.adguardhome.lock")),
+                "adguardhome" => Some(("pihole", "Pi-hole", "/install/.pihole.lock")),
+                _ => None,
+            };
+            if let Some((other_id, other_label, other_lock)) = conflicting_dns {
+                let env_cfg = crate::PackageExecutionEnv::default();
+                let resolved_lock = match &env_cfg.fs_root {
+                    Some(root) => root.join(other_lock.trim_start_matches(['/', '\\'])),
+                    None => Path::new(other_lock).to_path_buf(),
+                };
+                if std::fs::symlink_metadata(&resolved_lock).is_ok_and(|meta| meta.is_file()) {
+                    anyhow::bail!(
+                        "Cannot {} {} while {} ({}) is already installed ({}): both bind DNS TCP/UDP :53. Remove {} first before installing {}.",
+                        request.action,
+                        package.label,
+                        other_label,
+                        other_id,
+                        other_lock,
+                        other_id,
+                        request.package_id
+                    );
+                }
+            }
+        }
         if request.action != "remove" {
             let candidate_port = if request.app_port > 0 {
                 Some(request.app_port)

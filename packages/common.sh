@@ -537,7 +537,39 @@ write_app_version() {
         return 1
     fi
     AF_TX_DIR="${AF_TX_DIR:-}" python3 - "$@" <<'PYEOF'
-import os, pathlib, re, secrets, stat, subprocess, sys
+import os, pathlib, re, secrets, shutil, stat, subprocess, sys
+def _deb_ge(new_v, old_v):
+    if shutil.which('dpkg'):
+        return subprocess.run(['dpkg', '--compare-versions', new_v, 'ge', old_v]).returncode == 0
+    def _split(v):
+        ep = 0
+        if ':' in v:
+            e, r = v.split(':', 1)
+            if not e.isdigit(): return None
+            ep, v = int(e), r
+        return (ep, *(v.rsplit('-', 1) if '-' in v else (v, '')))
+    def _ord(c):
+        return -1 if c == '~' else (ord(c) if ('A' <= c <= 'Z' or 'a' <= c <= 'z') else ord(c) + 256)
+    def _pcmp(a, b):
+        i = j = 0
+        na, nb = len(a), len(b)
+        while i < na or j < nb:
+            while (i < na and not a[i].isdigit()) or (j < nb and not b[j].isdigit()):
+                ca = _ord(a[i]) if i < na and not a[i].isdigit() else 0
+                cb = _ord(b[j]) if j < nb and not b[j].isdigit() else 0
+                if ca != cb: return -1 if ca < cb else 1
+                if i < na and not a[i].isdigit(): i += 1
+                if j < nb and not b[j].isdigit(): j += 1
+            ia, jb = i, j
+            while i < na and a[i].isdigit(): i += 1
+            while j < nb and b[j].isdigit(): j += 1
+            da, db = int(a[ia:i] or '0'), int(b[jb:j] or '0')
+            if da != db: return -1 if da < db else 1
+        return 0
+    s1, s2 = _split(new_v), _split(old_v)
+    if s1 is None or s2 is None: return False
+    c = (-1 if s1[0] < s2[0] else (1 if s1[0] > s2[0] else 0)) or _pcmp(s1[1], s2[1]) or _pcmp(s1[2], s2[2])
+    return c >= 0
 path = pathlib.PurePath(sys.argv[1])
 if not path.is_absolute() or '..' in path.parts or path.name != '.af-version':
     raise ValueError('Invalid application version path')
@@ -606,7 +638,7 @@ try:
                 rejected = bool(old_sha and not old_compare.isdecimal() and not new_sha)
                 if old_compare and old_compare[0].isdigit() and (not old_sha or old_compare.isdecimal()):
                     rejected = (not new_compare or not new_compare[0].isdigit() or bool(new_sha and not new_compare.isdecimal())
-                                or subprocess.run(['dpkg', '--compare-versions', new_compare, 'ge', old_compare]).returncode != 0)
+                                or not _deb_ge(new_compare, old_compare))
                 if rejected:
                     raise ValueError(f'Refusing to downgrade {path} from {old_ver} to {new_ver}')
         finally:
@@ -2436,6 +2468,35 @@ remove_apache_app_listener() {
     [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
     config="aetherflow-${package_name}-listen.conf"
     rm -f -- "$apache_root/conf-enabled/$config" "$apache_root/conf-available/$config"
+}
+
+check_dns_port_53_available() {
+    local package_name="$1" competing_package="$2" self_proc_regex="$3"
+    local dns_port="${AF_DNS_PORT:-53}"
+    if [[ "$dns_port" != "53" ]]; then
+        return 0
+    fi
+    local competing_lock="/install/.${competing_package}.lock"
+    if [[ -e "$competing_lock" ]]; then
+        print_error "Cannot install ${package_name} on DNS port 53 while ${competing_package} is installed (${competing_lock} exists). Remove ${competing_package} first or set AF_DNS_PORT to a non-53 port."
+        return 1
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        local ss_bin listeners conflict
+        ss_bin="$(command -v ss)"
+        if [[ -n "${TEST_ROOT:-}" && "$ss_bin" != "${TEST_ROOT}"* ]] || [[ -n "${AF_FIXTURE_ROOT:-}" && "$ss_bin" != "${AF_FIXTURE_ROOT}"* ]]; then
+            return 0
+        fi
+        listeners="$(ss -H -lntup 'sport = :53' 2>/dev/null || true)"
+        if [[ -n "$listeners" ]]; then
+            conflict="$(printf '%s\n' "$listeners" | grep -Ev "users:\(\(\"(${self_proc_regex}|systemd-resolved)\"" | grep -Ev '127\.0\.0\.5[34](%[^:[:space:]]+)?:53\b' || true)"
+            if [[ -n "$conflict" ]]; then
+                print_error "DNS port 53 is already in use by another process; cannot safely configure ${package_name}: ${conflict%%$'\n'*}"
+                return 1
+            fi
+        fi
+    fi
+    return 0
 }
 
 lock_path() {
@@ -4640,12 +4701,56 @@ elif app in ('bazarr', 'tautulli', 'sabnzbd'):
         host, base = values.get(host_key, host), values.get(base_key, '')
     elif app == 'bazarr':
         raw = read_optional('/var/lib/bazarr/config/config.yaml')
-        general = re.search(r'(?m)^general:\s*\n((?:[ \t]+[^\n]*\n?)*)', raw)
-        if general:
-            def value(key, default):
-                match = re.search(r'(?m)^\s+' + key + r':\s*([^\n#]*)', general.group(1))
-                return match.group(1).strip().strip('\'"') if match else default
-            host, base = value('ip', host), value('base_url', '')
+        if raw:
+            general = None
+            try:
+                import yaml
+                loaded = yaml.safe_load(raw)
+                if isinstance(loaded, dict) and isinstance(loaded.get('general'), dict):
+                    general = loaded['general']
+            except ImportError:
+                general = {}
+                in_general = False
+                general_indent = None
+                child_indent = None
+                for line in raw.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith('#'):
+                        continue
+                    indent = len(line) - len(line.lstrip(' \t'))
+                    if not in_general:
+                        if indent == 0 and re.match(r'^general\s*:\s*(?:#.*)?$', stripped):
+                            in_general = True
+                            general_indent = indent
+                        continue
+                    if indent <= general_indent:
+                        break
+                    if child_indent is None:
+                        if stripped.startswith('-'):
+                            continue
+                        child_indent = indent
+                    if indent != child_indent:
+                        continue
+                    match = re.match(r'^([A-Za-z0-9_]+)\s*:\s*(.*)$', stripped)
+                    if match:
+                        k, v = match.group(1), match.group(2).strip()
+                        if v and v[0] in ('"', "'"):
+                            q = v[0]
+                            end_q = v.find(q, 1)
+                            v = v[1:end_q] if end_q != -1 else v.strip(q)
+                        else:
+                            v = v.split('#', 1)[0].strip()
+                        general[k] = v
+            if isinstance(general, dict):
+                if general.get('ip') not in (None, ''):
+                    host = str(general['ip'])
+                if general.get('port') not in (None, ''):
+                    yaml_port = str(general['port']).strip()
+                    if not yaml_port.isdecimal() or not 1 <= int(yaml_port) <= 65535:
+                        raise ValueError('Unsafe retained application port')
+                    port = yaml_port
+                if general.get('base_url') not in (None, ''):
+                    base = str(general['base_url'])
 elif app == 'overseerr':
     endpoint = '/api/v1/status'
 base = (base or '').strip()

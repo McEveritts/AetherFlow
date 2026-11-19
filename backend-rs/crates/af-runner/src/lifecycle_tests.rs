@@ -304,8 +304,11 @@ async fn uds_reservation_covers_post_script_callbacks_and_conflicting_cli_proces
         })
         .await;
     assert!(sandbox_root
-        .join("sonarr.service.d/aetherflow-sandbox.conf")
+        .join("sonarr.service.d/10-aetherflow-sandbox.conf")
         .is_file());
+    assert!(!sandbox_root
+        .join("sonarr.service.d/aetherflow-sandbox.conf")
+        .exists());
     assert!(apply_package_sandbox_local("not-a-managed-package")
         .await
         .is_err());

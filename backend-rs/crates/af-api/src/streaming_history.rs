@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 mod tests;
 
 const CURSOR_TTL_SECS: i64 = 900;
-const INCLUDED: &str = "h.policy_status = 'included' AND (h.provenance NOT IN ('observed_session','imported_event') OR COALESCE(h.watched_secs,0) >= p.minimum_watch_secs) AND NOT EXISTS (SELECT 1 FROM json_each(p.excluded_users) e WHERE json_extract(e.value,'$.provider') = h.provider AND json_extract(e.value,'$.serverId') = h.server_id AND json_extract(e.value,'$.id') = h.user_id) AND NOT EXISTS (SELECT 1 FROM streaming_history_labels l JOIN json_each(p.excluded_libraries) e ON json_extract(e.value,'$.id') = l.value WHERE l.history_id = h.id AND l.kind = 'library' AND json_extract(e.value,'$.provider') = h.provider AND json_extract(e.value,'$.serverId') = h.server_id)";
+const INCLUDED: &str = "h.policy_status = 'included' AND (h.provenance NOT IN ('observed_session','imported_event') OR COALESCE(h.watched_secs,0) >= p.minimum_watch_secs) AND (p.excluded_users = '[]' OR NOT EXISTS (SELECT 1 FROM json_each(p.excluded_users) e WHERE json_extract(e.value,'$.provider') = h.provider AND json_extract(e.value,'$.serverId') = h.server_id AND json_extract(e.value,'$.id') = h.user_id)) AND (p.excluded_libraries = '[]' OR NOT EXISTS (SELECT 1 FROM streaming_history_labels l JOIN json_each(p.excluded_libraries) e ON json_extract(e.value,'$.id') = l.value WHERE l.history_id = h.id AND l.kind = 'library' AND json_extract(e.value,'$.provider') = h.provider AND json_extract(e.value,'$.serverId') = h.server_id))";
 const FROM_HISTORY: &str = "FROM streaming_history h CROSS JOIN streaming_tracking_policies p";
 static CURSOR_KEY: Lazy<[u8; 32]> = Lazy::new(|| {
     let mut key = [0u8; 32];
@@ -554,7 +554,16 @@ fn count_history(
 ) -> HistoryResult<HistoryCounts> {
     let confirmed =
         format!("({INCLUDED}) AND h.provenance IN ('observed_session','imported_event')");
-    let sql = format!("SELECT COUNT(*), COALESCE(SUM(h.event_unix IS NULL),0), COALESCE(SUM(CASE WHEN {confirmed} THEN 1 ELSE 0 END),0), COALESCE(SUM(h.provenance = 'item_summary'),0), COALESCE(SUM(h.provenance = 'legacy_unverified'),0), COALESCE(SUM(CASE WHEN {confirmed} THEN MAX(COALESCE(h.watched_secs,0),0) ELSE 0 END),0), COALESCE(SUM(CASE WHEN {confirmed} AND h.byte_accuracy = 'estimated' THEN MAX(COALESCE(h.data_used_bytes,0),0) ELSE 0 END),0) {FROM_HISTORY} WHERE {}", clauses.join(" AND "));
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(event_unix IS NULL),0), COALESCE(SUM(is_conf),0), \
+         COALESCE(SUM(provenance = 'item_summary'),0), COALESCE(SUM(provenance = 'legacy_unverified'),0), \
+         COALESCE(SUM(CASE WHEN is_conf = 1 THEN MAX(COALESCE(watched_secs,0),0) ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN is_conf = 1 AND byte_accuracy = 'estimated' THEN MAX(COALESCE(data_used_bytes,0),0) ELSE 0 END),0) \
+         FROM (SELECT h.event_unix, h.provenance, h.watched_secs, h.data_used_bytes, h.byte_accuracy, \
+                      CASE WHEN {confirmed} THEN 1 ELSE 0 END AS is_conf \
+               {FROM_HISTORY} WHERE {})",
+        clauses.join(" AND ")
+    );
     Ok(conn.query_row(&sql, params_from_iter(values), |row| {
         Ok(HistoryCounts {
             available_records: 0,
@@ -700,16 +709,19 @@ fn query_history_batch(
     let base_values = values.clone();
     query_filters(&query, snapshot.as_of, &mut clauses, &mut values)?;
     if snapshot.counts == HistoryCounts::default() && snapshot.anchor.is_none() {
-        let available: i64 = tx.query_row(
-            &format!(
-                "SELECT COUNT(*) {FROM_HISTORY} WHERE {}",
-                base_clauses.join(" AND ")
-            ),
-            params_from_iter(&base_values),
-            |row| row.get(0),
-        )?;
         snapshot.counts = count_history(&tx, &clauses, &values)?;
-        snapshot.counts.available_records = available;
+        snapshot.counts.available_records = if clauses == base_clauses && values == base_values {
+            snapshot.counts.matching_records
+        } else {
+            tx.query_row(
+                &format!(
+                    "SELECT COUNT(*) {FROM_HISTORY} WHERE {}",
+                    base_clauses.join(" AND ")
+                ),
+                params_from_iter(&base_values),
+                |row| row.get(0),
+            )?
+        };
     }
     let ascending = query.sort == "startedAsc";
     let comparison = if ascending { ">" } else { "<" };

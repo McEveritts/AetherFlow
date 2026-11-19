@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AetherFlow v3.1.7 E2E Test Suite Entrypoint
+AetherFlow v4.0.0 E2E Test Suite Entrypoint
 Usage:
   python tests/run_e2e.py
   python tests/run_e2e.py --tier 1

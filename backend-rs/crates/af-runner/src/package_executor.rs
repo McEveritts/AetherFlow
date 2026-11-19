@@ -2966,7 +2966,13 @@ fn open_new_private_file(path: &Path, mode: u32) -> std::io::Result<File> {
     }
     #[cfg(not(unix))]
     let _ = mode;
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(file)
 }
 
 fn set_path_mode(path: &Path, _mode: u32) {
@@ -6788,6 +6794,22 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     });
                 }
                 let resolved_ver = normalize_dpkg_version(&out.stdout, fallback_version);
+                if recipe.package_id == "prometheus" {
+                    if let Some(target) = self
+                        .env_cfg
+                        .expected_target_version
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if !af_release::lifecycle::versions_match_target(&resolved_ver, target) {
+                            return Err(PackageExecutorError::VerificationFailed(format!(
+                                "APT prometheus package version '{}' does not satisfy expected upstream target version '{}'",
+                                resolved_ver, target
+                            )));
+                        }
+                    }
+                }
                 vars.insert("VERSION".to_string(), resolved_ver.clone());
                 vars.insert(
                     "ZNC_CONF_VERSION".to_string(),
@@ -9137,6 +9159,13 @@ fn normalize_dpkg_version(raw: &str, fallback: &str) -> String {
         .split_once('-')
         .map(|(upstream, _)| upstream)
         .unwrap_or(without_epoch)
+        .split_once('+')
+        .map(|(upstream, _)| upstream)
+        .unwrap_or(
+            without_epoch
+                .split_once('-')
+                .map_or(without_epoch, |(u, _)| u),
+        )
         .trim();
     if !without_rev.is_empty() && SAFE_VERSION_TAG.is_match(without_rev) {
         without_rev.to_string()
@@ -12595,6 +12624,36 @@ pub(crate) fn format_exit_failure_diagnostics(
     }
 }
 
+fn parse_apt_cache_candidate_version(apt_policy_stdout: &str) -> Option<String> {
+    for line in apt_policy_stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Candidate:") {
+            let raw_candidate = rest.trim();
+            if raw_candidate.is_empty() || raw_candidate == "(none)" {
+                return None;
+            }
+            return Some(normalize_dpkg_version(raw_candidate, raw_candidate));
+        }
+    }
+    None
+}
+
+fn apt_candidate_satisfies_target(apt_package: &str, target_version: &str) -> bool {
+    let Ok(out) = std::process::Command::new("apt-cache")
+        .args(["policy", apt_package])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_apt_cache_candidate_version(&stdout).is_some_and(|candidate| {
+        af_release::lifecycle::versions_match_target(&candidate, target_version)
+    })
+}
+
 /// Streams a package lifecycle operation (`install`, `remove`, or `update`) as newline-delimited
 /// progress/log lines, dispatching to [`DeclarativePackageExecutor`] for migrated recipes and
 /// automatically falling back to the legacy Bash script for unported recipes.
@@ -12614,12 +12673,20 @@ pub fn execute_package_request_stream(
             return;
         };
 
-        let declarative_recipe = if select_package_engine(&req.package_id) == PackageEngineMode::DeclarativeRust {
-            get_declarative_recipe(&req.package_id)
-        } else {
-            None
-        };
-        let legacy_script_path = if declarative_recipe.is_none() {
+        let effective_expected_target = req
+            .expected_target_version
+            .clone()
+            .or_else(|| env::var("AF_TARGET_VERSION").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let mut declarative_recipe =
+            if select_package_engine(&req.package_id) == PackageEngineMode::DeclarativeRust {
+                get_declarative_recipe(&req.package_id)
+            } else {
+                None
+            };
+        let mut legacy_script_path = if declarative_recipe.is_none() {
             let Some(p) = resolve_package_script_path(&req.action, &req.script_name) else {
                 yield Ok("__RUNNER_EXIT_ERROR__:package script not found\n".to_string());
                 return;
@@ -12628,6 +12695,25 @@ pub fn execute_package_request_stream(
         } else {
             None
         };
+
+        if req.package_id == "prometheus" && matches!(action, PackageAction::Update) {
+            if let Some(ref target) = effective_expected_target {
+                if !apt_candidate_satisfies_target("prometheus", target) {
+                    if let Some(fallback_script) =
+                        resolve_package_script_path(&req.action, &req.script_name)
+                    {
+                        tracing::info!(
+                            package = "prometheus",
+                            target_version = %target,
+                            script = %fallback_script.display(),
+                            "APT prometheus candidate does not satisfy upstream target version; falling back to validated upstream installer"
+                        );
+                        declarative_recipe = None;
+                        legacy_script_path = Some(fallback_script);
+                    }
+                }
+            }
+        }
 
         let cancel = CancellationToken::new();
         let _cancel_guard = match register_package_cancellation(&req.package_id, cancel.clone()) {
@@ -18801,5 +18887,58 @@ int main(int argc, char** argv) {
         assert!(!demoted_http.contains("SSLProxyCACertificateFile"));
         assert!(demoted_http.contains("ws://127.0.0.1:18989/$1"));
         assert!(demoted_http.contains("ProxyPass / http://127.0.0.1:18989/"));
+    }
+
+    #[test]
+    fn parse_apt_cache_candidate_version_extracts_normalized_version() {
+        let policy =
+            "prometheus:\n  Installed: 2.45.3+ds-2\n  Candidate: 2:2.53.0+ds-1\n  Version table:\n";
+        let parsed = parse_apt_cache_candidate_version(policy).unwrap();
+        assert_eq!(parsed, "2.53.0");
+        assert!(af_release::lifecycle::versions_match_target(
+            &parsed, "2.53.0"
+        ));
+        assert!(!af_release::lifecycle::versions_match_target(
+            &parsed, "3.2.1"
+        ));
+        assert_eq!(
+            parse_apt_cache_candidate_version(
+                "prometheus:\n  Installed: (none)\n  Candidate: (none)\n"
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn prometheus_update_rejects_mismatched_apt_version_when_target_version_differs() {
+        let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+        let root = create_isolated_test_dir("prometheus-target-mismatch");
+        let version_file = root.join("etc/prometheus/.af-version");
+        fs::create_dir_all(version_file.parent().unwrap()).unwrap();
+        fs::write(&version_file, "2.53.0\n").unwrap();
+
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.app_port = 9090;
+        env_cfg.expected_target_version = Some("3.2.1".to_string());
+
+        let mock = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg, mock);
+        let recipe = get_declarative_recipe("prometheus").unwrap();
+
+        let err = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect_err(
+                "prometheus update must reject mismatched APT version against target 3.2.1",
+            );
+        assert!(err.to_string().contains("3.2.1"), "unexpected error: {err}");
+        // Must preserve pre-existing .af-version receipt on rollback.
+        assert_eq!(fs::read_to_string(&version_file).unwrap().trim(), "2.53.0");
+        let _ = fs::remove_dir_all(&root);
     }
 }

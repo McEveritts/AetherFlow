@@ -28,7 +28,8 @@
     "port_allocation": "dynamic"
   },
   "frontend": {
-    "entry": "frontend/src/index.tsx",
+    "entry": "frontend/dist/index.html",
+    "bundle": "frontend/dist/index.html",
     "slot": "marketplace",
     "capabilities": [
       "sandbox-iframe",

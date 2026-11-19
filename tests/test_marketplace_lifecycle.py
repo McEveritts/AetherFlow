@@ -22,7 +22,11 @@ with (root / 'commands').open('a') as log:
     log.write(command + ' ' + ' '.join(args) + '\n')
 if command == 'dpkg':
     if '--compare-versions' in args:
-        sys.exit(subprocess.run(['/usr/bin/dpkg', *args]).returncode)
+        if os.path.exists('/usr/bin/dpkg'):
+            sys.exit(subprocess.run(['/usr/bin/dpkg', *args]).returncode)
+        sys.path.insert(0, '__AF_TESTS_DIR__')
+        from installer_test_helpers import dpkg_compare_versions_exit_code
+        sys.exit(dpkg_compare_versions_exit_code(args))
     print('amd64')
 elif command == 'dpkg-deb':
     print('2.1.0')
@@ -107,7 +111,7 @@ class MarketplaceLifecycleTests(unittest.TestCase):
         for command in ('dpkg', 'dpkg-deb', 'dpkg-query', 'curl', 'git', 'npm', 'mysql', 'sudo', 'systemctl',
                         'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su', 'mysqldump'):
             path = self.root / 'mock-bin' / command
-            path.write_text(MOCK)
+            path.write_text(MOCK.replace('__AF_TESTS_DIR__', str(ROOT / 'tests')))
             path.chmod(0o755)
             shutil.copy2(path, self.root / 'usr/bin' / command)
         source = (ROOT / 'packages/common.sh').read_text()

@@ -242,7 +242,7 @@ build_target() {
 
   mkdir -p "${target_dir}/config"
   tar -C "${cfg_src}" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/config" -xpf -
-  tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" --exclude='packages/ui' \
+  tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" --exclude='packages/ui' --exclude='packages/plugin' \
     -cf - packages deploy | tar -C "${target_dir}" -xpf -
   printf '%s\n' "${VERSION}" > "${target_dir}/.version"
   chmod 0755 "${target_dir}" "${target_dir}/deploy/release-manager.sh"

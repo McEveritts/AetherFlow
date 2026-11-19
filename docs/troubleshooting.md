@@ -109,7 +109,7 @@ AetherFlow serializes Marketplace operations behind `/install/.af-package-execut
 ## Frequently Asked Questions
 
 **Q: Why is there no `aetherflow-frontend.service` or `redis-server` required in v4.0.0?**  
-**A:** AetherFlow v4.0.0 embeds the compiled Next.js 16 (Obsidian V2) static export directly inside the `aetherflow-api` Rust binary (`rust-embed`) and persists JWT revocation and session state directly in bundled SQLite WAL (`af-db`). Separate Node.js and Redis daemons are no longer needed.
+**A:** AetherFlow v4.0.0 serves the compiled **Leptos Rust WebAssembly (`frontend-rs`)** UI directly from external `web/dist` (`STATIC_DIR`) via `aetherflow-api`, and persists JWT revocation and session state directly in bundled SQLite WAL (`af-db`). Separate Node.js and Redis daemons are no longer needed.
 
 **Q: How do I recover if I lose my 2FA authenticator device?**  
 **A:** Sign in using one of the one-time recovery codes generated during 2FA enrollment, or reset TOTP from the host with root access to `/var/lib/aetherflow/aetherflow.sqlite`.

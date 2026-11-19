@@ -1,5 +1,3 @@
-setup/sources/plexmediaserver_0.9.17.3.2239-fe07491_amd64.deb
-
 # Environment files
 .env
 .env.*
@@ -17,31 +15,28 @@ vendor/
 **/key*.json
 **/*.pem
 
-# Next.js build output
+# Next.js & Playwright build output
 .next/
 out/
 build/
-frontend/playwright-report/
-frontend/test-results/
+e2e/playwright-report/
+e2e/test-results/
 
 # Build outputs & logs
 *.exe
 *.log
 /dist/
-backend/bin/
-backend/dist/
-backend/aetherflow-api
-backend/tmp_test_bin
-backend/test-build.exe
 backend-rs/target/
 backend-rs/aetherflow-api
+frontend-rs/target/
+frontend-rs/dist/
 plugins/**/target/
 plugins/**/Cargo.lock
 !plugins/sdk-template-rust/backend/Cargo.lock
 plugins/**/bin/
 plugins/**/ui-link
 
-# Embedded frontend staging (keep placeholder for rust-embed)
+# External WASM frontend staging (keep placeholder)
 /web/dist/*
 !/web/dist/.keep
 
@@ -60,7 +55,6 @@ patch_*.py
 *.sqlite-shm
 *.db
 *.bak
-backend/data/
 **/.master.creds
 /config/*
 !/config/packages.json

@@ -196,6 +196,8 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
                         if ing.listen_port > 0 {
                             port = ing.listen_port;
                         }
+                    } else if !is_internal {
+                        return None;
                     }
                     if (1..=65535).contains(&port) {
                         return Some((bp.app_name, port));
@@ -227,6 +229,63 @@ static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
+
+static PROXY_LOOPBACK_TLS_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+static PROXY_LOOPBACK_TLS_WS_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .http1_only()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+pub(crate) fn upstream_uses_tls(app_name: &str, port: u16) -> bool {
+    let clean = app_name.trim().to_ascii_lowercase();
+    if clean.is_empty() || port == 0 {
+        return false;
+    }
+    if matches!(clean.as_str(), "kasmvnc" | "af-kasmvnc") {
+        return true;
+    }
+    if let Ok(raw) = env::var("AETHERFLOW_TLS_UPSTREAM_APPS") {
+        for entry in raw.split(',') {
+            let token = entry.trim().to_ascii_lowercase();
+            if token.is_empty() {
+                continue;
+            }
+            if let Some((name, entry_port)) = token.split_once(':') {
+                if name.trim() == clean && entry_port.trim().parse::<u16>().ok() == Some(port) {
+                    return true;
+                }
+            } else if token == clean {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_strict_loopback_https_url(target_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(target_url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    matches!(parsed.host_str(), Some("127.0.0.1" | "::1" | "[::1]"))
+}
 
 fn is_trusted_proxy_ip(ip: IpAddr) -> bool {
     crate::ws::is_trusted_proxy_peer(ip)
@@ -579,7 +638,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     let Some((app_name, target_port)) = target else {
         return next.run(req).await;
     };
-    if target_port <= 0 {
+    if !(1..=65535).contains(&target_port) {
         return next.run(req).await;
     }
 
@@ -605,11 +664,140 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         .map(|pq| pq.as_str())
         .unwrap_or("/")
         .to_string();
-    let target_url = format!("http://127.0.0.1:{}{}", target_port, path_and_query);
+    let use_tls = upstream_uses_tls(&app_name, target_port as u16);
+    let scheme = if use_tls { "https" } else { "http" };
+    let target_url = format!("{scheme}://127.0.0.1:{target_port}{path_and_query}");
 
     let incoming_headers = req.headers().clone();
 
     if is_ws_upgrade {
+        if use_tls {
+            if !is_strict_loopback_https_url(&target_url) {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "bad_gateway",
+                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
+
+            let reqwest_method =
+                reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
+            let mut ws_req = PROXY_LOOPBACK_TLS_WS_CLIENT.request(reqwest_method, &target_url);
+            ws_req = forward_proxy_http_headers(
+                ws_req,
+                &incoming_headers,
+                &raw_host,
+                peer_ip_opt,
+                trust_forwarded,
+            );
+            ws_req = ws_req.header(reqwest::header::CONNECTION, "Upgrade");
+            if let Some(ref user) = authenticated_user {
+                ws_req = ws_req.header("X-Aetherflow-User", user);
+            }
+
+            let upstream_resp = match tokio::time::timeout(Duration::from_secs(15), ws_req.send())
+                .await
+            {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        app = %app_name,
+                        host = %raw_host,
+                        port = target_port,
+                        error = %err,
+                        "subdomain reverse proxy TLS websocket upstream error"
+                    );
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": "bad_gateway",
+                            "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(_) => {
+                    return (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(serde_json::json!({
+                            "error": "gateway_timeout",
+                            "message": format!("Upstream service {} on port {} upgrade timed out.", app_name, target_port),
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+
+            if upstream_resp.status() == reqwest::StatusCode::SWITCHING_PROTOCOLS {
+                let resp_headers_clone = upstream_resp.headers().clone();
+                let client_upgrade = hyper::upgrade::on(req);
+                let upstream_upgrade = upstream_resp.upgrade();
+
+                tokio::spawn(async move {
+                    match tokio::try_join!(
+                        async move { client_upgrade.await.map_err(std::io::Error::other) },
+                        async move { upstream_upgrade.await.map_err(std::io::Error::other) }
+                    ) {
+                        Ok((client_upgraded, mut upstream_upgraded)) => {
+                            let mut client_io = hyper_util::rt::TokioIo::new(client_upgraded);
+                            let _ = tokio::io::copy_bidirectional(
+                                &mut client_io,
+                                &mut upstream_upgraded,
+                            )
+                            .await;
+                        }
+                        Err(err) => {
+                            tracing::debug!(error = %err, "subdomain TLS websocket upgrade tunnel closed");
+                        }
+                    }
+                });
+
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                let out_headers = response.headers_mut();
+                for (k, v) in resp_headers_clone.iter() {
+                    if let (Ok(hk), Ok(hv)) = (
+                        HeaderName::from_bytes(k.as_str().as_bytes()),
+                        HeaderValue::from_bytes(v.as_bytes()),
+                    ) {
+                        out_headers.append(hk, hv);
+                    }
+                }
+                if !out_headers.contains_key(header::UPGRADE) {
+                    if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
+                        out_headers.insert(header::UPGRADE, up_hv);
+                    }
+                }
+                if !out_headers.contains_key(header::CONNECTION) {
+                    out_headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+                }
+                return response;
+            } else {
+                let status = StatusCode::from_u16(upstream_resp.status().as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let resp_headers_clone = upstream_resp.headers().clone();
+                let stream = upstream_resp.bytes_stream();
+                let mut response = Response::new(Body::from_stream(stream));
+                *response.status_mut() = status;
+                let out_headers = response.headers_mut();
+                for (k, v) in resp_headers_clone.iter() {
+                    if is_hop_by_hop_header(k.as_str()) {
+                        continue;
+                    }
+                    if let (Ok(hk), Ok(hv)) = (
+                        HeaderName::from_bytes(k.as_str().as_bytes()),
+                        HeaderValue::from_bytes(v.as_bytes()),
+                    ) {
+                        out_headers.append(hk, hv);
+                    }
+                }
+                return response;
+            }
+        }
+
         let tcp_stream = match tokio::time::timeout(
             Duration::from_secs(10),
             tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16)),
@@ -852,33 +1040,8 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         }
     }
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            let mut is_too_large = false;
-            let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(&err);
-            while let Some(e) = cur {
-                if e.is::<http_body_util::LengthLimitError>() {
-                    is_too_large = true;
-                    break;
-                }
-                cur = e.source();
-            }
-            if is_too_large
-                || err
-                    .to_string()
-                    .to_ascii_lowercase()
-                    .contains("length limit")
-            {
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(serde_json::json!({
-                        "error": "payload_too_large",
-                        "message": "Request body exceeds the 64 MiB proxy limit.",
-                    })),
-                )
-                    .into_response();
-            }
+    let client = if use_tls {
+        if !is_strict_loopback_https_url(&target_url) {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -888,11 +1051,22 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             )
                 .into_response();
         }
+        &*PROXY_LOOPBACK_TLS_CLIENT
+    } else {
+        &*PROXY_HTTP_CLIENT
     };
+
+    let has_body = !hyper::body::Body::is_end_stream(req.body())
+        || incoming_headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|len| len > 0)
+        || incoming_headers.contains_key(header::TRANSFER_ENCODING);
 
     let reqwest_method =
         reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut upstream_req = PROXY_HTTP_CLIENT.request(reqwest_method, &target_url);
+    let mut upstream_req = client.request(reqwest_method, &target_url);
 
     upstream_req = forward_proxy_http_headers(
         upstream_req,
@@ -905,11 +1079,19 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         upstream_req = upstream_req.header("X-Aetherflow-User", user);
     }
 
-    if !body_bytes.is_empty() {
-        upstream_req = upstream_req.body(body_bytes);
+    if has_body {
+        upstream_req = upstream_req.body(reqwest::Body::wrap_stream(
+            req.into_body().into_data_stream(),
+        ));
     }
 
-    match tokio::time::timeout(Duration::from_secs(30), upstream_req.send()).await {
+    let send_res = if has_body {
+        Ok(upstream_req.send().await)
+    } else {
+        tokio::time::timeout(Duration::from_secs(30), upstream_req.send()).await
+    };
+
+    match send_res {
         Ok(Ok(upstream_resp)) => {
             let status = StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1393,6 +1575,27 @@ mod tests {
                     }
 
                     let body_start = header_end_pos + 4;
+                    if request_line.starts_with("POST /Upload ") {
+                        let mut received = buf.len().saturating_sub(body_start);
+                        while received < content_length {
+                            match socket.read(&mut temp).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => received += n,
+                            }
+                        }
+                        let payload = serde_json::json!({
+                            "receivedBytes": received,
+                        });
+                        let body_json = serde_json::to_string(&payload).unwrap();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body_json.len(),
+                            body_json
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+
                     while buf.len() < body_start + content_length {
                         match socket.read(&mut temp).await {
                             Ok(0) | Err(_) => break,
@@ -1587,7 +1790,7 @@ mod tests {
         assert_eq!(tunnel_reply, "ws-ack:jellyfin.example.test:ping-jellyfin");
 
         // 4. Untrusted non-loopback peer cannot spoof X-Forwarded-* or X-Real-IP on HTTP or WS,
-        // and >64 MiB request bodies return 413 Payload Too Large rather than 502 Bad Gateway.
+        // and >64 MiB request bodies stream cleanly without 413 buffering limits.
         let untrusted_peer: SocketAddr = "198.51.100.77:54321".parse().unwrap();
         let untrusted_req = axum::http::Request::builder()
             .method("GET")
@@ -1622,21 +1825,150 @@ mod tests {
         );
         assert_eq!(untrusted_json["headers"]["x-forwarded-proto"][0], "http");
 
-        let oversized_stream =
+        let upload_bytes: usize = 65 * 1024 * 1024;
+        let streaming_body =
             futures::stream::iter((0..65).map(|_| {
                 Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; 1024 * 1024]))
             }));
-        let oversized_req = axum::http::Request::builder()
+        let streaming_req = axum::http::Request::builder()
             .method("POST")
             .uri("/Upload")
             .header("Host", "jellyfin.example.test")
-            .body(Body::from_stream(oversized_stream))
+            .header("Content-Length", upload_bytes.to_string())
+            .body(Body::from_stream(streaming_body))
             .unwrap();
-        let oversized_resp = tower::ServiceExt::oneshot(untrusted_app, oversized_req)
+        let streaming_resp = tower::ServiceExt::oneshot(untrusted_app, streaming_req)
             .await
             .unwrap();
-        assert_eq!(oversized_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(streaming_resp.status(), StatusCode::OK);
+        let streaming_resp_bytes = axum::body::to_bytes(streaming_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let streaming_json: serde_json::Value =
+            serde_json::from_slice(&streaming_resp_bytes).unwrap();
+        assert_eq!(streaming_json["receivedBytes"], upload_bytes);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn upstream_uses_tls_identifies_kasmvnc_and_loopback_urls() {
+        assert!(upstream_uses_tls("kasmvnc", 6081));
+        assert!(upstream_uses_tls("af-kasmvnc", 6081));
+        assert!(upstream_uses_tls(" KasmVNC ", 6081));
+        assert!(!upstream_uses_tls("jellyfin", 8096));
+        assert!(!upstream_uses_tls("kasmvnc", 0));
+
+        assert!(is_strict_loopback_https_url(
+            "https://127.0.0.1:6081/vnc.html"
+        ));
+        assert!(is_strict_loopback_https_url("https://[::1]:6081/"));
+        assert!(!is_strict_loopback_https_url("http://127.0.0.1:6081/"));
+        assert!(!is_strict_loopback_https_url("https://192.168.1.50:6081/"));
+        assert!(!is_strict_loopback_https_url("https://evil.example.com/"));
+    }
+
+    #[test]
+    fn external_subdomain_fails_closed_without_explicit_enabled_ingress() {
+        const CHILD_ENV: &str = "AF_EXTERNAL_FAIL_CLOSED_TEST_CHILD";
+        if env::var(CHILD_ENV).as_deref() != Ok("1") {
+            let status = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "middlewares::tests::external_subdomain_fails_closed_without_explicit_enabled_ingress",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let root = env::temp_dir().join(format!("af-ext-fail-closed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        env::set_var("AETHERFLOW_FS_ROOT", &root);
+        env::set_var("AETHERFLOW_RELEASE_ROOT", &root);
+        env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+        let db = root.join("gateway.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db);
+        }
+        let catalog = root.join("packages.json");
+        std::fs::write(
+            &catalog,
+            serde_json::to_vec(&serde_json::json!([{
+                "name": "syncthing",
+                "label": "Syncthing",
+                "description": "fixture",
+                "lock_file": "/install/.syncthing.lock",
+                "category": "test",
+                "service_type": "systemd",
+                "service_name": "syncthing",
+                "default_port": 8384
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+        let automation = root.join("automation.json");
+        std::fs::write(&automation, "{}").unwrap();
+        env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+        af_db::init_db().unwrap();
+        af_services::initialize_package_jobs(rusqlite::Connection::open(&db).unwrap()).unwrap();
+        af_db::set_base_domain("example.test").unwrap();
+        std::fs::write(root.join("install/.syncthing.lock"), "installed").unwrap();
+
+        // 1. No AppIngressConfig: internal .aether.local resolves, external <app>.<base_domain> fails closed
+        assert_eq!(
+            resolve_app_target_for_host("syncthing.aether.local"),
+            Some(("syncthing".into(), 8384))
+        );
+        assert_eq!(resolve_app_target_for_host("syncthing.example.test"), None);
+
+        // 2. Explicit AppIngressConfig with external_access_enabled: false -> external fails closed
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "syncthing".into(),
+            public_domain: "syncthing.example.test".into(),
+            external_access_enabled: false,
+            listen_port: 18384,
+            ..Default::default()
+        })
+        .unwrap();
+        af_db::invalidate_ingress_cache();
+        assert_eq!(
+            resolve_app_target_for_host("syncthing.aether.local"),
+            Some(("syncthing".into(), 18384))
+        );
+        assert_eq!(resolve_app_target_for_host("syncthing.example.test"), None);
+
+        // 3. Stored AppIngressConfig with out-of-range listen_port: 0 -> both internal and external fail closed
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "UPDATE app_ingress_configs SET external_access_enabled = 1, listen_port = 0 WHERE app_name = 'syncthing'",
+                [],
+            )
+            .unwrap();
+        af_db::invalidate_ingress_cache();
+        assert_eq!(resolve_app_target_for_host("syncthing.aether.local"), None);
+        assert_eq!(resolve_app_target_for_host("syncthing.example.test"), None);
+
+        // 4. Explicit AppIngressConfig with external_access_enabled: true and valid port -> external allowed
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "syncthing".into(),
+            public_domain: "syncthing.example.test".into(),
+            external_access_enabled: true,
+            listen_port: 18384,
+            ..Default::default()
+        })
+        .unwrap();
+        af_db::invalidate_ingress_cache();
+        assert_eq!(
+            resolve_app_target_for_host("syncthing.example.test"),
+            Some(("syncthing".into(), 18384))
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

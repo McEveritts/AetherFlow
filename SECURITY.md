@@ -23,11 +23,11 @@ AetherFlow is maintained as a single unified open-source platform with active re
 When evaluating or reporting a security issue, the following components and trust boundaries are in scope (see [`docs/security.md`](./docs/security.md) and [`docs/threat_model.md`](./docs/threat_model.md) for full details):
 
 1. **Unprivileged Control Plane (`aetherflow-api.service` / `af-api`)**:
-   - Single-binary **Rust (`Axum` + `Tokio`)** API and embedded **Next.js 16 (Obsidian V2)** SPA running as unprivileged user `aetherflow` (`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`, `MemoryMax=512M`).
+   - **Rust (`Axum` + `Tokio`)** API serving the external **Leptos Rust WebAssembly (`frontend-rs`)** SPA from `web/dist` (`STATIC_DIR`) as unprivileged user `aetherflow` (`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`, `MemoryMax=512M`).
    - Binds to `127.0.0.1:8080` behind the Apache2 reverse proxy and Subdomain Gateway.
 2. **Privileged Runner Boundary (`aetherflow-runner.service` / `af-runner`)**:
    - Root helper daemon (`/opt/AetherFlow/current/aetherflow-api runner`) listening exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
-   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` unit lifecycle calls, Marketplace package installations (15 declarative Rust recipes + locked Bash installers), WireGuard/Tailscale control, quota changes, and isolated `aetherflow-self-update.service` deployments.
+   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` unit lifecycle calls, Marketplace package installations (12 declarative Rust recipes + locked Bash installers), WireGuard/Tailscale control, quota changes, and isolated `aetherflow-self-update.service` deployments.
 3. **Scoped Tenant File Manager (`af-files` / Native McBrowser)**:
    - Capability-scoped per-user storage (`/var/lib/aetherflow/mcbrowser`, mode `0700`) with strict symlink/traversal prevention, ETag conflict detection, bounded resumable uploads, and admin-only host path picker enforcement (`/api/v1/auth/fs`).
 4. **Authentication, Sessions & Perimeter SSO**:
@@ -51,7 +51,7 @@ Please report vulnerabilities privately through **[GitHub Security Advisories (P
 
 To help us triage and reproduce the issue quickly, please include:
 
-- **Affected Component**: Rust control plane crate (`backend-rs/crates/af-*`), privileged runner (`af-runner`), McBrowser (`af-files`), frontend (`frontend/`), Apache2 Subdomain Gateway, or a specific Marketplace installer (`packages/`).
+- **Affected Component**: Rust control plane crate (`backend-rs/crates/af-*`), privileged runner (`af-runner`), McBrowser (`af-files`), WASM frontend (`frontend-rs/crates/af-web-*`), Apache2 Subdomain Gateway, or a specific Marketplace installer (`packages/`).
 - **Version & Environment**: AetherFlow version/commit (e.g., `v4.0.0`), release channel (`stable`, `nightly`, or `experimental`), and host OS (`Debian 12/13` or `Ubuntu 22.04/24.04`).
 - **Reproduction Steps**: Clear, step-by-step instructions or a minimal proof-of-concept request/payload demonstrating the vulnerability.
 - **Security Impact**: What security boundary is crossed (e.g., authentication bypass, IDOR, privilege escalation across `runner.sock`, path/symlink traversal, command/SQL injection, SSRF, or secret exposure) and the relevant CWE if known.

@@ -49,7 +49,18 @@ ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectControlGroups=yes
-PrivateDevices=yes
+DevicePolicy=closed
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/zero rw
+DeviceAllow=/dev/full rw
+DeviceAllow=/dev/random r
+DeviceAllow=/dev/urandom r
+DeviceAllow=/dev/dri rw
+DeviceAllow=char-drm rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidia-modeset rw
+DeviceAllow=/dev/nvidia-uvm rw
 ProtectClock=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
@@ -67,7 +78,7 @@ UMask=0027
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
 # Legacy v3 databases live in /opt/AetherFlow/backend/data. The '-' skips the
 # path when that directory was never created.
-ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw
+ReadWritePaths=-/opt/AetherFlow/backend/data
 
 # ── Operator Drop-in Overrides ──────────────────────────────────────────────
 # Host-specific bind mounts, local media paths, or supplementary groups (such as

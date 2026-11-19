@@ -26,7 +26,10 @@ printf '%s %s\n' "$cmd" "$*" >> "${root}/mock_commands.log"
 
 case "$cmd" in
     dpkg)
-        if [[ "$1" == "--compare-versions" ]]; then exec /usr/bin/dpkg "$@"; fi
+        if [[ "$1" == "--compare-versions" ]]; then
+            if [[ -x /usr/bin/dpkg ]]; then exec /usr/bin/dpkg "$@"; fi
+            exec /usr/bin/python3 "__AF_INSTALLER_HELPERS__" "$@"
+        fi
         echo "amd64"
         exit 0
         ;;
@@ -535,7 +538,7 @@ class SafeMarketplaceUpdatesTests(unittest.TestCase):
             "useradd", "usermod", "userdel", "groupdel", "id", "install", "sudo", "runuser", "cargo", "kasmvncpasswd"
         ):
             p = self.root / "mock-bin" / command
-            p.write_text(MOCK_SCRIPT)
+            p.write_text(MOCK_SCRIPT.replace("__AF_INSTALLER_HELPERS__", str(ROOT / "tests/installer_test_helpers.py")))
             p.chmod(0o755)
             shutil.copy2(p, self.root / 'usr/bin' / command)
 

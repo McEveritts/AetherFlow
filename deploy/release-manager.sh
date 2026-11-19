@@ -396,8 +396,8 @@ conf_path = sys.argv[1]
 script_dir = sys.argv[2]
 allowed_keys = {
     "RELEASES_DIR", "CURRENT_LINK", "REPO_DIR", "LEGACY_OPT_ROOT", "DRY_RUN_ROOT",
-    "GITHUB_REPO", "RELEASE_CHANNEL", "ARTIFACT_NAME", "CHECKSUM_NAME", "GIT_BRANCH",
-    "GIT_REMOTE", "GO_BIN", "NODE_HEAP_MB", "HEALTH_ENDPOINT", "HEALTH_RETRIES",
+    "GITHUB_REPO", "RELEASE_CHANNEL", "ARTIFACT_NAME", "RELEASE_ASSET_NAME", "CHECKSUM_NAME", "GIT_BRANCH",
+    "GIT_REMOTE", "NODE_HEAP_MB", "HEALTH_ENDPOINT", "HEALTH_RETRIES",
     "HEALTH_INTERVAL", "MAX_RELEASES", "LOG_FILE", "DATA_DIR", "ENV_DIR", "ENV_FILE",
     "SQLITE_DB", "SNAPSHOT_TIMEOUT", "SYSTEMD_UNITS_SRC", "SYSTEMD_UNITS_DST",
     "CLI_BIN_DIR", "AETHERFLOW_RELEASE_ROOT", "AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH",
@@ -551,7 +551,20 @@ fi
 : "${HEALTH_RETRIES:=15}"
 : "${HEALTH_INTERVAL:=2}"
 : "${HEALTH_ENDPOINT:=http://127.0.0.1:8080/api/v1/system/health}"
-: "${ARTIFACT_NAME:=aetherflow-linux-amd64.tar.gz}"
+if [[ -z "${ARTIFACT_NAME:-}" ]]; then
+    if [[ -n "${RELEASE_ASSET_NAME:-}" ]]; then
+        ARTIFACT_NAME="${RELEASE_ASSET_NAME}"
+    else
+        case "$(uname -m 2>/dev/null || echo x86_64)" in
+            x86_64|amd64) _af_default_arch="amd64" ;;
+            aarch64|arm64) _af_default_arch="arm64" ;;
+            armv7*|armhf) _af_default_arch="armv7" ;;
+            *) _af_default_arch="amd64" ;;
+        esac
+        ARTIFACT_NAME="aetherflow-linux-${_af_default_arch}.tar.gz"
+        unset _af_default_arch
+    fi
+fi
 : "${CHECKSUM_NAME:=SHA256SUMS}"
 : "${GITHUB_REPO:=McEveritts/AetherFlow}"
 
@@ -1729,12 +1742,12 @@ prepare_release_permissions() {
     done
     if [[ "${DRY_RUN}" == false ]]; then
         if [[ "${EUID}" -eq 0 ]] || [[ "${service_user}" != "$(id -un)" ]]; then
-            if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then
+            if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api && { test ! -d web/dist || test -r web/dist/index.html; }' sh "${RELEASE_DIR}"; then
                 log_error "Release is inaccessible to service user ${service_user}. Refusing symlink swap."
                 return 1
             fi
         else
-            if ! sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then
+            if ! sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api && { test ! -d web/dist || test -r web/dist/index.html; }' sh "${RELEASE_DIR}"; then
                 log_error "Release is inaccessible to service user ${service_user}. Refusing symlink swap."
                 return 1
             fi
@@ -2084,6 +2097,12 @@ health_probe() {
                             attempt=$((attempt + 1))
                             continue
                         fi
+                    fi
+                fi
+                if [[ -L "${CURRENT_LINK}" && -d "${CURRENT_LINK}/web/dist" ]]; then
+                    if [[ ! -f "${CURRENT_LINK}/web/dist/index.html" || ! -s "${CURRENT_LINK}/web/dist/index.html" || ! -r "${CURRENT_LINK}/web/dist/index.html" ]]; then
+                        log_error "Post-swap readiness check failed: missing, empty, or unreadable ${CURRENT_LINK}/web/dist/index.html."
+                        return 1
                     fi
                 fi
                 log_info "Health probe PASSED on attempt ${attempt}/${HEALTH_RETRIES} (status=${status})"

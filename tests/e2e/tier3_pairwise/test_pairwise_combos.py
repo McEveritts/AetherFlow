@@ -3,18 +3,19 @@ Tier 3: Cross-Feature Combinations (Pairwise Interoperability)
 12 Comprehensive Pairwise Integration Suites:
 1. Ingress + Privileged Hosts + Reverse Proxy Topology + Migration 17
 2. Auth Refresh + Profile Password + Session Invalidation + Profile UI
-3. PathSelector + Rust FS Browser + MediaFlow Tab + Cookie Auth
+3. DirectoryPicker + Rust FS Browser + MediaFlow Tab + Cookie Auth
 4. Quotas Panel + Privileged Runner Quota + Quota Manager Enforcement
 5. Network VPN Panel + Privileged Runner Network + WireGuard/Tailscale
 6. Cluster Manager Startup + Cluster Nodes Panel + Worker Enrollment
-7. Single-Binary Pipeline + Embedded SPA + Obsidian CSS Tokens + Static Export
+7. External Rust WASM Pipeline + Embedded SPA + Obsidian CSS Tokens
 8. Systemd Privilege Units + Sudoers Purge + Caller Migration + Sandbox
 9. Debian 13 APT Sources + Core OS Detection + Package Modernization + Keyrings
 10. AI Telemetry Predictions + Bandwidth Tuning + OverviewTab Mounting
-11. Ingress Modal + Deployment SSE Stream + ServicesTab Mounting
+11. ExternalAccess + DeploymentStatus + Deploy SSE Stream + Apache2 Subdomain Gateway
 12. Tri-Mode Mobile Dock + Scroller Containment + Touch Targets + Primitives
 """
 
+import re
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 ROUTES_RS = "backend-rs/crates/af-api/src/routes.rs"
@@ -43,29 +44,29 @@ class TestComboIngressDnsProxyTopology(TestCase):
 
 class TestComboAuthSessionPasswordLifecycle(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_02", "F02+F03+F22", 3, "Password mutation, session rotation, and ProfileTab form interaction")
+        super().__init__("T3_COMBO_02", "F02+F03+F22", 3, "Password mutation, session rotation, and security.rs form interaction")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         routes = inspector.read_file(ROUTES_RS)
-        profile = inspector.read_file("frontend/src/components/tabs/ProfileTab.tsx")
+        profile = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/settings/security.rs")
         has_refresh = bool(routes and "/refresh" in routes)
         has_password = bool(routes and "/profile/password" in routes)
         has_profile_ui = bool(profile and "/api/v1/auth/profile/password" in profile)
-        self.assert_true(has_refresh and has_password and has_profile_ui, "Combo 02: Auth refresh, password mutation, and ProfileTab wiring must be satisfied")
+        self.assert_true(has_refresh and has_password and has_profile_ui, "Combo 02: Auth refresh, password mutation, and profile security UI wiring must be satisfied")
 
 
 class TestComboPathSelectorFsMediaflow(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_03", "F01+F20", 3, "PathSelector integration with Rust FS handler and MediaFlow cookie auth")
+        super().__init__("T3_COMBO_03", "F01+F20", 3, "DirectoryPicker integration with Rust FS handler and MediaflowTab ApiClient auth")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        selector = inspector.read_file("frontend/src/components/ui/PathSelector.tsx")
-        mediaflow = inspector.read_file("frontend/src/components/tabs/MediaFlowTab.tsx")
+        picker = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/fileshare/local_storage.rs")
+        mediaflow = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/mediaflow.rs")
         routes = inspector.read_file(ROUTES_RS)
         has_fs = bool(routes and "/fs" in routes)
-        has_selector = bool(selector and ("/api/fs" in selector or "/api/v1/auth/fs" in selector))
-        has_mediaflow_api = bool(mediaflow and "apiFetch" in mediaflow)
-        self.assert_true(has_fs and has_selector and has_mediaflow_api, "Combo 03: PathSelector, FS API, and MediaFlow wiring must be satisfied")
+        has_picker = bool(picker and "/api/v1/auth/fs" in picker)
+        has_mediaflow_api = bool(mediaflow and "ApiClient" in mediaflow)
+        self.assert_true(has_fs and has_picker and has_mediaflow_api, "Combo 03: DirectoryPicker, FS API, and MediaflowTab wiring must be satisfied")
 
 
 class TestComboQuotasRunner(TestCase):
@@ -73,7 +74,7 @@ class TestComboQuotasRunner(TestCase):
         super().__init__("T3_COMBO_04", "F26+F07+F08", 3, "Quotas UI, runner /v1/quota dispatch, and quota manager enforcement")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        quotas_ui = inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
+        quotas_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/quotas.rs")
         runner_code = inspector.read_file(RUNNER_RS)
         runner_quota = bool(runner_code and "/v1/quota" in runner_code and "dispatch_quota_set" in runner_code)
         quota_impl = bool(inspector.file_exists("backend-rs/crates/af-runner/src/quota.rs"))
@@ -85,7 +86,7 @@ class TestComboNetworkVpnRunner(TestCase):
         super().__init__("T3_COMBO_05", "F24+F07+F08", 3, "Network panel UI, runner /v1/network, and WireGuard/Tailscale callers")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        net_ui = inspector.file_exists("frontend/src/components/tabs/NetworkTab.tsx")
+        net_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/network/mod.rs")
         runner_code = inspector.read_file(RUNNER_RS)
         runner_net = bool(runner_code and "/v1/network" in runner_code)
         caller_net = bool(inspector.file_exists("backend-rs/crates/af-runner/src/network.rs"))
@@ -100,7 +101,7 @@ class TestComboClusterTelemetryManagement(TestCase):
         main_code = inspector.read_file(MAIN_RS)
         routes_code = inspector.read_file(ROUTES_RS)
         cluster_init = bool(main_code and "start_cluster_runtime" in main_code)
-        cluster_ui = inspector.file_exists("frontend/src/components/tabs/ClusterTab.tsx")
+        cluster_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/cluster.rs")
         routes = bool(routes_code and "/cluster/nodes" in routes_code)
         self.assert_true(cluster_init and cluster_ui and routes, "Combo 06: Cluster startup, UI tab, and node endpoints must be satisfied")
 
@@ -149,37 +150,41 @@ class TestComboDebian13AptPackaging(TestCase):
 
 class TestComboAiTelemetryPredictions(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_10", "F19+Overview", 3, "OverviewTab mounting of BandwidthCard and PredictionsCard with real history")
+        super().__init__("T3_COMBO_10", "F19+Overview", 3, "Overview tab mounting of CapacityPredictions & Bandwidth tuning with real history")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        overview = inspector.read_file("frontend/src/components/tabs/OverviewTab.tsx")
-        card = inspector.read_file("frontend/src/components/cards/PredictionsCard.tsx")
-        has_cards = bool(overview and "BandwidthCard" in overview and "PredictionsCard" in overview)
-        has_history = bool(card and "/api/v1/admin/ai/predictions/history" in card)
-        self.assert_true(has_cards and has_history, "Combo 10: OverviewTab AI cards mounting with real history must be satisfied")
+        overview = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/overview/mod.rs")
+        widgets = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/overview/widgets.rs")
+        telemetry = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/overview/telemetry.rs")
+        has_cards = bool(overview and "<CapacityPredictions" in overview and widgets and "Overview.networkBandwidth" in widgets)
+        has_history = bool(telemetry and "/api/v1/admin/ai/predictions/history" in telemetry)
+        self.assert_true(has_cards and has_history, "Combo 10: Overview AI predictions & bandwidth with real history must be satisfied")
 
 
 class TestComboDeploySseGateway(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_11", "F21+Deploy", 3, "ExternalAccessCard, DeploymentStatus, useDeploymentStream SSE, and Apache2 Subdomain Gateway integration")
+        super().__init__("T3_COMBO_11", "F21+Deploy", 3, "ExternalAccessSettings, DeploymentStatus, EventSource SSE, and Apache2 Subdomain Gateway integration")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        hook = inspector.read_file("frontend/src/hooks/useDeploymentStream.ts")
+        mediaflow = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/mediaflow.rs")
         deploy_api = inspector.read_file(STORAGE_RS)
-        has_hook = bool(hook and "/api/v1/auth/deploy/stream" in hook)
+        has_stream_ui = bool(mediaflow and "/api/v1/auth/deploy/stream" in mediaflow and "EventSource" in mediaflow)
         has_api = bool(deploy_api and "/api/v1/auth/deploy/stream" in deploy_api)
-        self.assert_true(has_hook and has_api, "Combo 11: Deployment SSE stream and Apache2 Subdomain Gateway deploy orchestration must be satisfied")
+        self.assert_true(has_stream_ui and has_api, "Combo 11: Deployment SSE stream and Apache2 Subdomain Gateway deploy orchestration must be satisfied")
+
 
 class TestComboResponsiveDockScrollerContainment(TestCase):
     def __init__(self):
         super().__init__("T3_COMBO_12", "F15+F16+F18", 3, "Tri-mode mobile dock, scroller containment invariant, and Obsidian UI primitives")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        has_dock = bool(sidebar and "md:hidden" in sidebar)
-        no_overflow = bool(css and not ('body { overflow-x: hidden' in css or 'html, body { overflow-x: hidden' in css))
+        css = inspector.read_file("frontend-rs/styles/input.css")
+        shell = inspector.read_file("frontend-rs/crates/af-web-app/src/shell.rs")
+        has_dock = bool(shell and "af-mobile-dock" in shell and css and ".af-mobile-dock" in css)
+        clean_css = re.sub(r'/\*.*?\*/', '', css or "", flags=re.DOTALL)
+        no_overflow = bool(css and not re.search(r'(html|body)\s*\{[^}]*overflow-x:\s*hidden', clean_css, re.IGNORECASE))
         self.assert_true(has_dock and no_overflow, "Combo 12: Mobile dock and scroller containment must be satisfied")
+
 
 def get_tier3_tests():
     return [

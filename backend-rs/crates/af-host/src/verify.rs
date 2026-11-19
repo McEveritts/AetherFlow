@@ -2853,7 +2853,6 @@ fn is_service_owned_subtree_eligible(path: &Path) -> bool {
         || path.starts_with("/etc/AetherFlow")
         || path.starts_with("/opt/AetherFlow")
         || path.starts_with("/home/aetherflow")
-        || path.starts_with("/var/www/html/dashboard")
         || path.starts_with("/tmp")
         || path.starts_with("/var/tmp")
     {

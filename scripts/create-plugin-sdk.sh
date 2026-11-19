@@ -73,17 +73,5 @@ for path in target_dir.rglob("*"):
 PYEOF
 
 echo "Plugin scaffold created at ${TARGET_DIR}"
-
-echo ""
-echo "=> Linking Shared UI Library..."
-if [[ -d "${REPO_ROOT}/packages/ui" ]]; then
-    mkdir -p "${TARGET_DIR}/frontend"
-    REL_UI_PATH="$(python3 -c 'import os, sys; print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' "${REPO_ROOT}/packages/ui" "${TARGET_DIR}/frontend")"
-    ln -sfn "${REL_UI_PATH}" "${TARGET_DIR}/frontend/ui-link" || true
-    echo "=> Symlinked AetherFlow UI primitives to ${TARGET_DIR}/frontend/ui-link successfully."
-else
-    echo "=> Warning: Core packages/ui not found. Plugin may drift aesthetically."
-fi
-
 echo ""
 echo "Plugin '${PLUGIN_NAME}' is ready. Check ${TARGET_DIR}/plugin.manifest.json to configure boundaries."

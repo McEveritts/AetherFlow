@@ -17,9 +17,9 @@ FlowAI uses a provider-agnostic routing layer in the Rust control plane (`backen
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Frontend (Next.js 16 / Obsidian V2)                │
-│  AiChatTab.tsx → sends { model, provider, ... }     │
-│  SettingsTab.tsx → shared AI_MODELS from ai-models  │
+│  WASM Frontend (Leptos / frontend-rs)               │
+│  tabs/ai_chat.rs → sends { model, provider, ... }   │
+│  tabs/settings/ → provider config & model selection │
 └──────────────────────┬──────────────────────────────┘
                        │ POST /api/v1/auth/ai/chat
                        ▼
@@ -107,7 +107,7 @@ Configure providers in **Settings → FlowAI Engine**:
 
 ### Model Selection
 
-Models are defined in `frontend/src/lib/ai-models.ts`, imported by both `SettingsTab.tsx` (default model) and `AiChatTab.tsx` (per-chat model picker), and validated against the backend model allowlist in `af-api::intelligence` (`backend-rs/crates/af-api/src/intelligence.rs`).
+Models are defined in the Leptos WASM UI (`frontend-rs/crates/af-web-app/src/tabs/ai_chat.rs` and `frontend-rs/crates/af-web-app/src/tabs/settings/`), and validated against the backend model allowlist in `af-api::intelligence` (`backend-rs/crates/af-api/src/intelligence.rs`).
 
 ---
 
@@ -116,7 +116,7 @@ Models are defined in `frontend/src/lib/ai-models.ts`, imported by both `Setting
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
 | "Model Unreachable" | Missing or invalid API key | Verify key in Settings → FlowAI Engine. Check env vars. |
-| 400 "Invalid AI model" | Model not in backend allowlist | Ensure the model ID matches an entry in `frontend/src/lib/ai-models.ts` and `af-api::intelligence`. |
+| 400 "Invalid AI model" | Model not in backend allowlist | Ensure the model ID matches an entry in `frontend-rs/crates/af-web-app/src/tabs/ai_chat.rs` and `af-api::intelligence`. |
 | "AI provider initialization failed" | Provider configuration error | Check that the correct credentials/endpoints are configured. |
 | "Connection error" on local AI | LM Studio or Ollama not running | Start the local server and verify the endpoint URL. |
 | "Context Overload" | Massive service logs | Clear the chat to reset the context window. Try `logs` mode. |

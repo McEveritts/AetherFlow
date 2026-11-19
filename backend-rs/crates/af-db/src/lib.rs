@@ -67,6 +67,25 @@ pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
     )
 }
 
+fn aes_key_candidate_env_files() -> Vec<std::path::PathBuf> {
+    if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() == Ok("1") {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    if let Some(explicit_path) = env::var("AETHERFLOW_ENV_FILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        candidates.push(std::path::PathBuf::from(explicit_path));
+    }
+    let default_env = std::path::PathBuf::from("/etc/aetherflow/aetherflow.env");
+    if !candidates.iter().any(|p| p == &default_env) {
+        candidates.push(default_env);
+    }
+    candidates
+}
+
 pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
     if let Ok(guard) = AES_MASTER_KEY.read() {
         if let Some(key) = *guard {
@@ -81,16 +100,11 @@ pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
             }
         }
     }
-    if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() == Ok("1") {
-        return None;
-    }
-    let env_file = env::var("AETHERFLOW_ENV_FILE")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())?;
-    if let Some(clean) = read_last_aes_key_from_env_file(Path::new(&env_file)) {
-        if let Ok(key) = parse_aes_key_bytes(&clean) {
-            return Some(key);
+    for env_file in aes_key_candidate_env_files() {
+        if let Some(clean) = read_last_aes_key_from_env_file(&env_file) {
+            if let Ok(key) = parse_aes_key_bytes(&clean) {
+                return Some(key);
+            }
         }
     }
     None
@@ -112,10 +126,10 @@ fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
     }
     let mut opts = fs::OpenOptions::new();
     opts.read(true);
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(0o0400000); // O_NOFOLLOW on Linux
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let mut file = opts.open(path).ok()?;
     let fmeta = file.metadata().ok()?;
@@ -208,18 +222,10 @@ pub fn init_aes_key() -> anyhow::Result<()> {
         .trim()
         .to_string();
     if raw.is_empty() {
-        let explicit_env_file = env::var("AETHERFLOW_ENV_FILE")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        if let Some(ref explicit_path) = explicit_env_file {
-            if let Some(from_file) = read_last_aes_key_from_env_file(Path::new(explicit_path)) {
+        for candidate in aes_key_candidate_env_files() {
+            if let Some(from_file) = read_last_aes_key_from_env_file(&candidate) {
                 raw = from_file;
-            }
-        } else if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() != Ok("1") {
-            let default_env = Path::new("/etc/aetherflow/aetherflow.env");
-            if let Some(from_file) = read_last_aes_key_from_env_file(default_env) {
-                raw = from_file;
+                break;
             }
         }
     }
@@ -523,39 +529,68 @@ fn apply_pragmas(conn: &Connection) {
     }
 }
 
+fn run_atomic_migration_tx<F, R>(conn: &Connection, f: F) -> anyhow::Result<R>
+where
+    F: FnOnce(&Connection) -> anyhow::Result<R>,
+{
+    if conn.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
+    } else {
+        conn.execute_batch("SAVEPOINT af_migrate;")?;
+        match f(conn) {
+            Ok(out) => {
+                conn.execute_batch("RELEASE SAVEPOINT af_migrate;")?;
+                Ok(out)
+            }
+            Err(err) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT af_migrate; RELEASE SAVEPOINT af_migrate;",
+                );
+                Err(err)
+            }
+        }
+    }
+}
+
 fn migrate(
     conn: &Connection,
     version: i32,
     description: &str,
     stmts: &[&str],
 ) -> anyhow::Result<()> {
-    let count: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
-        params![version],
-        |r| r.get(0),
-    )?;
-    if count > 0 {
-        return Ok(());
-    }
-
-    for stmt in stmts {
-        if let Err(err) = conn.execute_batch(stmt) {
-            let msg = err.to_string().to_ascii_lowercase();
-            if msg.contains("duplicate column name") || msg.contains("already exists") {
-                tracing::info!(version, "migration DDL already applied");
-                continue;
-            }
-            tracing::error!(version, error = %err, "migration failed");
-            return Err(err.into());
+    run_atomic_migration_tx(conn, |tx_conn| {
+        let count: i32 = tx_conn.query_row(
+            "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
+            params![version],
+            |r| r.get(0),
+        )?;
+        if count > 0 {
+            return Ok(());
         }
-    }
 
-    conn.execute(
-        "INSERT INTO schema_versions (version, description) VALUES (?1, ?2)",
-        params![version, description],
-    )?;
-    tracing::info!(version, description, "migration applied");
-    Ok(())
+        for stmt in stmts {
+            if let Err(err) = tx_conn.execute_batch(stmt) {
+                let msg = err.to_string().to_ascii_lowercase();
+                if msg.contains("duplicate column name") || msg.contains("already exists") {
+                    tracing::info!(version, "migration DDL already applied");
+                    continue;
+                }
+                tracing::error!(version, error = %err, "migration failed");
+                return Err(err.into());
+            }
+        }
+
+        tx_conn.execute(
+            "INSERT INTO schema_versions (version, description) VALUES (?1, ?2)",
+            params![version, description],
+        )?;
+        tracing::info!(version, description, "migration applied");
+        Ok(())
+    })
 }
 
 pub fn init_db() -> anyhow::Result<()> {
@@ -592,7 +627,7 @@ pub fn init_db() -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
             ai_model TEXT DEFAULT 'gemini-4-argon',
-            system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a consolidated Next.js + Rust aetherflow-api environment. Always prioritize safe and performant configurations.',
+            system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a sovereign Rust + WebAssembly aetherflow-api environment. Always prioritize safe and performant configurations.',
             language TEXT DEFAULT 'en',
             timezone TEXT DEFAULT 'UTC',
             update_channel TEXT DEFAULT 'stable',
@@ -1177,6 +1212,7 @@ pub fn init_db() -> anyhow::Result<()> {
     );
 
     ensure_security_schema_invariants(&conn)?;
+    ensure_notification_schema_invariants(&conn)?;
 
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
     let _ = conn.execute(
@@ -1325,6 +1361,200 @@ fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn ensure_notification_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    run_atomic_migration_tx(conn, |tx_conn| {
+        tx_conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS notification_reads (
+                notification_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (notification_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_notification_reads_user_notification
+                ON notification_reads(user_id, notification_id);",
+        )?;
+        Ok(())
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-User Notification Read State Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserNotificationRow {
+    pub id: i64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub user_id: Option<i64>,
+    pub level: String,
+    pub title: String,
+    pub message: String,
+    pub read: bool,
+    pub created_at: String,
+}
+
+pub const UNREAD_NOTIFICATIONS_COUNT_FOR_USER_SQL: &str = "
+    SELECT COUNT(*)
+    FROM notifications n
+    LEFT JOIN notification_reads nr
+        ON nr.notification_id = n.id AND nr.user_id = ?1
+    WHERE (n.user_id = ?1 OR n.user_id IS NULL)
+      AND CASE
+            WHEN n.user_id IS NULL THEN (COALESCE(n.read, 0) = 0 AND nr.notification_id IS NULL)
+            ELSE COALESCE(n.read, 0) = 0
+          END
+";
+
+pub const LIST_NOTIFICATIONS_FOR_USER_SQL: &str = "
+    SELECT
+        n.id,
+        n.user_id,
+        n.level,
+        n.title,
+        n.message,
+        CASE
+            WHEN n.user_id IS NULL THEN (COALESCE(n.read, 0) != 0 OR nr.notification_id IS NOT NULL)
+            ELSE COALESCE(n.read, 0) != 0
+        END AS effective_read,
+        COALESCE(CAST(n.created_at AS TEXT), '')
+    FROM notifications n
+    LEFT JOIN notification_reads nr
+        ON nr.notification_id = n.id AND nr.user_id = ?1
+    WHERE (n.user_id = ?1 OR n.user_id IS NULL)
+    ORDER BY n.created_at DESC, n.id DESC
+    LIMIT ?2 OFFSET ?3
+";
+
+/// Marks a single notification read for `user_id`.
+///
+/// User-owned rows (`user_id = ?`) update `notifications.read = 1`.
+/// Broadcast rows (`user_id IS NULL`) record `(notification_id, user_id)` in `notification_reads`
+/// without mutating `notifications.read`, preserving unread state for other users.
+pub fn mark_notification_read_for_user(user_id: i64, notification_id: i64) -> anyhow::Result<bool> {
+    let conn = get_conn()?;
+    mark_notification_read_for_user_with_conn(&conn, user_id, notification_id)
+}
+
+pub fn mark_notification_read_for_user_with_conn(
+    conn: &Connection,
+    user_id: i64,
+    notification_id: i64,
+) -> anyhow::Result<bool> {
+    run_atomic_migration_tx(conn, |tx_conn| {
+        let owner_id: Option<Option<i64>> = tx_conn
+            .query_row(
+                "SELECT user_id FROM notifications WHERE id = ?1",
+                params![notification_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match owner_id {
+            None => Ok(false),
+            Some(Some(owner)) if owner != user_id => Ok(false),
+            Some(Some(_)) => {
+                tx_conn.execute(
+                    "UPDATE notifications SET read = 1 WHERE id = ?1 AND user_id = ?2",
+                    params![notification_id, user_id],
+                )?;
+                Ok(true)
+            }
+            Some(None) => {
+                tx_conn.execute(
+                    "INSERT OR IGNORE INTO notification_reads (notification_id, user_id) VALUES (?1, ?2)",
+                    params![notification_id, user_id],
+                )?;
+                Ok(true)
+            }
+        }
+    })
+}
+
+/// Dismisses all unread notifications visible to `user_id`.
+///
+/// User-owned rows (`user_id = ?`) are marked `read = 1`; broadcast rows (`user_id IS NULL`)
+/// are recorded in `notification_reads` for `user_id` without mutating `notifications.read`.
+/// Returns the number of notifications newly marked read for `user_id`.
+pub fn dismiss_all_notifications_for_user(user_id: i64) -> anyhow::Result<usize> {
+    let conn = get_conn()?;
+    dismiss_all_notifications_for_user_with_conn(&conn, user_id)
+}
+
+pub fn dismiss_all_notifications_for_user_with_conn(
+    conn: &Connection,
+    user_id: i64,
+) -> anyhow::Result<usize> {
+    run_atomic_migration_tx(conn, |tx_conn| {
+        let owned_updated = tx_conn.execute(
+            "UPDATE notifications SET read = 1 WHERE user_id = ?1 AND COALESCE(read, 0) = 0",
+            params![user_id],
+        )?;
+        let broadcast_inserted = tx_conn.execute(
+            "INSERT OR IGNORE INTO notification_reads (notification_id, user_id)
+             SELECT n.id, ?1
+             FROM notifications n
+             LEFT JOIN notification_reads nr
+                 ON nr.notification_id = n.id AND nr.user_id = ?1
+             WHERE n.user_id IS NULL
+               AND COALESCE(n.read, 0) = 0
+               AND nr.notification_id IS NULL",
+            params![user_id],
+        )?;
+        Ok(owned_updated + broadcast_inserted)
+    })
+}
+
+pub fn count_unread_notifications_for_user(user_id: i64) -> anyhow::Result<i64> {
+    let conn = get_read_conn()?;
+    count_unread_notifications_for_user_with_conn(&conn, user_id)
+}
+
+pub fn count_unread_notifications_for_user_with_conn(
+    conn: &Connection,
+    user_id: i64,
+) -> anyhow::Result<i64> {
+    let unread: i64 = conn.query_row(
+        UNREAD_NOTIFICATIONS_COUNT_FOR_USER_SQL,
+        params![user_id],
+        |r| r.get(0),
+    )?;
+    Ok(unread)
+}
+
+pub fn list_notifications_for_user(
+    user_id: i64,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<UserNotificationRow>, i64)> {
+    let conn = get_read_conn()?;
+    list_notifications_for_user_with_conn(&conn, user_id, limit, offset)
+}
+
+pub fn list_notifications_for_user_with_conn(
+    conn: &Connection,
+    user_id: i64,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<UserNotificationRow>, i64)> {
+    let unread = count_unread_notifications_for_user_with_conn(conn, user_id)?;
+    let mut stmt = conn.prepare(LIST_NOTIFICATIONS_FOR_USER_SQL)?;
+    let rows = stmt.query_map(params![user_id, limit.clamp(1, 200), offset.max(0)], |r| {
+        Ok(UserNotificationRow {
+            id: r.get(0)?,
+            user_id: r.get(1)?,
+            level: r.get(2)?,
+            title: r.get(3)?,
+            message: r.get(4)?,
+            read: r.get(5)?,
+            created_at: r.get(6)?,
+        })
+    })?;
+    let mut list = Vec::new();
+    for row in rows {
+        list.push(row?);
+    }
+    Ok((list, unread))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2756,6 +2986,228 @@ pub(crate) mod tests {
             Some(v) => env::set_var("AETHERFLOW_SKIP_ENV_FILES", v),
             None => env::remove_var("AETHERFLOW_SKIP_ENV_FILES"),
         }
+    }
+
+    #[test]
+    fn test_aes_key_candidate_env_files_includes_default_fallback() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        struct EnvGuard {
+            prev_skip: Option<String>,
+            prev_file: Option<String>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.prev_skip {
+                    Some(v) => env::set_var("AETHERFLOW_SKIP_ENV_FILES", v),
+                    None => env::remove_var("AETHERFLOW_SKIP_ENV_FILES"),
+                }
+                match &self.prev_file {
+                    Some(v) => env::set_var("AETHERFLOW_ENV_FILE", v),
+                    None => env::remove_var("AETHERFLOW_ENV_FILE"),
+                }
+            }
+        }
+        let _env_guard = EnvGuard {
+            prev_skip: env::var("AETHERFLOW_SKIP_ENV_FILES").ok(),
+            prev_file: env::var("AETHERFLOW_ENV_FILE").ok(),
+        };
+
+        env::remove_var("AETHERFLOW_SKIP_ENV_FILES");
+        env::remove_var("AETHERFLOW_ENV_FILE");
+        let default_only = aes_key_candidate_env_files();
+        assert_eq!(
+            default_only,
+            vec![std::path::PathBuf::from("/etc/aetherflow/aetherflow.env")]
+        );
+
+        env::set_var("AETHERFLOW_ENV_FILE", "/tmp/custom-af.env");
+        let with_explicit = aes_key_candidate_env_files();
+        assert_eq!(
+            with_explicit,
+            vec![
+                std::path::PathBuf::from("/tmp/custom-af.env"),
+                std::path::PathBuf::from("/etc/aetherflow/aetherflow.env"),
+            ]
+        );
+
+        env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+        assert!(aes_key_candidate_env_files().is_empty());
+    }
+
+    #[test]
+    fn test_migrate_is_atomic_on_mid_migration_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_versions (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+
+        let err = migrate(
+            &conn,
+            99,
+            "failing partial migration",
+            &[
+                "CREATE TABLE atomic_test_table (id INTEGER PRIMARY KEY);",
+                "THIS IS NOT VALID SQL;",
+            ],
+        )
+        .expect_err("invalid second statement must fail migration");
+        assert!(!err.to_string().is_empty());
+        assert!(
+            conn.is_autocommit(),
+            "connection must not stay in transaction"
+        );
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='atomic_test_table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            table_exists, 0,
+            "first DDL statement must be rolled back when later statement fails"
+        );
+        let version_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = 99",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_exists, 0);
+
+        // Now apply a valid migration and verify idempotent re-run
+        migrate(
+            &conn,
+            99,
+            "valid atomic migration",
+            &["CREATE TABLE atomic_test_table (id INTEGER PRIMARY KEY);"],
+        )
+        .unwrap();
+        migrate(
+            &conn,
+            99,
+            "valid atomic migration",
+            &["THIS WOULD FAIL IF RE-EXECUTED;"],
+        )
+        .unwrap();
+        let version_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = 99",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_count, 1);
+    }
+
+    #[test]
+    fn test_system_prompt_default_updated_to_rust_wasm() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+        let conn = get_conn().unwrap();
+        let prompt: String = conn
+            .query_row("SELECT system_prompt FROM settings WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(prompt.contains("sovereign Rust + WebAssembly aetherflow-api environment"));
+        assert!(!prompt.contains("Next.js"));
+    }
+
+    #[test]
+    fn test_per_user_broadcast_notification_reads_isolate_users() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+        let conn = get_conn().unwrap();
+
+        // Seed two broadcast notifications (user_id IS NULL) and one owned per user
+        conn.execute(
+            "INSERT INTO notifications (id, user_id, level, title, message, read)
+             VALUES (1, NULL, 'info', 'Broadcast A', 'Hello all', 0),
+                    (2, NULL, 'warning', 'Broadcast B', 'Maintenance', 0),
+                    (3, 1, 'info', 'User 1 private', 'Only 1', 0),
+                    (4, 2, 'error', 'User 2 private', 'Only 2', 0)",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 1).unwrap(),
+            3
+        );
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 2).unwrap(),
+            3
+        );
+
+        // User 1 cannot mark User 2's private notification read
+        assert!(!mark_notification_read_for_user_with_conn(&conn, 1, 4).unwrap());
+        assert!(!mark_notification_read_for_user_with_conn(&conn, 1, 999).unwrap());
+
+        // User 1 marks Broadcast A (id=1) read: notifications.read MUST stay 0!
+        assert!(mark_notification_read_for_user_with_conn(&conn, 1, 1).unwrap());
+        let broadcast_global_read: bool = conn
+            .query_row("SELECT read FROM notifications WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            !broadcast_global_read,
+            "marking broadcast notification read for user 1 must NOT mutate notifications.read"
+        );
+
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 1).unwrap(),
+            2
+        );
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 2).unwrap(),
+            3
+        );
+
+        let (u1_list, u1_unread) = list_notifications_for_user_with_conn(&conn, 1, 50, 0).unwrap();
+        assert_eq!(u1_unread, 2);
+        assert_eq!(u1_list.len(), 3);
+        let u1_b1 = u1_list.iter().find(|n| n.id == 1).unwrap();
+        assert!(u1_b1.read);
+
+        let (u2_list, u2_unread) = list_notifications_for_user_with_conn(&conn, 2, 50, 0).unwrap();
+        assert_eq!(u2_unread, 3);
+        let u2_b1 = u2_list.iter().find(|n| n.id == 1).unwrap();
+        assert!(!u2_b1.read, "Broadcast A must remain unread for user 2");
+
+        // User 1 dismisses all remaining unread (Broadcast B id=2 + private id=3)
+        let dismissed_u1 = dismiss_all_notifications_for_user_with_conn(&conn, 1).unwrap();
+        assert_eq!(dismissed_u1, 2);
+        assert_eq!(
+            dismiss_all_notifications_for_user_with_conn(&conn, 1).unwrap(),
+            0
+        );
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 1).unwrap(),
+            0
+        );
+
+        // User 2 still has all 3 unread (both broadcasts + User 2 private)!
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 2).unwrap(),
+            3
+        );
+        let dismissed_u2 = dismiss_all_notifications_for_user_with_conn(&conn, 2).unwrap();
+        assert_eq!(dismissed_u2, 3);
+        assert_eq!(
+            count_unread_notifications_for_user_with_conn(&conn, 2).unwrap(),
+            0
+        );
     }
 }
 

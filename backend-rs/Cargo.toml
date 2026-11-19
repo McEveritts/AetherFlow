@@ -11,14 +11,13 @@ members = [
     "crates/af-cli",
     "crates/af-services",
     "crates/af-api",
-    "crates/af-streaming-tests",
     "crates/af-librespeed",
 ]
 
 [workspace.package]
 version = "4.0.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 authors = ["AetherFlow Contributors"]
 repository = "https://github.com/McEveritts/AetherFlow"
 

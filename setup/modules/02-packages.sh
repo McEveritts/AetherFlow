@@ -19,8 +19,6 @@ function _repos() {
 			fi
 		done
 		DEBIAN_FRONTEND=noninteractive apt-get -yqq \
-			-o Acquire::AllowInsecureRepositories=true \
-			-o Acquire::AllowDowngradeToInsecureRepositories=true \
 			--allow-releaseinfo-change \
 			update >>"${OUTTO}" 2>&1 || return 1
 	fi
@@ -48,12 +46,8 @@ function _updates() {
 			\cp -f "${local_setup}templates/apt.sources/debian.template" /etc/apt/sources.list
 			sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
 		fi
-		DEBIAN_FRONTEND=noninteractive apt-get -yqq \
-			-o Acquire::AllowInsecureRepositories=true \
-			-o Acquire::AllowDowngradeToInsecureRepositories=true \
-			update >>"${OUTTO}" 2>&1 || return 1
-		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring || return 1
-		_af_apt_install --allow-unauthenticated deb-multimedia-keyring >>"${OUTTO}" 2>&1 || true
+		DEBIAN_FRONTEND=noninteractive apt-get -yqq update >>"${OUTTO}" 2>&1 || return 1
+		_af_apt_install build-essential debian-archive-keyring || return 1
 	else
 		if [[ ! -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
 			\cp -f "${local_setup}templates/apt.sources/ubuntu.template" /etc/apt/sources.list
@@ -61,7 +55,6 @@ function _updates() {
 		fi
 		DEBIAN_FRONTEND=noninteractive apt-get -yqq update >>"${OUTTO}" 2>&1 || return 1
 		_af_apt_install build-essential debian-archive-keyring software-properties-common || return 1
-		#apt-get -y -f --allow-unauthenticated install deb-multimedia-keyring >>"${OUTTO}" 2>&1
 	fi
 
 	export DEBIAN_FRONTEND=noninteractive
@@ -80,7 +73,7 @@ function _updates() {
 function _depends() {
 	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	if [[ ${DISTRO} == Debian ]]; then
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 certbot python3-certbot-apache php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
 		for opt_pkg in clang mold dool dstat speedtest-cli rar unrar ttf-mscorefonts-installer; do
 			_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
 		done
@@ -89,7 +82,7 @@ function _depends() {
 		if [[ "${CODENAME}" =~ ("noble") ]] || ! apt-cache show dstat >/dev/null 2>&1; then
 			stat_pkg="dool"
 		fi
-		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
+		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 certbot python3-certbot-apache php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
 		local avail_opt_pkgs=()
 		if apt-cache show default-jre-headless >/dev/null 2>&1; then
 			avail_opt_pkgs+=("default-jre-headless")
@@ -125,7 +118,7 @@ function _syscommands() {
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 dos2unix >>"${OUTTO}" 2>&1
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 chmod +x >>"${OUTTO}" 2>&1
 	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
-	\cp -f /usr/local/bin/AetherFlow/system/af-heal /usr/bin/af-heal
+	rm -f /usr/bin/af-heal /usr/local/bin/AetherFlow/system/af-heal
 	\cp -f /usr/local/bin/AetherFlow/system/af-systemd-sandbox /usr/bin/af-systemd-sandbox
 	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/local/bin/af-certbot-sync
 	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/bin/af-certbot-sync
@@ -182,17 +175,6 @@ function _skel() {
 	if [[ -d /etc/skel ]]; then rm -r /etc/skel; fi
 	mkdir -p /etc/skel
 	\cp -rf ${local_setup}templates/skel/. /etc/skel
-	tar xzf ${local_setup}sources/rarlinux-x64-5.5.0.tar.gz -C ./
-	\cp -f ./rar/*rar /usr/bin
-	\cp -f ./rar/*rar /usr/sbin
-	rm -rf rarlinux*.tar.gz
-	rm -rf ./rar
-	# GeoLiteCity.dat.gz is no longer available from MaxMind
-	# wget -q http://geolite.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz
-	# gunzip GeoLiteCity.dat.gz >>"${OUTTO}" 2>&1
-	# mkdir -p /usr/share/GeoIP >>"${OUTTO}" 2>&1
-	# rm -rf GeoLiteCity.dat.gz
-	# mv GeoLiteCity.dat /usr/share/GeoIP/GeoIPCity.dat >>"${OUTTO}" 2>&1
 	_af_apt_install libdigest-sha-perl >>"${OUTTO}" 2>&1 || true
 	cd /root || true
 }

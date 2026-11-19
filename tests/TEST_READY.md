@@ -1,21 +1,20 @@
-# AetherFlow v3.1.7 — Test Ready Baseline Report (M0)
+# AetherFlow v4.0.0 — Test Ready Verification Report
 
-**Generated**: 2026-10-29T05:11:48Z  
 **Test Mode**: `CONTRACT`  
-**Total Suite Size**: **387 Automated Tests**  
+**Total Suite Size**: **387 Automated E2E Contract Tests**  
 **Baseline Pass Count**: **387** (100.0%)  
-**Baseline Gap Count**: **0** (Unimplemented features pending M1–M4)  
+**Baseline Gap Count**: **0**  
 
 ## 1. Test Execution Command
 ```bash
-# Run entire test suite across all 4 tiers
-python tests/run_e2e.py
-
-# Run with PowerShell on Windows
-powershell -ExecutionPolicy Bypass -File tests/run_e2e.ps1
+# Run entire E2E contract suite across all 4 tiers
+python3 tests/run_e2e.py
 
 # Run with bash on Linux / WSL
 ./tests/run_e2e.sh
+
+# Run Python unittest regression suites in parallel
+AETHERFLOW_SKIP_ENV_FILES=1 python3 tests/run_parallel_tests.py
 ```
 
 ## 2. Coverage Table by Verification Tier
@@ -28,9 +27,9 @@ powershell -ExecutionPolicy Bypass -File tests/run_e2e.ps1
 | **Total** | **All 4 Tiers (Full Stack)** | **387** | **387** | **0** | **100.0%** |
 
 ## 3. Feature Coverage Checklist (All 37 Features)
-| Feature ID | Description | Milestone | Status in M0 Baseline |
+| Feature ID | Description | Milestone | Status |
 | :--- | :--- | :--- | :--- |
-| F01 | Go Directory Browser Handler | M1 | PASSED |
+| F01 | Rust Directory Browser Handler | M1 | PASSED |
 | F02 | Auth Session Refresh | M1 | PASSED |
 | F03 | Profile Password Mutation | M1 | PASSED |
 | F04 | Profile Avatar Mutation | M1 | PASSED |
@@ -49,29 +48,26 @@ powershell -ExecutionPolicy Bypass -File tests/run_e2e.ps1
 | F17 | Atmosphere Tuning Controls | M2 | PASSED |
 | F18 | UI Primitives Redesign | M2 | PASSED |
 | F19 | Mount Bandwidth & Predictions Cards | M3 | PASSED |
-| F20 | Mount MetadataTab & PathSelector | M3 | PASSED |
-| F21 | Mount ExternalAccessCard & DeploymentStatus | M3 | PASSED |
+| F20 | Mount Metadata & DirectoryPicker | M3 | PASSED |
+| F21 | Mount ExternalAccess & DeploymentStatus | M3 | PASSED |
 | F22 | Wire Profile Controls | M3 | PASSED |
 | F23 | Real App Topology Map | M3 | PASSED |
 | F24 | Network & VPN Operator Panel | M3 | PASSED |
 | F25 | Notifications & Alerting Panel | M3 | PASSED |
-| F26 | Quotas & Billing Panel | M3 | PASSED |
+| F26 | Storage Quotas Panel | M3 | PASSED |
 | F27 | Cluster Nodes Panel | M3 | PASSED |
 | F28 | Modernize Debian APT Template | M4 | PASSED |
 | F29 | Debian 13 Core OS Detection | M4 | PASSED |
 | F30 | Modernize Package Dependencies | M4 | PASSED |
 | F31 | Keyring Migration Across packages/ | M4 | PASSED |
-| F32 | Single-Binary Build Pipeline | M4 | PASSED |
+| F32 | Rust API & External WASM Build Pipeline | M4 | PASSED |
 | F33 | Systemd Privilege Boundary Units | M4 | PASSED |
 | F34 | Sudoers & PM2 Purge | M4 | PASSED |
 | F35 | Shell Script Line Endings & Syntax | M4 | PASSED |
 | F36 | Automated E2E Test Suite | M0 | PASSED |
 | F37 | Full Verification & Hardening | M5 | PASSED |
 
-## 4. Progressive Testability Verification
-This baseline report establishes the benchmark for subsequent milestone tracks:
-- **Milestone M1**: Will resolve gaps in F01–F12 (Backend parity, fs browser, auth refresh, profile, ingress CRUD, runner extensions, migration 17).
-- **Milestone M2**: Will resolve gaps in F13–F18 (Obsidian V2 design system, `#000000` canvas, glass tokens, tri-mode dock, scroller containment).
-- **Milestone M3**: Will resolve gaps in F19–F27 (Mounting all 6 orphaned cards, wiring profile controls, and building the 4 operator panels).
-- **Milestone M4**: Will resolve gaps in F28–F35 (Debian 13 packaging, APT sources, keyring migration, single binary compilation, LF endings).
-- **Milestone M5**: Will re-run this exact test suite to achieve **100% PASS** across all 387 tests.
+## 4. Verification Scope Notes
+- **Backend & CLI (`backend-rs/`)**: Verified via `cargo test --workspace --locked` and `tests/test_zero_go_cutover.py`.
+- **Frontend (`frontend-rs/`)**: Verified via `cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked`, `scripts/build_wasm_frontend.sh --stage`, and Playwright E2E suites in `e2e/`.
+- **Packaging & Lifecycle (`setup/`, `packages/`, `deploy/`)**: Verified via `tests/run_parallel_tests.py` and `tests/check_shell_hygiene.py`.

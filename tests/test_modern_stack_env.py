@@ -99,7 +99,7 @@ class ModernStackSourceBuildTests(unittest.TestCase):
                              'esac\n')
             cargo.chmod(0o755)
             env = {**os.environ, "AF_INSTALL_ROOT": str(root), "WASM_TOOL_DIR": str(root / "tools"),
-                   "CARGO_TARGET_DIR": "custom-target", "AF_OFFLINE": "1"}
+                   "CARGO_TARGET_DIR": "custom-target", "AF_OFFLINE": "1", "AF_SKIP_SYSTEMCTL": "1"}
             result = subprocess.run(["bash", "-c", 'source "$1"; _build_modern_stack_from_source',
                                      "bash", str(MODERN_STACK_SH)], env=env,
                                     capture_output=True, text=True)

@@ -168,6 +168,40 @@ fn normalize_import_event(locale: &str, row: &Value, format: &str) -> Result<Imp
     serde_json::from_value(event).map_err(|e| e.to_string())
 }
 
+fn selected_sync_provider(binding: &str, servers: &[ProviderStatus]) -> String {
+    let trimmed = binding.trim();
+    if let Some((provider, server_id)) = trimmed.split_once(':') {
+        let clean_provider = provider.trim().to_ascii_lowercase();
+        if !clean_provider.is_empty()
+            && servers.iter().any(|s| {
+                s.provider.eq_ignore_ascii_case(&clean_provider) && s.server_id == server_id
+            })
+        {
+            return clean_provider;
+        }
+        if !clean_provider.is_empty() {
+            return clean_provider;
+        }
+    } else if !trimmed.is_empty() {
+        return trimmed.to_ascii_lowercase();
+    }
+    "jellyfin".to_string()
+}
+
+fn streaming_sync_path(provider: &str) -> String {
+    let clean = provider.trim().to_ascii_lowercase();
+    let safe_provider = if !clean.is_empty()
+        && clean
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        clean.as_str()
+    } else {
+        "jellyfin"
+    };
+    format!("/api/v1/admin/streaming/servers/{safe_provider}/sync")
+}
+
 #[component]
 pub(super) fn HistoryEventImport(
     servers: Signal<Vec<ProviderStatus>>,
@@ -354,11 +388,13 @@ pub(super) fn HistoryEventImport(
         if busy.get_untracked() {
             return;
         }
+        let provider = binding.with_untracked(|selection| {
+            servers.with_untracked(|items| selected_sync_provider(selection, items))
+        });
+        let path = streaming_sync_path(&provider);
         busy.set(true);
         spawn_local(async move {
-            let response = ApiClient
-                .post("/api/v1/admin/streaming/servers/jellyfin/sync", None)
-                .await;
+            let response = ApiClient.post(&path, None).await;
             if busy.try_get_untracked().is_none() {
                 return;
             }
@@ -579,5 +615,40 @@ pub(super) fn HistoryEventImport(
                 on_confirm=import
             />
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_url_defaults_to_jellyfin_and_formats_selected_provider() {
+        let servers = vec![
+            ProviderStatus {
+                provider: "emby".into(),
+                server_id: "srv-emby".into(),
+                ..Default::default()
+            },
+            ProviderStatus {
+                provider: "jellyfin".into(),
+                server_id: "srv-jf".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(selected_sync_provider("", &servers), "jellyfin");
+        assert_eq!(
+            streaming_sync_path(&selected_sync_provider("", &servers)),
+            "/api/v1/admin/streaming/servers/jellyfin/sync"
+        );
+        assert_eq!(selected_sync_provider("emby:srv-emby", &servers), "emby");
+        assert_eq!(
+            streaming_sync_path(&selected_sync_provider("emby:srv-emby", &servers)),
+            "/api/v1/admin/streaming/servers/emby/sync"
+        );
+        assert_eq!(
+            streaming_sync_path("../evil"),
+            "/api/v1/admin/streaming/servers/jellyfin/sync"
+        );
     }
 }

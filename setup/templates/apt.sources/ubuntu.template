@@ -4,16 +4,16 @@
 
 
 ###### Ubuntu Main Repos
-deb http://archive.ubuntu.com/ubuntu/ RELEASE main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ RELEASE main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ RELEASE main restricted universe multiverse
+deb-src https://archive.ubuntu.com/ubuntu/ RELEASE main restricted universe multiverse
 
 ###### Ubuntu Update Repos
-deb http://archive.ubuntu.com/ubuntu/ RELEASE-security main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ RELEASE-updates main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu/ RELEASE-backports main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ RELEASE-security main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ RELEASE-updates main restricted universe multiverse
-deb-src http://archive.ubuntu.com/ubuntu/ RELEASE-backports main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ RELEASE-security main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ RELEASE-updates main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu/ RELEASE-backports main restricted universe multiverse
+deb-src https://archive.ubuntu.com/ubuntu/ RELEASE-security main restricted universe multiverse
+deb-src https://archive.ubuntu.com/ubuntu/ RELEASE-updates main restricted universe multiverse
+deb-src https://archive.ubuntu.com/ubuntu/ RELEASE-backports main restricted universe multiverse
 
 ###### Ubuntu Partner Repo (decommissioned on modern Ubuntu releases)
 #deb http://archive.canonical.com/ubuntu RELEASE partner

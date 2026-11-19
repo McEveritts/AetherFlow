@@ -3,7 +3,7 @@
 ## 1. Overview
 
 This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0** architecture:
-- **Control Plane (`af-api`)**: Unprivileged Rust (`Axum` + `Tokio`) HTTP/WebSocket server + embedded Next.js 16 (Obsidian V2) SPA running as `User=aetherflow` under `ProtectSystem=strict` and `NoNewPrivileges=yes`.
+- **Control Plane (`af-api`)**: Unprivileged Rust (`Axum` + `Tokio`) HTTP/WebSocket server + external **Leptos Rust WebAssembly (`frontend-rs`)** SPA served from `web/dist` (`STATIC_DIR`), running as `User=aetherflow` under `ProtectSystem=strict` and `NoNewPrivileges=yes`.
 - **Privileged Runner (`af-runner`)**: Root daemon listening exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
 - **Scoped File Manager (`af-files`)**: Native McBrowser tenant storage under `/var/lib/aetherflow/mcbrowser` (`0700`).
 - **Persistence (`af-db` & `af-host`)**: Bundled SQLite (`rusqlite`) in single-writer `WAL` mode with AES-256-GCM (`enc:v1:`) secret encryption and manifest-verified online backups.

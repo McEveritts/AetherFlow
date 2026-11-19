@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bash wrapper for AetherFlow v3.1.7 E2E Test Suite
+# Bash wrapper for AetherFlow v4.0.0 E2E Test Suite
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

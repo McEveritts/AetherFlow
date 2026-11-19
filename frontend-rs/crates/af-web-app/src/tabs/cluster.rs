@@ -236,6 +236,49 @@ fn heartbeat(locale: &str, value: &Value) -> String {
         af_web_core::i18n::translate(locale, "Not reported")
     }
 }
+fn format_enrollment_instructions(
+    instructions: &str,
+    origin: Option<&str>,
+    hostname: Option<&str>,
+) -> String {
+    let clean_origin = origin
+        .map(str::trim)
+        .filter(|o| o.starts_with("https://"))
+        .map(|o| {
+            let trimmed = o.trim_end_matches('/');
+            trimmed.strip_suffix(":50051").unwrap_or(trimmed)
+        });
+    let clean_host = hostname.map(str::trim).filter(|h| !h.is_empty());
+
+    let mut out = instructions.to_string();
+    if let Some(https_origin) = clean_origin {
+        out = out
+            .replace("https://<this-server>:50051", https_origin)
+            .replace("http://<this-server>:50051", https_origin)
+            .replace("https://<this-server>", https_origin);
+    }
+    if let Some(host) = clean_host {
+        let authority_host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        let fallback_https = clean_origin
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("https://{authority_host}"));
+        out = out
+            .replace(&format!("https://{host}:50051"), &fallback_https)
+            .replace(&format!("https://{authority_host}:50051"), &fallback_https)
+            .replace("<this-server>:50051", host)
+            .replace("<this-server>", host);
+    } else {
+        out = out
+            .replace("https://<this-server>:50051", "https://<this-server>")
+            .replace("<this-server>:50051", "<this-server>");
+    }
+    out.replace(":50051", "")
+}
+
 #[component]
 pub fn ClusterTab() -> impl IntoView {
     let context = app();
@@ -452,6 +495,7 @@ fn ClusterAdminContent() -> impl IntoView {
             .find(|row| text(row, "id") == selected_id.get())
             .unwrap_or(Value::Null)
     });
+
     let enroll = move || {
         if busy.get_untracked() || !context.is_admin() {
             return;
@@ -462,12 +506,14 @@ fn ClusterAdminContent() -> impl IntoView {
             match ApiClient.post("/api/v1/admin/cluster/enroll", None).await {
                 Ok(mut value) => {
                     if enroll_open.try_get_untracked() == Some(true) {
-                        if let Some(host) =
-                            web_sys::window().and_then(|w| w.location().hostname().ok())
-                        {
-                            value["instructions"] =
-                                json!(text(&value, "instructions").replace("<this-server>", &host));
-                        }
+                        let location = web_sys::window().map(|w| w.location());
+                        let origin = location.as_ref().and_then(|l| l.origin().ok());
+                        let hostname = location.as_ref().and_then(|l| l.hostname().ok());
+                        value["instructions"] = json!(format_enrollment_instructions(
+                            &text(&value, "instructions"),
+                            origin.as_deref(),
+                            hostname.as_deref(),
+                        ));
                         enrollment.set(value);
                     }
                 }
@@ -1044,6 +1090,36 @@ mod tests {
                 "%"
             ),
             "Not reported"
+        );
+    }
+
+    #[test]
+    fn enrollment_instructions_replace_grpc_port_with_https_origin() {
+        let raw =
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>:50051\nCLUSTER_PSK=abc";
+        assert_eq!(
+            format_enrollment_instructions(
+                raw,
+                Some("https://panel.example.com"),
+                Some("panel.example.com"),
+            ),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://panel.example.com\nCLUSTER_PSK=abc"
+        );
+        assert_eq!(
+            format_enrollment_instructions(
+                raw,
+                Some("https://panel.example.com:8443"),
+                Some("panel.example.com"),
+            ),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://panel.example.com:8443\nCLUSTER_PSK=abc"
+        );
+        assert_eq!(
+            format_enrollment_instructions(raw, Some("http://localhost:3000"), Some("localhost")),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://localhost\nCLUSTER_PSK=abc"
+        );
+        assert_eq!(
+            format_enrollment_instructions(raw, None, None),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>\nCLUSTER_PSK=abc"
         );
     }
 }

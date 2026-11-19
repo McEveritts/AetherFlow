@@ -1,46 +1,29 @@
 #!/usr/bin/env python3
-# AetherFlow Security Sentinel (Phase 27)
-# Location: /usr/local/bin/AetherFlow/system/af-sentinel.py
+"""Compatibility shim delegating legacy af-sentinel.py to native `af sentinel`."""
 
 import os
-import re
-from collections import defaultdict
+import sys
 
-AUTH_LOG = '/var/log/auth.log'
-MAX_FAILURES = 5
-BLOCK_CMD = 'csf -d {ip} "Brute force detected by Sentinel"'
+CANDIDATES = [
+    os.environ.get("AETHERFLOW_CLI_BIN", ""),
+    "/opt/AetherFlow/current/bin/af",
+    "/opt/AetherFlow/current/af",
+    "/usr/local/bin/af-cli",
+    "/opt/AetherFlow/bin/af-cli",
+    "/usr/local/bin/af",
+]
 
-def parse_auth_log():
-    failed_attempts = defaultdict(int)
-    
-    try:
-        with open(AUTH_LOG, 'r') as f:
-            # Read last 1000 lines for efficiency
-            lines = f.readlines()[-1000:]
-            
-        for line in lines:
-            if 'Failed password' in line:
-                # Extract IP (Simple regex)
-                match = re.search(r'from (\d+\.\d+\.\d+\.\d+)', line)
-                if match:
-                    ip = match.group(1)
-                    failed_attempts[ip] += 1
-                    
-        return failed_attempts
-    except FileNotFoundError:
-        print(f"Log file {AUTH_LOG} not found.")
-        return {}
+for af_bin in CANDIDATES:
+    if not af_bin or not os.path.isfile(af_bin) or not os.access(af_bin, os.X_OK):
+        continue
+    if af_bin == "/usr/local/bin/af":
+        try:
+            with open(af_bin, "rb") as fh:
+                if b"/usr/local/bin/AetherFlow/system/af" in fh.read(4096):
+                    continue
+        except OSError:
+            continue
+    os.execv(af_bin, [af_bin, "sentinel", *sys.argv[1:]])
 
-def enforce_security(failures):
-    for ip, count in failures.items():
-        if count >= MAX_FAILURES:
-            print(f"[SENTINEL] Anomaly detected: {ip} has {count} failed attempts. Engaging defenses.")
-            # Execute block
-            cmd = BLOCK_CMD.format(ip=ip)
-            # os.system(cmd) # Commented out for safety during development
-            print(f"Executed: {cmd}")
-
-if __name__ == "__main__":
-    print("AetherFlow Security Sentinel Initialized...")
-    failures = parse_auth_log()
-    enforce_security(failures)
+sys.stderr.write("Native AetherFlow CLI binary (/usr/local/bin/af) not found.\n")
+sys.exit(1)

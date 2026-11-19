@@ -2,7 +2,7 @@
 
 ## Overview
 
-`backend-rs/crates/af-runner/src/package_executor.rs` implements the native Rust declarative package execution engine for AetherFlow v4 Backlog #10 (`fail2ban`, `quassel`, and `threadfin`).
+`backend-rs/crates/af-runner/src/package_executor.rs` implements the native Rust declarative package execution engine for AetherFlow v4 across 12 built-in recipes (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `novnc`, `x2go`, `prometheus`, `netdata`, `mergerfs`, `rclone`, `syncthing`), detailed below for the initial Backlog #10 targets (`fail2ban`, `quassel`, and `threadfin`).
 
 Instead of invoking arbitrary `bash -c` or `sh -c` lifecycle scripts, the declarative engine executes strongly typed, validated `DeclarativeStep` operations with:
 
@@ -77,4 +77,4 @@ journaled for install/update and applied before APT service activation.
 
 The 33 passing runner unit tests and strict runner Clippy result are bounded
 source-level evidence. Live guest results are tracked separately in
-`v4-native-package-testing.md` and `v4-backlog-verification.md`.
+[v4-native-package-testing.md](./v4-native-package-testing.md).

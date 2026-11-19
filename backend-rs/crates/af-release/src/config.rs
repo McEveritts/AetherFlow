@@ -209,6 +209,17 @@ fn default_cli_bin_dir() -> PathBuf {
     PathBuf::from("/usr/local/bin")
 }
 
+/// Maps a Rust `std::env::consts::ARCH` architecture identifier to the canonical
+/// AetherFlow release tarball filename, defaulting to `aetherflow-linux-amd64.tar.gz`.
+pub fn default_release_asset_for_arch(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "aetherflow-linux-amd64.tar.gz",
+        "aarch64" => "aetherflow-linux-arm64.tar.gz",
+        "arm" => "aetherflow-linux-armv7.tar.gz",
+        _ => "aetherflow-linux-amd64.tar.gz",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseConfig {
     pub releases_dir: PathBuf,
@@ -257,7 +268,7 @@ impl Default for ReleaseConfig {
             dry_run_root: PathBuf::from("/tmp/aetherflow-dryrun"),
             github_repo: "McEveritts/AetherFlow".to_string(),
             release_channel: ReleaseChannel::Stable,
-            artifact_name: "aetherflow-linux-amd64.tar.gz".to_string(),
+            artifact_name: default_release_asset_for_arch(std::env::consts::ARCH).to_string(),
             checksum_name: "SHA256SUMS".to_string(),
             git_branch: "master".to_string(),
             git_remote: "origin".to_string(),

@@ -797,10 +797,18 @@ fn collect_disk_partitions(disks: &Disks) -> (Vec<DiskPartition>, f64, f64, f64)
     (partitions, root_total, root_used, root_free)
 }
 
-fn read_proc_diskstats() -> (u64, u64) {
-    let Ok(content) = fs::read_to_string("/proc/diskstats") else {
-        return (0, 0);
-    };
+fn is_always_skipped_block_dev(dev: &str) -> bool {
+    dev.starts_with("loop")
+        || dev.starts_with("ram")
+        || dev.starts_with("zram")
+        || dev.starts_with("sr")
+        || dev.starts_with("fd")
+}
+
+pub fn parse_proc_diskstats_with_filter(
+    content: &str,
+    is_partition_or_virtual: impl Fn(&str) -> bool,
+) -> (u64, u64) {
     let mut read_bytes = 0u64;
     let mut write_bytes = 0u64;
     for line in content.lines() {
@@ -809,8 +817,7 @@ fn read_proc_diskstats() -> (u64, u64) {
             continue;
         }
         let dev = parts[2];
-        // Skip loop, ram, and partition sub-devices when whole block device is tracked
-        if dev.starts_with("loop") || dev.starts_with("ram") {
+        if is_partition_or_virtual(dev) {
             continue;
         }
         let sectors_read = parts[5].parse::<u64>().unwrap_or(0);
@@ -819,6 +826,48 @@ fn read_proc_diskstats() -> (u64, u64) {
         write_bytes = write_bytes.saturating_add(sectors_written.saturating_mul(512));
     }
     (read_bytes, write_bytes)
+}
+
+fn has_matching_block_device(
+    content: &str,
+    is_partition_or_virtual: impl Fn(&str) -> bool,
+) -> bool {
+    content.lines().any(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        parts.len() >= 10 && !is_partition_or_virtual(parts[2])
+    })
+}
+
+fn read_proc_diskstats_from_content(
+    content: &str,
+    is_partition: impl Fn(&str) -> bool,
+    is_dm: impl Fn(&str) -> bool,
+) -> (u64, u64) {
+    let primary_skip =
+        |dev: &str| is_always_skipped_block_dev(dev) || is_partition(dev) || is_dm(dev);
+    if has_matching_block_device(content, primary_skip) {
+        return parse_proc_diskstats_with_filter(content, primary_skip);
+    }
+
+    // Fallback for LVM-only / container guests without whole physical block devices:
+    // include device-mapper (`dm-*`) first, then partitions if no `dm-*` devices exist.
+    let dm_fallback_skip = |dev: &str| is_always_skipped_block_dev(dev) || is_partition(dev);
+    if has_matching_block_device(content, dm_fallback_skip) {
+        return parse_proc_diskstats_with_filter(content, dm_fallback_skip);
+    }
+
+    parse_proc_diskstats_with_filter(content, is_always_skipped_block_dev)
+}
+
+fn read_proc_diskstats() -> (u64, u64) {
+    let Ok(content) = fs::read_to_string("/proc/diskstats") else {
+        return (0, 0);
+    };
+    read_proc_diskstats_from_content(
+        &content,
+        |dev| Path::new(&format!("/sys/class/block/{dev}/partition")).exists(),
+        |dev| Path::new(&format!("/sys/class/block/{dev}/dm")).exists(),
+    )
 }
 
 fn read_net_totals(networks: &Networks) -> (u64, u64) {
@@ -1314,5 +1363,62 @@ mod tests {
         assert!(!m.cpu_usage.is_nan());
         assert!(m.memory.contains_key("total"));
         assert!(m.network.contains_key("down"));
+    }
+
+    #[test]
+    fn test_parse_proc_diskstats_avoids_partition_and_virtual_double_counting() {
+        let fixture = "\
+   7       0 loop0 100 0 800 5 0 0 0 0 0 5 5 0 0 0 0
+   8       0 sda 1000 10 2000 50 500 5 4000 40 0 30 90 0 0 0 0
+   8       1 sda1 1000 10 2000 50 500 5 4000 40 0 30 90 0 0 0 0
+ 259       0 nvme0n1 2000 0 6000 80 1000 0 8000 60 0 45 140 0 0 0 0
+ 259       1 nvme0n1p1 2000 0 6000 80 1000 0 8000 60 0 45 140 0 0 0 0
+ 253       0 dm-0 2500 0 5000 70 1200 0 7000 55 0 40 125 0 0 0 0
+";
+        let (read_bytes, write_bytes) = parse_proc_diskstats_with_filter(fixture, |dev| {
+            is_always_skipped_block_dev(dev) || matches!(dev, "sda1" | "nvme0n1p1" | "dm-0")
+        });
+        // Only sda (2000 read, 4000 write sectors) + nvme0n1 (6000 read, 8000 write sectors)
+        assert_eq!(read_bytes, (2000 + 6000) * 512);
+        assert_eq!(write_bytes, (4000 + 8000) * 512);
+
+        let (via_helper_read, via_helper_write) = read_proc_diskstats_from_content(
+            fixture,
+            |dev| matches!(dev, "sda1" | "nvme0n1p1"),
+            |dev| dev == "dm-0",
+        );
+        assert_eq!(via_helper_read, (2000 + 6000) * 512);
+        assert_eq!(via_helper_write, (4000 + 8000) * 512);
+    }
+
+    #[test]
+    fn test_proc_diskstats_falls_back_safely_for_lvm_only_and_container_guests() {
+        let lvm_only = "\
+   7       0 loop0 100 0 800 5 0 0 0 0 0 5 5 0 0 0 0
+ 252       0 zram0 50 0 400 1 20 0 200 1 0 1 2 0 0 0 0
+ 253       0 dm-0 2500 0 5000 70 1200 0 7000 55 0 40 125 0 0 0 0
+";
+        let (read_bytes, write_bytes) =
+            read_proc_diskstats_from_content(lvm_only, |_| false, |dev| dev == "dm-0");
+        assert_eq!(read_bytes, 5000 * 512);
+        assert_eq!(write_bytes, 7000 * 512);
+
+        let partition_only_guest = "\
+   7       0 loop0 100 0 800 5 0 0 0 0 0 5 5 0 0 0 0
+ 254       1 vda1 300 0 1000 10 200 0 2000 20 0 10 30 0 0 0 0
+";
+        let (part_read, part_write) =
+            read_proc_diskstats_from_content(partition_only_guest, |dev| dev == "vda1", |_| false);
+        assert_eq!(part_read, 1000 * 512);
+        assert_eq!(part_write, 2000 * 512);
+
+        let virtual_only = "\
+   7       0 loop0 100 0 800 5 0 0 0 0 0 5 5 0 0 0 0
+   1       0 ram0 10 0 80 1 0 0 0 0 0 1 1 0 0 0 0
+";
+        assert_eq!(
+            read_proc_diskstats_from_content(virtual_only, |_| false, |_| false),
+            (0, 0)
+        );
     }
 }

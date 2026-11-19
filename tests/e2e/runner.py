@@ -1,5 +1,5 @@
 """
-AetherFlow v3.1.7 E2E Test Suite Runner
+AetherFlow v4.0.0 E2E Test Suite Runner
 Discovers and executes Tier 1, Tier 2, Tier 3, and Tier 4 tests.
 Generates terminal reports, JSON metrics, and markdown tables.
 """
@@ -60,7 +60,7 @@ class TestRunner:
     def run(self) -> int:
         self.discover_tests()
         print("=" * 80)
-        print(" " * 20 + "AETHERFLOW v3.1.7 E2E TEST RUNNER")
+        print(" " * 20 + "AETHERFLOW v4.0.0 E2E TEST RUNNER")
         print("=" * 80)
         print(f" Execution Mode : {self.mode.upper()}")
         print(f" Target URL     : {self.base_url}")
@@ -180,7 +180,7 @@ class TestRunner:
 
     def export_json(self, output_path: str):
         data = {
-            "version": "3.1.7",
+            "version": "4.0.0",
             "mode": self.mode,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "total": len(self.all_tests),
@@ -208,7 +208,7 @@ class TestRunner:
 
         pass_pct = (self.passed_count / len(self.all_tests) * 100) if self.all_tests else 0
         md = []
-        md.append("# AetherFlow v3.1.7 — Test Ready Baseline Report (M0)")
+        md.append("# AetherFlow v4.0.0 — Test Ready Verification Report")
         md.append(f"\n**Generated**: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}  ")
         md.append(f"**Test Mode**: `{self.mode.upper()}`  ")
         md.append(f"**Total Suite Size**: **{len(self.all_tests)} Automated Tests**  ")
@@ -218,12 +218,9 @@ class TestRunner:
         md.append("## 1. Test Execution Command")
         md.append("```bash")
         md.append("# Run entire test suite across all 4 tiers")
-        md.append("python tests/run_e2e.py")
+        md.append("python3 tests/run_e2e.py")
         md.append("")
-        md.append("# Run with PowerShell on Windows")
-        md.append("powershell -ExecutionPolicy Bypass -File tests/run_e2e.ps1")
-        md.append("")
-        md.append("# Run with bash on Linux / WSL")
+        md.append("# Run with bash on Linux")
         md.append("./tests/run_e2e.sh")
         md.append("```\n")
 

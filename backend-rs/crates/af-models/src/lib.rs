@@ -645,6 +645,21 @@ pub struct AppMetaRunnerRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunnerApacheVhostRequest {
+    pub app_name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub vhost_content: Option<String>,
+    #[serde(default)]
+    pub external_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub external_vhost_content: Option<String>,
+    #[serde(default)]
+    pub reload_apache: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BackupRunnerRequest {
     #[serde(default)]
     pub action: String,
@@ -1987,5 +2002,27 @@ mod tests {
             Some("target_verification")
         );
         assert_eq!(parsed_rec.exit_code, Some(1));
+
+        let vhost_req = RunnerApacheVhostRequest {
+            app_name: "sonarr".to_string(),
+            enabled: true,
+            vhost_content: Some("<VirtualHost *:80>\n</VirtualHost>\n".to_string()),
+            external_enabled: true,
+            external_vhost_content: Some(
+                "<VirtualHost *:80>\nServerName sonarr.example.com\n</VirtualHost>\n".to_string(),
+            ),
+            reload_apache: true,
+        };
+        let vhost_json = serde_json::to_string(&vhost_req).unwrap();
+        let parsed_vhost: RunnerApacheVhostRequest = serde_json::from_str(&vhost_json).unwrap();
+        assert_eq!(parsed_vhost, vhost_req);
+
+        let disable_vhost: RunnerApacheVhostRequest =
+            serde_json::from_str(r#"{"app_name":"sonarr","enabled":false}"#).unwrap();
+        assert!(!disable_vhost.enabled);
+        assert!(disable_vhost.vhost_content.is_none());
+        assert!(!disable_vhost.external_enabled);
+        assert!(disable_vhost.external_vhost_content.is_none());
+        assert!(!disable_vhost.reload_apache);
     }
 }

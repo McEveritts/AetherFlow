@@ -28,7 +28,7 @@ Rather than granting the web API unrestricted `sudo` or disabling `ProtectSystem
    - Runs as `User=aetherflow` with `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectControlGroups=yes`, `ProtectKernelTunables=yes`, `RestrictSUIDSGID=yes`, and `MemoryMax=512M`.
 2. **`aetherflow-runner.service` (Root UNIX Socket Helper — `af-runner`)**:
    - Runs `/opt/AetherFlow/current/aetherflow-api runner` and listens exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
-   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (15 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.
+   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (12 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.
 
 ---
 
@@ -37,5 +37,5 @@ Rather than granting the web API unrestricted `sudo` or disabling `ProtectSystem
 Every push and release runs through `.github/workflows/ci.yml`, `.github/workflows/security.yml`, and `.github/workflows/release.yml`:
 - **Secret Scanning**: `gitleaks` scans the repository tree to block accidental credential or key commits.
 - **Zero-Go Repository Hygiene**: CI, security, and release workflows assert `git ls-files '*.go' '*go.mod' '*go.sum'` is empty, enforcing a pure-Rust control plane and native Rust LibreSpeed backend (`af-librespeed`) with zero Go toolchain surface.
-- **Rust Workspace Verification & Supply-Chain Audits**: `cargo test --workspace --locked` across all 12 crates (plus ignored systemd self-update survival integration checks `updater_survives_caller_restart`), strict `-D warnings` clippy across core crates (`af-models`, `af-host`, `af-release`, `af-cli`, `af-librespeed`), and `cargo audit` / `cargo deny`.
+- **Rust Workspace Verification & Supply-Chain Audits**: `cargo test --workspace --locked` across all 11 backend crates and 4 WASM frontend crates (plus ignored systemd self-update survival integration checks `updater_survives_caller_restart`), strict `-D warnings` clippy across core crates (`af-models`, `af-host`, `af-release`, `af-cli`, `af-librespeed`), and `cargo audit` / `cargo deny`.
 - **Signed/Checksummed Pull Releases (`af-release`)**: Production nodes verify `SHA256SUMS` and GitHub build provenance attestations before extracting `aetherflow-linux-amd64.tar.gz` into an exclusive `0700` staging directory, normalize executable permissions (`prepare_release_permissions`), capture a WAL-safe online SQLite `.backup` verified with `PRAGMA integrity_check`, verify the running binary path after restart, and automatically roll back if `/health/ready` fails.

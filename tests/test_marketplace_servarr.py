@@ -40,7 +40,11 @@ with (root / 'commands.jsonl').open('a') as output:
 failure = os.environ.get('FAIL_STAGE', '')
 if command == 'dpkg':
     if '--compare-versions' in arguments:
-        sys.exit(subprocess.run(['/usr/bin/dpkg', *arguments]).returncode)
+        if os.path.exists('/usr/bin/dpkg'):
+            sys.exit(subprocess.run(['/usr/bin/dpkg', *arguments]).returncode)
+        sys.path.insert(0, '__AF_TESTS_DIR__')
+        from installer_test_helpers import dpkg_compare_versions_exit_code
+        sys.exit(dpkg_compare_versions_exit_code(arguments))
     print(os.environ.get('TEST_ARCH', 'amd64'))
 elif command == 'curl':
     if '-o' in arguments:
@@ -99,7 +103,7 @@ class ArchiveFixture(unittest.TestCase):
         for command in ('dpkg', 'curl', 'systemctl', 'getent', 'apt-get', 'id',
                         'chown', 'useradd', 'userdel', 'groupdel', 'sleep', 'setcap', 'htpasswd', 'tar', 'mv'):
             executable = self.root / 'bin' / command
-            executable.write_text(HOST_COMMAND)
+            executable.write_text(HOST_COMMAND.replace('__AF_TESTS_DIR__', str(Path(__file__).resolve().parent)))
             executable.chmod(0o755)
         python = self.root / 'bin/python3'
         python.write_text('''#!/usr/bin/python3

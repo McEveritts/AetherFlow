@@ -17,11 +17,39 @@ struct TestTempDir {
 impl TestTempDir {
     fn new() -> Self {
         let mut rng = rand::thread_rng();
-        for _ in 0..64 {
-            let token: u128 = rng.gen();
-            let path = std::env::temp_dir().join(format!("af-tus-uploads-test-{token:032x}"));
-            if fs::create_dir(&path).is_ok() {
-                return Self { path };
+        let base_candidates = [std::env::temp_dir(), PathBuf::from("/var/tmp")];
+        for base in &base_candidates {
+            if !base.is_dir() {
+                continue;
+            }
+            for _ in 0..64 {
+                let token: u128 = rng.gen();
+                let path = base.join(format!("af-tus-uploads-test-{token:032x}"));
+                if fs::create_dir(&path).is_ok() {
+                    let probe = path.join(".xattr_probe");
+                    let supports_xattr = fs::File::create(&probe)
+                        .ok()
+                        .map(|f| {
+                            use std::os::fd::AsRawFd;
+                            let rc = unsafe {
+                                libc::fsetxattr(
+                                    f.as_raw_fd(),
+                                    c"user.af_probe".as_ptr().cast(),
+                                    b"1".as_ptr().cast(),
+                                    1,
+                                    0,
+                                )
+                            };
+                            let _ = fs::remove_file(&probe);
+                            rc == 0
+                        })
+                        .unwrap_or(false);
+                    if supports_xattr || base == base_candidates.last().unwrap() {
+                        return Self { path };
+                    }
+                    let _ = fs::remove_dir_all(&path);
+                    break;
+                }
             }
         }
         panic!("failed to allocate test temp dir");

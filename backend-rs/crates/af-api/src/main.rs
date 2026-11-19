@@ -206,31 +206,37 @@ async fn async_main() -> anyhow::Result<()> {
     // Fail closed if JWT_SECRET is missing or too short when starting the HTTP control plane
     auth::validate_startup_jwt_secret()?;
 
-    // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
-    af_db::init_db()?;
-    af_services::initialize_package_jobs(rusqlite::Connection::open(af_db::get_db_path())?)?;
-    tokio::spawn(async {
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
-        loop {
-            interval.tick().await;
-            match tokio::task::spawn_blocking(af_services::reconcile_package_jobs).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(%error, "package lifecycle reconciliation failed"),
-                Err(error) => {
-                    tracing::warn!(%error, "package lifecycle reconciliation task failed")
-                }
-            }
-        }
-    });
-    af_db::init_aes_key()?;
-    if let Err(e) = af_db::migrate_legacy_secrets() {
-        tracing::warn!(error = %e, "failed to migrate legacy secrets");
-    }
-
     let disable_workers = env_flag_enabled("AETHERFLOW_DISABLE_BACKGROUND_WORKERS")
         || env_flag_enabled("AETHERFLOW_DISABLE_WORKERS")
         || env_flag_enabled("AETHERFLOW_E2E_ISOLATED");
     let disable_autoheal = disable_workers || env_flag_enabled("AETHERFLOW_DISABLE_AUTOHEAL");
+
+    // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
+    af_db::init_db()?;
+    let init_conn = rusqlite::Connection::open(af_db::get_db_path())?;
+    init_conn.busy_timeout(Duration::from_secs(5))?;
+    af_services::initialize_package_jobs(init_conn)?;
+    if !disable_workers {
+        tokio::spawn(async {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                match tokio::task::spawn_blocking(af_services::reconcile_package_jobs).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "package lifecycle reconciliation failed")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "package lifecycle reconciliation task failed")
+                    }
+                }
+            }
+        });
+    }
+    af_db::init_aes_key()?;
+    if let Err(e) = af_db::migrate_legacy_secrets() {
+        tracing::warn!(error = %e, "failed to migrate legacy secrets");
+    }
 
     // Background 15-minute expired data pruning loop
     if !disable_workers {
@@ -239,7 +245,7 @@ async fn async_main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(Duration::from_secs(900));
             loop {
                 interval.tick().await;
-                af_db::prune_expired_data();
+                let _ = tokio::task::spawn_blocking(af_db::prune_expired_data).await;
             }
         });
     }

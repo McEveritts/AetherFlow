@@ -348,11 +348,13 @@ class TestF06TopologyZeroDummyNodes(TestCase):
         super().__init__("T1_F06_03", "F06", 1, "Zero hardcoded fake infrastructure nodes returned in topology")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        widget_code = inspector.read_file("frontend/src/components/widgets/AppTopologyMap.tsx")
-        if widget_code:
-            self.assert_not_in("Nginx Router", widget_code, "F06: AppTopologyMap must not hardcode 'Nginx Router'")
-            self.assert_not_in("Proxy Port 8080", widget_code, "F06: AppTopologyMap must not hardcode 'Proxy Port 8080'")
-            self.assert_not_in("PostgreSQL DB", widget_code, "F06: AppTopologyMap must not hardcode 'PostgreSQL DB'")
+        widget_code = inspector.read_file("frontend-rs/crates/af-web-ui/src/topology.rs")
+        topo_core = inspector.read_file("frontend-rs/crates/af-web-core/src/topology.rs")
+        self.assert_true(bool(widget_code and topo_core), "F06: topology.rs modules must exist in frontend-rs")
+        for code in (widget_code, topo_core):
+            self.assert_not_in("Nginx Router", code, "F06: AppTopologyMap must not hardcode 'Nginx Router'")
+            self.assert_not_in("Proxy Port 8080", code, "F06: AppTopologyMap must not hardcode 'Proxy Port 8080'")
+            self.assert_not_in("PostgreSQL DB", code, "F06: AppTopologyMap must not hardcode 'PostgreSQL DB'")
 
 
 class TestF06TopologyRealInfrastructureNodes(TestCase):

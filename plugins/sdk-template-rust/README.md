@@ -25,19 +25,19 @@ Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`), the sole
     PrivateTmp=yes
     ```
 - **Sandboxed Frontend Origin & Loopback Proxy**:
-  - Plugin UI mounts inside `<iframe sandbox="allow-scripts">` (without `allow-same-origin`), isolating it in an opaque origin that cannot read `document.cookie` or `localStorage`.
-  - The iframe communicates with the host via `window.parent.postMessage({ type: 'AF_PLUGIN_PROXY_REQUEST', pluginId, path, method }, '*')`.
+  - Plugin UI mounts inside `<iframe sandbox="allow-scripts">` (without `allow-same-origin`), isolating it in an opaque origin that cannot read `document.cookie` or `localStorage`, under strict CSP (`default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'`).
+  - The self-contained HTML/JS bundle (`frontend/dist/index.html`) performs the host `postMessage` handshake (`AF_PLUGIN_READY` -> `AF_PLUGIN_INIT`) and sends scoped proxy calls via `window.parent.postMessage({ type: 'AF_PLUGIN_PROXY_REQUEST', pluginId, requestId, path, method }, '*')`, receiving `AF_PLUGIN_PROXY_RESPONSE` replies from the Leptos WASM host.
   - The host reverse proxy (`/api/v1/auth/plugins/:id/proxy/*`) connects strictly to `127.0.0.1:<allocated_port>`, rejects path traversal, caps bodies at 2 MiB, and strips `Cookie`, `Authorization`, `X-CSRF-Token`, and `Set-Cookie`.
 
 ## Layout
 
-- `plugin.manifest.json`: Declarative plugin metadata, contract version, method-bound `api_scopes`, and lifecycle hook paths.
+- `plugin.manifest.json`: Declarative plugin metadata, contract version, method-bound `api_scopes`, `frontend.entry` / `frontend.bundle` (`frontend/dist/index.html`), and lifecycle hook paths.
 - `backend/`: Rust HTTP companion service (`axum` + `reqwest` + `tokio`) that queries verified AetherFlow v4.0.0 HTTP contracts and exposes `/healthz`, `/status`, and `/snapshot`.
   - `Cargo.toml`: Standalone Cargo manifest (`[workspace]` isolated so it does not mutate `backend-rs/Cargo.toml`).
   - `src/lib.rs`: Typed `AetherFlowClient`, verified endpoint path constants, configuration parser, HTTP router, and contract unit tests.
   - `src/main.rs`: Binary entrypoint reading `AETHERFLOW_API_BASE_URL`, `AETHERFLOW_PLUGIN_TOKEN`, `PLUGIN_BIND_ADDR`, and `PLUGIN_PORT`.
   - `hooks/start.sh` & `hooks/stop.sh`: Lifecycle scripts invoked by the host plugin manager or isolated unprivileged systemd unit.
-- `frontend/`: React 19 / TypeScript panel component (`PluginPanel.tsx`) using the host `postMessage` capability bridge.
+- `frontend/dist/index.html`: Self-contained sandboxed HTML/CSS/JS companion UI speaking `AF_PLUGIN_READY`, `AF_PLUGIN_INIT`, `AF_PLUGIN_PROXY_REQUEST`, and `AF_PLUGIN_PROXY_RESPONSE` over `window.parent.postMessage` (no Node.js or `@aetherflow/ui` build required).
 - `.env.example`: Environment variable template for local development.
 
 ## Verified AetherFlow HTTP Contracts Used

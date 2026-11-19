@@ -1203,11 +1203,29 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-pub async fn csrf_middleware(req: Request, next: Next) -> Response {
-    let csrf_disabled = env::var("CSRF_DISABLED")
-        .map(|v| v.eq_ignore_ascii_case("true"))
+fn is_production_or_release_env(val: &str) -> bool {
+    let trimmed = val.trim();
+    trimmed.eq_ignore_ascii_case("production") || trimmed.eq_ignore_ascii_case("release")
+}
+
+fn is_csrf_disabled_for_env(csrf_disabled: Option<&str>, aetherflow_env: Option<&str>) -> bool {
+    let disabled = csrf_disabled
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if csrf_disabled {
+    if !disabled {
+        return false;
+    }
+    if aetherflow_env.is_some_and(is_production_or_release_env) {
+        tracing::warn!("CSRF_DISABLED=true ignored because AETHERFLOW_ENV is production/release");
+        return false;
+    }
+    true
+}
+
+pub async fn csrf_middleware(req: Request, next: Next) -> Response {
+    let csrf_disabled = env::var("CSRF_DISABLED").ok();
+    let af_env = env::var("AETHERFLOW_ENV").ok();
+    if is_csrf_disabled_for_env(csrf_disabled.as_deref(), af_env.as_deref()) {
         return next.run(req).await;
     }
 
@@ -3379,6 +3397,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn csrf_middleware_refuses_csrf_disabled_in_production_and_release() {
+        use axum::{middleware, routing::any, Router};
+        use tower::ServiceExt;
+
+        assert!(is_csrf_disabled_for_env(Some("true"), None));
+        assert!(is_csrf_disabled_for_env(Some("true"), Some("test")));
+        assert!(!is_csrf_disabled_for_env(Some("true"), Some("production")));
+        assert!(!is_csrf_disabled_for_env(Some("TRUE"), Some("PRODUCTION")));
+        assert!(!is_csrf_disabled_for_env(Some("true"), Some("release")));
+        assert!(!is_csrf_disabled_for_env(Some("true"), Some("Release")));
+
+        const CHILD_ENV: &str = "AF_CSRF_PROD_TEST_CHILD";
+        if env::var(CHILD_ENV).as_deref() != Ok("1") {
+            let status = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "auth::tests::csrf_middleware_refuses_csrf_disabled_in_production_and_release",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        env::set_var("CSRF_DISABLED", "true");
+        let app = Router::new()
+            .route("/api/v1/auth/protected", any(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(csrf_middleware));
+
+        for af_env in ["production", "PRODUCTION", "release", "Release"] {
+            env::set_var("AETHERFLOW_ENV", af_env);
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/protected")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::FORBIDDEN,
+                "AETHERFLOW_ENV={af_env} must enforce CSRF even when CSRF_DISABLED=true"
+            );
+        }
+
+        env::set_var("AETHERFLOW_ENV", "test");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/protected")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::OK,
+            "non-production test env may honor CSRF_DISABLED=true"
+        );
     }
 
     fn mfa_database() -> rusqlite::Connection {

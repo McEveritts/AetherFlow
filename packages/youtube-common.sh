@@ -117,7 +117,26 @@ import socket
 import sys
 
 used = {int(sys.argv[1])}
-used.update(int(path.read_text()) for path in pathlib.Path(sys.argv[2]).glob('*-port') if path.stat().st_size)
+config_dir = pathlib.Path(sys.argv[2])
+etc_dir = config_dir.parent
+search_dirs = [config_dir]
+for sibling in ("piped", "invidious", "aetherflow"):
+    candidate = etc_dir / sibling
+    if candidate not in search_dirs:
+        search_dirs.append(candidate)
+if etc_dir.name == "etc":
+    opt_dir = etc_dir.parent / "opt"
+    for sibling in ("piped", "invidious"):
+        search_dirs.append(opt_dir / sibling)
+for directory in search_dirs:
+    if not directory.is_dir():
+        continue
+    for port_file in directory.glob("*-port"):
+        if not port_file.is_file() or not port_file.stat().st_size:
+            continue
+        raw = port_file.read_text().strip()
+        if raw.isdecimal():
+            used.add(int(raw))
 for port in range(20000, 30000):
     if port in used:
         continue
@@ -239,10 +258,17 @@ youtube_remove() {
     fi
     purge_systemd_unit "af-${app}" "$@" || return 1
     if [[ "${DELETE_DATA:-false}" == true ]]; then
-        af_logged runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL' || return 1
+        if command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet postgresql.service 2>/dev/null || systemctl is-active --quiet postgresql 2>/dev/null; }; then
+            if ! af_logged runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL'
 SELECT format('DROP DATABASE IF EXISTS %I', :'app') \gexec
 SELECT format('DROP ROLE IF EXISTS %I', :'app') \gexec
 SQL
+            then
+                print_warn "Failed to drop PostgreSQL database/role for ${app}; continuing data cleanup."
+            fi
+        else
+            print_warn "PostgreSQL service is not active; skipping database/role teardown for ${app}."
+        fi
         safe_rm_rf "/opt/${app}" || return 1
         safe_rm_rf "/etc/${app}" || return 1
         safe_rm_rf "/var/lib/${app}" || return 1

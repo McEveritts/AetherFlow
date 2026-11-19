@@ -40,6 +40,7 @@ if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
 fi
 
 if ! command -v certbot >/dev/null 2>&1; then
+    echo "[af-certbot-sync] certbot binary not found; skipping TLS certificate expansion." >&2
     exit 0
 fi
 
@@ -99,6 +100,7 @@ public_dns_resolves() {
 
 CERT_FILE="/etc/letsencrypt/live/${BASE_DOMAIN}/fullchain.pem"
 if [[ ! -f "$CERT_FILE" ]]; then
+    echo "[af-certbot-sync] Initial TLS certificate not yet issued for ${BASE_DOMAIN} (${CERT_FILE} missing); skipping SAN expansion." >&2
     exit 0
 fi
 
@@ -157,8 +159,16 @@ for d in "${UNIQUE_DOMAINS[@]}"; do
 done
 
 if [[ "$NEED_EXPAND" -eq 1 ]]; then
-    mkdir -p /srv/aetherflow/.well-known/acme-challenge
-    if certbot certonly --webroot -w /srv/aetherflow --cert-name "$BASE_DOMAIN" --expand --non-interactive --agree-tos "${CERT_ARGS[@]}"; then
+    WEBROOT="/var/www/aetherflow-default"
+    if [[ -f /etc/apache2/sites-enabled/default-ssl.conf ]]; then
+        detected_docroot="$(awk '/DocumentRoot/ {gsub(/"/, "", $2); print $2; exit}' /etc/apache2/sites-enabled/default-ssl.conf 2>/dev/null || true)"
+        if [[ -n "$detected_docroot" && "$detected_docroot" != "/opt/AetherFlow"* ]]; then
+            WEBROOT="$detected_docroot"
+        fi
+    fi
+    echo "[af-certbot-sync] Expanding TLS certificate SANs for ${BASE_DOMAIN}: ${UNIQUE_DOMAINS[*]} (webroot=${WEBROOT})" >&2
+    mkdir -p "${WEBROOT}/.well-known/acme-challenge"
+    if certbot certonly --webroot -w "${WEBROOT}" --cert-name "$BASE_DOMAIN" --expand --non-interactive --agree-tos "${CERT_ARGS[@]}"; then
         systemctl reload apache2
     fi
 fi

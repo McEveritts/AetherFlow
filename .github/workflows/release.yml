@@ -277,7 +277,7 @@ jobs:
       - name: Typecheck Playwright E2E Suite
         run: |
           npm ci
-          cd frontend
+          cd e2e
           ../node_modules/.bin/tsc --noEmit --incremental false
 
       - name: Install Pinned WASM Build Tools (SHA-256 Verified)
@@ -352,7 +352,7 @@ jobs:
 
       - name: Install Playwright Browser Engines for Release Verification
         run: |
-          cd frontend
+          cd e2e
           npx playwright install --with-deps chromium firefox webkit
 
       - name: Execute Live E2E Against Extracted Release Artifact

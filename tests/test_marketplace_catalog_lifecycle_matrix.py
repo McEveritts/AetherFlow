@@ -709,7 +709,11 @@ elif command == 'apt-get':
         state_file.write_text(json.dumps(state))
 elif command == 'dpkg':
     if '--compare-versions' in arguments:
-        sys.exit(subprocess.run(['/usr/bin/dpkg', *arguments]).returncode)
+        if os.path.exists('/usr/bin/dpkg'):
+            sys.exit(subprocess.run(['/usr/bin/dpkg', *arguments]).returncode)
+        sys.path.insert(0, '__AF_TESTS_DIR__')
+        from installer_test_helpers import dpkg_compare_versions_exit_code
+        sys.exit(dpkg_compare_versions_exit_code(arguments))
     print('amd64' if '--print-architecture' in arguments else '')
 elif command == 'dpkg-deb': print(version)
 elif command == 'dpkg-query':
@@ -853,7 +857,7 @@ class InstallerFixture:
         )
         for directory in directories:
             (self.root / directory).mkdir(parents=True, exist_ok=True)
-        self.file("host-command", HOST_COMMAND).chmod(0o755)
+        self.file("host-command", HOST_COMMAND.replace("__AF_TESTS_DIR__", str(ROOT / "tests"))).chmod(0o755)
         self.file("pihole-bootstrap.sh", PIHOLE_BOOTSTRAP_SCRIPT)
         self.file("nodesource-bootstrap.sh", NODESOURCE_BOOTSTRAP_SCRIPT)
         self.file("netdata-bootstrap.sh", NETDATA_BOOTSTRAP_SCRIPT)
@@ -943,7 +947,7 @@ youtube_private_port() {
         return pattern.sub(lambda match: str(self.root) + match.group(0), text)
 
     def prepare_release(self):
-        executable = HOST_COMMAND
+        executable = HOST_COMMAND.replace("__AF_TESTS_DIR__", str(ROOT / "tests"))
         files = {
             "new-code": "fixture runtime\n", "package.json": '{"name":"fixture","version":"2.1.0"}\n',
             "index.php": "<?php echo 'fixture';\n", "occ": executable,
@@ -3445,7 +3449,7 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
             ("nzbget", ("var/lib/nzbget/nzbget.conf",), False),
             ("filebrowser", ("opt/AetherFlow/logs/filebrowser_credentials.txt",), True),
             ("nextcloud", ("opt/AetherFlow/logs/nextcloud_credentials.txt",), True),
-            ("vaultwarden", ("etc/vaultwarden/vaultwarden.env", "opt/AetherFlow/logs/vaultwarden_admin_token.txt"), True),
+            ("vaultwarden", ("etc/vaultwarden/vaultwarden.env", "etc/vaultwarden/admin_token.txt"), False),
         )
         previous_umask = os.umask(0o022)
         try:

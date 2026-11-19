@@ -1643,12 +1643,14 @@ fn read_dir_entries_bounded(
         if name_bytes == b"." || name_bytes == b".." {
             continue;
         }
-        let name_str = std::str::from_utf8(name_bytes).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidData,
-                "directory contains non-UTF-8 entry name",
-            )
-        })?;
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else {
+            tracing::warn!(
+                dir = normalized_dir,
+                lossy_name = %String::from_utf8_lossy(name_bytes),
+                "skipping non-UTF-8 directory entry"
+            );
+            continue;
+        };
         if is_internal_upload_temp(name_str) {
             continue;
         }
@@ -1700,6 +1702,11 @@ fn read_dir_entries_truncating(
             continue;
         }
         let Ok(name_str) = std::str::from_utf8(name_bytes) else {
+            tracing::warn!(
+                dir = normalized_dir,
+                lossy_name = %String::from_utf8_lossy(name_bytes),
+                "skipping non-UTF-8 directory entry during search walk"
+            );
             continue;
         };
         if is_internal_upload_temp(name_str) {
@@ -3040,16 +3047,43 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_filenames_are_rejected_without_lossy_collision() {
+    fn non_utf8_filenames_are_skipped_without_lossy_collision_and_valid_siblings_are_listed() {
         let tmp = TempDir::new();
         let invalid_name = std::ffi::OsString::from_vec(vec![b'b', b'a', b'd', 0xff, 0xfe]);
-        fs::write(tmp.path().join(invalid_name), b"bad").unwrap();
+        fs::write(tmp.path().join(&invalid_name), b"bad").unwrap();
+        fs::write(tmp.path().join("valid-sibling.txt"), b"ok").unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub").join(&invalid_name), b"nested-bad").unwrap();
+        fs::write(tmp.path().join("sub/nested-valid.txt"), b"nested-ok").unwrap();
 
         let bfs = BrowserFs::open(tmp.path()).unwrap();
-        let err = bfs.list("").unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::InvalidData);
-        let walk_err = bfs.walk("", 100).unwrap_err();
-        assert_eq!(walk_err.kind(), ErrorKind::InvalidData);
+        let listed = bfs.list("").unwrap();
+        let listed_names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(listed_names, vec!["sub", "valid-sibling.txt"]);
+        assert!(!listed_names.iter().any(|name| name.contains("bad")));
+
+        let walked = bfs.walk("", 100).unwrap();
+        let walked_paths: Vec<&str> = walked.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            walked_paths,
+            vec!["sub", "sub/nested-valid.txt", "valid-sibling.txt"]
+        );
+
+        let (resolved_listed, _) = bfs.list_resolving_internal_links("").unwrap();
+        assert_eq!(
+            resolved_listed
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sub", "valid-sibling.txt"]
+        );
+
+        let (searched, truncated) = bfs.walk_for_search("", 100).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            searched.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            vec!["sub", "valid-sibling.txt", "sub/nested-valid.txt"]
+        );
     }
 
     #[test]

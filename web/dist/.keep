@@ -1,2 +1,3 @@
-# Placeholder so rust-embed in af-api always compiles cleanly during cargo check / cargo test.
-# Production builds populate web/dist/ from frontend/out/.
+# External Leptos Rust WebAssembly UI asset staging directory.
+# Staged from frontend-rs/dist via: bash scripts/build_wasm_frontend.sh --stage
+# Served at runtime by aetherflow-api (STATIC_DIR or executable-adjacent web/dist).

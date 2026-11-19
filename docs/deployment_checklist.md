@@ -4,7 +4,7 @@ This checklist documents the runtime architecture, configuration contracts, priv
 
 > [!IMPORTANT]
 > **Verification & Evidence Policy**
-> Code changes, unit tests, or mocked filesystem drills do not by themselves certify production readiness across all target distributions. Refer to [docs/v4-backlog-verification.md](./v4-backlog-verification.md) and [docs/v4-clean-host-testing.md](./v4-clean-host-testing.md) for the current verification ledger and clean-OS KVM test status.
+> Code changes, unit tests, or mocked filesystem drills do not by themselves certify production readiness across all target distributions. Refer to [docs/v4-clean-host-testing.md](./v4-clean-host-testing.md) and [docs/v4-lifecycle-testing.md](./v4-lifecycle-testing.md) for the current clean-OS KVM test status and lifecycle verification ledger.
 
 ---
 

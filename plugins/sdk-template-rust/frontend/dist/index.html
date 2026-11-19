@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{PLUGIN_NAME}} ({{PLUGIN_ID}})</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: #050811;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, ui-monospace, monospace;
+  }
+  .card {
+    border: 1px solid rgba(99, 102, 241, 0.28);
+    background: rgba(15, 23, 42, 0.78);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+  .subtitle {
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 2px;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: rgba(99, 102, 241, 0.16);
+    color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.35);
+  }
+  .badge.ok {
+    background: rgba(16, 185, 129, 0.15);
+    color: #6ee7b7;
+    border-color: rgba(16, 185, 129, 0.35);
+  }
+  .badge.err {
+    background: rgba(244, 63, 94, 0.15);
+    color: #fda4af;
+    border-color: rgba(244, 63, 94, 0.35);
+  }
+  .meta {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.5;
+  }
+  .scopes {
+    margin-top: 8px;
+    font-size: 11px;
+    color: #64748b;
+    word-break: break-word;
+  }
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .metric {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(2, 6, 23, 0.72);
+    border-radius: 8px;
+    padding: 10px;
+  }
+  .metric-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #64748b;
+  }
+  .metric-value {
+    margin-top: 4px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #f1f5f9;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  button {
+    background: #4f46e5;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: rgba(51, 65, 85, 0.8);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+  }
+  button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  pre {
+    margin: 12px 0 0;
+    padding: 10px;
+    background: #020617;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-x: auto;
+    color: #cbd5e1;
+  }
+</style>
+</head>
+<body>
+  <div class="card" data-plugin-id="{{PLUGIN_ID}}" data-testid="plugin-runtime-panel">
+    <div class="header">
+      <div>
+        <div class="title" id="plugin-title">{{PLUGIN_NAME}}</div>
+        <div class="subtitle" id="plugin-subtitle">Rust Companion Plugin · {{PLUGIN_ID}}</div>
+      </div>
+      <span class="badge" id="bridge-badge" data-testid="plugin-bridge-badge">Connecting Bridge...</span>
+    </div>
+
+    <p class="meta">
+      Sandboxed v4 HTML/JS companion UI communicating exclusively via the host
+      <code>postMessage</code> bridge and loopback reverse proxy.
+    </p>
+
+    <div class="scopes">
+      Granted Scopes: <code id="scopes-label">pending AF_PLUGIN_INIT handshake</code>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">Runtime</div>
+        <div class="metric-value" id="metric-runtime">-</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Catalog Apps</div>
+        <div class="metric-value" id="metric-marketplace">-</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">CPU Load</div>
+        <div class="metric-value" id="metric-cpu">-</div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="snapshot-btn" data-testid="plugin-snapshot-btn" type="button">
+        Fetch Snapshot
+      </button>
+      <button id="status-btn" class="secondary" data-testid="plugin-status-btn" type="button">
+        Probe Status
+      </button>
+    </div>
+
+    <pre id="output" data-testid="plugin-bridge-output">Waiting for host capability handshake (AF_PLUGIN_INIT)...</pre>
+  </div>
+
+  <script>
+    const pluginId = '{{PLUGIN_ID}}';
+    const pluginName = '{{PLUGIN_NAME}}';
+    const badgeNode = document.getElementById('bridge-badge');
+    const scopesNode = document.getElementById('scopes-label');
+    const runtimeNode = document.getElementById('metric-runtime');
+    const marketplaceNode = document.getElementById('metric-marketplace');
+    const cpuNode = document.getElementById('metric-cpu');
+    const outputNode = document.getElementById('output');
+    const snapshotBtn = document.getElementById('snapshot-btn');
+    const statusBtn = document.getElementById('status-btn');
+
+    let requestSeq = 0;
+    const pendingRequests = new Map();
+
+    function setBadge(label, stateClass) {
+      badgeNode.textContent = label;
+      badgeNode.className = stateClass ? 'badge ' + stateClass : 'badge';
+    }
+
+    function sendProxyRequest(path, method) {
+      const cleanPath = String(path || 'snapshot').replace(/^\/+/, '');
+      const httpMethod = String(method || 'GET').toUpperCase();
+      const requestId = pluginId + '-' + (++requestSeq);
+      pendingRequests.set(requestId, cleanPath);
+
+      window.parent.postMessage({
+        type: 'AF_PLUGIN_PROXY_REQUEST',
+        pluginId: pluginId,
+        requestId: requestId,
+        path: cleanPath,
+        method: httpMethod
+      }, '*');
+    }
+
+    function formatScopes(scopes) {
+      if (!Array.isArray(scopes) || scopes.length === 0) {
+        return 'none (default-deny)';
+      }
+      return scopes
+        .map((s) => (s && s.method && s.route ? s.method + ' ' + s.route : String(s)))
+        .join(', ');
+    }
+
+    function updateSnapshotMetrics(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+      if (payload.runtime_mode || payload.status) {
+        runtimeNode.textContent = String(payload.runtime_mode || payload.status);
+      }
+      if (typeof payload.marketplace_count === 'number') {
+        marketplaceNode.textContent = String(payload.marketplace_count);
+      }
+      const metrics = payload.system_metrics;
+      if (metrics && typeof metrics === 'object') {
+        const cpu = metrics.cpu_usage ?? metrics.cpu_percent;
+        if (cpu !== undefined && cpu !== null) {
+          cpuNode.textContent = String(cpu) + '%';
+        }
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.source !== window.parent) {
+        return;
+      }
+      const msg = event.data || {};
+      if (msg.pluginId !== pluginId) {
+        return;
+      }
+
+      if (msg.type === 'AF_PLUGIN_INIT') {
+        setBadge('Bridge Ready', 'ok');
+        scopesNode.textContent = formatScopes(msg.scopes);
+        outputNode.textContent = JSON.stringify({
+          status: 'handshake_complete',
+          pluginId: pluginId,
+          pluginName: pluginName,
+          capabilities: msg.capabilities || [],
+          scopes: msg.scopes || []
+        }, null, 2);
+        sendProxyRequest('snapshot', 'GET');
+        return;
+      }
+
+      if (msg.type === 'AF_PLUGIN_PROXY_RESPONSE') {
+        const requestPath = pendingRequests.get(msg.requestId) || 'proxy';
+        pendingRequests.delete(msg.requestId);
+
+        if (msg.ok === false || msg.error) {
+          setBadge('Proxy Error (' + (msg.status || 'ERR') + ')', 'err');
+          outputNode.textContent = JSON.stringify({
+            request: requestPath,
+            ok: false,
+            status: msg.status || null,
+            error: msg.error || 'Unknown proxy error'
+          }, null, 2);
+          return;
+        }
+
+        setBadge('Bridge Ready', 'ok');
+        updateSnapshotMetrics(msg.payload);
+        outputNode.textContent = JSON.stringify(msg.payload, null, 2);
+      }
+    });
+
+    snapshotBtn.addEventListener('click', () => {
+      sendProxyRequest('snapshot', 'GET');
+    });
+
+    statusBtn.addEventListener('click', () => {
+      sendProxyRequest('status', 'GET');
+    });
+
+    window.parent.postMessage({ type: 'AF_PLUGIN_READY', pluginId: pluginId }, '*');
+  </script>
+</body>
+</html>

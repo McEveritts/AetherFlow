@@ -2511,3 +2511,70 @@ fn confined_alias_and_recursive_directory_copy_pin_sources_enforce_policy_hops_a
         "hello-target"
     );
 }
+
+#[test]
+fn pure_rust_md5_and_crc32_match_rfc1321_and_ieee8023_vectors() {
+    let md5_vectors = [
+        ("", "d41d8cd98f00b204e9800998ecf8427e"),
+        ("a", "0cc175b9c0f1b6a831c399e269772661"),
+        ("abc", "900150983cd24fb0d6963f7d28e17f72"),
+        ("message digest", "f96b697d7cb7938d525a2f31aaf161d0"),
+        (
+            "abcdefghijklmnopqrstuvwxyz",
+            "c3fcd3d76192e4007dfb496cca67e13b",
+        ),
+        (
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            "d174ab98d277d9f5a5611c2c9f419d9f",
+        ),
+        (
+            "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+            "57edf4a22be3c955ac49da2e2107b67a",
+        ),
+    ];
+
+    for (input, expected) in md5_vectors {
+        let mut h = Md5Hasher::new();
+        h.update(input.as_bytes());
+        assert_eq!(
+            hex::encode(h.finalize()),
+            expected,
+            "single-shot MD5 for {input:?}"
+        );
+
+        for chunk_size in [1usize, 3, 7, 55, 56, 63, 64, 65] {
+            let mut streamed = Md5Hasher::new();
+            streamed.update(&[]);
+            for chunk in input.as_bytes().chunks(chunk_size) {
+                streamed.update(chunk);
+            }
+            streamed.update(&[]);
+            assert_eq!(
+                hex::encode(streamed.finalize()),
+                expected,
+                "chunked({chunk_size}) MD5 for {input:?}"
+            );
+        }
+    }
+
+    let mut crc_empty = Crc32Hasher::new();
+    crc_empty.update(b"");
+    assert_eq!(crc_empty.finalize(), 0x0000_0000);
+
+    let mut crc_single = Crc32Hasher::new();
+    crc_single.update(b"123456789");
+    assert_eq!(crc_single.finalize(), 0xcbf4_3926);
+
+    for chunk_size in [1usize, 2, 4, 5] {
+        let mut crc_stream = Crc32Hasher::new();
+        crc_stream.update(&[]);
+        for chunk in b"123456789".chunks(chunk_size) {
+            crc_stream.update(chunk);
+        }
+        assert_eq!(
+            crc_stream.finalize(),
+            0xcbf4_3926,
+            "chunked({chunk_size}) CRC32"
+        );
+    }
+}

@@ -368,7 +368,68 @@ with (root / "commands.jsonl").open("a") as f:
     f.write(json.dumps([cmd, *args]) + "\n")
 if cmd == "dpkg":
     if "--compare-versions" in args:
-        sys.exit(subprocess.run(["/usr/bin/dpkg", *args]).returncode)
+        if os.path.exists("/usr/bin/dpkg"):
+            sys.exit(subprocess.run(["/usr/bin/dpkg", *args]).returncode)
+        idx = args.index("--compare-versions")
+        v1, op, v2 = args[idx + 1], args[idx + 2], args[idx + 3]
+        def _deb_split(ver: str):
+            epoch = 0
+            if ":" in ver:
+                ep, ver = ver.split(":", 1)
+                epoch = int(ep or 0)
+            if "-" in ver:
+                upstream, rev = ver.rsplit("-", 1)
+            else:
+                upstream, rev = ver, ""
+            return epoch, upstream, rev
+        def _deb_order(ch: str) -> int:
+            if ch == "~":
+                return -1
+            if ("A" <= ch <= "Z") or ("a" <= ch <= "z"):
+                return ord(ch)
+            return ord(ch) + 256
+        def _deb_part_cmp(a: str, b: str) -> int:
+            i = j = 0
+            na, nb = len(a), len(b)
+            while i < na or j < nb:
+                while (i < na and not a[i].isdigit()) or (j < nb and not b[j].isdigit()):
+                    ca = _deb_order(a[i]) if i < na and not a[i].isdigit() else 0
+                    cb = _deb_order(b[j]) if j < nb and not b[j].isdigit() else 0
+                    if ca != cb:
+                        return -1 if ca < cb else 1
+                    if i < na and not a[i].isdigit():
+                        i += 1
+                    if j < nb and not b[j].isdigit():
+                        j += 1
+                ia, jb = i, j
+                while i < na and a[i].isdigit():
+                    i += 1
+                while j < nb and b[j].isdigit():
+                    j += 1
+                da = int(a[ia:i] or "0")
+                db = int(b[jb:j] or "0")
+                if da != db:
+                    return -1 if da < db else 1
+            return 0
+        def _deb_cmp(a: str, b: str) -> int:
+            e1, u1, r1 = _deb_split(a)
+            e2, u2, r2 = _deb_split(b)
+            if e1 != e2:
+                return -1 if e1 < e2 else 1
+            c = _deb_part_cmp(u1, u2)
+            if c != 0:
+                return c
+            return _deb_part_cmp(r1, r2)
+        c = _deb_cmp(v1, v2)
+        ok = {
+            "lt": c < 0, "<<": c < 0,
+            "le": c <= 0, "<=": c <= 0,
+            "eq": c == 0, "=": c == 0,
+            "ne": c != 0,
+            "ge": c >= 0, ">=": c >= 0,
+            "gt": c > 0, ">>": c > 0,
+        }[op]
+        sys.exit(0 if ok else 1)
     print(os.environ.get("TEST_ARCH", "amd64"))
 elif cmd == "curl":
     if "-o" in args:

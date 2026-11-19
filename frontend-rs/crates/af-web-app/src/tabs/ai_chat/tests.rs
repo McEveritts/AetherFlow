@@ -74,6 +74,40 @@ fn provider_selection_respects_explicit_local_and_cloud_models() {
         ),
         ("openai".into(), "gpt-6.1-sol".into())
     );
+    for (model, expected_provider) in [
+        ("gemini-4-argon", "gemini"),
+        ("gemini-4-carbon", "gemini"),
+        ("gemini-4-neon", "gemini"),
+        ("gemini-4-hydrogen", "gemini"),
+        ("gemini-3.1-pro-preview", "gemini"),
+        ("gemini-3-flash-preview", "gemini"),
+        ("gemini-3.1-flash-lite-preview", "gemini"),
+        ("gemini-2.5-pro", "gemini"),
+        ("gemini-2.5-flash", "gemini"),
+        ("gemini-2.0-flash", "gemini"),
+        ("gpt-6.2-sol", "openai"),
+        ("gpt-6.2-astra", "openai"),
+        ("gpt-4o", "openai"),
+        ("gpt-4o-mini", "openai"),
+        ("o1-mini", "openai"),
+        ("o3", "openai"),
+        ("o4-mini", "openai"),
+        ("claude-opus-5-6", "anthropic"),
+        ("claude-sonnet-4-5", "anthropic"),
+        ("claude-opus-4-6", "anthropic"),
+    ] {
+        assert!(
+            MODEL_PRESETS.contains(&model) || model.starts_with("o1") || model.starts_with("o4"),
+            "{model}"
+        );
+        assert_eq!(
+            configured_selection(
+                &json!({"aiModel": model, "localProvider": "ollama", "localModel": "qwen3:8b"})
+            ),
+            (expected_provider.into(), model.into()),
+            "model={model}"
+        );
+    }
     assert!(!valid_model(" local-test "));
     assert!(valid_model("llama3.2:latest"));
 }

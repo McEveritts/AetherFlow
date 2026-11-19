@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from 'framer-motion';
-import { Button } from '@aetherflow/ui';
+import { Button } from './ui/Button';
 import { heroData } from '../content/home';
 
 export function Hero() {

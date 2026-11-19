@@ -1,5 +1,5 @@
 """
-AetherFlow v3.1.7 E2E Test Framework
+AetherFlow v4.0.0 E2E Test Framework
 Provides test case abstractions, assertion helpers, codebase contract inspectors,
 HTTP/socket clients, and mock test servers.
 """
@@ -216,7 +216,7 @@ class AetherFlowApiClient:
     def request(self, method: str, path: str, json_body: Optional[Dict[str, Any]] = None,
                 headers: Optional[Dict[str, str]] = None, timeout: float = 5.0) -> Tuple[int, Dict[str, Any], Dict[str, str]]:
         url = f"{self.base_url}{path}"
-        req_headers = {"User-Agent": "AetherFlow-E2E-Harness/3.1.7"}
+        req_headers = {"User-Agent": "AetherFlow-E2E-Harness/4.0.0"}
         if headers:
             req_headers.update(headers)
 

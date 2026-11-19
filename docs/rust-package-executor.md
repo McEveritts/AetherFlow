@@ -148,6 +148,6 @@ Twelve Marketplace applications are registered in `BUILTIN_DECLARATIVE_RECIPES`.
 
 ## Validation and Safety Boundary
 
-On November 1, 2026, `cargo test --workspace` passed all 131 tests in an isolated Linux checkout, including 29 `af-runner` tests covering all 15 built-in declarative recipes, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, persistent advisory lock inode/content preservation, queued cancellation, process-group cancellation, bounded command output, live progress streaming, ancestor-symlink rejection, and exclusive atomic writes/rollback backups.
+On November 1, 2026, `cargo test --workspace` passed all 131 tests in an isolated Linux checkout, including 29 `af-runner` tests covering all 12 built-in declarative recipes, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, persistent advisory lock inode/content preservation, queued cancellation, process-group cancellation, bounded command output, live progress streaming, ancestor-symlink rejection, and exclusive atomic writes/rollback backups.
 
 The Marketplace lifecycle repair also captures the installed Debian version for every APT-backed recipe, uses `unknown` until a version is resolved, and preserves configuration and system accounts on removal unless `DELETE_DATA=true`. Automatic health recovery uses the same process mutex and persistent flock as privileged package execution. See [Marketplace repair validation](marketplace-repair.md).

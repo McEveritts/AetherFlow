@@ -9,6 +9,7 @@ use af_models::{
     PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse, SandboxRunnerRequest,
     SelfUpdateRequest, SystemctlRequest,
 };
+use af_runner::HostsUpdateRequest;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -341,6 +342,14 @@ pub trait RunnerClientTransport: Send + Sync {
 
     /// Dispatches `POST /v1/self-update`.
     fn execute_self_update(&self, req: &SelfUpdateRequest) -> CliResult<RunnerResponse>;
+
+    /// Dispatches `POST /v1/hosts`.
+    fn execute_hosts(&self, req: &HostsUpdateRequest) -> CliResult<RunnerResponse>;
+
+    /// Probes the installed runtime version via `POST /v1/package/probe-version`.
+    fn probe_package_version(&self, _package_id: &str) -> CliResult<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Production Unix domain socket (`AF_UNIX`) client for `/run/aetherflow/runner.sock`.
@@ -676,5 +685,24 @@ impl RunnerClientTransport for UnixSocketRunnerClient {
 
     fn execute_self_update(&self, req: &SelfUpdateRequest) -> CliResult<RunnerResponse> {
         Self::run_async(self.post_json_async("/v1/self-update", req, Duration::from_secs(30)))
+    }
+
+    fn execute_hosts(&self, req: &HostsUpdateRequest) -> CliResult<RunnerResponse> {
+        Self::run_async(self.post_json_async("/v1/hosts", req, Duration::from_secs(15)))
+    }
+
+    fn probe_package_version(&self, package_id: &str) -> CliResult<Option<String>> {
+        let payload = serde_json::json!({ "package_id": package_id });
+        match Self::run_async(self.post_json_async(
+            "/v1/package/probe-version",
+            &payload,
+            Duration::from_secs(12),
+        )) {
+            Ok(resp) if resp.success && !resp.output.trim().is_empty() => {
+                Ok(Some(resp.output.trim().to_string()))
+            }
+            Ok(_) | Err(CliError::RunnerIpc { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }

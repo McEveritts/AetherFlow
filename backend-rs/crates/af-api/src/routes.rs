@@ -304,6 +304,7 @@ fn build_v1_router() -> Router {
         .route("/auth/login", post(local_login))
         .route("/auth/mfa/verify", post(mfa_login_verify))
         .route("/auth/setup", post(setup_admin))
+        .route("/auth/refresh", post(refresh_session_with_peer))
         .layer(middleware::from_fn(auth_rate_limit_middleware));
 
     let oidc_limited_public = Router::new()
@@ -326,7 +327,6 @@ fn build_v1_router() -> Router {
         .route("/auth/google/callback", get(google_callback))
         .route("/auth/verify", get(verify_proxy_auth))
         .route("/auth/setup/check", get(check_setup_needed))
-        .route("/auth/refresh", post(refresh_session_with_peer))
         .route("/marketplace", get(get_marketplace_apps))
         .route("/oidc/jwks", get(oidc_jwks))
         .merge(auth_limited_public)
@@ -662,7 +662,6 @@ fn build_v1_router() -> Router {
         .nest("/admin", admin_routes)
         .merge(compat_routes)
         .merge(ingress_compat_routes)
-        .layer(middleware::from_fn(host_validation_middleware))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -681,7 +680,7 @@ async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": status,
         "uptime": format!("{:.1}s", START_TIME.elapsed().as_secs_f64()),
-        "version": "4.0.0",
+        "version": af_runner::af_release::runtime::runtime_identity().version,
         "database": db_status,
         "db_latency_ms": latency_ms,
     }))
@@ -741,8 +740,119 @@ async fn authenticated_ready() -> Response {
         .into_response()
 }
 
-async fn prometheus_metrics() -> Response {
-    let m = af_hardware::get_system_metrics_core();
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+async fn is_metrics_request_authorized(req: Request) -> bool {
+    let (parts, _body) = req.into_parts();
+    drop(_body);
+
+    if env::var("METRICS_PUBLIC")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let peer_ip = parts
+        .extensions
+        .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::connect_info::ConnectInfo(addr)| addr.ip());
+    if peer_ip.is_none_or(|ip| ip.is_loopback()) {
+        return true;
+    }
+
+    let bearer = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(presented) = bearer {
+        if let Ok(expected) = env::var("METRICS_BEARER_TOKEN") {
+            let expected = expected.trim();
+            if !expected.is_empty() && constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+                return true;
+            }
+        }
+    }
+
+    let Some(raw_token) = crate::auth::resolve_raw_token(&parts.headers) else {
+        return false;
+    };
+    let Ok(claims) = crate::auth::decode_session_claims(&raw_token, false) else {
+        return false;
+    };
+    if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
+        return false;
+    }
+    let ua = parts
+        .headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let client_ip = extract_client_ip_for_peer(&parts.headers, peer_ip);
+    let hdr_ip = extract_client_ip(&parts.headers);
+    if !crate::auth::matches_client_fingerprint(&claims.cfp, &client_ip, &ua)
+        && !crate::auth::matches_client_fingerprint(&claims.cfp, &hdr_ip, &ua)
+    {
+        return false;
+    }
+    crate::auth::blocking_auth_work(move || {
+        if crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id) {
+            return false;
+        }
+        let Ok(conn) = af_db::get_read_conn() else {
+            return false;
+        };
+        let Ok(subj) = crate::auth::load_active_human_subject(&conn, claims.user_id) else {
+            return false;
+        };
+        if claims.ver < subj.sessions_revoked_after {
+            return false;
+        }
+        if crate::auth::table_exists(&conn, "active_sessions").unwrap_or(false) {
+            let resolved_jti = crate::auth::resolve_current_session_jti(&claims.jti);
+            let session_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3))",
+                    params![claims.user_id, claims.jti, resolved_jti],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !session_exists {
+                return false;
+            }
+        }
+        true
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn prometheus_metrics(req: Request) -> Response {
+    if !is_metrics_request_authorized(req).await {
+        return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+    }
+
+    let Ok(m) = tokio::task::spawn_blocking(af_hardware::get_system_metrics_core).await else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to collect system metrics",
+        );
+    };
     let mem_total_gb = m.memory.get("total").copied().unwrap_or(0.0);
     let mem_used_gb = m.memory.get("used").copied().unwrap_or(0.0);
     let mem_pct = if mem_total_gb > 0.0 {
@@ -758,6 +868,9 @@ async fn prometheus_metrics() -> Response {
         0.0
     };
 
+    let version = af_runner::af_release::runtime::runtime_identity()
+        .version
+        .clone();
     let body = format!(
         "# HELP aetherflow_process_uptime_seconds Process uptime in seconds\n\
          # TYPE aetherflow_process_uptime_seconds gauge\n\
@@ -779,13 +892,14 @@ async fn prometheus_metrics() -> Response {
          aetherflow_system_disk_percent {:.2}\n\
          # HELP aetherflow_build_info Build metadata\n\
          # TYPE aetherflow_build_info gauge\n\
-         aetherflow_build_info{{runtime=\"rust\",version=\"4.0.0\",os=\"{}\",arch=\"{}\"}} 1\n",
+         aetherflow_build_info{{runtime=\"rust\",version=\"{}\",os=\"{}\",arch=\"{}\"}} 1\n",
         START_TIME.elapsed().as_secs_f64(),
         m.cpu_usage,
         mem_total_gb * 1073741824.0,
         mem_used_gb * 1073741824.0,
         mem_pct,
         disk_pct,
+        version,
         env::consts::OS,
         env::consts::ARCH
     );
@@ -3000,7 +3114,7 @@ where
                 let external_access = existing
                     .as_ref()
                     .map(|c| c.external_access_enabled)
-                    .unwrap_or(!public_domain.is_empty());
+                    .unwrap_or(false);
                 let tls_enabled = existing
                     .as_ref()
                     .map(|c| c.tls_enabled)
@@ -5118,7 +5232,6 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
                     if cfg.listen_port > 0 {
                         cfg.public_domain =
                             af_services::format_app_public_domain(&cfg.app_name, &norm_domain);
-                        cfg.external_access_enabled = true;
                         cfg.tls_enabled = true;
                         cfg.updated_at = now;
                         af_services::mutators::with_blueprint_mutation(&cfg.app_name, async {
@@ -5147,7 +5260,7 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
                         let cfg = AppIngressConfig {
                             app_name: p.name.clone(),
                             public_domain: pub_dom,
-                            external_access_enabled: true,
+                            external_access_enabled: false,
                             listen_port: p.default_port,
                             tls_enabled: true,
                             created_at: now,
@@ -5942,12 +6055,62 @@ fn default_limit() -> i64 {
     50
 }
 
+fn ensure_notification_reads_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS notification_reads (
+            notification_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (notification_id, user_id)
+        );",
+    )
+}
+
 async fn get_notifications(
     Extension(auth_user): Extension<AuthUser>,
     Query(q): Query<PageQuery>,
 ) -> Json<serde_json::Value> {
-    let (notifications, unread_count) =
-        af_services::list_notifications(auth_user.user_id, q.limit, q.offset).unwrap_or_default();
+    let user_id = auth_user.user_id;
+    let limit = q.limit.clamp(1, 200);
+    let offset = q.offset.max(0);
+    let (notifications, unread_count) = tokio::task::spawn_blocking(move || {
+        let Ok(conn) = af_db::get_conn() else {
+            return (Vec::new(), 0i64);
+        };
+        if ensure_notification_reads_table(&conn).is_err() {
+            return (Vec::new(), 0i64);
+        }
+        let unread: i64 =
+            af_db::count_unread_notifications_for_user_with_conn(&conn, user_id).unwrap_or(0);
+        let mut list = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT n.id, n.user_id, n.level, n.title, n.message, n.read, COALESCE(CAST(n.created_at AS TEXT), '') \
+             FROM notifications n \
+             LEFT JOIN notification_reads nr ON nr.notification_id = n.id AND nr.user_id = ?1 \
+             WHERE (n.user_id = ?1 OR (n.user_id IS NULL AND nr.notification_id IS NULL)) \
+             ORDER BY n.created_at DESC LIMIT ?2 OFFSET ?3",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![user_id, limit, offset], |r| {
+                Ok(af_services::Notification {
+                    id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    level: r.get(2)?,
+                    title: r.get(3)?,
+                    message: r.get(4)?,
+                    read: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            }) {
+                for r in rows.flatten() {
+                    list.push(r);
+                }
+            }
+        }
+        (list, unread)
+    })
+    .await
+    .unwrap_or_default();
+
     Json(serde_json::json!({
         "notifications": notifications,
         "unread_count": unread_count,
@@ -5958,35 +6121,57 @@ async fn mark_notification_read(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> Response {
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
+    let user_id = auth_user.user_id;
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        let conn = af_db::get_conn()?;
+        ensure_notification_reads_table(&conn)?;
+        af_db::mark_notification_read_for_user_with_conn(&conn, user_id, id)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(true)) => {
+            Json(serde_json::json!({ "message": "Notification marked as read" })).into_response()
+        }
+        Ok(Ok(false)) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Notification not found"),
+        _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Database unavailable",
-        );
-    };
-    let updated = conn
-        .execute(
-            "UPDATE notifications SET read = 1 WHERE id = ?1 AND (user_id = ?2 OR user_id IS NULL)",
-            params![id, auth_user.user_id],
-        )
-        .unwrap_or(0);
-    if updated == 0 {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Notification not found");
+        ),
     }
-    Json(serde_json::json!({ "message": "Notification marked as read" })).into_response()
 }
 
-async fn dismiss_all_notifications(
-    Extension(auth_user): Extension<AuthUser>,
-) -> Json<serde_json::Value> {
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
-            "UPDATE notifications SET read = 1 WHERE (user_id = ?1 OR user_id IS NULL) AND read = 0",
-            params![auth_user.user_id],
-        );
+async fn dismiss_all_notifications(Extension(auth_user): Extension<AuthUser>) -> Response {
+    let user_id = auth_user.user_id;
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut conn = af_db::get_conn()?;
+        ensure_notification_reads_table(&conn)?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE notifications SET read = 1 WHERE user_id = ?1 AND read = 0",
+            params![user_id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO notification_reads (notification_id, user_id) \
+             SELECT id, ?1 FROM notifications WHERE user_id IS NULL",
+            params![user_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })
+    .await;
+
+    match res {
+        Ok(Ok(())) => {
+            Json(serde_json::json!({ "message": "All notifications dismissed" })).into_response()
+        }
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to dismiss notifications",
+        ),
     }
-    Json(serde_json::json!({ "message": "All notifications dismissed" }))
 }
 
 async fn get_blueprints() -> Json<serde_json::Value> {
@@ -6091,18 +6276,24 @@ async fn sync_app_blueprint_admitted(
     let external_access_enabled = existing_ing
         .as_ref()
         .map(|c| c.external_access_enabled)
-        .unwrap_or(!public_domain.is_empty());
+        .unwrap_or(false);
     let tls_enabled = existing_ing
         .as_ref()
         .map(|c| c.tls_enabled)
         .unwrap_or(!public_domain.is_empty());
 
-    if let Err(error) =
-        af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port).await
+    let config_summary = match af_services::mutators::apply_blueprint_app_config_detailed(
+        &app_name,
+        u16::try_from(allocated_port).unwrap_or(0),
+    )
+    .await
     {
-        return blueprint_sync_failure_response(&anyhow::Error::msg(error));
-    }
-    let config_applied = true;
+        Ok(summary) => summary,
+        Err(error) => return blueprint_sync_failure_response(&anyhow::Error::msg(error)),
+    };
+    let mut unprivileged_skips = config_summary.unprivileged_skips;
+    let mut warnings = config_summary.warnings;
+    let config_applied = config_summary.config_applied;
 
     let now = Utc::now();
     let ingress_cfg = AppIngressConfig {
@@ -6134,15 +6325,44 @@ async fn sync_app_blueprint_admitted(
     let hosts_synced = if dns_domains.is_empty() {
         true
     } else {
-        if let Err(error) = af_services::mutators::sync_local_dns_domains(&dns_domains).await {
-            return blueprint_sync_failure_response(&anyhow::Error::msg(error));
+        match af_services::mutators::sync_local_dns_domains(&dns_domains).await {
+            Ok(()) => true,
+            Err(error) if af_services::mutators::is_unprivileged_host_write_error(&error) => {
+                if !unprivileged_skips.contains(&error) {
+                    unprivileged_skips.push(error.clone());
+                }
+                warnings.push(format!(
+                    "Local DNS hosts sync skipped in unprivileged API process: {}",
+                    error
+                ));
+                false
+            }
+            Err(error) => return blueprint_sync_failure_response(&anyhow::Error::msg(error)),
         }
-        true
     };
     if let Err(error) = af_services::mutators::sync_network_dns_providers().await {
         return blueprint_sync_failure_response(&anyhow::Error::msg(error));
     }
     let network_dns_synced = true;
+
+    if !unprivileged_skips.is_empty() && !ingress_synced && !config_applied {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "code": "BLUEPRINT_HOST_WRITE_SKIPPED",
+                "message": "Blueprint host configuration writes were skipped due to unprivileged filesystem restrictions and no database/ingress sync occurred",
+                "unprivileged_skips": unprivileged_skips,
+                "warnings": warnings,
+            })),
+        )
+            .into_response();
+    }
+
+    let message = if unprivileged_skips.is_empty() && warnings.is_empty() {
+        "Blueprint synchronized successfully"
+    } else {
+        "Blueprint synchronized with warnings (some host writes were skipped in unprivileged mode)"
+    };
 
     let res = af_services::BlueprintSetupResult {
         app_name: bp.app_name,
@@ -6154,13 +6374,16 @@ async fn sync_app_blueprint_admitted(
         public_domain,
         external_access_enabled,
         config_applied,
+        mutated_files: config_summary.mutated_files,
+        unprivileged_skips,
+        warnings,
         ingress_synced,
         hosts_synced,
         network_dns_synced,
     };
 
     Json(serde_json::json!({
-        "message": "Blueprint synchronized successfully",
+        "message": message,
         "result": res,
     }))
     .into_response()
@@ -6467,7 +6690,7 @@ fn resolve_patched_ingress_config(
     let external_access_enabled = req
         .external_access_enabled
         .or_else(|| existing.map(|ex| ex.external_access_enabled))
-        .unwrap_or(!clean_public_domain.is_empty());
+        .unwrap_or(false);
 
     if !(1..=65535).contains(&listen_port) {
         return Err((
@@ -12675,6 +12898,261 @@ mod hillclimb_tests {
         assert_eq!(
             missing_resp.headers()[header::CONTENT_SECURITY_POLICY],
             api_csp
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_enforces_access_control_and_reports_runtime_version() {
+        use axum::extract::connect_info::ConnectInfo;
+        use std::net::SocketAddr;
+
+        let expected_version = af_runner::af_release::runtime::runtime_identity()
+            .version
+            .clone();
+
+        // /health includes dynamic runtime version
+        let health = health_check().await.0;
+        assert_eq!(health["version"], expected_version);
+
+        // In-process oneshot without ConnectInfo is allowed
+        let app = build_router();
+        let in_proc_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(in_proc_resp.status(), StatusCode::OK);
+        let metrics_bytes = axum::body::to_bytes(in_proc_resp.into_body(), 65536)
+            .await
+            .unwrap();
+        let metrics_text = String::from_utf8(metrics_bytes.to_vec()).unwrap();
+        assert!(
+            metrics_text.contains(&format!(r#"version="{}""#, expected_version)),
+            "expected version {expected_version} in metrics output: {metrics_text}"
+        );
+
+        // Non-loopback ConnectInfo without credentials is rejected 401
+        let mut remote_req = axum::http::Request::builder()
+            .uri("/metrics")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        remote_req
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([198, 51, 100, 10], 44444))));
+        let remote_resp = app.clone().oneshot(remote_req).await.unwrap();
+        assert_eq!(remote_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Loopback ConnectInfo is allowed
+        let mut loopback_req = axum::http::Request::builder()
+            .uri("/metrics")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        loopback_req
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44444))));
+        let loopback_resp = app.clone().oneshot(loopback_req).await.unwrap();
+        assert_eq!(loopback_resp.status(), StatusCode::OK);
+
+        // Non-loopback with valid METRICS_BEARER_TOKEN is allowed
+        std::env::set_var("METRICS_BEARER_TOKEN", "test-metrics-secret-token");
+        let mut bearer_req = axum::http::Request::builder()
+            .uri("/metrics")
+            .header(header::AUTHORIZATION, "Bearer test-metrics-secret-token")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        bearer_req
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([198, 51, 100, 10], 44445))));
+        let bearer_resp = app.oneshot(bearer_req).await.unwrap();
+        std::env::remove_var("METRICS_BEARER_TOKEN");
+        assert_eq!(bearer_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn broadcast_notifications_dismiss_per_user_without_mutating_shared_row() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+
+        let (broadcast_id, u1_notif_id, u2_notif_id) = {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute_batch(
+                "DELETE FROM notification_reads;
+                 DELETE FROM notifications;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO notifications (user_id, level, title, message, read)
+                 VALUES (NULL, 'warning', 'Broadcast Alert', 'System-wide notice', 0)",
+                [],
+            )
+            .unwrap();
+            let b_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO notifications (user_id, level, title, message, read)
+                 VALUES (7101, 'info', 'User1 Alert', 'Only user 1', 0)",
+                [],
+            )
+            .unwrap();
+            let u1_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO notifications (user_id, level, title, message, read)
+                 VALUES (7102, 'info', 'User2 Alert', 'Only user 2', 0)",
+                [],
+            )
+            .unwrap();
+            let u2_id = conn.last_insert_rowid();
+            (b_id, u1_id, u2_id)
+        };
+
+        let u1 = AuthUser {
+            user_id: 7101,
+            username: "notif-u1".into(),
+            role: "user".into(),
+            jti: "jti-u1".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let u2 = AuthUser {
+            user_id: 7102,
+            username: "notif-u2".into(),
+            role: "user".into(),
+            jti: "jti-u2".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+
+        let query_default = || PageQuery {
+            limit: 50,
+            offset: 0,
+            action: String::new(),
+            username: String::new(),
+        };
+
+        // User 1 marks the broadcast notification read -> removed for user 1 only
+        let resp = mark_notification_read(Path(broadcast_id), Extension(u1.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let u1_list = get_notifications(Extension(u1.clone()), Query(query_default()))
+            .await
+            .0;
+        assert_eq!(u1_list["unread_count"], 1);
+        let u1_ids: Vec<i64> = u1_list["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(u1_ids, vec![u1_notif_id]);
+
+        // User 2 STILL sees both the broadcast and their own notification unread
+        let u2_list = get_notifications(Extension(u2.clone()), Query(query_default()))
+            .await
+            .0;
+        assert_eq!(u2_list["unread_count"], 2);
+        let u2_ids: Vec<i64> = u2_list["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_i64().unwrap())
+            .collect();
+        assert!(u2_ids.contains(&broadcast_id));
+        assert!(u2_ids.contains(&u2_notif_id));
+
+        // Broadcast row itself MUST remain read = 0
+        let broadcast_read: i64 = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT read FROM notifications WHERE id = ?1",
+                params![broadcast_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(broadcast_read, 0);
+
+        // User 2 dismisses all -> User 2 unread_count = 0, broadcast row still read = 0
+        let dismiss_resp = dismiss_all_notifications(Extension(u2.clone())).await;
+        assert_eq!(dismiss_resp.status(), StatusCode::OK);
+        let u2_after = get_notifications(Extension(u2.clone()), Query(query_default()))
+            .await
+            .0;
+        assert_eq!(u2_after["unread_count"], 0);
+        assert!(u2_after["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["id"].as_i64() != Some(broadcast_id)));
+        let broadcast_read_after: i64 = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT read FROM notifications WHERE id = ?1",
+                params![broadcast_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(broadcast_read_after, 0);
+
+        // DB failure during dismiss_all_notifications returns 500 instead of silent 200
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_notif_reads BEFORE INSERT ON notification_reads
+                 BEGIN SELECT RAISE(ABORT, 'simulated db error'); END;",
+            )
+            .unwrap();
+        }
+        let err_resp = dismiss_all_notifications(Extension(u1)).await;
+        assert_eq!(err_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute_batch("DROP TRIGGER IF EXISTS fail_notif_reads;")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn public_auth_refresh_is_rate_limited_and_ingress_defaults_opt_in() {
+        use axum::extract::connect_info::ConnectInfo;
+        use std::net::SocketAddr;
+
+        let now = Utc::now();
+        let req_new: UpdateIngressReq = serde_json::from_value(serde_json::json!({
+            "publicDomain": "sonarr.example.com"
+        }))
+        .unwrap();
+        let created = resolve_patched_ingress_config("sonarr", &req_new, None, 8989, now).unwrap();
+        assert!(
+            !created.external_access_enabled,
+            "newly auto-seeded ingress must default external_access_enabled to false"
+        );
+
+        let app = build_router();
+        let unique_peer = SocketAddr::from(([198, 51, 100, 222], 51234));
+        let mut saw_rate_limit = false;
+        for _ in 0..15 {
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/public/auth/refresh")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(unique_peer));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_rate_limit = true;
+                break;
+            }
+        }
+        assert!(
+            saw_rate_limit,
+            "/api/v1/public/auth/refresh must enforce auth_rate_limit_middleware"
         );
     }
 }

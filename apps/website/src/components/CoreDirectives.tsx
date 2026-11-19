@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from 'framer-motion';
-import { Card, CardHeader, CardTitle, CardContent } from '@aetherflow/ui';
+import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { directives } from '../content/home';
 
 export function CoreDirectives() {

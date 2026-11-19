@@ -31,12 +31,14 @@ pub mod error;
 pub mod provision;
 
 pub use cli::{
-    build_package_runner_request, build_quota_runner_request, build_release_engine_options,
-    build_sandbox_runner_request, build_self_update_runner_request, parse_byte_size_arg,
-    parse_cli_args, render_help_text, resolve_package_lock_name, validate_service_request,
-    AfCommand, BackupCliCommand, BackupCreateKind, GlobalOptions, HelpTopic, MaintenanceCliCommand,
-    PackageCommand, ParsedInvocation, ProvisionCliCommand, QuotaCommand, ReleaseCliCommand,
-    ReleaseDispatchMode, SandboxCommand, ServiceCommand, ALLOWED_SYSTEMCTL_ACTIONS,
+    build_hosts_runner_request, build_package_runner_request,
+    build_package_runner_request_with_target, build_quota_runner_request,
+    build_release_engine_options, build_sandbox_runner_request, build_self_update_runner_request,
+    parse_byte_size_arg, parse_cli_args, render_help_text, resolve_package_lock_name,
+    validate_service_request, AfCommand, BackupCliCommand, BackupCreateKind, GlobalOptions,
+    HelpTopic, HostsCliCommand, MaintenanceCliCommand, PackageCommand, ParsedInvocation,
+    ProvisionCliCommand, QuotaCommand, ReleaseCliCommand, ReleaseDispatchMode, SandboxCommand,
+    ServiceCommand, ALLOWED_SYSTEMCTL_ACTIONS,
 };
 pub use client::{
     format_human_progress_line, parse_package_stream_body, parse_package_stream_line,
@@ -87,143 +89,85 @@ pub struct PackageListEntry {
     pub sandbox_profile: String,
 }
 
-/// Canonical list of legacy & modern allowlisted AetherFlow package identifiers.
+/// Canonical list of allowlisted AetherFlow package identifiers matching `config/packages.json` (77 packages).
 pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
-    "qbittorrent",
-    "rtorrent",
-    "deluge",
-    "transmission",
-    "sabnzbd",
-    "nzbget",
-    "sonarr",
-    "radarr",
-    "lidarr",
-    "readarr",
-    "prowlarr",
-    "bazarr",
-    "whisparr",
-    "autobrr",
-    "autodl",
-    "autodlirssi",
-    "plex",
-    "jellyfin",
-    "emby",
-    "tautulli",
-    "ombi",
-    "overseerr",
-    "jellyseerr",
-    "jackett",
-    "flaresolverr",
-    "syncthing",
-    "nextcloud",
-    "filebrowser",
-    "rclone",
-    "mergerfs",
-    "wireguard",
-    "openvpn",
-    "znc",
-    "thelounge",
-    "quassel",
-    "pyload",
-    "jdownloader",
-    "flood",
-    "rutorrent",
-    "unpackerr",
-    "recyclarr",
-    "tdarr",
-    "unmanic",
-    "handbrake",
-    "makemkv",
-    "filebot",
-    "komga",
-    "kavita",
-    "calibre",
-    "calibre-web",
-    "calibreweb",
-    "audiobookshelf",
-    "navidrome",
-    "airsonic",
-    "funkwhale",
-    "peertube",
-    "immich",
-    "photoprism",
-    "librephotos",
-    "piwigo",
-    "lychee",
-    "gitea",
-    "code-server",
-    "portainer",
-    "netdata",
-    "grafana",
-    "prometheus",
-    "uptime-kuma",
-    "uptimekuma",
-    "scrutiny",
-    "glances",
-    "vnstat",
-    "fail2ban",
-    "crowdsec",
-    "pihole",
     "adguardhome",
-    "unbound",
-    "nginx-proxy-manager",
-    "traefik",
-    "caddy",
-    "organizr",
-    "homarr",
-    "homepage",
-    "heimdall",
-    "dashy",
-    "freshrss",
-    "miniflux",
-    "tt-rss",
-    "wallabag",
-    "paperless-ngx",
-    "stirling-pdf",
-    "mealie",
-    "tandoor",
-    "grocy",
-    "homeassistant",
-    "mosquitto",
-    "zigbee2mqtt",
-    "nodered",
-    "vaultwarden",
-    "bitwarden",
-    "passbolt",
-    "guacamole",
-    "x2go",
-    "xrdp",
-    "novnc",
-    "kasmvnc",
-    "mcvnc",
-    "webmin",
-    "cockpit",
-    "phpmyadmin",
-    "adminer",
-    "mariadb",
-    "postgresql",
-    "redis",
-    "memcached",
-    "ffmpeg",
-    "vsftpd",
-    "bbr",
-    "maintainerr",
-    "threadfin",
-    "qui",
-    "tailscale",
-    "cloudplow",
+    "audiobookshelf",
+    "autobrr",
     "autoscan",
-    "librespeed",
-    "n8n",
-    "palate",
+    "bazarr",
+    "calibreweb",
+    "cloudplow",
+    "deluge",
     "dispatcharr",
     "duplicati",
-    "listenarr",
-    "notifiarr",
-    "requestrr",
-    "seedcross",
-    "piped",
+    "emby",
+    "fail2ban",
+    "filebot",
+    "filebrowser",
+    "flaresolverr",
+    "flood",
+    "gitea",
+    "grafana",
+    "homeassistant",
     "invidious",
+    "jackett",
+    "jellyfin",
+    "jellyseerr",
+    "kasmvnc",
+    "kavita",
+    "librespeed",
+    "lidarr",
+    "listenarr",
+    "maintainerr",
+    "mcvnc",
+    "mergerfs",
+    "n8n",
+    "navidrome",
+    "netdata",
+    "nextcloud",
+    "notifiarr",
+    "novnc",
+    "nzbget",
+    "ombi",
+    "organizr",
+    "overseerr",
+    "palate",
+    "paperless-ngx",
+    "pihole",
+    "piped",
+    "plex",
+    "prometheus",
+    "prowlarr",
+    "pyload",
+    "qbittorrent",
+    "quassel",
+    "qui",
+    "radarr",
+    "rclone",
+    "readarr",
+    "recyclarr",
+    "requestrr",
+    "rtorrent",
+    "rutorrent",
+    "sabnzbd",
+    "scrutiny",
+    "seedcross",
+    "sonarr",
+    "syncthing",
+    "tailscale",
+    "tautulli",
+    "thelounge",
+    "threadfin",
+    "transmission",
+    "unmanic",
+    "unpackerr",
+    "uptimekuma",
+    "vaultwarden",
+    "wireguard",
+    "x2go",
+    "xrdp",
+    "znc",
 ];
 
 /// Parses raw CLI arguments and executes the resulting command using the default
@@ -329,7 +273,40 @@ fn execute_command_inner(
         AfCommand::Backup(bak_cmd) => execute_backup_command(global, bak_cmd),
         AfCommand::Provision(prov_cmd) => execute_provision_command(global, prov_cmd),
         AfCommand::Maintenance(maint_cmd) => execute_maintenance_command(global, maint_cmd),
+        AfCommand::Hosts(hosts_cmd) => execute_hosts_command(global, hosts_cmd, transport),
     }
+}
+
+fn execute_hosts_command(
+    global: &GlobalOptions,
+    cmd: &HostsCliCommand,
+    transport: &dyn RunnerClientTransport,
+) -> CliResult<CliResponseEnvelope> {
+    let req = build_hosts_runner_request(cmd)?;
+    if global.dry_run {
+        return Ok(CliResponseEnvelope::success(
+            "hosts",
+            cmd.action_name(),
+            format!("[DRY-RUN] Would dispatch hosts {} to /v1/hosts", req.action),
+            Some(json!({ "dry_run": true, "request": req })),
+        ));
+    }
+
+    let resp = transport.execute_hosts(&req)?;
+    let msg = if resp.output.trim().is_empty() {
+        format!("Hosts {} completed", req.action)
+    } else {
+        format!("Hosts {} completed: {}", req.action, resp.output.trim())
+    };
+    Ok(CliResponseEnvelope::success(
+        "hosts",
+        cmd.action_name(),
+        msg,
+        Some(json!({
+            "request": req,
+            "runner_response": resp,
+        })),
+    ))
 }
 
 fn execute_maintenance_command(
@@ -561,18 +538,7 @@ fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> O
     None
 }
 
-fn resolve_cli_package_port(
-    global: &GlobalOptions,
-    pkg_id: &str,
-    explicit_port: Option<i32>,
-) -> Option<i32> {
-    if let Some(p) = explicit_port {
-        if (1024..=65535).contains(&p) {
-            return Some(p);
-        }
-    }
-
-    let lock_name = resolve_package_lock_name(pkg_id);
+fn candidate_cli_sqlite_dbs(global: &GlobalOptions) -> Vec<PathBuf> {
     let mut candidate_dbs = Vec::new();
     if let Some(ref r) = global.root {
         candidate_dbs.push(r.join("var/lib/aetherflow/aetherflow.sqlite"));
@@ -591,6 +557,156 @@ fn resolve_cli_package_port(
         ));
         candidate_dbs.push(PathBuf::from("data/aetherflow.sqlite"));
     }
+    candidate_dbs
+}
+
+fn query_app_update_target_version_from_sqlite(db_path: &Path, pkg_id: &str) -> Option<String> {
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    let sql = "SELECT COALESCE(latest_version, ''), COALESCE(installed_version, '') FROM app_updates WHERE LOWER(package_name) = LOWER(?1) LIMIT 1";
+    let (latest, installed) = conn
+        .query_row(sql, [pkg_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .ok()?;
+    for candidate in [latest, installed] {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn parse_version_from_lockfile_content(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((lhs, rhs)) = trimmed.split_once('=') {
+            let key = lhs.trim();
+            if matches!(
+                key,
+                "TARGET_VERSION" | "AF_TARGET_VERSION" | "VERSION" | "version"
+            ) {
+                let clean_rhs = rhs.trim().trim_matches('"').trim_matches('\'').trim();
+                if !clean_rhs.is_empty()
+                    && af_release::lifecycle::validate_target_version(clean_rhs)
+                {
+                    return Some(clean_rhs.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_local_version_marker(global: &GlobalOptions, pkg_id: &str) -> Option<String> {
+    let lock_name = resolve_package_lock_name(pkg_id);
+    let install_dir = resolve_install_lock_dir(global);
+    let mut marker_files = vec![
+        install_dir.join(format!(".{}.version", lock_name)),
+        install_dir.join(format!(".{}.version", pkg_id)),
+    ];
+    let opt_dir = if let Some(ref r) = global.root {
+        r.join("opt")
+    } else {
+        PathBuf::from("/opt")
+    };
+    marker_files.push(opt_dir.join(lock_name).join(".af-version"));
+    marker_files.push(opt_dir.join(pkg_id).join(".af-version"));
+
+    for path in marker_files {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lock_name);
+    for lock_path in [install_lock, swizzin_lock] {
+        if let Ok(raw) = std::fs::read_to_string(&lock_path) {
+            if let Some(ver) = parse_version_from_lockfile_content(&raw) {
+                return Some(ver);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_cli_package_target_version(
+    global: &GlobalOptions,
+    pkg_id: &str,
+    explicit_target: Option<&str>,
+    transport: &dyn RunnerClientTransport,
+) -> CliResult<String> {
+    if let Some(explicit) = explicit_target {
+        let trimmed = explicit.trim();
+        if !af_release::lifecycle::validate_target_version(trimmed) {
+            return Err(CliError::Validation(format!(
+                "invalid --target-version {:?} (must be a concrete version, commit SHA, or component manifest)",
+                explicit
+            )));
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    if let Ok(env_target) = std::env::var("AF_TARGET_VERSION") {
+        let trimmed = env_target.trim();
+        if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let lock_name = resolve_package_lock_name(pkg_id);
+    for db_path in candidate_cli_sqlite_dbs(global) {
+        if let Some(ver) = query_app_update_target_version_from_sqlite(&db_path, lock_name)
+            .or_else(|| query_app_update_target_version_from_sqlite(&db_path, pkg_id))
+        {
+            return Ok(ver);
+        }
+    }
+
+    if let Some(ver) = resolve_local_version_marker(global, pkg_id) {
+        return Ok(ver);
+    }
+
+    if !global.dry_run {
+        if let Ok(Some(probed)) = transport.probe_package_version(pkg_id) {
+            let trimmed = probed.trim();
+            if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+
+    if pkg_id.eq_ignore_ascii_case("readarr") {
+        return Ok("0.4.18.2805".to_string());
+    }
+
+    Ok("0.0.0".to_string())
+}
+
+fn resolve_cli_package_port(
+    global: &GlobalOptions,
+    pkg_id: &str,
+    explicit_port: Option<i32>,
+) -> Option<i32> {
+    if let Some(p) = explicit_port {
+        if (1024..=65535).contains(&p) {
+            return Some(p);
+        }
+    }
+
+    let lock_name = resolve_package_lock_name(pkg_id);
+    let candidate_dbs = candidate_cli_sqlite_dbs(global);
 
     for db_path in &candidate_dbs {
         if let Some(p) = query_persisted_ingress_port_from_sqlite(db_path, lock_name)
@@ -781,10 +897,25 @@ fn execute_package_command(
                 })),
             ))
         }
-        PackageCommand::Update { package, channel } => {
+        PackageCommand::Update {
+            package,
+            channel,
+            target_version,
+        } => {
             if let Some(ref pkg) = package {
                 let effective_port = resolve_cli_package_port(global, pkg, None);
-                let req = build_package_runner_request("update", pkg, effective_port)?;
+                let resolved_target = resolve_cli_package_target_version(
+                    global,
+                    pkg,
+                    target_version.as_deref(),
+                    transport,
+                )?;
+                let req = build_package_runner_request_with_target(
+                    "update",
+                    pkg,
+                    effective_port,
+                    Some(resolved_target),
+                )?;
                 if global.dry_run {
                     return Ok(CliResponseEnvelope::success(
                         "package",

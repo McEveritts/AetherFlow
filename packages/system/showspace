@@ -1,122 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Compatibility shim delegating legacy showspace to native `af showspace`.
+set -euo pipefail
 
-######################################################################
-#  USAGE:
-#    showspace
-#    showspace --user alice --json
-#    showspace --user alice --bytes
-######################################################################
-
-source /opt/AetherFlow/packages/common.sh 2>/dev/null || true
-
-JSON_OUTPUT=0
-BYTES_ONLY=0
-TARGET_USER=""
-
-showspace() {
-  local units magnitude
-  declare -a metric=('B' 'KB' 'MB' 'GB' 'TB' 'PB')
-  magnitude=0
-  units=$(echo "$1" | tr -d ',')
-  while [[ ${units/.*} -ge 1024 && ${magnitude} -lt 5 ]]; do
-    units=$(echo "scale=1; ${units}/1024" | bc)
-    ((magnitude++))
-  done
-  echo -n "${units}${metric[$magnitude]}"
-}
-
-user_bytes() {
-  local home_path
-  home_path="/home/$1"
-  if [[ ! -d "${home_path}" ]]; then
-    echo 0
-    return 0
-  fi
-  du -bs "${home_path}" 2>/dev/null | cut -f 1
-}
-
-parse_args() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --json)
-        JSON_OUTPUT=1
-        shift
-        ;;
-      --bytes)
-        BYTES_ONLY=1
-        shift
-        ;;
-      --user)
-        TARGET_USER="$2"
-        shift 2
-        ;;
-      --help|-h)
-        echo "Usage: showspace [--user USER] [--json] [--bytes]"
-        exit 0
-        ;;
-      *)
-        echo "Unknown argument: $1" >&2
-        exit 1
-        ;;
-    esac
-  done
-}
-
-emit_single_user() {
-  local username size human
-  username="$1"
-  size=$(user_bytes "${username}")
-  human=$(showspace "${size}")
-
-  if [[ ${JSON_OUTPUT} -eq 1 ]]; then
-    printf '{"user":"%s","bytes":%s,"human":"%s"}\n' "${username}" "${size}" "${human}"
-    return 0
-  fi
-
-  if [[ ${BYTES_ONLY} -eq 1 ]]; then
-    echo "${size}"
-    return 0
-  fi
-
-  printf "%8s %s/\n" "${human}" "${username}"
-}
-
-emit_all_users() {
-  local first=1
-  if [[ ${JSON_OUTPUT} -eq 1 ]]; then
-    printf "["
-  fi
-
-  for dir in /home/*; do
-    [[ -d "${dir}" ]] || continue
-    local username size human
-    username=$(basename "${dir}")
-    size=$(user_bytes "${username}")
-    [[ "${size}" -gt 500 ]] || continue
-    human=$(showspace "${size}")
-
-    if [[ ${JSON_OUTPUT} -eq 1 ]]; then
-      if [[ ${first} -eq 0 ]]; then
-        printf ","
-      fi
-      printf '{"user":"%s","bytes":%s,"human":"%s"}' "${username}" "${size}" "${human}"
-      first=0
-    elif [[ ${BYTES_ONLY} -eq 1 ]]; then
-      echo "${size}"
-    else
-      printf "%8s %s/\n" "${human}" "${username}"
+for af_bin in "${AETHERFLOW_CLI_BIN:-}" /opt/AetherFlow/current/bin/af /opt/AetherFlow/current/af /usr/local/bin/af-cli /opt/AetherFlow/bin/af-cli /usr/local/bin/af; do
+  if [[ -n "$af_bin" && -x "$af_bin" && ! "$af_bin" -ef "$0" ]]; then
+    if [[ "$af_bin" != "/usr/local/bin/af" ]] || ! grep -q '/usr/local/bin/AetherFlow/system/af' "$af_bin" 2>/dev/null; then
+      exec "$af_bin" showspace "$@"
     fi
-  done
-
-  if [[ ${JSON_OUTPUT} -eq 1 ]]; then
-    printf "]\n"
   fi
-}
+done
 
-parse_args "$@"
-
-if [[ -n "${TARGET_USER}" ]]; then
-  emit_single_user "${TARGET_USER}"
-else
-  emit_all_users
-fi
+printf 'Native AetherFlow CLI binary (/usr/local/bin/af) not found.\n' >&2
+exit 1

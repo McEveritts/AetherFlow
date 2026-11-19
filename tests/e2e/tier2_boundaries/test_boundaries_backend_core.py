@@ -209,35 +209,41 @@ class TestB11RemovedRouteAccessReturns404(TestCase):
         super().__init__("T2_B11_01", "F11", 2, "Direct access to deleted Next.js server route returns 404")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_false(inspector.file_exists("frontend/src/app/api/fs/route.ts"), "B11: Route file must not exist on disk")
+        self.assert_false(inspector.file_exists("frontend/src/app/api/fs/route.ts"), "B11: Legacy route file must not exist on disk")
+        if mode == "live" and client.is_server_reachable():
+            code, _, _ = client.request("GET", "/api/fs/route.ts")
+            self.assert_status_code(code, 404, "B11: Legacy Next.js route path must return 404")
 
 
 class TestB11BuildFailsIfDynamicRouteReintroduced(TestCase):
     def __init__(self):
-        super().__init__("T2_B11_02", "F11", 2, "Next.js static export fails if any non-static server route exists")
+        super().__init__("T2_B11_02", "F11", 2, "frontend-rs Trunk.toml enforces static WASM release bundle without Next.js SSR")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        config = inspector.read_file("frontend/next.config.ts")
-        self.assert_true(bool(config and "output: 'export'" in config or "output: \"export\"" in config), "B11: next.config.ts must enforce static export mode")
+        trunk_toml = inspector.read_file("frontend-rs/Trunk.toml")
+        self.assert_false(inspector.file_exists("frontend/next.config.ts"), "B11: Legacy next.config.ts must be deleted")
+        self.assert_true(bool(trunk_toml and 'dist = "dist"' in trunk_toml and "release = true" in trunk_toml), "B11: Trunk.toml must build static WASM dist")
 
 
 class TestB11PathSelectorFailsGracefullyOnNetworkError(TestCase):
     def __init__(self):
-        super().__init__("T2_B11_03", "F11", 2, "PathSelector displays inline error when filesystem API is unreachable")
+        super().__init__("T2_B11_03", "F11", 2, "DirectoryPicker displays inline ResourceFeedback error when filesystem API is unreachable")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        selector = inspector.read_file("frontend/src/components/ui/PathSelector.tsx")
-        self.assert_true(bool(selector and ("catch" in selector or "error" in selector.lower())), "B11: PathSelector must handle API fetch errors")
+        picker = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/fileshare/local_storage.rs")
+        self.assert_true(bool(picker and ("ResourceFeedback" in picker or "resource.error" in picker)), "B11: DirectoryPicker must handle API fetch errors")
 
 
 class TestB11NoFsPolyfillsInClientBundle(TestCase):
     def __init__(self):
-        super().__init__("T2_B11_04", "F11", 2, "Client bundles contain zero webpack fallbacks or polyfills for node fs")
+        super().__init__("T2_B11_04", "F11", 2, "E2E and WASM manifests contain zero Node fs-extra or webpack polyfills")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        package_json = inspector.read_file("frontend/package.json")
-        if package_json:
-            self.assert_not_in("fs-extra", package_json, "B11: Client bundle must not depend on node fs-extra")
+        e2e_pkg = inspector.read_file("e2e/package.json")
+        core_toml = inspector.read_file("frontend-rs/crates/af-web-core/Cargo.toml")
+        self.assert_true(bool(e2e_pkg and core_toml), "B11: e2e/package.json and af-web-core/Cargo.toml must exist")
+        self.assert_not_in("fs-extra", e2e_pkg or "", "B11: e2e workspace must not depend on node fs-extra")
+        self.assert_not_in("next", e2e_pkg or "", "B11: e2e workspace must not depend on Next.js")
 
 
 class TestB11IndexHtmlProducedInExport(TestCase):

@@ -168,6 +168,8 @@ pub fn should_attach_csrf(method: &str, input: &str, authorization: Option<&str>
         "/api/auth/",
         "/api/v1/admin/",
         "/api/admin/",
+        "/api/v1/ingress/",
+        "/api/ingress/",
         "/plugins/",
         "/api/v1/mcbrowser/",
         "/api/v1/fileshare/",
@@ -1420,6 +1422,8 @@ mod tests {
             "/api/auth/login",
             "/api/v1/admin/users",
             "/api/admin/users",
+            "/api/v1/ingress/apps/sonarr",
+            "/api/ingress/apps/sonarr",
             "/plugins/example/action",
             "/api/v1/mcbrowser/files",
             "/api/v1/fileshare/upload",
@@ -1453,6 +1457,8 @@ mod tests {
         ));
         assert!(!should_attach_csrf("POST", "/external", None));
         for path in [
+            "/api/v1/ingress-other/apps/sonarr",
+            "/api/ingress-other/apps/sonarr",
             "/plugins-other/action",
             "/api/v1/mcbrowser-other/files",
             "/api/v1/fileshare-other/upload",

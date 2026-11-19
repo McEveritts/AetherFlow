@@ -8,6 +8,19 @@ fn update_status_auto_allowed(
     runner_available == Some(true) || has_saved_job || explicit_requests > 0
 }
 
+fn runner_probe_path(is_admin: bool) -> Option<&'static str> {
+    is_admin.then_some("/api/v1/admin/network/status")
+}
+
+fn update_status_auto_allowed_for_role(
+    is_admin: bool,
+    runner_available: Option<bool>,
+    has_saved_job: bool,
+    explicit_requests: u64,
+) -> bool {
+    !is_admin || update_status_auto_allowed(runner_available, has_saved_job, explicit_requests)
+}
+
 pub(super) fn update_status(value: &Value) -> Value {
     let mut normalized = value.clone();
     if let Ok(status) = serde_json::from_value::<SelfUpdateJobStatus>(value.clone()) {
@@ -44,10 +57,33 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
     let context = app();
     let check = use_api("/api/v1/auth/system/update/check".to_string());
     let job = RwSignal::new(storage_get("af-update-operation").unwrap_or_default());
-    let runner_probe = use_api("/api/v1/admin/network/status".to_string());
+    let runner_probe_data = RwSignal::new(Value::Null);
+    let runner_probe_generation = RwSignal::new(0u64);
+    Effect::new(move |_| {
+        let auth = context.session_epoch.get();
+        let path = runner_probe_path(context.is_admin());
+        runner_probe_generation.update(|ticket| *ticket += 1);
+        let ticket = runner_probe_generation.get_untracked();
+        let Some(path) = path else {
+            runner_probe_data.set(Value::Null);
+            return;
+        };
+        spawn_local(async move {
+            let result = ApiClient.get(path).await;
+            if runner_probe_generation.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(auth)
+            {
+                return;
+            }
+            match result {
+                Ok(data) => runner_probe_data.set(data),
+                Err(_) => runner_probe_data.set(Value::Null),
+            }
+        });
+    });
     let runner_available = Signal::derive(move || {
         crate::tabs::contracts::decode::<crate::tabs::contracts::NetworkStatus>(
-            &runner_probe.data.get(),
+            &runner_probe_data.get(),
         )
         .runner_available
     });
@@ -59,13 +95,14 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
     };
     let generation = RwSignal::new(0u64);
     Effect::new(move |_| {
+        let is_admin = context.is_admin();
         let available = runner_available.get();
         let unit = job.get();
         let requests = status.revision.get();
         let auth = context.session_epoch.get();
         generation.update(|ticket| *ticket += 1);
         let ticket = generation.get_untracked();
-        if !update_status_auto_allowed(available, !unit.is_empty(), requests) {
+        if !update_status_auto_allowed_for_role(is_admin, available, !unit.is_empty(), requests) {
             status.loading.set(false);
             status.error.set(None);
             return;
@@ -483,5 +520,28 @@ mod tests {
                 "runner={available:?}, saved={saved}, requests={requests}"
             );
         }
+    }
+
+    #[test]
+    fn non_admin_never_probes_admin_network_status_and_allows_update_status() {
+        assert_eq!(
+            runner_probe_path(true),
+            Some("/api/v1/admin/network/status")
+        );
+        assert_eq!(runner_probe_path(false), None);
+        assert!(update_status_auto_allowed_for_role(false, None, false, 0));
+        assert!(!update_status_auto_allowed_for_role(true, None, false, 0));
+        assert!(!update_status_auto_allowed_for_role(
+            true,
+            Some(false),
+            false,
+            0
+        ));
+        assert!(update_status_auto_allowed_for_role(
+            true,
+            Some(true),
+            false,
+            0
+        ));
     }
 }

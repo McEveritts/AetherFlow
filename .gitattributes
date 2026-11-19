@@ -26,6 +26,5 @@
 *.db binary
 
 # Mark vendored third-party C/C++ sources and static bundles as vendored for GitHub Linguist
-setup/sources/** linguist-vendored
-frontend/public/** linguist-vendored
+frontend-rs/public/** linguist-vendored
 

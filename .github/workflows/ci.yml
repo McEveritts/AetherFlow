@@ -120,38 +120,6 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_v4_release_bootstrap_ci.py' -v
           python3 tests/check_shell_hygiene.py
 
-  frontend:
-    name: React Reference Frontend Validation
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: "24.22.2"
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install Dependencies
-        working-directory: .
-        run: npm ci
-
-      - name: Lint Frontend
-        run: npm run lint
-
-      - name: Typecheck Frontend and Tests
-        run: ../node_modules/.bin/tsc --noEmit --incremental false
-
-      - name: Unit Tests
-        run: npm run test:ci
-
   frontend-rs:
     name: Frontend (Rust WASM & Tests)
     runs-on: ubuntu-22.04
@@ -334,12 +302,12 @@ jobs:
       - name: Install Playwright Browser Engines
         run: |
           npm ci
-          cd frontend
+          cd e2e
           npx playwright install --with-deps chromium firefox webkit
 
       - name: Typecheck Playwright E2E Suite
         run: |
-          cd frontend
+          cd e2e
           ../node_modules/.bin/tsc --noEmit --incremental false
 
       - name: Execute External Frontend Full-Stack & Playwright E2E
@@ -398,6 +366,6 @@ jobs:
           (cd "${contract_root}" && exec "${api_binary}") >"${contract_root}/api.log" 2>&1 &
           api_pid=$!
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 --retry-max-time 60 "${PLAYWRIGHT_BASE_URL}/health/ready"
-          cd frontend
+          cd e2e
           # Discover every contract suite automatically.
           npx playwright test 'tests/e2e/(?!.*[.]live[.]spec[.]ts$|visual[.]spec[.]ts$).*[.]spec[.]ts$' --workers=1

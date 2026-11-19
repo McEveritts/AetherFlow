@@ -278,7 +278,7 @@ static HEAL_STATES: Lazy<Mutex<HashMap<String, ServiceHealState>>> =
 
 /// Spawns the `af-heal` background recovery worker (`interval_secs` interval, e.g., 10s).
 ///
-/// Checks critical managed systemd services (`nginx`, `smbd`, `wsdd`, plus any
+/// Checks critical managed systemd services (`apache2`, `aetherflow-runner`, plus any
 /// installed systemd apps whose lockfile exists in `/install/`), tracks failure counts
 /// and exponential backoff (`10s * 2^attempt`, max 3 retries before marking `exhausted`
 /// until the service recovers), attempts [`crate::control_service(unit, "restart")`],
@@ -334,7 +334,7 @@ fn resolve_installed_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Collects the list of critical systemd units (`nginx`, `smbd`, `wsdd`) and
+/// Collects the list of critical systemd units (`apache2`, `aetherflow-runner`) and
 /// any installed systemd packages whose lockfile exists in `/install/`.
 fn is_component_policy_monitored(policy: &crate::ServiceComponentPolicy) -> bool {
     matches!(policy.role, "required" | "timer") || (policy.role == "optional" && policy.configured)
@@ -347,9 +347,11 @@ struct HealPollInventory {
 
 fn collect_monitored_systemd_units() -> anyhow::Result<HealPollInventory> {
     let mut units: Vec<(String, String)> = vec![
-        ("nginx".to_string(), "Nginx".to_string()),
-        ("smbd".to_string(), "Samba (smbd)".to_string()),
-        ("wsdd".to_string(), "WSDD".to_string()),
+        ("apache2".to_string(), "Apache2 Web Server".to_string()),
+        (
+            "aetherflow-runner".to_string(),
+            "AetherFlow Runner".to_string(),
+        ),
     ];
     let mut seen: HashSet<String> = units.iter().map(|(u, _)| u.clone()).collect();
     let mut installed = seen.clone();
@@ -711,26 +713,27 @@ fn ensure_smart_backup_columns() {
 fn check_and_run_smart_backup() {
     ensure_smart_backup_columns();
 
-    let (enabled, target_hour, persisted_last_run) = {
+    let (enabled, target_hour, persisted_last_run, persisted_next_run) = {
         let Ok(conn) = af_db::get_conn() else {
             return;
         };
 
-        let row: Result<(String, i64, String, String), _> = conn.query_row(
+        let row: Result<(String, i64, String, String, String), _> = conn.query_row(
             "SELECT
                 LOWER(COALESCE(CAST(smart_backup_enabled AS TEXT), 'false')),
                 COALESCE(CAST(smart_backup_hour AS INTEGER), 3),
                 COALESCE(CAST(smart_backup_last_run AS TEXT), ''),
-                LOWER(COALESCE(backup_schedule_mode, 'manual'))
+                LOWER(COALESCE(backup_schedule_mode, 'manual')),
+                COALESCE(CAST(backup_next_run_at AS TEXT), '')
              FROM settings WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         );
 
         match row {
-            Ok((en, hr, last_run, sched_mode)) => {
+            Ok((en, hr, last_run, sched_mode, next_run)) => {
                 let is_enabled = en == "true" || en == "1" || sched_mode == "smart";
-                (is_enabled, hr.clamp(0, 23) as u32, last_run)
+                (is_enabled, hr.clamp(0, 23) as u32, last_run, next_run)
             }
             Err(_) => return,
         }
@@ -741,7 +744,16 @@ fn check_and_run_smart_backup() {
     }
 
     let now = Utc::now();
-    if now.hour() != target_hour {
+    let trimmed_next_run = persisted_next_run.trim();
+    if !trimmed_next_run.is_empty() {
+        if let Ok(next_dt) = chrono::DateTime::parse_from_rfc3339(trimmed_next_run) {
+            if now < next_dt.with_timezone(&Utc) {
+                return;
+            }
+        } else if now.hour() != target_hour {
+            return;
+        }
+    } else if now.hour() != target_hour {
         return;
     }
 
@@ -798,11 +810,32 @@ fn resolve_backups_directory() -> PathBuf {
     } else {
         None
     };
-    af_models::resolve_active_backup_dir_from_env(None, db_path_opt, "data/backups")
+    let has_explicit_override = env::var("AETHERFLOW_BACKUP_DIR")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+        || env::var("AETHERFLOW_FS_ROOT")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        || env::var("AETHERFLOW_CONFIG_ROOT")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        || db_path_opt.is_some_and(|p| p != Path::new("/var/lib/aetherflow/aetherflow.sqlite"));
+    if !has_explicit_override {
+        let default_prod = Path::new("/var/backups/aetherflow");
+        if default_prod.is_dir() || fs::create_dir_all(default_prod).is_ok() {
+            return default_prod.to_path_buf();
+        }
+    }
+    af_models::resolve_active_backup_dir_from_env(None, db_path_opt, "/var/backups/aetherflow")
 }
 
 fn execute_online_sqlite_backup() -> anyhow::Result<PathBuf> {
     let backup_dir = resolve_backups_directory();
+    let _maint_lock = af_host::HostMaintenanceLockGuard::acquire_default(
+        Some(&backup_dir),
+        Duration::from_secs(30),
+    )
+    .map_err(|e| anyhow::anyhow!("smart backup maintenance lock unavailable: {e}"))?;
     let db_path_str = af_db::get_db_path();
     let db_path = PathBuf::from(&db_path_str);
 
@@ -5247,6 +5280,53 @@ fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
 
 static MEDIAFLOW_POLLER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MEDIAFLOW_PROCESSING: AtomicBool = AtomicBool::new(false);
+static MEDIAFLOW_PROGRESS_TX: Lazy<tokio::sync::broadcast::Sender<String>> =
+    Lazy::new(|| tokio::sync::broadcast::channel(256).0);
+
+/// Subscribes to structured JSON MediaFlow progress events.
+pub fn subscribe_mediaflow_progress() -> tokio::sync::broadcast::Receiver<String> {
+    MEDIAFLOW_PROGRESS_TX.subscribe()
+}
+
+/// Broadcasts a structured JSON MediaFlow progress event to active subscribers.
+pub fn publish_mediaflow_progress(event: &serde_json::Value) {
+    let _ = MEDIAFLOW_PROGRESS_TX.send(event.to_string());
+}
+
+async fn probe_mediaflow_duration_secs(src_path: &Path) -> Option<f64> {
+    let mut cmd = Command::new("ffprobe");
+    cmd.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+    ])
+    .arg(src_path)
+    .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|&d| d.is_finite() && d > 0.0)
+}
+
+fn mediaflow_transcode_timeout() -> Duration {
+    let secs = env::var("AETHERFLOW_MEDIAFLOW_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(4 * 3600);
+    Duration::from_secs(secs)
+}
 
 /// Spawns the background MediaFlow worker poller (10-second interval) that picks up
 /// `APPROVED` items in `mediaflow_queue`, transitions them to `PROCESSING`, invokes
@@ -5276,6 +5356,8 @@ pub fn start_mediaflow_poller() {
 /// Processes a single `APPROVED` job from `mediaflow_queue` if one exists and no job
 /// is currently running. Returns `true` if a job was picked up and processed.
 pub async fn process_next_mediaflow_job() -> bool {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
     if MEDIAFLOW_PROCESSING.swap(true, Ordering::SeqCst) {
         return false;
     }
@@ -5313,6 +5395,12 @@ pub async fn process_next_mediaflow_job() -> bool {
     let src_path = Path::new(&file_path);
     if !src_path.exists() {
         record_mediaflow_failure(job_id, "Source file does not exist");
+        publish_mediaflow_progress(&serde_json::json!({
+            "status": "failed",
+            "file": file_path,
+            "progress": 0,
+            "message": "Source file does not exist",
+        }));
         return true;
     }
 
@@ -5323,6 +5411,8 @@ pub async fn process_next_mediaflow_job() -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
     let out_path = parent_dir.join(format!("{}_hevc.mkv", stem));
+    let temp_output = parent_dir.join(format!(".{}_hevc.{}.tmp.mkv", stem, job_id));
+    let _ = fs::remove_file(&temp_output);
 
     let mut args: Vec<String> = vec!["-y".to_string()];
     if !flags.hw_accel.is_empty() && flags.hw_accel != "none" {
@@ -5353,7 +5443,10 @@ pub async fn process_next_mediaflow_job() -> bool {
         "5M".to_string(),
         "-c:a".to_string(),
         "copy".to_string(),
-        out_path.to_string_lossy().to_string(),
+        "-nostats".to_string(),
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        temp_output.to_string_lossy().to_string(),
     ]);
 
     tracing::info!(
@@ -5362,17 +5455,145 @@ pub async fn process_next_mediaflow_job() -> bool {
         codec = %video_codec,
         "mediaflow: starting transcode job"
     );
+    publish_mediaflow_progress(&serde_json::json!({
+        "status": "running",
+        "file": file_path,
+        "progress": 0,
+        "message": "Starting transcode",
+    }));
 
-    match Command::new("ffmpeg").args(&args).output().await {
-        Ok(output) if output.status.success() => {
-            let new_size = fs::metadata(&out_path).map(|m| m.len() as i64).unwrap_or(0);
+    let duration_secs = probe_mediaflow_duration_secs(src_path).await;
+    let timeout = mediaflow_transcode_timeout();
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(err) => {
+            let _ = fs::remove_file(&temp_output);
+            let msg = format!("FFmpeg execution error: {}", err);
+            record_mediaflow_failure(job_id, &msg);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": msg,
+            }));
+            return true;
+        }
+    };
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let progress_file = file_path.clone();
+
+    let stdout_task = tokio::spawn(async move {
+        let Some(stdout) = stdout_pipe else {
+            return;
+        };
+        let mut lines = BufReader::new(stdout).lines();
+        let mut out_time_secs: f64 = 0.0;
+        let mut last_pct: i32 = -1;
+        let mut last_emit = Instant::now() - Duration::from_secs(10);
+        while let Ok(Some(line)) = lines.next_line().await {
+            let trimmed = line.trim();
+            if let Some(val) = trimmed
+                .strip_prefix("out_time_us=")
+                .or_else(|| trimmed.strip_prefix("out_time_ms="))
+            {
+                if let Ok(us) = val.parse::<i64>() {
+                    out_time_secs = (us.max(0) as f64) / 1_000_000.0;
+                }
+            } else if trimmed == "progress=continue" || trimmed == "progress=end" {
+                let pct = duration_secs
+                    .filter(|&d| d > 0.0)
+                    .map(|d| ((out_time_secs / d) * 100.0).clamp(0.0, 99.0) as i32)
+                    .unwrap_or(0);
+                if pct != last_pct || last_emit.elapsed() >= Duration::from_secs(2) {
+                    last_pct = pct;
+                    last_emit = Instant::now();
+                    publish_mediaflow_progress(&serde_json::json!({
+                        "status": "running",
+                        "file": progress_file,
+                        "progress": pct,
+                        "message": if duration_secs.is_some() {
+                            format!("Transcoding ({pct}%)")
+                        } else {
+                            format!("Transcoding ({out_time_secs:.1}s)")
+                        },
+                    }));
+                }
+            }
+        }
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let Some(stderr) = stderr_pipe else {
+            return String::new();
+        };
+        let mut buf = Vec::new();
+        let _ = stderr.take(64 * 1024).read_to_end(&mut buf).await;
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    let wait_result = tokio::time::timeout(timeout, async {
+        let status = child.wait().await;
+        let _ = stdout_task.await;
+        let stderr_text = stderr_task.await.unwrap_or_default();
+        (status, stderr_text)
+    })
+    .await;
+
+    match wait_result {
+        Ok((Ok(status), _stderr_text)) if status.success() => {
+            let temp_size = fs::metadata(&temp_output)
+                .ok()
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if temp_size == 0 {
+                let _ = fs::remove_file(&temp_output);
+                let msg = "FFmpeg exited cleanly but produced an empty or missing output file";
+                record_mediaflow_failure(job_id, msg);
+                publish_mediaflow_progress(&serde_json::json!({
+                    "status": "failed",
+                    "file": file_path,
+                    "progress": 0,
+                    "message": msg,
+                }));
+                return true;
+            }
 
             let trash_dir = parent_dir.join(".mediaflow_trash");
             let _ = fs::create_dir_all(&trash_dir);
-            if let Some(fname) = src_path.file_name() {
-                let _ = fs::rename(src_path, trash_dir.join(fname));
+            let trashed_src = src_path.file_name().map(|fname| trash_dir.join(fname));
+            if let Some(ref dest) = trashed_src {
+                let _ = fs::rename(src_path, dest);
             }
 
+            if let Err(err) = fs::rename(&temp_output, &out_path) {
+                if let Some(ref dest) = trashed_src {
+                    if dest.exists() && !src_path.exists() {
+                        let _ = fs::rename(dest, src_path);
+                    }
+                }
+                let _ = fs::remove_file(&temp_output);
+                let msg = format!("Failed to finalize transcoded output: {}", err);
+                record_mediaflow_failure(job_id, &msg);
+                publish_mediaflow_progress(&serde_json::json!({
+                    "status": "failed",
+                    "file": file_path,
+                    "progress": 0,
+                    "message": msg,
+                }));
+                return true;
+            }
+
+            let new_size = temp_size as i64;
             let out_str = out_path.to_string_lossy().to_string();
             if let Ok(conn) = af_db::get_conn() {
                 let _ = conn.execute(
@@ -5386,23 +5607,48 @@ pub async fn process_next_mediaflow_job() -> bool {
                 new_size = new_size,
                 "mediaflow: transcode completed"
             );
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "completed",
+                "file": out_str,
+                "progress": 100,
+                "message": "Transcode completed",
+            }));
         }
-        Ok(output) => {
-            let _ = fs::remove_file(&out_path);
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let err_log = tail_error_log(&combined, 1000);
-            record_mediaflow_failure(
-                job_id,
-                &format!("FFmpeg error ({}): {}", output.status, err_log),
-            );
+        Ok((Ok(status), stderr_text)) => {
+            let _ = fs::remove_file(&temp_output);
+            let err_log = tail_error_log(&stderr_text, 1000);
+            let msg = format!("FFmpeg error ({}): {}", status, err_log);
+            record_mediaflow_failure(job_id, &msg);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": msg,
+            }));
         }
-        Err(err) => {
-            let _ = fs::remove_file(&out_path);
-            record_mediaflow_failure(job_id, &format!("FFmpeg execution error: {}", err));
+        Ok((Err(err), _)) => {
+            let _ = fs::remove_file(&temp_output);
+            let msg = format!("FFmpeg execution error: {}", err);
+            record_mediaflow_failure(job_id, &msg);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": msg,
+            }));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = fs::remove_file(&temp_output);
+            let msg = format!("FFmpeg timed out after {}s", timeout.as_secs());
+            record_mediaflow_failure(job_id, &msg);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": msg,
+            }));
         }
     }
 
@@ -5461,8 +5707,8 @@ mod tests {
         };
         let seeded = HashMap::from([
             ("fixture-main".to_string(), exhausted.clone()),
-            ("nginx".to_string(), exhausted.clone()),
-            ("smbd".to_string(), backed_off),
+            ("apache2".to_string(), exhausted.clone()),
+            ("aetherflow-runner".to_string(), backed_off),
             ("retired-unit".to_string(), exhausted.clone()),
         ]);
         *HEAL_STATES.lock().unwrap() = seeded.clone();
@@ -5508,8 +5754,8 @@ mod tests {
         {
             let states = HEAL_STATES.lock().unwrap();
             assert_eq!(states["fixture-main"], exhausted);
-            assert_eq!(states["nginx"], ServiceHealState::default());
-            assert_eq!(states["smbd"], ServiceHealState::default());
+            assert_eq!(states["apache2"], ServiceHealState::default());
+            assert_eq!(states["aetherflow-runner"], ServiceHealState::default());
             assert!(!states.contains_key("retired-unit"));
         }
         fixture.command("systemctl", "printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\ntest \"$1\" = is-active || exit 92\necho active\n");
@@ -5520,7 +5766,7 @@ mod tests {
         );
         let suspended = HashMap::from([
             (
-                "nginx".to_string(),
+                "apache2".to_string(),
                 ServiceHealState {
                     failure_count: 1,
                     next_retry_at: None,
@@ -5643,7 +5889,7 @@ mod tests {
         let observed = std::fs::read_to_string(&calls).unwrap_or_default();
         assert_eq!(
             observed.lines().count(),
-            3,
+            2,
             "healthy polling must not take mutation locks: {observed}"
         );
         assert!(observed.lines().all(|line| line.starts_with("is-active ")));
@@ -5675,7 +5921,7 @@ mod tests {
         );
         std::fs::rename(&hidden, &path).unwrap();
         runtime.block_on(perform_heal_check());
-        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -9950,5 +10196,134 @@ signal.pause()'
             "1.9.1",
             "1.9.1-2+deb13u1"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_mediaflow_progress_broadcast_and_empty_output_preserves_source() {
+        let name =
+            "workers::tests::test_mediaflow_progress_broadcast_and_empty_output_preserves_source";
+        if std::env::var("AF_MEDIAFLOW_TEST_CHILD").as_deref() != Ok(name) {
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("AF_MEDIAFLOW_TEST_CHILD", name)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!("af-mediaflow-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("media")).unwrap();
+        let db_path = root.join("aetherflow.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        af_db::init_db().unwrap();
+
+        let src_file = root.join("media/movie.mp4");
+        fs::write(&src_file, b"original-video-bytes").unwrap();
+
+        // Fake ffmpeg that exits 0 but writes a 0-byte output file
+        let fake_ffmpeg = root.join("bin/ffmpeg");
+        fs::write(
+            &fake_ffmpeg,
+            "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\n: > \"$out\"\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+        let fake_ffprobe = root.join("bin/ffprobe");
+        fs::write(&fake_ffprobe, "#!/bin/sh\necho 10.0\n").unwrap();
+        fs::set_permissions(&fake_ffprobe, fs::Permissions::from_mode(0o755)).unwrap();
+        env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("bin").display(),
+                env::var("PATH").unwrap()
+            ),
+        );
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO mediaflow_queue (file_path, original_codec, original_size, status) VALUES (?1, 'h264', 20, 'APPROVED')",
+                params![src_file.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+
+        let mut rx = subscribe_mediaflow_progress();
+        assert!(process_next_mediaflow_job().await);
+
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(serde_json::from_str::<serde_json::Value>(&msg).unwrap());
+        }
+        assert!(events.iter().any(|e| e["status"] == "running"));
+        assert!(events.iter().any(|e| e["status"] == "failed"));
+
+        // Source file must remain untouched!
+        assert_eq!(fs::read(&src_file).unwrap(), b"original-video-bytes");
+        let status: String = af_db::get_conn()
+            .unwrap()
+            .query_row("SELECT status FROM mediaflow_queue LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "FAILED");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_smart_backup_honors_persisted_next_run_and_acquires_lock() {
+        let name = "workers::tests::test_smart_backup_honors_persisted_next_run_and_acquires_lock";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        let root = env::temp_dir().join(format!("af-smart-backup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("aetherflow.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        env::set_var("AETHERFLOW_BACKUP_DIR", root.join("backups"));
+        af_db::init_db().unwrap();
+        ensure_smart_backup_columns();
+
+        // Future backup_next_run_at must prevent running prematurely
+        let future = (Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "UPDATE settings SET smart_backup_enabled = 'true', smart_backup_hour = ?1, smart_backup_last_run = '', backup_schedule_mode = 'smart', backup_next_run_at = ?2 WHERE id = 1",
+                params![Utc::now().hour() as i64, future],
+            )
+            .unwrap();
+        }
+        check_and_run_smart_backup();
+        assert!(!root.join("backups").exists());
+
+        // Past backup_next_run_at must run and create a verified snapshot
+        let past = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "UPDATE settings SET backup_next_run_at = ?1 WHERE id = 1",
+                params![past],
+            )
+            .unwrap();
+        }
+        check_and_run_smart_backup();
+        let backups: Vec<_> = fs::read_dir(root.join("backups"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sqlite"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

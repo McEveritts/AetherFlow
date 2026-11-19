@@ -18,7 +18,6 @@ use af_models::{Package, PackageAutomation};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -37,6 +36,7 @@ const EMBEDDED_AUTOMATION_JSON: &str = include_str!("../../../../config/package_
 
 mod package_jobs;
 pub use package_jobs::*;
+pub use workers::{publish_mediaflow_progress, subscribe_mediaflow_progress};
 
 // Shared with health recovery and API controls. Cross-process exclusion lives
 // in the runner's maintenance lock, since an API mutex cannot survive restart.
@@ -414,6 +414,12 @@ pub struct BlueprintSetupResult {
     pub public_domain: String,
     pub external_access_enabled: bool,
     pub config_applied: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutated_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unprivileged_skips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub ingress_synced: bool,
     pub hosts_synced: bool,
     pub network_dns_synced: bool,
@@ -425,6 +431,16 @@ fn default_blueprint_mutator_meta(app_name: &str) -> (&'static str, String, &'st
         "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
             ("xml", format!("/var/lib/{}/config.xml", clean), "Port")
         }
+        "bazarr" => (
+            "yaml",
+            "/var/lib/bazarr/config/config.yaml".to_string(),
+            "general.port",
+        ),
+        "dispatcharr" => (
+            "ini",
+            "/etc/dispatcharr/dispatcharr.env".to_string(),
+            "DISPATCHARR_PORT",
+        ),
         "jellyfin" => (
             "xml",
             "/etc/jellyfin/network.xml".to_string(),
@@ -471,8 +487,7 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
     let pkgs = get_package_catalog().ok()?;
     let p = pkgs.into_iter().find(|x| x.name == app_name)?;
     let (mutator_type, config_file_path, port_config_key) = default_blueprint_mutator_meta(&p.name);
-    let supports_dynamic_port =
-        p.default_port > 0 && !matches!(p.name.as_str(), "plex" | "calibreweb" | "calibre-web");
+    let supports_dynamic_port = p.default_port > 0 && !mutator_type.is_empty();
     Some(AppBlueprint {
         app_name: p.name.clone(),
         service_name: if p.service_name.is_empty() {
@@ -615,59 +630,68 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
 
     // 1. Check `<app>.aether.local`
     if let Some(app_prefix) = host.strip_suffix(".aether.local") {
-        if let Some(bp) = get_blueprint(app_prefix) {
-            let active_config = af_db::get_app_ingress_config(app_prefix).ok().flatten();
-            if active_config.is_none() && !package_is_physically_installed(app_prefix) {
-                return None;
-            }
-            let port = af_db::get_app_ingress_config(app_prefix)
-                .ok()
-                .flatten()
-                .map(|c| c.listen_port)
-                .filter(|&p| p > 0)
-                .unwrap_or_else(|| {
-                    let meta = mutators::get_app_runtime_meta(app_prefix);
-                    if meta.configured_port > 0 {
-                        meta.configured_port
-                    } else {
-                        bp.default_port
+        if !app_prefix.is_empty() && !app_prefix.contains('.') {
+            if let Some(bp) = get_blueprint(app_prefix) {
+                let active_config = af_db::get_app_ingress_config(&bp.app_name).ok().flatten();
+                if active_config.is_none() && !package_is_physically_installed(&bp.app_name) {
+                    return None;
+                }
+                let port = match active_config {
+                    Some(c) => {
+                        if !(1..=65535).contains(&c.listen_port) {
+                            return None;
+                        }
+                        c.listen_port
                     }
-                });
-            if port > 0 {
-                return Some((app_prefix.to_string(), port));
+                    None => {
+                        let meta = mutators::get_app_runtime_meta(&bp.app_name);
+                        if meta.configured_port > 0 {
+                            meta.configured_port
+                        } else {
+                            bp.default_port
+                        }
+                    }
+                };
+                if (1..=65535).contains(&port) {
+                    return Some((bp.app_name, port));
+                }
             }
+        }
+        return None;
+    }
+
+    // 2. Check configured `public_domain`
+    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
+    for cfg in &configs {
+        if cfg.external_access_enabled
+            && !cfg.public_domain.trim().is_empty()
+            && cfg.public_domain.trim().eq_ignore_ascii_case(&host)
+            && (1..=65535).contains(&cfg.listen_port)
+        {
+            return Some((cfg.app_name.clone(), cfg.listen_port));
         }
     }
 
-    // 2. Check configured `public_domain` or `<app>.<baseDomain>`
-    if let Ok(configs) = af_db::get_all_app_ingress_configs() {
-        for cfg in configs {
-            if cfg.external_access_enabled
-                && cfg.public_domain.eq_ignore_ascii_case(&host)
-                && cfg.listen_port > 0
-            {
-                return Some((cfg.app_name, cfg.listen_port));
-            }
-        }
-    }
-
+    // 3. Check `<app>.<baseDomain>`: fail closed unless an active config explicitly enables external access.
     let base = resolve_base_domain();
     if !base.is_empty() {
         let suffix = format!(".{}", base);
         if let Some(app_prefix) = host.strip_suffix(&suffix) {
-            if let Some(bp) = get_blueprint(app_prefix) {
-                let active_config = af_db::get_app_ingress_config(app_prefix).ok().flatten();
-                if active_config.is_none() && !package_is_physically_installed(app_prefix) {
-                    return None;
-                }
-                let port = af_db::get_app_ingress_config(app_prefix)
-                    .ok()
-                    .flatten()
-                    .map(|c| c.listen_port)
-                    .filter(|&p| p > 0)
-                    .unwrap_or(bp.default_port);
-                if port > 0 {
-                    return Some((app_prefix.to_string(), port));
+            if !app_prefix.is_empty() && !app_prefix.contains('.') {
+                if let Some(bp) = get_blueprint(app_prefix) {
+                    let active_config = configs
+                        .into_iter()
+                        .find(|c| c.app_name.eq_ignore_ascii_case(&bp.app_name))
+                        .or_else(|| af_db::get_app_ingress_config(&bp.app_name).ok().flatten());
+                    let cfg = active_config?;
+                    if !cfg.external_access_enabled || !(1..=65535).contains(&cfg.listen_port) {
+                        return None;
+                    }
+                    let pub_dom = cfg.public_domain.trim();
+                    if !pub_dom.is_empty() && !pub_dom.eq_ignore_ascii_case(&host) {
+                        return None;
+                    }
+                    return Some((cfg.app_name, cfg.listen_port));
                 }
             }
         }
@@ -1609,13 +1633,13 @@ pub fn get_active_services_with_jobs(
     };
 
     // 1. Core Systemd Services (AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
-    let (_api_st, api_up, _api_unit) = core_info("aetherflow-api");
+    let (api_st, api_up, _api_unit) = core_info("aetherflow-api");
     map.insert(
         "AetherFlow API".to_string(),
         ServiceStatusItem {
             id: "aetherflow-api".to_string(),
-            status: "running".to_string(),
-            uptime: if api_up == "-" {
+            status: api_st.clone(),
+            uptime: if api_up == "-" && api_st == "running" {
                 "Active".to_string()
             } else {
                 api_up
@@ -1628,7 +1652,7 @@ pub fn get_active_services_with_jobs(
             components: vec![ServiceComponentStatus {
                 unit: "aetherflow-api".to_string(),
                 role: "required".to_string(),
-                status: "running".to_string(),
+                status: api_st,
                 configured: true,
             }],
             units: vec!["aetherflow-api".to_string()],
@@ -1637,30 +1661,21 @@ pub fn get_active_services_with_jobs(
     );
 
     let (fe_st, fe_up, _fe_unit) = core_info("aetherflow-frontend");
-    let (fe_status, fe_uptime, fe_managed_by) = if matches!(fe_st.as_str(), "running" | "unknown") {
-        (fe_st, fe_up, "systemd".to_string())
-    } else {
-        (
-            "running".to_string(),
-            "Integrated".to_string(),
-            "embedded".to_string(),
-        )
-    };
     map.insert(
         "AetherFlow Frontend".to_string(),
         ServiceStatusItem {
             id: "aetherflow-frontend".to_string(),
-            status: fe_status.clone(),
-            uptime: fe_uptime,
+            status: fe_st.clone(),
+            uptime: fe_up,
             version: af_release::runtime::runtime_identity().version.clone(),
-            managed_by: fe_managed_by,
+            managed_by: "systemd".to_string(),
             process: "aetherflow-frontend".to_string(),
             bind_scope: "network".to_string(),
             control_scope: "service".to_string(),
             components: vec![ServiceComponentStatus {
                 unit: "aetherflow-frontend".to_string(),
                 role: "required".to_string(),
-                status: fe_status,
+                status: fe_st,
                 configured: true,
             }],
             units: vec!["aetherflow-frontend".to_string()],
@@ -2079,17 +2094,31 @@ async fn control_service_with_budget(
         );
     }
 
+    let canonical = resolve_canonical_service_id(service_name);
+    if resolve_service_control_scope(&canonical) == "shared-vhost" {
+        anyhow::bail!(
+            "{} is hosted as a shared Apache virtual host; use the Apache2 Web Server card for daemon-wide controls",
+            service_name
+        );
+    }
     let units = if managed_by == "systemd-unit" {
         vec![service_name.to_string()]
     } else {
-        let canonical = resolve_canonical_service_id(service_name);
-        if resolve_service_control_scope(&canonical) == "shared-vhost" {
+        let mut resolved = resolve_controllable_service_units(&canonical, action);
+        if canonical != "apache2" {
+            resolved.retain(|u| {
+                !u.trim_end_matches(".service")
+                    .eq_ignore_ascii_case("apache2")
+            });
+        }
+        if resolved.is_empty() {
             anyhow::bail!(
-                "{} is hosted as a shared Apache virtual host; use the Apache2 Web Server card for daemon-wide controls",
-                service_name
+                "{} has no independent systemd unit to {}",
+                service_name,
+                action
             );
         }
-        resolve_controllable_service_units(&canonical, action)
+        resolved
     };
     for unit in units {
         if !valid_name.is_match(&unit) {
@@ -2603,13 +2632,16 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
 }
 
 pub fn forbidden_streaming_ip(address: std::net::IpAddr) -> bool {
+    let block_cgnat = env::var("AETHERFLOW_BLOCK_CGNAT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     match address {
         std::net::IpAddr::V4(address) => {
             let octets = address.octets();
             address.is_unspecified()
                 || address.is_link_local()
                 || octets[0] == 0
-                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+                || (block_cgnat && octets[0] == 100 && (octets[1] & 0xc0) == 64)
                 || octets == [168, 63, 129, 16]
                 || (octets[0] == 192
                     && ((octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
@@ -2721,36 +2753,19 @@ pub fn list_notifications(
     limit: i64,
     offset: i64,
 ) -> anyhow::Result<(Vec<Notification>, i64)> {
-    let conn = af_db::get_conn()?;
-    let unread: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM notifications WHERE (user_id = ?1 OR user_id IS NULL) AND read = 0",
-            params![user_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-
-    let mut stmt = conn.prepare(
-        "SELECT id, user_id, level, title, message, read, COALESCE(CAST(created_at AS TEXT), '') \
-         FROM notifications WHERE (user_id = ?1 OR user_id IS NULL) \
-         ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
-    )?;
-    let rows = stmt.query_map(params![user_id, limit.clamp(1, 200), offset.max(0)], |r| {
-        Ok(Notification {
-            id: r.get(0)?,
-            user_id: r.get(1)?,
-            level: r.get(2)?,
-            title: r.get(3)?,
-            message: r.get(4)?,
-            read: r.get(5)?,
-            created_at: r.get(6)?,
+    let (rows, unread) = af_db::list_notifications_for_user(user_id, limit, offset)?;
+    let list = rows
+        .into_iter()
+        .map(|row| Notification {
+            id: row.id,
+            user_id: row.user_id,
+            level: row.level,
+            title: row.title,
+            message: row.message,
+            read: row.read,
+            created_at: row.created_at,
         })
-    })?;
-
-    let mut list = Vec::new();
-    for r in rows {
-        list.push(r?);
-    }
+        .collect();
     Ok((list, unread))
 }
 
@@ -3413,5 +3428,136 @@ mod tests {
         assert!(af_runner::open_and_read_regular_config(&dir).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_app_target_for_host_enforces_external_access_toggle() {
+        let name = "tests::test_resolve_app_target_for_host_enforces_external_access_toggle";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        let root = env::temp_dir().join(format!("af-ingress-toggle-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("install")).unwrap();
+        fs::create_dir_all(root.join("var/lib/aetherflow")).unwrap();
+        let catalog = root.join("packages.json");
+        fs::write(
+            &catalog,
+            serde_json::json!([{
+                "name": "sonarr",
+                "label": "Sonarr",
+                "description": "fixture",
+                "category": "Media",
+                "lock_file": "/install/.sonarr.lock",
+                "default_port": 8989,
+                "service_type": "systemd",
+                "service_name": "sonarr"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(root.join("install/.sonarr.lock"), "installed").unwrap();
+        let db = root.join("var/lib/aetherflow/aetherflow.sqlite");
+        env::set_var("AETHERFLOW_FS_ROOT", &root);
+        env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
+        env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+        env::set_var("AETHERFLOW_BASE_DOMAIN", "example.com");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db);
+        }
+        af_db::init_db().unwrap();
+
+        // 1. No ingress config yet: .aether.local resolves for installed app, external fails closed
+        assert_eq!(
+            resolve_app_target_for_host("sonarr.aether.local"),
+            Some(("sonarr".to_string(), 8989))
+        );
+        assert_eq!(resolve_app_target_for_host("sonarr.example.com"), None);
+
+        // 2. Active ingress config with external_access_enabled: false blocks external domain
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "sonarr".to_string(),
+            public_domain: "sonarr.example.com".to_string(),
+            external_access_enabled: false,
+            listen_port: 18989,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            resolve_app_target_for_host("sonarr.aether.local"),
+            Some(("sonarr".to_string(), 18989))
+        );
+        assert_eq!(resolve_app_target_for_host("sonarr.example.com"), None);
+
+        // 3. Explicit external_access_enabled: true allows external domain
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "sonarr".to_string(),
+            public_domain: "sonarr.example.com".to_string(),
+            external_access_enabled: true,
+            listen_port: 18989,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            resolve_app_target_for_host("sonarr.example.com"),
+            Some(("sonarr".to_string(), 18989))
+        );
+        assert_eq!(
+            resolve_app_target_for_host("sonarr.aether.local"),
+            Some(("sonarr".to_string(), 18989))
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_forbidden_streaming_ip_allows_tailscale_cgnat_and_blocks_metadata() {
+        let name = "tests::test_forbidden_streaming_ip_allows_tailscale_cgnat_and_blocks_metadata";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        env::remove_var("AETHERFLOW_BLOCK_CGNAT");
+        assert!(!forbidden_streaming_ip("100.64.0.1".parse().unwrap()));
+        assert!(!forbidden_streaming_ip("100.127.255.254".parse().unwrap()));
+        assert!(forbidden_streaming_ip("169.254.169.254".parse().unwrap()));
+        assert!(forbidden_streaming_ip("168.63.129.16".parse().unwrap()));
+
+        env::set_var("AETHERFLOW_BLOCK_CGNAT", "1");
+        assert!(forbidden_streaming_ip("100.64.0.1".parse().unwrap()));
+        assert!(forbidden_streaming_ip("169.254.169.254".parse().unwrap()));
+        assert!(forbidden_streaming_ip("168.63.129.16".parse().unwrap()));
+        env::remove_var("AETHERFLOW_BLOCK_CGNAT");
+    }
+
+    #[tokio::test]
+    async fn test_shared_vhost_stop_rejected_and_supports_dynamic_port_accurate() {
+        for app in ["nextcloud", "rutorrent", "organizr"] {
+            for manager in ["systemd", "systemd-unit"] {
+                let err = control_service_with_manager(app, "stop", manager)
+                    .await
+                    .expect_err("shared-vhost stop must never touch apache2");
+                assert!(err.to_string().contains("shared Apache virtual host"));
+            }
+        }
+        assert!(get_blueprint("bazarr").unwrap().supports_dynamic_port);
+        assert!(get_blueprint("dispatcharr").unwrap().supports_dynamic_port);
+        assert!(!get_blueprint("kasmvnc").unwrap().supports_dynamic_port);
+        assert!(!get_blueprint("calibreweb").unwrap().supports_dynamic_port);
+    }
+
+    #[test]
+    fn test_stopped_aetherflow_frontend_not_fabricated_as_running() {
+        let name = "tests::test_stopped_aetherflow_frontend_not_fabricated_as_running";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        let fixture = crate::inventory_regressions::Fixture::new();
+        fixture.command(
+            "systemctl",
+            "test \"$1\" = show || exit 92\nprintf 'ActiveState=inactive\\nSubState=dead\\n'\n",
+        );
+        clear_service_status_cache();
+        let services = get_active_services().unwrap();
+        assert_eq!(services["AetherFlow Frontend"].status, "stopped");
+        assert_eq!(services["AetherFlow API"].status, "stopped");
     }
 }

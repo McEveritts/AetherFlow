@@ -23,6 +23,16 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
+    struct BackupDirGuard {
+        path: Option<PathBuf>,
+    }
+    impl Drop for BackupDirGuard {
+        fn drop(&mut self) {
+            if let Some(dir) = self.path.take() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -30,6 +40,9 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
         builder.mode(0o700);
     }
     builder.create(&directory)?;
+    let mut dir_guard = BackupDirGuard {
+        path: Some(directory.clone()),
+    };
     let backup = directory.join("before-migration.sqlite");
     let result = (|| -> anyhow::Result<()> {
         conn.execute("VACUUM main INTO ?1", [backup.to_string_lossy().as_ref()])?;
@@ -51,10 +64,8 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
         anyhow::ensure!(original == copied, "Streaming backup count changed during verification; retry while collection is quiescent");
         Ok(())
     })();
-    if let Err(error) = result {
-        let _ = std::fs::remove_dir_all(&directory);
-        return Err(error);
-    }
+    result?;
+    dir_guard.path = None;
     Ok(Some(backup))
 }
 

@@ -27,12 +27,6 @@ function _ftpdconfig() {
 
 # seedbox boot for first user
 function _boot() {
-	# Use safe overlay for AetherFlow systemd unit files — preserves user modifications
-	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.service" \
-		/etc/systemd/system/aetherflow-heal.service
-	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.timer" \
-		/etc/systemd/system/aetherflow-heal.timer
-
 	# Install AetherFlow Runner and Control Plane single-binary systemd service files
 	if [[ ! -f /etc/systemd/system/aetherflow-runner.service ]]; then
 		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-runner.template" \
@@ -57,7 +51,10 @@ function _boot() {
 	systemctl daemon-reload >/dev/null 2>&1
 	systemctl start aetherflow-log-retention.service || return 1
 	systemctl enable --now aetherflow-log-retention.timer || return 1
-	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
+	# Recovery is governed solely by the Rust heal coordinator (respecting AETHERFLOW_DISABLE_AUTOHEAL).
+	systemctl disable --now aetherflow-heal.timer 2>/dev/null || true
+	systemctl stop aetherflow-heal.service 2>/dev/null || true
+	rm -f /etc/systemd/system/aetherflow-heal.service /etc/systemd/system/aetherflow-heal.timer 2>/dev/null || true
 
 	# Enable and start the privileged runner daemon and control plane single binary
 	mkdir -p /mnt/storage/media 2>/dev/null || true
@@ -95,8 +92,7 @@ except Exception:
 	if [[ -n "${IFACE:-}" ]]; then
 		printf '%s\n' "${IFACE}" > /opt/AetherFlow/config/interface.txt
 	fi
-	echo "*/1 * * * * root bash /usr/local/bin/AetherFlow/system/set_interface" >/etc/cron.d/set_interface
-	/usr/local/bin/AetherFlow/system/set_interface >/dev/null 2>&1 || true
+	rm -f /etc/cron.d/set_interface
 }
 
 # function to set permissions on first user
@@ -168,13 +164,6 @@ _harden_permissions() {
 		if [[ -d "${af_root}/releases" ]]; then
 			find "${af_root}/releases" -type f \( -name "aetherflow-api" -o -name "af" -o -name "*.sh" -o -name "*.py" \) -exec chmod 755 {} + 2>/dev/null || true
 			find "${af_root}/releases" -path "*/packages/*" -type f -exec chmod 755 {} + 2>/dev/null || true
-		fi
-
-		# Node binaries in node_modules/.bin (including workspace root) need execute
-		chmod 755 "${af_root}"/node_modules/.bin/* "${af_root}"/frontend/node_modules/.bin/* 2>/dev/null || true
-		if [[ -d "${af_root}/frontend/node_modules/.bin" ]]; then
-			find "${af_root}/frontend/node_modules/.bin" -type f -exec chmod 755 {} + 2>/dev/null || true
-			find "${af_root}/frontend/node_modules/.bin" -type l -exec chmod 755 {} + 2>/dev/null || true
 		fi
 
 		if [[ -d "${af_root}/setup" ]]; then
@@ -364,36 +353,24 @@ _validate_no_root_services() {
 	return 0
 }
 
-# BBR function
-function _insbbr() {
-	cd /tmp
-	\cp -rf ${local_setup}sources/BBR/BBR.sh .
-	chmod a+x BBR.sh
-	bash BBR.sh -f v4.14.32 >>"${OUTTO}" 2>&1
-	cd
+# Configure TCP BBR congestion control via native kernel sysctl
+function _configure_bbr() {
+	install -d -m 0755 /etc/sysctl.d
+	cat > /etc/sysctl.d/99-aetherflow-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+	chmod 0644 /etc/sysctl.d/99-aetherflow-bbr.conf
+	modprobe tcp_bbr >/dev/null 2>&1 || true
+	sysctl --system >/dev/null 2>&1 || true
 }
-
-# fix bcm NIC firmware
-function _insbcm() {
-	mkdir -p ${local_setup}/bcm
-	cd ${local_setup}/bcm
-	git clone https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git >>"${OUTTO}" 2>&1
-	mkdir -p /lib/firmware/bnx2/
-	\cp -rf ${local_setup}/bcm/linux-firmware/bnx2/ /lib/firmware
-}
-
-# function to create ssl cert for pure-ftpd ()
-function _pureftpcert() {
-	/bin/true
-}
-################################################################################
-#   //END UNUSED FUNCTIONS//
-################################################################################
 
 # function to show finished data
 # shellcheck disable=2312,2162,2249,2250
 function _finished() {
 	ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
+	local onboarding_host="${domain:-${hostname_value:-${ip}}}"
+	local onboarding_url="https://${onboarding_host}/"
 	echo
 	echo
 	echo -e " ╭──────────────────────────────────────────────────────────╮"
@@ -404,7 +381,7 @@ function _finished() {
 	echo -e " │ ${bold}Next Steps:${normal}                                              │"
 	echo -e " │ Please complete the setup using the web onboarding UI:   │"
 	echo -e " │                                                          │"
-	echo -e " │ 👉 ${bold}${magenta}http://${ip}:8080${normal}                              │"
+	echo -e " │ 👉 ${bold}${magenta}${onboarding_url}${normal}                              │"
 	echo -e " │                                                          │"
 	echo -e " │ Log in using the administrator credentials you created   │"
 	echo -e " │ during this setup process.                               │"
@@ -420,7 +397,7 @@ function _finished() {
 	install -m 0600 /dev/null /root/information.info
 	cat >/root/information.info <<EOF
 AetherFlow Seedbox Initialized successfully.
-Dashboard Onboarding: http://${ip}:8080
+Dashboard Onboarding: ${onboarding_url}
 Admin Username: ${username}
 EOF
 	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then

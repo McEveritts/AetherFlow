@@ -1,6 +1,6 @@
 # AetherFlow Operational Runbook
 
-> **Version**: v4.0.0 · **Control Plane**: 12-Crate Rust Workspace (`backend-rs`) + Embedded Next.js 16 (Obsidian V2)
+> **Version**: v4.0.0 · **Control Plane**: 11-Crate Rust Workspace (`backend-rs`) + 4-Crate Leptos WASM Frontend (`frontend-rs`)
 > **Audience**: System administrators and operators managing AetherFlow bare-metal deployments.
 
 ---
@@ -34,7 +34,7 @@
 │                                              ▼                       │
 │  ┌────────────────────────────────────────────────────────────────┐  │
 │  │ aetherflow-api.service (Unprivileged Rust Control Plane)       │  │
-│  │  • af-api (Axum HTTP/WS + Embedded Next.js 16 SPA)             │  │
+│  │  • af-api (Axum HTTP/WS + External web/dist WASM UI)            │  │
 │  │  • af-files (Native McBrowser Scoped Tenant File Manager)      │  │
 │  │  • af-hardware (Zero-Fork sysinfo + NVML GPU FFI)              │  │
 │  │  • af-services (77-App Catalog, Mutators, Plugins, Workers)    │  │
@@ -45,7 +45,7 @@
 │  │ /var/lib/aetherflow/           │  │ /run/aetherflow/runner.sock│  │
 │  │  • aetherflow.sqlite (WAL)     │  │ aetherflow-runner.service  │  │
 │  │  • mcbrowser/user-<id> (0700)  │  │  • systemctl allowlists    │  │
-│  │  • AES-256-GCM secrets         │  │  • 15 Rust recipes + Bash  │  │
+│  │  • AES-256-GCM secrets         │  │  • 12 Rust recipes + Bash  │  │
 │  └────────────────────────────────┘  │  • WireGuard / Tailscale   │  │
 │                                      │  • Isolated Self-Updater   │  │
 │                                      └────────────────────────────┘  │
@@ -54,7 +54,7 @@
 
 | Component | Binding / Path | Purpose |
 |-----------|----------------|---------|
-| `aetherflow-api.service` | `127.0.0.1:8080` | Unprivileged Rust HTTP/WS API + embedded Next.js 16 SPA (`User=aetherflow`) |
+| `aetherflow-api.service` | `127.0.0.1:8080` | Unprivileged Rust HTTP/WS API serving external `web/dist` WASM UI (`User=aetherflow`) |
 | `aetherflow-runner.service` | `/run/aetherflow/runner.sock` | Privileged root UNIX socket daemon (`0660 root:aetherflow`) |
 | `aetherflow-self-update.service` | Transient systemd unit | Isolated self-updater surviving `aetherflow-runner` and `aetherflow-api` restarts |
 | `af` (`/opt/AetherFlow/current/af`) | CLI binary (`af-cli`) | Unified administrative CLI for packages, services, quotas, backups, and releases |

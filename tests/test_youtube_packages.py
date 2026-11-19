@@ -224,7 +224,7 @@ class YouTubeCatalogTest(unittest.TestCase):
             self.assertEqual(automation[name]["update_source"], "git")
             self.assertIn(automation[name]["sandbox_profile"], ("java", "node"))
             self.assertGreater(len(automation[name]["sandbox_service_units"]), 1)
-            self.assertTrue((REPO / f"frontend/public/img/{name}.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertTrue((REPO / f"frontend-rs/public/img/{name}.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
             for action in ("install", "remove"):
                 script = (REPO / f"packages/package/{action}/{action}package-{name}").read_text()
                 self.assertNotRegex(script, r"(?m)^\s*(docker|podman)\b")

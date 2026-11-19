@@ -12,265 +12,316 @@ Features:
 import re
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
+INPUT_CSS = "frontend-rs/styles/input.css"
+SHELL_RS = "frontend-rs/crates/af-web-app/src/shell.rs"
+STATE_RS = "frontend-rs/crates/af-web-app/src/state.rs"
+AUDIT_RS = "frontend-rs/crates/af-web-app/src/tabs/audit.rs"
+SETTINGS_RS = "frontend-rs/crates/af-web-app/src/tabs/settings/mod.rs"
+PRIMITIVES_RS = "frontend-rs/crates/af-web-ui/src/primitives.rs"
+GRID_RS = "frontend-rs/crates/af-web-ui/src/grid.rs"
+LOGIN_RS = "frontend-rs/crates/af-web-app/src/routes/login.rs"
+
+
 class TestF13PureBlackFoundation(TestCase):
     def __init__(self):
-        super().__init__("T1_F13_01", "F13", 1, "globals.css defines and applies a dark foundation token")
+        super().__init__("T1_F13_01", "F13", 1, "input.css defines and applies a dark foundation token")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
+        css = inspector.read_file(INPUT_CSS)
         color_match = re.search(r"--obs-bg-base\s*:\s*#([0-9a-fA-F]{6})\s*;", css or "")
-        self.assert_true(bool(color_match and css and "var(--obs-bg-base)" in css), "F13: globals.css must define and apply a foundation color")
+        self.assert_true(bool(color_match and css and "var(--obs-bg-base)" in css), "F13: input.css must define and apply a foundation color")
         channels = [int(color_match.group(1)[offset:offset + 2], 16) for offset in (0, 2, 4)]
         self.assert_true(max(channels) <= 48, "F13: the applied foundation must remain dark")
+
 
 class TestF13BodyBeforeAuroraGradients(TestCase):
     def __init__(self):
         super().__init__("T1_F13_02", "F13", 1, "body::before renders 3-orb radial aurora and base vertical gradient")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and "body::before" in css and "radial-gradient" in css), "F13: globals.css must render radial-gradient on body::before")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "body::before" in css and "radial-gradient" in css), "F13: input.css must render radial-gradient on body::before")
+
 
 class TestF13BodyAfterMicroGrain(TestCase):
     def __init__(self):
         super().__init__("T1_F13_03", "F13", 1, "body::after renders SVG fractal micro-grain and spatial edge vignette")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and "body::after" in css and ("fractalNoise" in css or "grain" in css or "radial-gradient" in css)), "F13: globals.css must render micro-grain on body::after")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "body::after" in css and ("fractalNoise" in css or "grain" in css or "radial-gradient" in css)), "F13: input.css must render micro-grain on body::after")
+
 
 class TestF13HardwareAcceleratedAtmosphere(TestCase):
     def __init__(self):
         super().__init__("T1_F13_04", "F13", 1, "Atmosphere pseudo-elements use GPU containment and strict layer caching")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
+        css = inspector.read_file(INPUT_CSS)
         self.assert_true(bool(css and ("contain: strict" in css or "will-change" in css or "translateZ" in css)), "F13: Atmosphere styles must specify GPU containment")
+
 
 class TestF13TransparentBodyCanvas(TestCase):
     def __init__(self):
         super().__init__("T1_F13_05", "F13", 1, "body background is transparent to expose underlying atmospheric layers")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
+        css = inspector.read_file(INPUT_CSS)
         self.assert_true(bool(css and ("background-color: transparent" in css or "bg-transparent" in css or "background: transparent" in css)), "F13: body background must be transparent")
+
 
 class TestF14SpecularTopBorderToken(TestCase):
     def __init__(self):
         super().__init__("T1_F14_01", "F14", 1, "--obs-specular-top directional highlight token is defined")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and "--obs-specular-top" in css), "F14: globals.css must define --obs-specular-top")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "--obs-specular-top" in css), "F14: input.css must define --obs-specular-top")
+
 
 class TestF14ChromaticEdgeGradientToken(TestCase):
     def __init__(self):
         super().__init__("T1_F14_02", "F14", 1, "--obs-chromatic-edge-gradient prism rim token is defined")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and "--obs-chromatic-edge" in css), "F14: globals.css must define --obs-chromatic-edge tokens")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "--obs-chromatic-edge" in css), "F14: input.css must define --obs-chromatic-edge tokens")
+
 
 class TestF14HighRefreshSpringTiming(TestCase):
     def __init__(self):
         super().__init__("T1_F14_03", "F14", 1, "--obs-ease-spring-120 high refresh curve is defined")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and "--obs-ease-spring" in css), "F14: globals.css must define --obs-ease-spring-120 token")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "--obs-ease-spring" in css), "F14: input.css must define --obs-ease-spring-120 token")
+
 
 class TestF14GlassCardUtilityClass(TestCase):
     def __init__(self):
         super().__init__("T1_F14_04", "F14", 1, ".glass-card class implements specular borders and chromatic refraction")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and ".glass-card" in css), "F14: globals.css must define .glass-card utility class")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and ".glass-card" in css), "F14: input.css must define .glass-card utility class")
+
 
 class TestF14GlassButtonPrimaryGradient(TestCase):
     def __init__(self):
         super().__init__("T1_F14_05", "F14", 1, ".glass-button-primary uses indigo-to-fuchsia gradient")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and ".glass-button-primary" in css), "F14: globals.css must define .glass-button-primary utility class")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and ".glass-button-primary" in css), "F14: input.css must define .glass-button-primary utility class")
+
 
 class TestF15MobileBottomDockDefined(TestCase):
     def __init__(self):
-        super().__init__("T1_F15_01", "F15", 1, "Mobile bottom dock component is rendered with md:hidden")
+        super().__init__("T1_F15_01", "F15", 1, "Mobile bottom dock component is rendered in shell.rs and styled in input.css")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        dock = inspector.read_file("frontend/src/components/layout/MobileDock.tsx") or sidebar
-        self.assert_true(bool(dock and ("md:hidden" in dock or "fixed bottom" in dock)), "F15: Mobile bottom glass dock must be implemented with md:hidden")
+        shell = inspector.read_file(SHELL_RS)
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(
+            bool(shell and "af-mobile-dock" in shell and css and ".af-mobile-dock" in css and "position: fixed" in css),
+            "F15: Mobile bottom glass dock must be implemented in shell.rs and input.css",
+        )
+
 
 class TestF15DesktopExpandableRail(TestCase):
     def __init__(self):
         super().__init__("T1_F15_02", "F15", 1, "Desktop sidebar expands from icon rail to full navigation panel")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        has_widths_and_aria = bool(
-            sidebar
-            and (
-                ("isCollapsed ? 'md:w-16' : 'md:w-52'" in sidebar and "aria-expanded={!isCollapsed}" in sidebar)
-                or ("isExpanded ? 'md:w-64' : 'md:w-[4.5rem]'" in sidebar and "aria-expanded={isExpanded}" in sidebar)
-            )
-            and "handleToggleCollapse" in sidebar
-            and "/img/aetherflow-mark.svg" in sidebar
+        shell = inspector.read_file(SHELL_RS)
+        css = inspector.read_file(INPUT_CSS)
+        has_rail = bool(
+            shell
+            and css
+            and "af-sidebar-expanded" in shell
+            and "aria-expanded=move || pinned.get().to_string()" in shell
+            and "/img/aetherflow-mark.svg" in shell
+            and ".af-sidebar {" in css
+            and ".af-sidebar-expanded {" in css
         )
-        self.assert_true(has_widths_and_aria, "F15: Sidebar must expose the logo toggle and distinct collapsed/expanded desktop widths")
+        self.assert_true(has_rail, "F15: Sidebar must expose the logo toggle and distinct collapsed/expanded desktop widths")
+
 
 class TestF15TouchTargetEnforcement(TestCase):
     def __init__(self):
         super().__init__("T1_F15_03", "F15", 1, "Mobile navigation items enforce min 44px touch targets")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        has_touch = (css and "obs-touch-target" in css) or (sidebar and "min-h-[44px]" in sidebar)
-        self.assert_true(bool(has_touch), "F15: Mobile navigation items must enforce >=44px touch targets")
+        css = inspector.read_file(INPUT_CSS)
+        has_touch = bool(css and ("obs-touch-target" in css or "min-height: 44px" in css))
+        self.assert_true(has_touch, "F15: Mobile navigation items must enforce >=44px touch targets")
+
 
 class TestF15ConnectionStatusBeacons(TestCase):
     def __init__(self):
         super().__init__("T1_F15_04", "F15", 1, "obs-beacon-* utility classes style live/reconnecting/danger beacons")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and "obs-beacon" in css), "F15: globals.css must define obs-beacon-* status indicators")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "obs-beacon" in css), "F15: input.css must define obs-beacon-* status indicators")
+
 
 class TestF15SafeAreaInsetPadding(TestCase):
     def __init__(self):
         super().__init__("T1_F15_05", "F15", 1, "Mobile dock applies safe-area-inset-bottom padding")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        dock = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        has_safe_area = (css and "safe-area-inset-bottom" in css) or (dock and "safe-area" in dock)
-        self.assert_true(bool(has_safe_area), "F15: Mobile dock must account for safe-area-inset-bottom")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css and "safe-area-inset-bottom" in css), "F15: Mobile dock must account for safe-area-inset-bottom")
+
 
 class TestF16ZeroBlanketOverflowHidden(TestCase):
     def __init__(self):
-        super().__init__("T1_F16_01", "F16", 1, "Zero blanket 'overflow-x: hidden' on html or body tags in globals.css")
+        super().__init__("T1_F16_01", "F16", 1, "Zero blanket 'overflow-x: hidden' on html or body tags in input.css")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        css = inspector.read_file("frontend/src/app/globals.css")
-        if css:
-            clean_css = re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)
-            pattern = re.compile(r'(html|body)\s*\{[^}]*overflow-x:\s*hidden', re.IGNORECASE)
-            self.assert_false(bool(pattern.search(clean_css)), "F16: globals.css must not violate scroller containment with overflow-x: hidden on html/body")
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(bool(css), "F16: input.css must be readable")
+        clean_css = re.sub(r'/\*.*?\*/', '', css or "", flags=re.DOTALL)
+        pattern = re.compile(r'(html|body)\s*\{[^}]*overflow-x:\s*hidden', re.IGNORECASE)
+        self.assert_false(bool(pattern.search(clean_css)), "F16: input.css must not violate scroller containment with overflow-x: hidden on html/body")
+
 
 class TestF16LayoutUsesMinWZero(TestCase):
     def __init__(self):
         super().__init__("T1_F16_02", "F16", 1, "Main content area uses min-w-0 to prevent flex item blowout")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        page_code = inspector.read_file("frontend/src/app/page.tsx")
-        self.assert_true(bool(page_code and "min-w-0" in page_code), "F16: Main layout must declare min-w-0 on flex containers")
+        shell = inspector.read_file(SHELL_RS)
+        self.assert_true(bool(shell and "min-w-0" in shell), "F16: Main shell layout must declare min-w-0 on flex containers")
+
 
 class TestF16AuditTabScopedOverflow(TestCase):
     def __init__(self):
-        super().__init__("T1_F16_03", "F16", 1, "AuditTab scopes wide tables with overflow-x-auto")
+        super().__init__("T1_F16_03", "F16", 1, "Audit tab scopes wide tables and payloads inside DataGrid / overflow-auto")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        audit_code = inspector.read_file("frontend/src/components/tabs/AuditTab.tsx")
-        self.assert_true(bool(audit_code and "overflow-x-auto" in audit_code), "F16: AuditTab must manage horizontal scroll via overflow-x-auto")
+        audit_code = inspector.read_file(AUDIT_RS)
+        self.assert_true(bool(audit_code and "<DataGrid" in audit_code and "overflow-auto" in audit_code), "F16: Audit tab must manage horizontal scroll via DataGrid and overflow-auto")
+
 
 class TestF16DataGridScrollerContainment(TestCase):
     def __init__(self):
         super().__init__("T1_F16_04", "F16", 1, "DataGrid primitive encapsulates wide tabular layouts")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        grid_code = inspector.read_file("frontend/src/components/ui/DataGrid.tsx")
-        self.assert_true(bool(grid_code and ("overflow-x-auto" in grid_code or "min-w-0" in grid_code)), "F16: DataGrid must contain horizontal table overflow")
+        grid_code = inspector.read_file(GRID_RS)
+        self.assert_true(bool(grid_code and "obs-scroller" in grid_code and "min-w-0" in grid_code), "F16: DataGrid must contain horizontal table overflow")
+
 
 class TestF16NoRootPageClipping(TestCase):
     def __init__(self):
-        super().__init__("T1_F16_05", "F16", 1, "page.tsx root container does not truncate sticky headers with overflow-hidden")
+        super().__init__("T1_F16_05", "F16", 1, "shell.rs root container does not truncate sticky headers with overflow-hidden")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        page_code = inspector.read_file("frontend/src/app/page.tsx")
-        self.assert_true(bool(page_code), "F16: page.tsx must be readable")
+        shell_code = inspector.read_file(SHELL_RS)
+        self.assert_true(bool(shell_code and "af-shell" in shell_code), "F16: shell.rs must be readable")
+
 
 class TestF17AuroraIntensityControl(TestCase):
     def __init__(self):
-        super().__init__("T1_F17_01", "F17", 1, "DashboardSettingsTab exposes aurora intensity slider")
+        super().__init__("T1_F17_01", "F17", 1, "Settings tab exposes aurora opacity slider")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        settings = inspector.read_file("frontend/src/components/tabs/DashboardSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/SettingsTab.tsx")
-        self.assert_true(bool(settings and ("aurora" in settings.lower() or "intensity" in settings.lower())), "F17: Dashboard settings must provide aurora intensity control")
+        settings = inspector.read_file(SETTINGS_RS)
+        self.assert_true(bool(settings and "settings-aurora-opacity" in settings), "F17: Settings tab must provide aurora opacity control")
+
 
 class TestF17AnimationToggleControl(TestCase):
     def __init__(self):
-        super().__init__("T1_F17_02", "F17", 1, "DashboardSettingsTab provides static 120Hz cached vs animated toggle")
+        super().__init__("T1_F17_02", "F17", 1, "Settings tab provides static 120Hz cached vs animated aurora toggle")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        settings = inspector.read_file("frontend/src/components/tabs/DashboardSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/SettingsTab.tsx")
-        self.assert_true(bool(settings and ("animat" in settings.lower() or "120hz" in settings.lower())), "F17: Dashboard settings must provide animation toggle")
+        settings = inspector.read_file(SETTINGS_RS)
+        self.assert_true(bool(settings and "settings-aurora-animation" in settings), "F17: Settings tab must provide aurora animation toggle")
+
 
 class TestF17MicroGrainToggleControl(TestCase):
     def __init__(self):
-        super().__init__("T1_F17_03", "F17", 1, "DashboardSettingsTab provides micro-grain enable/disable toggle")
+        super().__init__("T1_F17_03", "F17", 1, "Settings tab provides micro-grain enable/disable toggle")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        settings = inspector.read_file("frontend/src/components/tabs/DashboardSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/SettingsTab.tsx")
-        self.assert_true(bool(settings and "grain" in settings.lower()), "F17: Dashboard settings must provide micro-grain toggle")
+        settings = inspector.read_file(SETTINGS_RS)
+        self.assert_true(bool(settings and "settings-grain-display" in settings), "F17: Settings tab must provide micro-grain toggle")
+
 
 class TestF17CardLiftDensityControl(TestCase):
     def __init__(self):
-        super().__init__("T1_F17_04", "F17", 1, "DashboardSettingsTab provides density / card lift control")
+        super().__init__("T1_F17_04", "F17", 1, "Settings tab provides density / card lift control")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        settings = inspector.read_file("frontend/src/components/tabs/DashboardSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/SettingsTab.tsx")
-        self.assert_true(bool(settings and ("density" in settings.lower() or "lift" in settings.lower() or "compact" in settings.lower())), "F17: Dashboard settings must provide layout density control")
+        settings = inspector.read_file(SETTINGS_RS)
+        self.assert_true(
+            bool(settings and "settings-card-lift" in settings and "immersive_overview" in settings),
+            "F17: Settings tab must provide card lift and layout density controls",
+        )
+
 
 class TestF17AtmosphereSettingsPersistence(TestCase):
     def __init__(self):
-        super().__init__("T1_F17_05", "F17", 1, "Atmosphere preferences persist in localStorage or settings store")
+        super().__init__("T1_F17_05", "F17", 1, "Atmosphere preferences persist in localStorage via state.rs")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        settings = inspector.read_file("frontend/src/components/tabs/DashboardSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/SettingsTab.tsx")
-        self.assert_true(bool(settings and ("localStorage" in settings or "useSettingsStore" in settings or "theme" in settings.lower())), "F17: Atmosphere preferences must be persistent")
+        state = inspector.read_file(STATE_RS)
+        self.assert_true(
+            bool(state and "aetherflow-aurora-opacity" in state and "storage_set" in state),
+            "F17: Atmosphere preferences must persist in localStorage",
+        )
+
 
 class TestF18CardPrimitiveUpgraded(TestCase):
     def __init__(self):
-        super().__init__("T1_F18_01", "F18", 1, "Card.tsx applies Obsidian V2 glass tokens and specular borders")
+        super().__init__("T1_F18_01", "F18", 1, "ObsCard primitive applies Obsidian V2 glass tokens and specular borders")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        card = inspector.read_file("frontend/src/components/ui/Card.tsx")
-        self.assert_true(bool(card and ("glass-card" in card or "obs-" in card)), "F18: Card.tsx must implement Obsidian V2 tokens")
+        primitives = inspector.read_file(PRIMITIVES_RS)
+        self.assert_true(bool(primitives and "pub fn ObsCard" in primitives and "glass-card" in primitives), "F18: ObsCard must implement Obsidian V2 glass tokens")
+
 
 class TestF18ButtonPrimitiveUpgraded(TestCase):
     def __init__(self):
-        super().__init__("T1_F18_02", "F18", 1, "Button.tsx variants use Obsidian V2 chromatic gradients")
+        super().__init__("T1_F18_02", "F18", 1, "Button primitive variants use Obsidian V2 chromatic gradients")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        btn = inspector.read_file("frontend/src/components/ui/Button.tsx")
-        self.assert_true(bool(btn and ("glass-button" in btn or "obs-" in btn or "primary" in btn)), "F18: Button.tsx must implement Obsidian V2 styling")
+        primitives = inspector.read_file(PRIMITIVES_RS)
+        self.assert_true(bool(primitives and "pub fn Button" in primitives and "glass-button-primary" in primitives), "F18: Button must implement Obsidian V2 styling")
+
 
 class TestF18InputPrimitiveRecessedWell(TestCase):
     def __init__(self):
-        super().__init__("T1_F18_03", "F18", 1, "Input.tsx renders recessed dark well with specular focus ring")
+        super().__init__("T1_F18_03", "F18", 1, "SearchInput and glass-input render recessed dark well with specular focus ring")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        inp = inspector.read_file("frontend/src/components/ui/Input.tsx")
-        self.assert_true(bool(inp and ("glass-input" in inp or "obs-" in inp or "focus:ring" in inp)), "F18: Input.tsx must implement Obsidian V2 well styling")
+        primitives = inspector.read_file(PRIMITIVES_RS)
+        css = inspector.read_file(INPUT_CSS)
+        self.assert_true(
+            bool(primitives and "glass-input" in primitives and css and ".glass-input:focus" in css),
+            "F18: Input primitives must implement Obsidian V2 well styling",
+        )
+
 
 class TestF18ModalPrimitiveGlassPanel(TestCase):
     def __init__(self):
-        super().__init__("T1_F18_04", "F18", 1, "Modal.tsx renders .glass-panel with backdrop blur")
+        super().__init__("T1_F18_04", "F18", 1, "Modal primitive renders .af-modal .glass-card dialog with backdrop blur")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        modal = inspector.read_file("frontend/src/components/ui/Modal.tsx")
-        self.assert_true(bool(modal and ("glass-panel" in modal or "backdrop-blur" in modal or "obs-" in modal)), "F18: Modal.tsx must use glass panel styling")
+        primitives = inspector.read_file(PRIMITIVES_RS)
+        self.assert_true(bool(primitives and "pub fn Modal" in primitives and "af-modal glass-card" in primitives), "F18: Modal must use glass card dialog styling")
+
 
 class TestF18LoginPageObsidianStyling(TestCase):
     def __init__(self):
-        super().__init__("T1_F18_05", "F18", 1, "login/page.tsx rendered with Obsidian V2 atmosphere and zero redundant blur divs")
+        super().__init__("T1_F18_05", "F18", 1, "login.rs renders with Obsidian V2 atmosphere and glass-card surface")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        login = inspector.read_file("frontend/src/app/login/page.tsx")
-        self.assert_true(bool(login and ("glass" in login or "obs-" in login or "bg-transparent" in login)), "F18: login/page.tsx must adhere to Obsidian V2 styling")
+        login = inspector.read_file(LOGIN_RS)
+        self.assert_true(bool(login and "glass-card" in login and "obs-brand-logo" in login), "F18: login.rs must adhere to Obsidian V2 styling")
+
 
 def get_tests():
     return [

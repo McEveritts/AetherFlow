@@ -4,9 +4,11 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_marketplace_catalog_lifecycle_matrix as lifecycle_fixture
 from test_marketplace_catalog_lifecycle_matrix import InstallerFixture, ROOT
 

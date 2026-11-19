@@ -213,55 +213,57 @@ class TestF10ClusterMetricsRoute(TestCase):
 
 class TestF11NextJsFsRouteDeleted(TestCase):
     def __init__(self):
-        super().__init__("T1_F11_01", "F11", 1, "frontend/src/app/api/fs/route.ts is deleted from repository")
+        super().__init__("T1_F11_01", "F11", 1, "Legacy frontend/ directory and Next.js FS route are deleted from repository")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        exists = inspector.file_exists("frontend/src/app/api/fs/route.ts")
-        self.assert_false(exists, "F11: frontend/src/app/api/fs/route.ts must be completely removed")
+        exists = inspector.file_exists("frontend/src/app/api/fs/route.ts") or inspector.file_exists("frontend/package.json")
+        self.assert_false(exists, "F11: Legacy Next.js frontend/ and /api/fs/route.ts must be completely removed")
 
 
 class TestF11NextStaticExportConfigured(TestCase):
     def __init__(self):
-        super().__init__("T1_F11_02", "F11", 1, "next.config.ts enables output: export when NEXT_STATIC_EXPORT=1")
+        super().__init__("T1_F11_02", "F11", 1, "frontend-rs Trunk.toml & index.html configure static WASM bundle build")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        config_code = inspector.read_file("frontend/next.config.ts")
-        self.assert_true(bool(config_code and "NEXT_STATIC_EXPORT" in config_code and "export" in config_code), "F11: next.config.ts must support output: 'export'")
+        trunk_toml = inspector.read_file("frontend-rs/Trunk.toml")
+        index_html = inspector.read_file("frontend-rs/index.html")
+        self.assert_true(
+            bool(trunk_toml and 'dist = "dist"' in trunk_toml and index_html and "af-web-app" in index_html),
+            "F11: frontend-rs/Trunk.toml and index.html must configure the static WASM bundle",
+        )
 
 
 class TestF11NoDynamicAppApiRoutesRemaining(TestCase):
     def __init__(self):
-        super().__init__("T1_F11_03", "F11", 1, "No incompatible server routes exist in frontend/src/app/api")
+        super().__init__("T1_F11_03", "F11", 1, "No incompatible Next.js server routes exist; Rust API serves static WASM dist")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        api_dir = os.path.join(inspector.root, "frontend/src/app/api")
-        if os.path.exists(api_dir):
-            files = [f for f in os.listdir(api_dir) if not f.startswith(".")]
-            self.assert_equal(len(files), 0, f"F11: frontend/src/app/api should have no dynamic routes, found: {files}")
+        self.assert_false(inspector.file_exists("frontend/src/app/api"), "F11: frontend/src/app/api must not exist")
+        embed_code = inspector.read_file("backend-rs/crates/af-api/src/embed.rs")
+        self.assert_true(bool(embed_code and "spa_fallback_handler" in embed_code), "F11: Rust API must serve static WASM SPA fallback")
 
 
 class TestF11PathSelectorTargetsBackendEndpoint(TestCase):
     def __init__(self):
-        super().__init__("T1_F11_04", "F11", 1, "PathSelector.tsx targets authenticated Rust backend filesystem endpoint")
+        super().__init__("T1_F11_04", "F11", 1, "DirectoryPicker in frontend-rs targets authenticated Rust backend filesystem endpoint")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        selector_code = inspector.read_file("frontend/src/components/ui/PathSelector.tsx")
-        self.assert_true(bool(selector_code and ("/api/fs" in selector_code or "/api/v1/auth/fs" in selector_code)), "F11: PathSelector must target Rust filesystem browser")
+        picker_code = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/fileshare/local_storage.rs")
+        self.assert_true(
+            bool(picker_code and "DirectoryPicker" in picker_code and "/api/v1/auth/fs" in picker_code),
+            "F11: DirectoryPicker must target /api/v1/auth/fs",
+        )
 
 
 class TestF11ZeroNodeFsImportsInFrontend(TestCase):
     def __init__(self):
-        super().__init__("T1_F11_05", "F11", 1, "Zero Node.js fs/promises imports across frontend/src/")
+        super().__init__("T1_F11_05", "F11", 1, "Zero Node.js fs/promises or server runtime dependencies across frontend-rs/")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        src_dir = os.path.join(inspector.root, "frontend/src")
-        for r, _, files in os.walk(src_dir):
-            for f in files:
-                if f.endswith((".ts", ".tsx")) and not f.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")):
-                    with open(os.path.join(r, f), "r", encoding="utf-8", errors="replace") as fh:
-                        content = fh.read()
-                        self.assert_not_in("from 'fs'", content, f"Node fs import found in {f}")
-                        self.assert_not_in("from 'fs/promises'", content, f"Node fs/promises import found in {f}")
+        cargo_toml = inspector.read_file("frontend-rs/Cargo.toml")
+        self.assert_true(bool(cargo_toml), "F11: frontend-rs/Cargo.toml must exist")
+        self.assert_false(inspector.file_exists("frontend/src"), "F11: legacy frontend/src must not exist")
+        self.assert_not_in("sqlx", cargo_toml or "", "F11: WASM frontend must not depend on server SQLite drivers")
 
 
 class TestF12FsHandlerUnitTestsExist(TestCase):

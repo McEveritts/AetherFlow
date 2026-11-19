@@ -108,15 +108,14 @@ fn security_gateway_installed_and_explicit_ingress_policies() {
     }
     let fixture = Fixture::new();
     fs::write(fixture.root.join("install/.syncthing.lock"), "installed").unwrap();
-    for host in [
-        "syncthing.aether.local",
-        "syncthing.review.test",
-        "SYNCTHING.review.test.:443",
-    ] {
-        assert_eq!(
-            resolve_app_target_for_host(host),
-            Some(("syncthing".into(), 8384)),
-            "{host}"
+    assert_eq!(
+        resolve_app_target_for_host("syncthing.aether.local"),
+        Some(("syncthing".into(), 8384))
+    );
+    for host in ["syncthing.review.test", "SYNCTHING.review.test.:443"] {
+        assert!(
+            resolve_app_target_for_host(host).is_none(),
+            "unconfigured external host must fail closed: {host}"
         );
     }
     fixture.active("saved.review.test", false);

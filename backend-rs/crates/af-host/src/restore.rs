@@ -571,6 +571,7 @@ pub fn resolve_trusted_canonical_host_destination_with_sqlite_override(
 
     let allowed = key == "var/lib/aetherflow/aetherflow.sqlite"
         || key == "etc/aetherflow/aetherflow.env"
+        || key.starts_with("etc/aetherflow/")
         || key == "var/www/html/dashboard/inc/config.php"
         || key == "home/owner/.rtorrent.rc"
         || key == "home/aetherflow/.rtorrent.rc"

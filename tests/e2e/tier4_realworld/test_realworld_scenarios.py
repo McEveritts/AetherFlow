@@ -10,6 +10,7 @@ Tier 4: Real-World Application Scenarios (Operator E2E Workflows)
 
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
+
 class TestScenarioOperatorBootstrap(TestCase):
     def __init__(self):
         super().__init__("T4_SCENARIO_01", "OperatorLifecycle", 4, "Complete Operator Bootstrap, Privilege Drop, Password Change & Topology Verification")
@@ -19,7 +20,7 @@ class TestScenarioOperatorBootstrap(TestCase):
             # Step 1: Health check
             code, ready, _ = client.request("GET", "/health/ready")
             self.assert_status_code(code, 200, "Health check failed")
-            
+
             # Step 2: Login
             code, login_resp, _ = client.request("POST", "/api/v1/public/auth/login", {
                 "username": getattr(client, "auth_username", "admin"),
@@ -29,7 +30,7 @@ class TestScenarioOperatorBootstrap(TestCase):
             token = login_resp.get("token")
             if token:
                 client.set_auth_token(token)
-                
+
             # Step 3: Verify Topology
             code, topo, _ = client.request("GET", "/api/v1/auth/system/topology")
             self.assert_status_code(code, 200, "Topology query failed")
@@ -41,8 +42,10 @@ class TestScenarioOperatorBootstrap(TestCase):
             has_runner = inspector.file_exists("backend-rs/crates/af-runner/src/lib.rs")
             has_auth = bool(routes and "/profile/password" in routes)
             has_topology = bool(routes and "/system/topology" in routes)
-            has_obsidian = bool(inspector.read_file("frontend/src/app/globals.css") and "--obs-bg-base" in inspector.read_file("frontend/src/app/globals.css"))
+            css = inspector.read_file("frontend-rs/styles/input.css")
+            has_obsidian = bool(css and "--obs-bg-base" in css)
             self.assert_true(has_api and has_runner and has_auth and has_topology and has_obsidian, "Scenario 01: All lifecycle components must be present")
+
 
 class TestScenarioAppIngressProvisioning(TestCase):
     def __init__(self):
@@ -58,8 +61,9 @@ class TestScenarioAppIngressProvisioning(TestCase):
             has_ingress = bool(routes and "/ingress" in routes)
             has_gateway = bool(mw and "app_subdomain_proxy_middleware" in mw)
             has_stream = bool(routes and "/deploy/stream" in routes)
-            has_card = inspector.file_exists("frontend/src/components/ingress/ExternalAccessCard.tsx")
+            has_card = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/network/tailscale_ingress.rs")
             self.assert_true(has_ingress and has_gateway and has_stream and has_card, "Scenario 02: Ingress provisioning pipeline must be satisfied")
+
 
 class TestScenarioMultitenantQuotaEnforcement(TestCase):
     def __init__(self):
@@ -74,8 +78,9 @@ class TestScenarioMultitenantQuotaEnforcement(TestCase):
             runner = inspector.read_file("backend-rs/crates/af-runner/src/lib.rs")
             has_quota_api = bool(routes and "/quotas" in routes)
             has_runner_quota = bool(runner and "/v1/quota" in runner)
-            has_quota_ui = inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
+            has_quota_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/quotas.rs")
             self.assert_true(has_quota_api and has_runner_quota and has_quota_ui, "Scenario 03: Storage quotas lifecycle must be satisfied")
+
 
 class TestScenarioMeshVpnOrchestration(TestCase):
     def __init__(self):
@@ -89,9 +94,10 @@ class TestScenarioMeshVpnOrchestration(TestCase):
             routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs")
             runner = inspector.read_file("backend-rs/crates/af-runner/src/lib.rs")
             has_net_api = bool(routes and "/network" in routes)
-            has_net_tab = inspector.file_exists("frontend/src/components/tabs/NetworkTab.tsx")
+            has_net_tab = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/network/mod.rs")
             has_runner_net = bool(runner and "/v1/network" in runner)
             self.assert_true(has_net_api and has_net_tab and has_runner_net, "Scenario 04: Mesh VPN orchestration components must be satisfied")
+
 
 class TestScenarioAiAnomalyHealing(TestCase):
     def __init__(self):
@@ -110,6 +116,7 @@ class TestScenarioAiAnomalyHealing(TestCase):
             has_heal = bool(workers and "start_heal_worker" in workers)
             has_notifications = bool(routes and "/notifications" in routes)
             self.assert_true(has_predictions and has_heal and has_notifications, "Scenario 05: Anomaly healing components must be satisfied")
+
 
 def get_tier4_tests():
     return [

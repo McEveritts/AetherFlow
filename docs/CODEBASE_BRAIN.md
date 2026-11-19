@@ -8,7 +8,7 @@ AetherFlow explicitly rejects the complexity of heavy container overlays in favo
 
 1. **100% Bare-Metal & systemd First**: Applications run natively on the host OS. Service supervision is managed directly via `systemd` cgroups and `af-systemd-sandbox` drop-ins—zero Docker daemons, zero container bridging latency, and zero production Node.js runtime daemons. Supported target platforms are **Debian 12/13 (Bookworm/Trixie)** and **Ubuntu 22.04/24.04 LTS**.
 2. **AI-Native, Human-Gated**: Intelligence is bounded by cryptographic authorization constraints. The FlowAI engine analyzes telemetry and formulates `RemediationProposals`, but **CANNOT** mutate system state without explicit operator approval via the Global Approval Inbox (`pending_actions`).
-3. **Repository & Binary Truth**: Configuration drift is prevented by design. The 11-crate Rust control plane (`backend-rs`) embeds the Next.js 16 static UI (`rust-embed` in `af-api`), verifies its own physical binary path on startup, and persists all state in a single-writer bundled SQLite WAL database (`af-db`).
+3. **Repository & Binary Truth**: Configuration drift is prevented by design. The 11-crate Rust control plane (`backend-rs`) serves the external 4-crate Leptos Rust WebAssembly UI from `web/dist` (`STATIC_DIR`), verifies its own physical binary path on startup, and persists all state in a single-writer bundled SQLite WAL database (`af-db`).
 
 ## 2. Component Topology & Data Flow
 
@@ -16,10 +16,10 @@ When executing an action on AetherFlow, the request traverses strict privilege a
 
 ```mermaid
 graph TD
-    Client["Next.js 16 Client SPA (Obsidian V2)"] -->|HTTPS / WSS + JWT| Proxy["Apache2 + Subdomain Gateway"]
+    Client["Leptos Rust WASM SPA (frontend-rs)"] -->|HTTPS / WSS + JWT| Proxy["Apache2 + Subdomain Gateway"]
     Proxy -->|127.0.0.1:8080| AxumRouter("Rust Axum Control Plane (af-api)<br/>User=aetherflow • ProtectSystem=strict")
 
-    subgraph Control_Plane["12-Crate Rust Workspace (backend-rs)"]
+    subgraph Control_Plane["11-Crate Rust Workspace (backend-rs)"]
         AxumRouter --> AuthMiddleware["AuthMiddleware + HS256 JWT + CSRF + Rate Limiter"]
         AuthMiddleware --> RBAC["Admin & Plugin Scope Guard"]
         RBAC --> Handlers["API, McBrowser (af-files) & Streaming Handlers"]

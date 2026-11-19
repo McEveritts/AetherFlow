@@ -33,7 +33,18 @@ EnvironmentFile=-/etc/aetherflow/aetherflow.env
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
-PrivateDevices=yes
+DevicePolicy=closed
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/zero rw
+DeviceAllow=/dev/full rw
+DeviceAllow=/dev/random r
+DeviceAllow=/dev/urandom r
+DeviceAllow=/dev/dri rw
+DeviceAllow=char-drm rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidia-modeset rw
+DeviceAllow=/dev/nvidia-uvm rw
 NoNewPrivileges=yes
 ProtectClock=yes
 ProtectControlGroups=yes
@@ -51,7 +62,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 UMask=0027
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
-ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw
+ReadWritePaths=-/opt/AetherFlow/backend/data
 
 LimitNOFILE=65535
 

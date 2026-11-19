@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class CiAndSecurityWorkflowGateTests(unittest.TestCase):
     def test_browser_harness_uses_wasm_and_preserves_real_service_worker_coverage(self) -> None:
-        config = (ROOT / "frontend/playwright.config.ts").read_text(encoding="utf-8")
+        config = (ROOT / "e2e/playwright.config.ts").read_text(encoding="utf-8")
         self.assertNotIn("npm run dev", config)
         self.assertIn("PLAYWRIGHT_BASE_URL", config)
         self.assertIn("serviceWorkers: 'block'", config)
@@ -18,7 +18,7 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         for filename in ("ci.yml", "release.yml"):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             self.assertIn("playwright install --with-deps chromium firefox webkit", workflow)
-        live = (ROOT / "frontend/tests/e2e/embedded.live.spec.ts").read_text(encoding="utf-8")
+        live = (ROOT / "e2e/tests/e2e/embedded.live.spec.ts").read_text(encoding="utf-8")
         self.assertIn("test.use({ serviceWorkers: 'allow' })", live)
         self.assertIn("Real service-worker cache boundaries", live)
 
@@ -51,7 +51,7 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         command = next(line.strip() for line in contract_gate.splitlines()
                        if line.strip().startswith("npx playwright test "))
         selector = shlex.split(command)[3]
-        specs = {p.name for p in (ROOT / "frontend/tests/e2e").glob("*.spec.ts")}
+        specs = {p.name for p in (ROOT / "e2e/tests/e2e").glob("*.spec.ts")}
         selected = {name for name in specs if re.search(selector, f"tests/e2e/{name}")}
         self.assertEqual(selected, {name for name in specs
                                     if not name.endswith(".live.spec.ts") and name != "visual.spec.ts"})
@@ -62,12 +62,10 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
 
     def test_ci_builds_wasm_and_rust_binaries_independently(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        react = ci.split("  frontend:\n", 1)[1].split("\n  frontend-rs:\n", 1)[0]
+        self.assertNotIn("\n  frontend:\n", ci)
+        self.assertNotIn("working-directory: frontend", ci)
         wasm = ci.split("  frontend-rs:\n", 1)[1].split("\n  backend-rs:\n", 1)[0]
         backend = ci.split("  backend-rs:\n", 1)[1].split("\n  embedded-e2e:\n", 1)[0]
-        self.assertIn("npm run lint", react)
-        self.assertIn("npm run test:ci", react)
-        self.assertNotIn("upload-artifact", react)
         self.assertIn("scripts/install_wasm_build_tools.sh", wasm)
         self.assertIn("scripts/build_wasm_frontend.sh --stage", wasm)
         self.assertIn("name: frontend-wasm-dist", wasm)

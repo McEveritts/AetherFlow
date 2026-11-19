@@ -54,39 +54,22 @@ run_check() {
 } > "${RESULT_DIR}/environment.txt"
 
 run_check rust-streaming cargo test --manifest-path backend-rs/Cargo.toml --locked \
-  -p af-streaming-tests streaming_ext::tests -- --test-threads=1
+  -p af-api --bin aetherflow-api streaming_ext::tests -- --test-threads=1
 run_check rust-canonical-streaming cargo test --manifest-path backend-rs/Cargo.toml --locked \
-  -p af-streaming-tests streaming_ -- --test-threads=1
+  -p af-api --bin aetherflow-api streaming_ -- --test-threads=1
 run_check rust-streaming-migration cargo test --manifest-path backend-rs/Cargo.toml --locked \
   -p af-db streaming::tests -- --test-threads=1
 
 if [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" ]]; then
-  run_check frontend-streaming npm --workspace frontend test -- --runInBand --runTestsByPath \
-    src/components/tabs/StreamingTab.test.tsx \
-    src/components/tabs/StreamingTab.rust-contract.test.tsx \
-    src/components/streaming/StreamingHistoryExplorer.test.tsx \
-    src/components/streaming/StreamingInsights.test.tsx \
-    src/components/streaming/StreamingPortability.test.tsx \
-    src/components/streaming/StreamingHistoryAdmin.test.tsx
+  run_check frontend-streaming cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
 else
   echo 'FAIL rust-contract-fixture (not generated; frontend contracts cannot run)' \
     | tee -a "${RESULT_DIR}/summary.txt"
   FAILED=1
 fi
 
-run_check typescript npm exec --workspace frontend -- tsc --noEmit --incremental false
-run_check streaming-lint npm --workspace frontend run lint -- \
-  src/components/tabs/StreamingTab.tsx \
-  src/components/tabs/StreamingTab.test.tsx \
-  src/components/tabs/StreamingTab.rust-contract.test.tsx src/lib/streaming.ts \
-  src/components/streaming/StreamingHistoryExplorer.tsx \
-  src/components/streaming/StreamingHistoryExplorer.test.tsx src/lib/streaming-history.ts \
-  src/components/streaming/StreamingInsights.tsx \
-  src/components/streaming/StreamingInsights.test.tsx \
-  src/components/streaming/StreamingPortability.tsx \
-  src/components/streaming/StreamingPortability.test.tsx \
-  src/components/streaming/StreamingHistoryAdmin.tsx \
-  src/components/streaming/StreamingHistoryAdmin.test.tsx
+run_check typescript npm exec --workspace e2e -- tsc --noEmit --incremental false
+run_check streaming-lint cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --locked -- -D warnings
 
 if [[ "${MODE}" == "--integrated" ]]; then
   unset AF_STREAMING_CONTRACT_FIXTURE
@@ -95,13 +78,13 @@ if [[ "${MODE}" == "--integrated" ]]; then
   run_check rust-integrated-build cargo build --manifest-path backend-rs/Cargo.toml --locked -p af-api
   export AF_STREAMING_CONTRACT_FIXTURE="${RESULT_DIR}/rust-dashboard.json"
   if [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" ]]; then
-    run_check frontend-all npm --workspace frontend test -- --runInBand
+    run_check frontend-all cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
   else
     echo 'FAIL frontend-all (Rust contract fixture unavailable)' | tee -a "${RESULT_DIR}/summary.txt"
     FAILED=1
   fi
-  run_check frontend-lint npm --workspace frontend run lint
-  run_check frontend-build env NEXT_STATIC_EXPORT=1 npm --workspace frontend run build
+  run_check frontend-lint cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
+  run_check frontend-build cargo build --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked
 fi
 
 printf '\nResults: %s\n' "${RESULT_DIR}"

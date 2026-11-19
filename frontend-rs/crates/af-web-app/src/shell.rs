@@ -489,17 +489,52 @@ fn MobileNavigation() -> impl IntoView {
 
 fn safe_avatar_src(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return None;
     }
-    if (trimmed.starts_with('/') && !trimmed.starts_with("//"))
-        || trimmed.starts_with("https://")
-        || trimmed.starts_with("http://")
-    {
-        Some(trimmed.to_string())
-    } else {
-        None
+    if trimmed.starts_with('/') {
+        if !trimmed.starts_with("//") && !trimmed.starts_with("/\\") && !trimmed.contains("..") {
+            return Some(trimmed.to_string());
+        }
+        return None;
     }
+    if [
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/jpg;base64,",
+        "data:image/webp;base64,",
+        "data:image/gif;base64,",
+        "data:image/avif;base64,",
+    ]
+    .iter()
+    .any(|prefix| {
+        trimmed
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            && trimmed.len() > prefix.len()
+            && trimmed[prefix.len()..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    }) {
+        return Some(trimmed.to_string());
+    }
+    if trimmed
+        .get(..5)
+        .is_some_and(|head| head.eq_ignore_ascii_case("blob:"))
+        && trimmed.len() > 5
+        && !trimmed.bytes().any(|b| b.is_ascii_whitespace())
+    {
+        return Some(trimmed.to_string());
+    }
+    if url::Url::parse(trimmed).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    }) {
+        return Some(trimmed.to_string());
+    }
+    None
 }
 
 fn palette_items(context: AppContext, locale: &str) -> Vec<SearchItem> {
@@ -1141,6 +1176,15 @@ mod tests {
             safe_avatar_src("https://example.com/a.png"),
             Some("https://example.com/a.png".into())
         );
+        assert_eq!(
+            safe_avatar_src("data:image/png;base64,YQ=="),
+            Some("data:image/png;base64,YQ==".into())
+        );
+        assert_eq!(
+            safe_avatar_src("blob:https://example.com/550e8400-e29b-41d4-a716-446655440000"),
+            Some("blob:https://example.com/550e8400-e29b-41d4-a716-446655440000".into())
+        );
+        assert_eq!(safe_avatar_src("http://example.com/a.png"), None);
         assert_eq!(safe_avatar_src("//evil.example/a.png"), None);
         assert_eq!(safe_avatar_src("javascript:alert(1)"), None);
         assert_eq!(safe_avatar_src("data:image/svg+xml,<svg/>"), None);

@@ -1,7 +1,14 @@
 #!/bin/bash
 # Module: 00-core.sh
 
-function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15; }
+function _string() {
+	local len="${1:-16}"
+	local raw=""
+	while (( ${#raw} < len )); do
+		raw+="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9')"
+	done
+	printf '%s\n' "${raw:0:${len}}"
+}
 
 function _version_ge() {
 	[[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
@@ -332,11 +339,6 @@ function _logcheck() {
 
 		_save_config OUTTO "${OUTTO}"
 	fi
-
-	if [[ ! -d /root/tmp ]]; then
-		sed -i 's/noexec,//g' /etc/fstab
-		mount -o remount /tmp >>"${OUTTO}" 2>&1
-	fi
 }
 
 # setting system hostname function (5)
@@ -373,7 +375,38 @@ function _hostname() {
 	else
 		hostname "${requested_hostname}"
 		echo "${requested_hostname}" >/etc/hostname
-		echo "127.0.0.1 ${requested_hostname}" >/etc/hosts
+		local short_host="${requested_hostname%%.*}"
+		local hosts_line
+		if [[ "${short_host}" != "${requested_hostname}" ]]; then
+			hosts_line="127.0.1.1 ${requested_hostname} ${short_host}"
+		else
+			hosts_line="127.0.1.1 ${requested_hostname}"
+		fi
+		if [[ -f /etc/hosts && ! -L /etc/hosts ]]; then
+			local tmp_hosts
+			tmp_hosts="$(mktemp /etc/.hosts.af.XXXXXX)"
+			awk -v newline="${hosts_line}" '
+				BEGIN { updated = 0 }
+				/^[[:space:]]*127\.0\.1\.1[[:space:]]+/ {
+					if (!updated) {
+						print newline
+						updated = 1
+					}
+					next
+				}
+				{ print }
+				END {
+					if (!updated) {
+						print newline
+					}
+				}
+			' /etc/hosts >"${tmp_hosts}"
+			chmod 0644 "${tmp_hosts}"
+			mv -f "${tmp_hosts}" /etc/hosts
+		else
+			printf '127.0.0.1 localhost\n%s\n' "${hosts_line}" >/etc/hosts
+			chmod 0644 /etc/hosts
+		fi
 		_save_config hostname_value "${requested_hostname}"
 		echo "   ${green}✓ Hostname successfully set to:${normal} ${bold}${requested_hostname}${normal}"
 	fi

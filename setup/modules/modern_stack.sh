@@ -538,6 +538,7 @@ _build_modern_stack_from_source() {
     (
         cd "${af_root}/backend-rs" || exit 1
         if ! command -v mold >/dev/null 2>&1; then
+            export RUSTFLAGS="${RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
         fi

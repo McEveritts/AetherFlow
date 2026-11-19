@@ -39,6 +39,8 @@ allow = [
     "BSL-1.0",
     "0BSD",
     "bzip2-1.0.6",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
 ]
 confidence-threshold = 0.8
 

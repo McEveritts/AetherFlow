@@ -17,6 +17,7 @@ id = "generic-api-key"
     '''^\s*"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n",\s*$''',
   ]
 
+  # Historical git-history allowlist (retired from working tree)
   [[rules.allowlists]]
   description = "Allow synthetic VALID_TOKEN share fixture in share unit tests"
   condition = "AND"
@@ -182,6 +183,7 @@ id = "generic-api-key"
     '''^eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9\.eyJ1c2VyX2lkIjoxLCJleHAiOjk5OTk5OTk5OTl9\.invalid-signature$''',
   ]
 
+  # Historical git-history allowlist (retired from working tree)
   [[rules.allowlists]]
   description = "Upstream Headphones public default songkick_apikey template placeholder"
   condition = "AND"

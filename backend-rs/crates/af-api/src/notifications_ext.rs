@@ -146,8 +146,9 @@ pub async fn regenerate_2fa_recovery_codes(
         if !totp_enabled {
             return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Two-factor authentication is not enabled");
         }
-        let password_ok = req.password.is_empty()
-            || (!password_hash.is_empty() && crate::auth::verify_password(&req.password, &password_hash));
+        let password_ok = password_hash.is_empty()
+            || (!req.password.is_empty()
+                && crate::auth::verify_password(&req.password, &password_hash));
         let result = (|| -> anyhow::Result<_> {
             let conn = af_db::get_conn()?;
             replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_ok)
@@ -155,7 +156,7 @@ pub async fn regenerate_2fa_recovery_codes(
         let codes = match result {
             Ok(Some(codes)) => codes,
             Ok(None) => {
-                let err_code = if !req.password.is_empty() && !password_ok {
+                let err_code = if !password_ok {
                     "INVALID_CURRENT_PASSWORD"
                 } else {
                     "INVALID_2FA_CODE"
@@ -627,7 +628,67 @@ fn is_public_webhook_ip(address: std::net::IpAddr) -> bool {
     }
 }
 
-fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
+fn allow_private_webhooks() -> bool {
+    std::env::var("AETHERFLOW_ALLOW_PRIVATE_WEBHOOKS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn is_blocked_always_webhook_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(v4) => {
+            let [first, second, third, fourth] = v4.octets();
+            first == 0
+                || first == 127
+                || (first == 169 && second == 254)
+                || [first, second, third, fourth] == [168, 63, 129, 16]
+                || v4.is_multicast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_always_webhook_ip(std::net::IpAddr::V4(mapped));
+            }
+            let segments = v6.segments();
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+                || segments[0] == 0x2002
+        }
+    }
+}
+
+fn is_allowed_webhook_ip_with(address: std::net::IpAddr, allow_private: bool) -> bool {
+    if is_public_webhook_ip(address) {
+        return true;
+    }
+    if !allow_private || is_blocked_always_webhook_ip(address) {
+        return false;
+    }
+    match address {
+        std::net::IpAddr::V4(v4) => {
+            let [first, second, _, _] = v4.octets();
+            first == 10
+                || (first == 100 && (64..=127).contains(&second))
+                || (first == 172 && (16..=31).contains(&second))
+                || (first == 192 && second == 168)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_allowed_webhook_ip_with(std::net::IpAddr::V4(mapped), allow_private);
+            }
+            (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+#[cfg(test)]
+fn is_allowed_webhook_ip(address: std::net::IpAddr) -> bool {
+    is_allowed_webhook_ip_with(address, allow_private_webhooks())
+}
+
+fn parse_webhook_url_with(target: &str, allow_private: bool) -> anyhow::Result<url::Url> {
     let url = url::Url::parse(target)?;
     anyhow::ensure!(
         matches!(url.scheme(), "http" | "https"),
@@ -643,11 +704,11 @@ fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
     );
     match url.host() {
         Some(url::Host::Ipv4(address)) => anyhow::ensure!(
-            is_public_webhook_ip(address.into()),
+            is_allowed_webhook_ip_with(address.into(), allow_private),
             "Webhook target must be public"
         ),
         Some(url::Host::Ipv6(address)) => anyhow::ensure!(
-            is_public_webhook_ip(address.into()),
+            is_allowed_webhook_ip_with(address.into(), allow_private),
             "Webhook target must be public"
         ),
         _ => {}
@@ -655,8 +716,13 @@ fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
     Ok(url)
 }
 
+fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
+    parse_webhook_url_with(target, allow_private_webhooks())
+}
+
 async fn webhook_client(target: &str) -> anyhow::Result<(reqwest::Client, url::Url)> {
-    let url = parse_webhook_url(target)?;
+    let allow_private = allow_private_webhooks();
+    let url = parse_webhook_url_with(target, allow_private)?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| anyhow::anyhow!("Invalid webhook port"))?;
@@ -686,8 +752,8 @@ async fn webhook_client(target: &str) -> anyhow::Result<(reqwest::Client, url::U
         !addresses.is_empty()
             && addresses
                 .iter()
-                .all(|address| is_public_webhook_ip(address.ip())),
-        "Webhook DNS must resolve only to public addresses"
+                .all(|address| is_allowed_webhook_ip_with(address.ip(), allow_private)),
+        "Webhook DNS must resolve only to allowed addresses"
     );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -1382,5 +1448,132 @@ mod tests {
             &serde_json::json!({"url": "https://8.8.8.8/webhook"})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn webhook_private_flag_allows_tailscale_cgnat_and_rfc1918_while_blocking_loopback_and_metadata(
+    ) {
+        for private_target in [
+            "http://100.64.0.1:8080/hook",
+            "https://100.100.100.100/hook",
+            "http://192.168.1.50/hook",
+            "http://10.1.2.3/hook",
+            "http://172.16.5.5/hook",
+            "http://[fd00::1]/hook",
+        ] {
+            assert!(
+                parse_webhook_url_with(private_target, false).is_err(),
+                "must reject {private_target} when private webhooks are disabled"
+            );
+            assert!(
+                parse_webhook_url_with(private_target, true).is_ok(),
+                "must allow {private_target} when private webhooks are enabled"
+            );
+        }
+
+        for always_blocked in [
+            "http://127.0.0.1/hook",
+            "http://[::1]/hook",
+            "http://0.0.0.0/hook",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://168.63.129.16/machine",
+            "http://[::ffff:127.0.0.1]/hook",
+            "http://[::ffff:169.254.169.254]/hook",
+        ] {
+            assert!(
+                parse_webhook_url_with(always_blocked, true).is_err(),
+                "must ALWAYS block {always_blocked}"
+            );
+        }
+        assert!(is_allowed_webhook_ip("8.8.8.8".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn regenerate_2fa_rejects_empty_password_on_password_backed_user() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        crate::plugins::tests::ensure_shared_test_db();
+        let pw_hash = bcrypt::hash("correct-password", 4).unwrap();
+        let enc_secret = af_db::encrypt_key("JBSWY3DPEHPK3PXP").unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute_batch(
+                "DELETE FROM recovery_codes WHERE user_id IN (9101, 9102);
+                 DELETE FROM users WHERE id IN (9101, 9102);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_secret, totp_enabled, last_totp_step)
+                 VALUES (9101, 'totp-pw-user', 'user', ?1, ?2, 1, -1)",
+                params![pw_hash, enc_secret],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_secret, totp_enabled, last_totp_step)
+                 VALUES (9102, 'totp-oauth-user', 'user', '', ?1, 1, -1)",
+                params![enc_secret],
+            )
+            .unwrap();
+        }
+
+        let pw_user = AuthUser {
+            user_id: 9101,
+            username: "totp-pw-user".into(),
+            role: "user".into(),
+            jti: "jti-9101".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let code = recovery_totp();
+
+        // Empty password must fail with 403 INVALID_CURRENT_PASSWORD and NOT consume the TOTP code
+        let empty_pw_resp = regenerate_2fa_recovery_codes(
+            Extension(pw_user.clone()),
+            HeaderMap::new(),
+            Json(RegenerateRecoveryReq {
+                code: code.clone(),
+                password: String::new(),
+            }),
+        )
+        .await;
+        assert_eq!(empty_pw_resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(empty_pw_resp.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "INVALID_CURRENT_PASSWORD");
+
+        // Valid password + same unconsumed TOTP code succeeds
+        let ok_resp = regenerate_2fa_recovery_codes(
+            Extension(pw_user),
+            HeaderMap::new(),
+            Json(RegenerateRecoveryReq {
+                code: code.clone(),
+                password: "correct-password".into(),
+            }),
+        )
+        .await;
+        assert_eq!(ok_resp.status(), StatusCode::OK);
+
+        // OAuth-only user with empty password_hash can regenerate without a password
+        let oauth_user = AuthUser {
+            user_id: 9102,
+            username: "totp-oauth-user".into(),
+            role: "user".into(),
+            jti: "jti-9102".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let oauth_resp = regenerate_2fa_recovery_codes(
+            Extension(oauth_user),
+            HeaderMap::new(),
+            Json(RegenerateRecoveryReq {
+                code,
+                password: String::new(),
+            }),
+        )
+        .await;
+        assert_eq!(oauth_resp.status(), StatusCode::OK);
     }
 }

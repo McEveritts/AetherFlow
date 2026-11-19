@@ -75,7 +75,7 @@ Nextcloud purge resolves the retained `config.php` before detaching Apache. Auto
 ### 4. Catalog & Automation Registration
 When adding a new package:
 1. Add the package definition to `config/packages.json` and register automation in `config/package_automation.json` when required.
-2. Place the brand icon in `frontend/public/img/<app_id>.png` (or `.svg`).
+2. Place the brand icon in `frontend-rs/public/img/<app_id>.png` (or `.svg`).
 3. Add syntax and lifecycle regression tests under `tests/` and verify with `python3 tests/check_shell_hygiene.py`.
 
 ### 5. Completion, Configuration & Recovery

@@ -1,6 +1,6 @@
 # API Reference
 
-The AetherFlow API (`aetherflow-api`) is a high-concurrency **Rust (`Axum` + `Tokio`)** control plane (`backend-rs/crates/af-api`). It serves the embedded Next.js 16 (Obsidian V2) static frontend, RESTful endpoints for state mutation, Server-Sent Events (SSE), and full-duplex WebSocket streams for real-time telemetry.
+The AetherFlow API (`aetherflow-api`) is a high-concurrency **Rust (`Axum` + `Tokio`)** control plane (`backend-rs/crates/af-api`). It serves the external **Leptos Rust WebAssembly (`frontend-rs`)** static frontend from `web/dist` (`STATIC_DIR`), RESTful endpoints for state mutation, Server-Sent Events (SSE), and full-duplex WebSocket streams for real-time telemetry.
 
 > [!NOTE]
 > This API powers the AetherFlow dashboard and the `af` CLI, and can also be consumed programmatically by administrators with valid session tokens or Bearer JWTs.

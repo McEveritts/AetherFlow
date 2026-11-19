@@ -38,10 +38,10 @@ if [[ "$*" == *tsc* && "$AF_TEST_HANG_TYPESCRIPT" == 1 ]]; then
 fi
 ''',
             "cargo": '''printf 'cargo %s\\n' "$*" >> "$AF_TEST_CALLS"
-if [[ "$*" == *"-p af-streaming-tests"* && "$AF_TEST_MISSING_FIXTURE" != 1 ]]; then
+if [[ "$*" == *"streaming_ext::tests"* && "$AF_TEST_MISSING_FIXTURE" != 1 ]]; then
   printf '{}' > "$AF_STREAMING_CONTRACT_FIXTURE"
 fi
-if [[ "$*" == *"-p af-api"* && "$AF_TEST_FAIL_INTEGRATED" == 1 ]]; then
+if [[ ( "$*" == *"-p af-api -- --test-threads=1"* || "$*" == *"build --manifest-path backend-rs/Cargo.toml --locked -p af-api"* ) && "$AF_TEST_FAIL_INTEGRATED" == 1 ]]; then
   exit 1
 fi
 ''',
@@ -63,9 +63,9 @@ fi
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls.read_text()
-        self.assertIn("-p af-streaming-tests streaming_ext::tests", calls)
-        self.assertIn("StreamingTab.rust-contract.test.tsx", calls)
-        self.assertNotIn("-p af-api", calls)
+        self.assertIn("-p af-api --bin aetherflow-api streaming_ext::tests", calls)
+        self.assertIn("cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked", calls)
+        self.assertNotIn("-p af-api -- --test-threads=1", calls)
         self.assertIn("PASS typescript", result.stdout)
         self.assertEqual(len(list((self.root / "dist").glob("*/rust-dashboard.json"))), 1)
 
@@ -74,7 +74,7 @@ fi
         result = self.run_gate()
         self.assertEqual(result.returncode, 1)
         self.assertIn("FAIL rust-contract-fixture", result.stdout)
-        self.assertNotIn("--runTestsByPath", self.calls.read_text())
+        self.assertNotIn("cargo test --manifest-path frontend-rs/Cargo.toml", self.calls.read_text())
         self.assertIn("PASS typescript", result.stdout)
 
     def test_integrated_failures_do_not_hide_remaining_gates(self):

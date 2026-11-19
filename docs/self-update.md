@@ -42,9 +42,7 @@ known-good release. Do not forge or delete recovery state to bypass that guard.
 
 ## Validation
 
-Run Rust workspace tests and frontend TypeScript, lint, Jest, and static-export
-checks. The self-update tests cover command validation, launcher failure,
-duplicates, native/Bash isolation, runtime mismatch, and stale/failed UI status.
+Run `backend-rs` and `frontend-rs` workspace tests, Clippy, WASM asset checks, and Playwright browser checks. The self-update tests cover command validation, launcher failure, duplicates, native/Bash isolation, runtime mismatch, and stale/failed UI status.
 
 The explicit ignored Rust integration test
 `self_update::tests::updater_survives_caller_restart` executes the actual launcher

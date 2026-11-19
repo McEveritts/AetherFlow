@@ -2939,6 +2939,9 @@ pub async fn refresh_user_quota(Path(user_id): Path<i64>) -> Response {
 
 static DEPLOY_STREAMS: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static DEPLOY_LAST_EVENT: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+#[cfg(test)]
 pub static SSE_DEPLOY_TX: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -2963,34 +2966,79 @@ fn register_deployment(app_name: &str) -> Result<DeploymentRegistration, Respons
             "A deployment for this application is already running",
         ));
     }
-    let mut sse = SSE_DEPLOY_TX.lock().map_err(|_| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "INTERNAL_ERROR",
-            "Deployment state unavailable",
-        )
-    })?;
     let (sender, _) = broadcast::channel(64);
     streams.insert(app_name.to_string(), sender.clone());
-    sse.insert(app_name.to_string(), sender.clone());
+    if let Ok(mut last) = DEPLOY_LAST_EVENT.lock() {
+        last.remove(app_name);
+    }
     Ok(DeploymentRegistration {
         app_name: app_name.to_string(),
         sender,
     })
 }
 
-impl Drop for DeploymentRegistration {
-    fn drop(&mut self) {
-        for map in [&*DEPLOY_STREAMS, &*SSE_DEPLOY_TX] {
-            if let Ok(mut map) = map.lock() {
-                if map
-                    .get(&self.app_name)
-                    .is_some_and(|sender| sender.same_channel(&self.sender))
-                {
-                    map.remove(&self.app_name);
-                }
+pub(crate) fn ensure_or_reuse_deploy_stream(app_name: &str) -> Option<broadcast::Sender<String>> {
+    let mut streams = DEPLOY_STREAMS.lock().ok()?;
+    let sender = if let Some(existing) = streams.get(app_name) {
+        existing.clone()
+    } else {
+        let (sender, _) = broadcast::channel(64);
+        streams.insert(app_name.to_string(), sender.clone());
+        sender
+    };
+    Some(sender)
+}
+
+pub(crate) fn publish_deploy_json_event(
+    app_name: &str,
+    sender: &broadcast::Sender<String>,
+    payload: &serde_json::Value,
+) {
+    let serialized = payload.to_string();
+    if let Ok(mut last) = DEPLOY_LAST_EVENT.lock() {
+        last.insert(app_name.to_string(), serialized.clone());
+    }
+    if app_name == "mediaflow_engine" {
+        af_services::publish_mediaflow_progress(payload);
+    }
+    let _ = sender.send(serialized);
+}
+
+pub(crate) fn release_deploy_stream_if_matching(
+    app_name: &str,
+    sender: &broadcast::Sender<String>,
+) {
+    if let Ok(mut streams) = DEPLOY_STREAMS.lock() {
+        if streams
+            .get(app_name)
+            .is_some_and(|current| current.same_channel(sender))
+        {
+            streams.remove(app_name);
+            if let Ok(mut last) = DEPLOY_LAST_EVENT.lock() {
+                last.remove(app_name);
             }
         }
+    }
+}
+
+pub(crate) fn is_terminal_deploy_event(msg: &str) -> bool {
+    if msg.starts_with("[SUCCESS]") || msg.starts_with("[ROLLBACK]") || msg.starts_with("[ERROR]") {
+        return true;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(msg) {
+        if let Some(status) = val.get("status").and_then(|v| v.as_str()) {
+            return matches!(
+                status.to_ascii_lowercase().as_str(),
+                "complete" | "completed" | "failed" | "error" | "success" | "done"
+            );
+        }
+    }
+    false
+}
+
+impl Drop for DeploymentRegistration {
+    fn drop(&mut self) {
+        release_deploy_stream_if_matching(&self.app_name, &self.sender);
     }
 }
 
@@ -4373,6 +4421,114 @@ pub async fn handle_deploy_stream(
             .into_response();
     };
 
+    if app_name == "mediaflow_engine" {
+        let mut rx = af_services::subscribe_mediaflow_progress();
+        let cached_event = DEPLOY_LAST_EVENT
+            .lock()
+            .ok()
+            .and_then(|map| map.get(app_name).cloned());
+        let initial_snapshot = match cached_event {
+            Some(ev) if !is_terminal_deploy_event(&ev) => ev,
+            _ => {
+                let db_snapshot = tokio::task::spawn_blocking(|| {
+                    let conn = af_db::get_read_conn().ok()?;
+                    let proc_file: Option<String> = conn
+                        .query_row(
+                            "SELECT file_path FROM mediaflow_queue WHERE status = 'PROCESSING' ORDER BY updated_at DESC LIMIT 1",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    if let Some(file) = proc_file {
+                        return Some(
+                            serde_json::json!({
+                                "status": "running",
+                                "file": file,
+                                "progress": 0,
+                                "message": "Transcode in progress",
+                            })
+                            .to_string(),
+                        );
+                    }
+                    let approved_file: Option<String> = conn
+                        .query_row(
+                            "SELECT file_path FROM mediaflow_queue WHERE status = 'APPROVED' ORDER BY updated_at ASC LIMIT 1",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    approved_file.map(|file| {
+                        serde_json::json!({
+                            "status": "running",
+                            "file": file,
+                            "progress": 0,
+                            "message": "Transcode job queued",
+                        })
+                        .to_string()
+                    })
+                })
+                .await
+                .ok()
+                .flatten();
+                db_snapshot.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "status": "idle",
+                        "progress": 0,
+                        "message": "MediaFlow Engine idle",
+                    })
+                    .to_string()
+                })
+            }
+        };
+
+        let stream = async_stream::stream! {
+            let mut revalidate_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            revalidate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let _ = revalidate_tick.tick().await;
+            let safe_init = af_common::redact::redact_secrets(&initial_snapshot);
+            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_init));
+            loop {
+                tokio::select! {
+                    _ = revalidate_tick.tick() => {
+                        if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                            break;
+                        }
+                    }
+                    recv_res = rx.recv() => {
+                        match recv_res {
+                            Ok(msg) => {
+                                if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                                    break;
+                                }
+                                let safe_msg = af_common::redact::redact_secrets(&msg);
+                                yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
+                                if is_terminal_deploy_event(&safe_msg) {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::debug!(skipped, "mediaflow progress stream lagged; continuing");
+                                continue;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut resp = Response::new(Body::from_stream(stream));
+        let h = resp.headers_mut();
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        h.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        h.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
+        return resp;
+    }
+
     let rx_opt = DEPLOY_STREAMS
         .lock()
         .ok()
@@ -4387,11 +4543,22 @@ pub async fn handle_deploy_stream(
         )
             .into_response();
     };
+    let initial_event = DEPLOY_LAST_EVENT
+        .lock()
+        .ok()
+        .and_then(|map| map.get(app_name).cloned());
 
     let stream = async_stream::stream! {
         let mut revalidate_tick = tokio::time::interval(std::time::Duration::from_secs(5));
         revalidate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let _ = revalidate_tick.tick().await;
+        if let Some(first_msg) = initial_event {
+            let safe_msg = af_common::redact::redact_secrets(&first_msg);
+            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
+            if is_terminal_deploy_event(&safe_msg) {
+                return;
+            }
+        }
         loop {
             tokio::select! {
                 _ = revalidate_tick.tick() => {
@@ -4400,16 +4567,22 @@ pub async fn handle_deploy_stream(
                     }
                 }
                 recv_res = rx.recv() => {
-                    let Ok(msg) = recv_res else {
-                        break;
-                    };
-                    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
-                        break;
-                    }
-                    let safe_msg = af_common::redact::redact_secrets(&msg);
-                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
-                    if safe_msg.starts_with("[SUCCESS]") || safe_msg.starts_with("[ROLLBACK]") || safe_msg.starts_with("[ERROR]") {
-                        break;
+                    match recv_res {
+                        Ok(msg) => {
+                            if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                                break;
+                            }
+                            let safe_msg = af_common::redact::redact_secrets(&msg);
+                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
+                            if is_terminal_deploy_event(&safe_msg) {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::debug!(skipped, "deploy stream lagged; continuing");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
@@ -4642,6 +4815,138 @@ mod updater_tests {
         assert!(!redacted.contains("supersecretvalue123"));
         assert!(!redacted.contains("hiddenpass"));
         assert!(redacted.contains("[REDACTED]"));
+
+        assert!(is_terminal_deploy_event("[SUCCESS] done"));
+        assert!(is_terminal_deploy_event("[ROLLBACK] reverted"));
+        assert!(is_terminal_deploy_event("[ERROR] failed"));
+        assert!(is_terminal_deploy_event(
+            r#"{"status":"completed","progress":100,"message":"done"}"#
+        ));
+        assert!(is_terminal_deploy_event(
+            r#"{"status":"failed","progress":100,"message":"err"}"#
+        ));
+        assert!(is_terminal_deploy_event(
+            r#"{"status":"done","progress":100}"#
+        ));
+        assert!(!is_terminal_deploy_event(
+            r#"{"status":"running","progress":50}"#
+        ));
+    }
+
+    fn ensure_test_admin_user_for_stream() {
+        let _ = crate::plugins::tests::ensure_shared_test_db();
+        if let Ok(conn) = af_db::get_conn() {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO users (id, username, role) VALUES (1, 'admin', 'admin')",
+                [],
+            );
+            let _ = conn.execute("UPDATE users SET role = 'admin' WHERE id = 1", []);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mediaflow_engine_deploy_stream_returns_200_json_sse_and_closes_on_completion() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_test_admin_user_for_stream();
+        let app_name = format!("mediaflow-test-{}", uuid::Uuid::new_v4());
+        let sender = ensure_or_reuse_deploy_stream(&app_name).unwrap();
+        publish_deploy_json_event(
+            &app_name,
+            &sender,
+            &serde_json::json!({
+                "status": "running",
+                "progress": 25,
+                "message": "Scanning library",
+            }),
+        );
+
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            jti: String::new(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let mut q = HashMap::new();
+        q.insert("appName".to_string(), app_name.clone());
+        let resp = handle_deploy_stream(axum::Extension(admin), Query(q)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
+
+        let sender_for_finish = sender.clone();
+        let app_for_finish = app_name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            publish_deploy_json_event(
+                &app_for_finish,
+                &sender_for_finish,
+                &serde_json::json!({
+                    "status": "completed",
+                    "progress": 100,
+                    "message": "Scan complete",
+                }),
+            );
+        });
+
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains(r#""status":"running""#), "body={text}");
+        assert!(text.contains(r#""status":"completed""#), "body={text}");
+
+        release_deploy_stream_if_matching(&app_name, &sender);
+        assert!(!DEPLOY_STREAMS.lock().unwrap().contains_key(&app_name));
+    }
+
+    #[tokio::test]
+    async fn test_mediaflow_engine_progress_stream_subscribes_worker_broadcasts_and_handles_lag() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_test_admin_user_for_stream();
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            jti: String::new(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let mut q = HashMap::new();
+        q.insert("appName".to_string(), "mediaflow_engine".to_string());
+        let resp = handle_deploy_stream(axum::Extension(admin), Query(q)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            // Overflow the 256-slot broadcast buffer so subscriber experiences RecvError::Lagged
+            for i in 0..300 {
+                af_services::publish_mediaflow_progress(&serde_json::json!({
+                    "status": "running",
+                    "progress": i % 99,
+                    "message": format!("Tick {i}"),
+                }));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            af_services::publish_mediaflow_progress(&serde_json::json!({
+                "status": "completed",
+                "progress": 100,
+                "message": "Worker transcode done",
+            }));
+        });
+
+        let body = axum::body::to_bytes(resp.into_body(), 262_144)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains(r#""status":"#), "body={text}");
+        assert!(
+            text.contains(r#""status":"completed""#),
+            "stream must survive lag and deliver completion: body={text}"
+        );
     }
 
     #[test]

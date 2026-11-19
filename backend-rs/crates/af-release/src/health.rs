@@ -369,6 +369,100 @@ pub fn parse_endpoint_socket_addr(endpoint: &str) -> Option<std::net::SocketAddr
     format!("{}:{}", host, port).parse().ok()
 }
 
+/// Validates deployed frontend assets (`web/dist/index.html` and at least one non-empty `.wasm`)
+/// when `web/dist` (or `web`) is present in `release_dir`.
+///
+/// Synthetic binary-only test fixtures that omit `web/dist` altogether pass cleanly.
+pub fn verify_deployed_frontend_assets(release_dir: &Path) -> ReleaseResult<()> {
+    let web_dir = release_dir.join("web");
+    match fs::symlink_metadata(&web_dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(ReleaseError::ArtifactVerification(format!(
+                    "Deployed release web directory {} is a symlink or non-directory.",
+                    web_dir.display()
+                )));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!("inspecting deployed web directory {}", web_dir.display()),
+                err,
+            ));
+        }
+    }
+
+    let dist_dir = web_dir.join("dist");
+    match fs::symlink_metadata(&dist_dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(ReleaseError::ArtifactVerification(format!(
+                    "Deployed release web/dist path {} is a symlink or non-directory.",
+                    dist_dir.display()
+                )));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!(
+                    "inspecting deployed web/dist directory {}",
+                    dist_dir.display()
+                ),
+                err,
+            ));
+        }
+    }
+
+    let index_path = dist_dir.join("index.html");
+    let has_index = fs::symlink_metadata(&index_path)
+        .map(|m| !m.file_type().is_symlink() && m.is_file() && m.len() > 0)
+        .unwrap_or(false);
+    if !has_index {
+        return Err(ReleaseError::ArtifactVerification(format!(
+            "Deployed release is missing a non-empty regular {}.",
+            index_path.display()
+        )));
+    }
+
+    let entries = fs::read_dir(&dist_dir).map_err(|err| {
+        ReleaseError::ArtifactVerification(format!(
+            "Failed to inspect deployed frontend directory {}: {}",
+            dist_dir.display(),
+            err
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            ReleaseError::ArtifactVerification(format!(
+                "Failed to read deployed frontend entry in {}: {}",
+                dist_dir.display(),
+                err
+            ))
+        })?;
+        if !entry.file_name().to_string_lossy().ends_with(".wasm") {
+            continue;
+        }
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).map_err(|err| {
+            ReleaseError::ArtifactVerification(format!(
+                "Failed to inspect deployed frontend asset {}: {}",
+                path.display(),
+                err
+            ))
+        })?;
+        if !meta.file_type().is_symlink() && meta.is_file() && meta.len() > 0 {
+            return Ok(());
+        }
+    }
+
+    Err(ReleaseError::ArtifactVerification(format!(
+        "Deployed release is missing a non-empty regular {}/*.wasm module.",
+        dist_dir.display()
+    )))
+}
+
 /// Production bare-metal Linux `LifecycleController` invoking `systemctl`.
 #[derive(Debug, Clone, Default)]
 pub struct SystemdLifecycleController;
@@ -377,6 +471,9 @@ impl LifecycleController for SystemdLifecycleController {
     fn verify_running_release(&self, config: &ReleaseConfig) -> ReleaseResult<()> {
         let expected = fs::canonicalize(config.current_link.join("aetherflow-api"))
             .map_err(|error| ReleaseError::io("resolving candidate executable", error))?;
+        if let Some(release_dir) = expected.parent() {
+            verify_deployed_frontend_assets(release_dir)?;
+        }
         for unit in ["aetherflow-api.service", "aetherflow-runner.service"] {
             let output = Command::new("systemctl")
                 .args(["show", "--property=MainPID", "--value", unit])

@@ -7,19 +7,58 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
-pub(super) const MODEL_PRESETS: [&str; 11] = [
+pub(super) const MODEL_PRESETS: [&str; 33] = [
     "gemini-4-argon",
+    "gemini-4-carbon",
+    "gemini-4-neon",
+    "gemini-4-hydrogen",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
     "gpt-6-astra",
     "gpt-6.1-sol",
     "gpt-6.1-terra",
     "gpt-6-luna",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o3",
+    "claude-opus-5-6",
     "claude-fable-5-1",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
+    "claude-opus-4-6",
+    "claude-sonnet-4-5",
     "llama3.2:latest",
     "qwen2.5-coder-7b-instruct",
 ];
+
+fn cloud_provider_for_model(model: &str) -> Option<&'static str> {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.starts_with("gemini-") {
+        Some("gemini")
+    } else if lower.starts_with("gpt-")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        Some("openai")
+    } else if lower.starts_with("claude-") {
+        Some("anthropic")
+    } else {
+        None
+    }
+}
 
 const PROVIDERS: [(&str, &str, &str); 6] = [
     ("gemini", "Google Gemini", "geminiApiKey"),
@@ -61,8 +100,8 @@ fn default_model(provider: &str) -> &'static str {
     }
 }
 fn configured_selection(settings: &Value) -> (String, String) {
-    let raw = text(settings, "aiModel");
-    let local = text(settings, "localModel");
+    let raw = text(settings, "aiModel").trim().to_string();
+    let local = text(settings, "localModel").trim().to_string();
     let runtime = text(settings, "localProvider");
     let runtime = if runtime.is_empty() {
         text(settings, "localRuntime")
@@ -84,22 +123,10 @@ fn configured_selection(settings: &Value) -> (String, String) {
             );
         }
     }
-    let cloud = if raw == "gemini-4-argon" || !valid_model(&raw) {
+    let cloud = if !valid_model(&raw) {
         Some("gemini")
-    } else if ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"].contains(&raw.as_str())
-    {
-        Some("openai")
-    } else if [
-        "claude-fable-5-1",
-        "claude-opus-5-5",
-        "claude-sonnet-5-5",
-        "claude-haiku-5-5",
-    ]
-    .contains(&raw.as_str())
-    {
-        Some("anthropic")
     } else {
-        None
+        cloud_provider_for_model(&raw)
     };
     let provider = if let Some(provider) = cloud {
         provider
@@ -363,10 +390,7 @@ pub fn AiChatTab() -> impl IntoView {
                 body["metrics_snapshot"] = snapshot;
             }
             if mode == "full" || mode == "logs" {
-                body["system_logs"] = json!(context.toasts.with_untracked(|items| items
-                    .iter()
-                    .map(|t| json!({"message":t.message,"error":t.error}))
-                    .collect::<Vec<_>>()));
+                body["system_logs"] = json!([]);
             }
         }
         let pending = threads
@@ -532,10 +556,10 @@ pub fn AiChatTab() -> impl IntoView {
                 {move || {
                     let current = provider.get();
                     MODEL_PRESETS.into_iter().filter(|id| match current.as_str() {
-                        "gemini" => id.starts_with("gemini-"),
-                        "openai" => id.starts_with("gpt-"),
-                        "anthropic" => id.starts_with("claude-"),
-                        _ => !id.starts_with("gemini-") && !id.starts_with("gpt-"),
+                        "gemini" => cloud_provider_for_model(id) == Some("gemini"),
+                        "openai" => cloud_provider_for_model(id) == Some("openai"),
+                        "anthropic" => cloud_provider_for_model(id) == Some("anthropic"),
+                        _ => !matches!(cloud_provider_for_model(id), Some("gemini" | "openai")),
                     }).map(|id| view! { <option value=id /> }).collect_view()
                 }}
             </datalist>

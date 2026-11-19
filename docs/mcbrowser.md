@@ -3,15 +3,14 @@
 McBrowser is a core AetherFlow dashboard tab in the left sidebar, backed by the
 Rust API and the `af-files` crate. It is a new implementation, not a translation
 of the legacy Go/Vue application. It needs no iframe, separate daemon, container,
-extra login, or Marketplace installation. The dashboard uses its existing React
-frontend; the filesystem and HTTP backend are Rust.
+extra login, or Marketplace installation. The dashboard uses the Leptos Rust WebAssembly
+frontend (`frontend-rs`); the filesystem and HTTP backend are Rust.
 
 ## Parity target
 
 Full upstream feature parity is the acceptance target, not the current status.
-See [the pinned feature inventory and release gate](./mcbrowser-parity.md) for
-remaining requirements. The current implementation must not be advertised as full
-parity until those gates pass or differences are explicitly approved.
+The current implementation must not be advertised as full parity until browser
+and integration acceptance gates pass or differences are explicitly approved.
 
 ## Implemented workflows — November 2, 2026
 

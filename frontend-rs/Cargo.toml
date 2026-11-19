@@ -5,7 +5,7 @@ members = ["crates/af-web-core", "crates/af-web-worker", "crates/af-web-ui", "cr
 [workspace.package]
 version = "4.0.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 
 [workspace.dependencies]
 af-models = { path = "../backend-rs/crates/af-models", version = "=4.0.0" }

@@ -253,7 +253,8 @@ paths:
     post:
       tags:
         - AI
-      summary: Execute ai bandwidth apply
+      summary: Apply torrent client bandwidth limits
+      description: Applies upload and download speed caps (`upload_kbps`, `download_kbps`) to Transmission, qBittorrent, or Deluge. When `client` is omitted or `auto`, probes active clients with multi-client Transmission and qBittorrent fallback.
       responses:
         '200':
           description: OK
@@ -261,9 +262,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '504':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
@@ -274,7 +279,24 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
+              type: object
+              properties:
+                upload_kbps:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                download_kbps:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                client:
+                  type: string
+                  enum:
+                    - auto
+                    - transmission
+                    - qbittorrent
+                    - deluge
+                  default: auto
   /admin/ai/metadata/results:
     get:
       tags:
@@ -660,7 +682,8 @@ paths:
       tags:
         - Cluster
         - Operator
-      summary: Execute cluster enroll
+      summary: Issue worker cluster enrollment token
+      description: Generates and persists a cluster enrollment PSK (`enrollment_token`) and worker setup instructions using HTTPS REST heartbeats against the API origin (`CLUSTER_MASTER_ADDR=https://<this-server>`) with mTLS client certificates (rather than gRPC port 50051).
       responses:
         '200':
           description: OK
@@ -845,7 +868,8 @@ paths:
     put:
       tags:
         - Services
-      summary: Update ingress apps
+      summary: Update per-application ingress configuration
+      description: Updates or initializes an application's reverse-proxy ingress record. On first creation, `externalAccessEnabled` defaults to `false` unless explicitly set to `true` (which also requires a non-empty `publicDomain`). Omitted fields preserve existing persisted values, and changing an existing `listenPort` is rejected with `409 PORT_RECONFIGURATION_UNSUPPORTED`.
       responses:
         '200':
           description: OK
@@ -853,20 +877,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '409':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
+              $ref: '#/components/schemas/AppIngressUpdateRequest'
   /admin/ingress/configs:
     get:
       tags:
@@ -4868,26 +4896,40 @@ paths:
     post:
       tags:
         - Auth
-      summary: Execute user 2fa recovery regenerate
+      summary: Regenerate 2FA recovery codes
+      description: Replaces existing 2FA recovery codes after verifying a TOTP or unused recovery `code` and the user's current `password`. Accounts with a local password must supply a non-empty `password` (otherwise rejected with `403 INVALID_CURRENT_PASSWORD` without consuming the TOTP code); passwordless OAuth-only accounts may omit `password`.
       responses:
         '200':
-          description: OK
+          description: Recovery codes regenerated
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
+          $ref: '#/components/responses/Error'
+        '403':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
+              type: object
+              required:
+                - code
+              properties:
+                code:
+                  type: string
+                  description: Current 6-digit TOTP code or unused recovery code
+                password:
+                  type: string
+                  description: Current account password (required non-empty for password-backed accounts; optional for passwordless OAuth-only accounts)
   /auth/user/2fa/setup:
     post:
       tags:
@@ -5034,7 +5076,8 @@ paths:
     put:
       tags:
         - Services
-      summary: Update ingress apps
+      summary: Update per-application ingress configuration
+      description: Legacy compatibility alias for `PUT /admin/ingress/apps/{appName}`. On first creation, `externalAccessEnabled` defaults to `false` unless explicitly set to `true` (requiring a non-empty `publicDomain`).
       responses:
         '200':
           description: OK
@@ -5042,20 +5085,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '409':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
+              $ref: '#/components/schemas/AppIngressUpdateRequest'
   /ingress/configs:
     get:
       tags:
@@ -5652,6 +5699,24 @@ components:
     HardwareInfo:
       type: object
       additionalProperties: true
+    AppIngressUpdateRequest:
+      type: object
+      properties:
+        publicDomain:
+          type: string
+          description: Public hostname for external reverse-proxy exposure (required when externalAccessEnabled is true)
+        externalAccessEnabled:
+          type: boolean
+          default: false
+          description: Whether external reverse-proxy access is enabled (defaults to false on first creation unless explicitly true; omitted values preserve existing state on update)
+        listenPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: Application listen port (cannot be changed via ingress API once bound)
+        tlsEnabled:
+          type: boolean
+          description: Whether TLS termination is enabled for the public domain (defaults to true when publicDomain is non-empty on first creation)
     GenericObject:
       type: object
       additionalProperties: true

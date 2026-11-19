@@ -39,7 +39,7 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 7;
 /// Source target specification for host configuration files/directories included in a backup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostBackupTargetSpec {
-    /// Relative path inside the backup archive/manifest (e.g., `"etc/AetherFlow/aetherflow.env"`).
+    /// Relative path inside the backup archive/manifest (e.g., `"etc/aetherflow/aetherflow.env"`).
     pub archive_relative_path: String,
     /// Actual source path on the host filesystem (or isolated test root).
     pub source_path: PathBuf,
@@ -107,35 +107,24 @@ impl Default for HostBackupConfig {
     }
 }
 
-/// Returns the canonical host configuration targets modeled on `packages/system/af-backup`,
-/// parameterized by `fs_root` and `owner_home` so tests never touch real `/etc` or `/home`.
+/// Returns the canonical host configuration targets, prioritizing v4 `/etc/aetherflow`
+/// while retaining optional legacy `/etc/AetherFlow` compatibility, parameterized by `fs_root`
+/// and `owner_home` so tests never touch real `/etc` or `/home`.
 pub fn default_host_targets_for_root(
     fs_root: &Path,
     owner_home: &Path,
 ) -> Vec<HostBackupTargetSpec> {
     vec![
         HostBackupTargetSpec {
+            archive_relative_path: "etc/aetherflow".to_string(),
+            source_path: fs_root.join("etc/aetherflow"),
+            logical_fhs_path: Some("/etc/aetherflow".to_string()),
+            required: false,
+        },
+        HostBackupTargetSpec {
             archive_relative_path: "etc/AetherFlow".to_string(),
             source_path: fs_root.join("etc/AetherFlow"),
             logical_fhs_path: Some("/etc/AetherFlow".to_string()),
-            required: false,
-        },
-        HostBackupTargetSpec {
-            archive_relative_path: "etc/aetherflow/aetherflow.env".to_string(),
-            source_path: fs_root.join("etc/aetherflow/aetherflow.env"),
-            logical_fhs_path: Some("/etc/aetherflow/aetherflow.env".to_string()),
-            required: false,
-        },
-        HostBackupTargetSpec {
-            archive_relative_path: "var/www/html/dashboard/inc/config.php".to_string(),
-            source_path: fs_root.join("var/www/html/dashboard/inc/config.php"),
-            logical_fhs_path: Some("/var/www/html/dashboard/inc/config.php".to_string()),
-            required: false,
-        },
-        HostBackupTargetSpec {
-            archive_relative_path: "var/www/html/dashboard/custom".to_string(),
-            source_path: fs_root.join("var/www/html/dashboard/custom"),
-            logical_fhs_path: Some("/var/www/html/dashboard/custom".to_string()),
             required: false,
         },
         HostBackupTargetSpec {

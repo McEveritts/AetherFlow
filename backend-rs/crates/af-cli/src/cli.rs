@@ -13,7 +13,8 @@ use af_models::{
 use af_release::{ReleaseChannel, ReleaseCommand, ReleaseOptions};
 use af_runner::{
     get_runner_package_definition, parse_quota_size_to_1k_blocks, resolve_runner_socket_path,
-    SAFE_PKG_ID, SAFE_QUOTA_SIZE, SAFE_SERVICE_NAME, SAFE_USERNAME,
+    validate_hosts_domain, validate_hosts_ip, HostsUpdateRequest, SAFE_PKG_ID, SAFE_QUOTA_SIZE,
+    SAFE_SERVICE_NAME, SAFE_USERNAME,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,6 +62,7 @@ pub struct ParsedInvocation {
 pub enum HelpTopic {
     General,
     Package,
+    Update,
     Service,
     Quota,
     Sandbox,
@@ -97,6 +99,8 @@ pub enum AfCommand {
     Provision(ProvisionCliCommand),
     /// Host maintenance utilities (tune, sentinel, clean-logs, showspace) backed by `af-host`.
     Maintenance(MaintenanceCliCommand),
+    /// Local DNS and /etc/hosts reconciliation mediated by `af-runner` (`/v1/hosts`).
+    Hosts(HostsCliCommand),
 }
 
 impl AfCommand {
@@ -113,6 +117,7 @@ impl AfCommand {
             AfCommand::Backup(_) => "backup",
             AfCommand::Provision(_) => "provision",
             AfCommand::Maintenance(_) => "maintenance",
+            AfCommand::Hosts(_) => "hosts",
         }
     }
 
@@ -129,6 +134,7 @@ impl AfCommand {
             AfCommand::Backup(cmd) => cmd.action_name(),
             AfCommand::Provision(cmd) => cmd.action_name(),
             AfCommand::Maintenance(cmd) => cmd.action_name(),
+            AfCommand::Hosts(cmd) => cmd.action_name(),
         }
     }
 }
@@ -153,6 +159,8 @@ pub enum PackageCommand {
     Update {
         package: Option<String>,
         channel: ReleaseChannel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_version: Option<String>,
     },
     /// Legacy `af upgrade` alias for control-plane self-update via runner `/v1/self-update`.
     Upgrade { channel: ReleaseChannel },
@@ -724,7 +732,60 @@ pub fn build_sandbox_runner_request(package: &str) -> CliResult<SandboxRunnerReq
     })
 }
 
-/// Builds a [`SelfUpdateRequest`] for `/v1/self-update` and validates it using
+fn validate_hosts_domains(domains: &[String]) -> CliResult<Vec<String>> {
+    let mut clean_domains = Vec::with_capacity(domains.len());
+    for domain in domains {
+        let valid =
+            validate_hosts_domain(domain).map_err(|e| CliError::Validation(e.to_string()))?;
+        clean_domains.push(valid);
+    }
+    Ok(clean_domains)
+}
+
+/// Validates and builds an [`af_runner::HostsUpdateRequest`] for `/v1/hosts`.
+pub fn build_hosts_runner_request(cmd: &HostsCliCommand) -> CliResult<HostsUpdateRequest> {
+    match cmd {
+        HostsCliCommand::Update { ip, domains } => {
+            if domains.is_empty() {
+                return Err(CliError::Validation(
+                    "hosts update requires at least one domain".to_string(),
+                ));
+            }
+            validate_hosts_ip(ip)
+                .map_err(|e| CliError::Validation(format!("invalid IP address {:?}: {}", ip, e)))?;
+            Ok(HostsUpdateRequest {
+                action: "update".to_string(),
+                ip: ip.trim().to_string(),
+                domains: validate_hosts_domains(domains)?,
+                ..Default::default()
+            })
+        }
+        HostsCliCommand::Remove { domains } => {
+            if domains.is_empty() {
+                return Err(CliError::Validation(
+                    "hosts remove requires at least one domain".to_string(),
+                ));
+            }
+            Ok(HostsUpdateRequest {
+                action: "remove".to_string(),
+                domains: validate_hosts_domains(domains)?,
+                ..Default::default()
+            })
+        }
+        HostsCliCommand::Reconcile { ip, domains } => {
+            validate_hosts_ip(ip)
+                .map_err(|e| CliError::Validation(format!("invalid IP address {:?}: {}", ip, e)))?;
+            Ok(HostsUpdateRequest {
+                action: "reconcile".to_string(),
+                ip: ip.trim().to_string(),
+                domains: validate_hosts_domains(domains)?,
+                ..Default::default()
+            })
+        }
+    }
+}
+
+/// Validates and builds a [`SelfUpdateRequest`] for `/v1/self-update` and validates it using
 /// `af_release::validate_self_update_request`.
 pub fn build_self_update_runner_request(
     command: &str,
@@ -941,6 +1002,7 @@ where
         "sentinel" | "af-sentinel" => AfCommand::Maintenance(parse_sentinel_args(rest)?),
         "clean-log" | "clean-logs" => AfCommand::Maintenance(parse_clean_log_args(rest)?),
         "showspace" => AfCommand::Maintenance(parse_showspace_args(rest)?),
+        "hosts" | "dns" => AfCommand::Hosts(parse_hosts_subcommand(rest)?),
 
         unknown => {
             return Err(CliError::Usage(format!(
@@ -956,10 +1018,11 @@ where
 fn parse_help_topic(raw: &str) -> HelpTopic {
     match raw.trim().to_ascii_lowercase().as_str() {
         "package" | "pkg" | "install" | "reinstall" | "remove" | "list" => HelpTopic::Package,
+        "update" => HelpTopic::Update,
         "service" | "svc" | "systemctl" => HelpTopic::Service,
         "quota" | "setdisk" => HelpTopic::Quota,
         "sandbox" => HelpTopic::Sandbox,
-        "release" | "self-update" | "update" | "upgrade" => HelpTopic::Release,
+        "release" | "self-update" | "upgrade" => HelpTopic::Release,
         "backup" => HelpTopic::Backup,
         "provision" | "setup" => HelpTopic::Provision,
         "maintenance" | "tune" | "sentinel" | "clean-log" | "clean-logs" | "showspace" => {
@@ -977,17 +1040,17 @@ pub fn parse_hosts_subcommand(args: &[String]) -> CliResult<HostsCliCommand> {
         ));
     };
     let tail = &args[1..];
-    match sub {
+    let cmd = match sub {
         "update" => {
             if tail.len() < 2 {
                 return Err(CliError::Usage(
                     "usage: af hosts update <ip> <domain...>".to_string(),
                 ));
             }
-            Ok(HostsCliCommand::Update {
+            HostsCliCommand::Update {
                 ip: tail[0].clone(),
                 domains: tail[1..].to_vec(),
-            })
+            }
         }
         "remove" => {
             if tail.is_empty() {
@@ -995,9 +1058,9 @@ pub fn parse_hosts_subcommand(args: &[String]) -> CliResult<HostsCliCommand> {
                     "usage: af hosts remove <domain...>".to_string(),
                 ));
             }
-            Ok(HostsCliCommand::Remove {
+            HostsCliCommand::Remove {
                 domains: tail.to_vec(),
-            })
+            }
         }
         "reconcile" => {
             let ip = tail
@@ -1009,13 +1072,17 @@ pub fn parse_hosts_subcommand(args: &[String]) -> CliResult<HostsCliCommand> {
             } else {
                 Vec::new()
             };
-            Ok(HostsCliCommand::Reconcile { ip, domains })
+            HostsCliCommand::Reconcile { ip, domains }
         }
-        other => Err(CliError::Usage(format!(
-            "unknown hosts subcommand {:?} (expected: update, remove, reconcile)",
-            other
-        ))),
-    }
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown hosts subcommand {:?} (expected: update, remove, reconcile)",
+                other
+            )));
+        }
+    };
+    let _ = build_hosts_runner_request(&cmd)?;
+    Ok(cmd)
 }
 
 fn parse_package_subcommand(args: &[String]) -> CliResult<PackageCommand> {
@@ -1214,6 +1281,7 @@ fn parse_package_list_args(args: &[String]) -> CliResult<PackageCommand> {
 fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
     let mut package: Option<String> = None;
     let mut channel = ReleaseChannel::Stable;
+    let mut target_version: Option<String> = None;
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -1232,12 +1300,26 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
                 let raw_target = args.get(i + 1).ok_or_else(|| {
                     CliError::Usage("--target-version requires a version argument".to_string())
                 })?;
-                std::env::set_var("AF_TARGET_VERSION", raw_target.trim());
+                let trimmed = raw_target.trim();
+                if !af_release::lifecycle::validate_target_version(trimmed) {
+                    return Err(CliError::Validation(format!(
+                        "invalid --target-version {:?} (must be a concrete version, commit SHA, or component manifest)",
+                        raw_target
+                    )));
+                }
+                target_version = Some(trimmed.to_string());
                 i += 2;
             }
             s if s.starts_with("--target-version=") => {
                 let raw_target = s.trim_start_matches("--target-version=");
-                std::env::set_var("AF_TARGET_VERSION", raw_target.trim());
+                let trimmed = raw_target.trim();
+                if !af_release::lifecycle::validate_target_version(trimmed) {
+                    return Err(CliError::Validation(format!(
+                        "invalid --target-version {:?} (must be a concrete version, commit SHA, or component manifest)",
+                        raw_target
+                    )));
+                }
+                target_version = Some(trimmed.to_string());
                 i += 1;
             }
             pkg => {
@@ -1246,7 +1328,7 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
                 }
                 if package.is_some() {
                     return Err(CliError::Usage(
-                        "usage: af [package] update [package_id] [--channel <channel>]".to_string(),
+                        "usage: af [package] update [package_id] [--target-version <ver>] [--channel <channel>]".to_string(),
                     ));
                 }
                 let _ = build_package_runner_request("update", pkg, None)?;
@@ -1255,7 +1337,16 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
             }
         }
     }
-    Ok(PackageCommand::Update { package, channel })
+    if package.is_none() && target_version.is_some() {
+        return Err(CliError::Usage(
+            "--target-version requires a package identifier (usage: af update <package> --target-version <ver>)".to_string(),
+        ));
+    }
+    Ok(PackageCommand::Update {
+        package,
+        channel,
+        target_version,
+    })
 }
 
 fn parse_package_upgrade_args(args: &[String]) -> CliResult<PackageCommand> {
@@ -2661,7 +2752,7 @@ LEGACY COMPATIBILITY SHORTHANDS (`packages/system/af`):
   af reinstall <pkg1> [pkg2...] [--port <port>]
   af remove <pkg1> [pkg2...] [--purge]
   af list [--installed]
-  af update [pkg] [--channel <stable|nightly>]
+  af update [pkg] [--target-version <ver>] [--channel <stable|nightly>]
   af upgrade [--channel <stable|nightly>]
 
 ADMINISTRATIVE DOMAINS:
@@ -2673,6 +2764,7 @@ ADMINISTRATIVE DOMAINS:
   backup      Host backup bundle create/list/verify & non-destructive restore-preflight (af-host)
   provision   Resumable bare-metal provisioning foundation & safe config overlay (STATE_VERSION=2)
   maintenance Host maintenance utilities: tune, sentinel, clean-logs, showspace (af-host)
+  hosts       Runner-mediated /etc/hosts and local DNS reconciliation (/v1/hosts)
   health      Verify connectivity to the privileged runner Unix socket (/v1/health)
 
 NOTE ON UNSUPPORTED INTERACTIVE / DESTRUCTIVE FLOWS:
@@ -2687,13 +2779,27 @@ USAGE:
   af package install <pkg1> [pkg2...] [--port <port>]
   af package reinstall <pkg1> [pkg2...] [--port <port>]
   af package remove <pkg1> [pkg2...] [--purge]
-  af package update [pkg] [--channel <stable|nightly>]
+  af package update [pkg] [--target-version <ver>] [--channel <stable|nightly>]
   af package upgrade [--channel <stable|nightly>]
   af package list [--installed]
   af package info <pkg>
 
 Mediates privileged package lifecycle operations over /run/aetherflow/runner.sock (/v1/package)
 using af-runner's declarative installer primitives and script allowlist.
+"
+        .to_string(),
+        HelpTopic::Update => "\
+USAGE:
+  af update <package> [--target-version <ver>]
+  af package update <package> [--target-version <ver>]
+  af update [--channel <stable|nightly>]
+  af release deploy [--channel <stable|nightly>] [--local] [--offline]
+
+Updates an installed application package over /run/aetherflow/runner.sock (/v1/package).
+When --target-version is omitted, af resolves the target version from local state/DB or probes
+/v1/package/probe-version before invoking CoordinatedOperation admission.
+When no package argument is passed, triggers control-plane self-update (/v1/self-update);
+see 'af help release' for atomic release deployment, rollback, and cleanup options.
 "
         .to_string(),
         HelpTopic::Service => "\

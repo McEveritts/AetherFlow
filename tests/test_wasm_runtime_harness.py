@@ -69,7 +69,7 @@ class ExternalWasmHarnessTests(unittest.TestCase):
         result = subprocess.run(["bash", "-eu", "-c", command], env=env,
                                 capture_output=True, text=True, check=True)
         selector = result.stdout.strip()
-        specs = {p.name for p in (ROOT / "frontend/tests/e2e").glob("*.spec.ts")}
+        specs = {p.name for p in (ROOT / "e2e/tests/e2e").glob("*.spec.ts")}
         selected = {name for name in specs if re.search(selector, f"tests/e2e/{name}")}
         self.assertEqual(selected, {name for name in specs if name.endswith(".live.spec.ts")})
         self.assertTrue({"embedded.live.spec.ts", "wasm.worker.live.spec.ts", "wasm.upload.live.spec.ts"} <= selected)

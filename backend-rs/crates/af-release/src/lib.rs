@@ -42,10 +42,11 @@ pub use artifact::{
     verify_release_provenance, ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
 };
 pub use config::{
-    decode_quoted_or_raw_conf_value, escape_conf_value, parse_conf_file, parse_conf_str,
-    read_env_file_value, read_env_str_value, read_systemd_environment_value, resolve_db_path,
-    try_parse_conf_entries, try_resolve_db_path, validate_no_parent_traversal, DbPathSource,
-    ReleaseChannel, ReleaseCommand, ReleaseConfig, ReleaseOptions, ResolvedDbPath,
+    decode_quoted_or_raw_conf_value, default_release_asset_for_arch, escape_conf_value,
+    parse_conf_file, parse_conf_str, read_env_file_value, read_env_str_value,
+    read_systemd_environment_value, resolve_db_path, try_parse_conf_entries, try_resolve_db_path,
+    validate_no_parent_traversal, DbPathSource, ReleaseChannel, ReleaseCommand, ReleaseConfig,
+    ReleaseOptions, ResolvedDbPath,
 };
 pub use engine::{
     append_jsonl_log, CleanupReport, DeployReport, MigrateSystemdReport, ReleaseEngine,
@@ -62,9 +63,9 @@ pub use fs_security::{
 pub use health::{
     install_packaged_unit_if_missing, install_systemd_hardening_dropins, is_healthy_status,
     parse_endpoint_socket_addr, parse_health_status, poll_readiness_probe, sync_cli_entrypoints,
-    verify_isolated_systemd_lifecycle_authorized, wait_for_listener_stopped, HealthCheckAttempt,
-    HealthProber, LifecycleController, NoopLifecycleController, ReqwestHealthProber,
-    SystemdLifecycleController,
+    verify_deployed_frontend_assets, verify_isolated_systemd_lifecycle_authorized,
+    wait_for_listener_stopped, HealthCheckAttempt, HealthProber, LifecycleController,
+    NoopLifecycleController, ReqwestHealthProber, SystemdLifecycleController,
 };
 pub use lock::{RecoveryState, ReleaseLockGuard, ReleasePhase};
 pub use snapshot::{
@@ -2322,5 +2323,61 @@ AETHERFLOW_DB_PATH=fallback.sqlite
 
         let env_contents = fs::read_to_string(&cfg.host_env_file).unwrap();
         assert_eq!(env_contents, "JWT_SECRET=from-v3-slot-secret\n");
+    }
+
+    #[test]
+    fn default_release_asset_maps_known_architectures_and_falls_back_to_amd64() {
+        assert_eq!(
+            default_release_asset_for_arch("x86_64"),
+            "aetherflow-linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            default_release_asset_for_arch("aarch64"),
+            "aetherflow-linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            default_release_asset_for_arch("arm"),
+            "aetherflow-linux-armv7.tar.gz"
+        );
+        assert_eq!(
+            default_release_asset_for_arch("riscv64"),
+            "aetherflow-linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            ReleaseConfig::default().artifact_name,
+            default_release_asset_for_arch(std::env::consts::ARCH)
+        );
+    }
+
+    #[test]
+    fn verify_deployed_frontend_assets_validates_web_dist_and_allows_binary_only_fixtures() {
+        let sb = TempSandbox::new("verify-deployed-frontend");
+
+        // 1. Binary-only fixture without `web/dist` passes cleanly
+        let binary_only = sb.path().join("binary-only");
+        fs::create_dir_all(&binary_only).unwrap();
+        fs::write(binary_only.join("aetherflow-api"), b"bin").unwrap();
+        verify_deployed_frontend_assets(&binary_only).unwrap();
+
+        // 2. Valid `web/dist` with non-empty `index.html` and `.wasm` passes
+        let valid = sb.path().join("valid-release");
+        fs::create_dir_all(valid.join("web/dist")).unwrap();
+        fs::write(valid.join("web/dist/index.html"), b"<html></html>").unwrap();
+        fs::write(valid.join("web/dist/app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        verify_deployed_frontend_assets(&valid).unwrap();
+
+        // 3. `web/dist` with empty `index.html` fails
+        let empty_index = sb.path().join("empty-index");
+        fs::create_dir_all(empty_index.join("web/dist")).unwrap();
+        fs::write(empty_index.join("web/dist/index.html"), b"").unwrap();
+        fs::write(empty_index.join("web/dist/app.wasm"), b"wasm").unwrap();
+        assert!(verify_deployed_frontend_assets(&empty_index).is_err());
+
+        // 4. `web/dist` with missing or empty `.wasm` fails
+        let empty_wasm = sb.path().join("empty-wasm");
+        fs::create_dir_all(empty_wasm.join("web/dist")).unwrap();
+        fs::write(empty_wasm.join("web/dist/index.html"), b"<html></html>").unwrap();
+        fs::write(empty_wasm.join("web/dist/app.wasm"), b"").unwrap();
+        assert!(verify_deployed_frontend_assets(&empty_wasm).is_err());
     }
 }

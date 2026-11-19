@@ -214,6 +214,8 @@ struct MockRunnerTransport {
     quota_calls: Arc<Mutex<Vec<QuotaRunnerRequest>>>,
     sandbox_calls: Arc<Mutex<Vec<SandboxRunnerRequest>>>,
     self_update_calls: Arc<Mutex<Vec<SelfUpdateRequest>>>,
+    hosts_calls: Arc<Mutex<Vec<af_runner::HostsUpdateRequest>>>,
+    probed_versions: Arc<Mutex<std::collections::HashMap<String, String>>>,
     simulated_package_body: Arc<Mutex<Option<String>>>,
 }
 
@@ -292,6 +294,24 @@ impl RunnerClientTransport for MockRunnerTransport {
             error: String::new(),
         })
     }
+
+    fn execute_hosts(&self, req: &af_runner::HostsUpdateRequest) -> CliResult<RunnerResponse> {
+        self.hosts_calls.lock().unwrap().push(req.clone());
+        Ok(RunnerResponse {
+            success: true,
+            output: format!("hosts {}", req.action),
+            error: String::new(),
+        })
+    }
+
+    fn probe_package_version(&self, package_id: &str) -> CliResult<Option<String>> {
+        Ok(self
+            .probed_versions
+            .lock()
+            .unwrap()
+            .get(package_id)
+            .cloned())
+    }
 }
 
 fn create_sample_sqlite_db(db_path: &Path) {
@@ -362,6 +382,7 @@ fn cli_parser_supports_legacy_af_shorthands_and_rejects_no_arg_tui() {
         AfCommand::Package(PackageCommand::Update {
             package: None,
             channel: ReleaseChannel::Stable,
+            target_version: None,
         })
     );
 
@@ -1793,4 +1814,241 @@ fn release_deploy_omitting_channel_honors_configured_channel_from_release_manage
         let rb_env = execute_invocation(&rb_inv, &MockRunnerTransport::default());
         assert_eq!(rb_env.status, "ok", "{}", rb_env.message);
     }
+}
+
+#[test]
+fn known_cli_package_ids_match_config_packages_json_exactly() {
+    use std::collections::BTreeSet;
+
+    let raw = include_str!("../../../../config/packages.json");
+    let packages: Vec<serde_json::Value> =
+        serde_json::from_str(raw).expect("parse config/packages.json");
+    let config_set: BTreeSet<String> = packages
+        .iter()
+        .map(|entry| {
+            entry["name"]
+                .as_str()
+                .expect("package entry must have string 'name'")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(config_set.len(), 77);
+
+    let cli_set: BTreeSet<String> = KNOWN_CLI_PACKAGE_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect();
+    assert_eq!(
+        cli_set.len(),
+        KNOWN_CLI_PACKAGE_IDS.len(),
+        "KNOWN_CLI_PACKAGE_IDS must not contain duplicate entries"
+    );
+    assert_eq!(
+        cli_set, config_set,
+        "KNOWN_CLI_PACKAGE_IDS must match config/packages.json 1:1"
+    );
+}
+
+#[test]
+fn package_update_target_version_parsing_probing_and_admit_fallback() {
+    let tmp = TempTestDir::new("pkg-update-target");
+    let root = tmp.path().join("rootfs");
+    fs::create_dir_all(root.join("var/lib/aetherflow")).unwrap();
+    let root_str = root.to_string_lossy().to_string();
+
+    // 1. Explicit `--target-version <ver>` and `--target-version=<ver>`
+    let inv_space = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "update",
+        "sonarr",
+        "--target-version",
+        "4.0.10.2544",
+    ])
+    .unwrap();
+    let transport = MockRunnerTransport::default();
+    let env_space = execute_invocation(&inv_space, &transport);
+    assert_eq!(env_space.status, "ok", "{}", env_space.message);
+    let calls = transport.package_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].expected_target_version.as_deref(),
+        Some("4.0.10.2544")
+    );
+    drop(calls);
+
+    let inv_eq = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "package",
+        "update",
+        "radarr",
+        "--target-version=5.14.0.9383",
+    ])
+    .unwrap();
+    let env_eq = execute_invocation(&inv_eq, &transport);
+    assert_eq!(env_eq.status, "ok", "{}", env_eq.message);
+    let calls = transport.package_calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1].expected_target_version.as_deref(),
+        Some("5.14.0.9383")
+    );
+    drop(calls);
+
+    // 2. Reject invalid `--target-version` tokens and `--target-version` without a package
+    assert!(parse_cli_args(["update", "sonarr", "--target-version", "latest"]).is_err());
+    assert!(parse_cli_args(["update", "sonarr", "--target-version=../etc/passwd"]).is_err());
+    assert!(parse_cli_args(["update", "--target-version", "4.0.10"]).is_err());
+
+    // 3. Omitted `--target-version`: resolves from runner probe when available
+    let probe_transport = MockRunnerTransport::default();
+    probe_transport
+        .probed_versions
+        .lock()
+        .unwrap()
+        .insert("lidarr".to_string(), "2.8.2.4493".to_string());
+    let inv_probe = parse_cli_args(["--json", "--root", &root_str, "update", "lidarr"]).unwrap();
+    let env_probe = execute_invocation(&inv_probe, &probe_transport);
+    assert_eq!(env_probe.status, "ok", "{}", env_probe.message);
+    let probe_target = probe_transport.package_calls.lock().unwrap()[0]
+        .expected_target_version
+        .clone()
+        .expect("probed target version must be populated");
+    assert_eq!(probe_target, "2.8.2.4493");
+    assert!(af_release::lifecycle::validate_target_version(
+        &probe_target
+    ));
+
+    // 4. Omitted `--target-version`: resolves from SQLite `app_updates.latest_version`
+    let db_path = root.join("var/lib/aetherflow/aetherflow.sqlite");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE app_updates (
+            package_name TEXT PRIMARY KEY,
+            installed_version TEXT DEFAULT '',
+            latest_version TEXT DEFAULT ''
+        );
+        INSERT INTO app_updates (package_name, installed_version, latest_version)
+        VALUES ('prowlarr', '1.25.0', '1.26.2.4852');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let db_transport = MockRunnerTransport::default();
+    let inv_db = parse_cli_args([
+        "--json", "--root", &root_str, "package", "update", "prowlarr",
+    ])
+    .unwrap();
+    let env_db = execute_invocation(&inv_db, &db_transport);
+    assert_eq!(env_db.status, "ok", "{}", env_db.message);
+    let db_target = db_transport.package_calls.lock().unwrap()[0]
+        .expected_target_version
+        .clone()
+        .expect("sqlite target version must be populated");
+    assert_eq!(db_target, "1.26.2.4852");
+    assert!(af_release::lifecycle::validate_target_version(&db_target));
+
+    // 5. Omitted `--target-version` with no DB/probe/marker falls back to a token valid for `CoordinatedOperation::admit`
+    let fallback_transport = MockRunnerTransport::default();
+    let inv_fallback = parse_cli_args(["--json", "--root", &root_str, "update", "bazarr"]).unwrap();
+    let env_fallback = execute_invocation(&inv_fallback, &fallback_transport);
+    assert_eq!(env_fallback.status, "ok", "{}", env_fallback.message);
+    let fallback_target = fallback_transport.package_calls.lock().unwrap()[0]
+        .expected_target_version
+        .clone()
+        .expect("fallback target version must be populated");
+    assert!(!fallback_target.is_empty());
+    assert!(
+        af_release::lifecycle::validate_target_version(&fallback_target),
+        "fallback target {:?} must satisfy CoordinatedOperation::admit",
+        fallback_target
+    );
+}
+
+#[test]
+fn help_update_documents_package_update_and_release_deploy() {
+    let inv = parse_cli_args(["help", "update"]).unwrap();
+    assert_eq!(
+        inv.command,
+        AfCommand::Help {
+            topic: HelpTopic::Update
+        }
+    );
+    let resp = execute_invocation(&inv, &MockRunnerTransport::default());
+    assert_eq!(resp.status, "ok");
+    assert!(resp
+        .message
+        .contains("af update <package> [--target-version <ver>]"));
+    assert!(resp.message.contains("af release deploy"));
+}
+
+#[test]
+fn hosts_cli_commands_validate_and_dispatch_to_runner() {
+    let transport = MockRunnerTransport::default();
+
+    // Dry-run `af hosts update`
+    let dry_inv = parse_cli_args([
+        "--json",
+        "--dry-run",
+        "hosts",
+        "update",
+        "127.0.0.1",
+        "sonarr.aether.local",
+    ])
+    .unwrap();
+    let dry_env = execute_invocation(&dry_inv, &transport);
+    assert_eq!(dry_env.status, "ok", "{}", dry_env.message);
+    assert!(dry_env.message.contains("[DRY-RUN]"));
+    assert!(transport.hosts_calls.lock().unwrap().is_empty());
+
+    // Live `af hosts update`, `remove`, and `reconcile`
+    let upd_inv = parse_cli_args([
+        "--json",
+        "hosts",
+        "update",
+        "10.0.0.5",
+        "radarr.aether.local",
+        "sonarr.aether.local",
+    ])
+    .unwrap();
+    let upd_env = execute_invocation(&upd_inv, &transport);
+    assert_eq!(upd_env.status, "ok", "{}", upd_env.message);
+
+    let rem_inv = parse_cli_args(["--json", "hosts", "remove", "radarr.aether.local"]).unwrap();
+    let rem_env = execute_invocation(&rem_inv, &transport);
+    assert_eq!(rem_env.status, "ok", "{}", rem_env.message);
+
+    let rec_inv = parse_cli_args([
+        "--json",
+        "hosts",
+        "reconcile",
+        "127.0.0.1",
+        "plex.aether.local",
+    ])
+    .unwrap();
+    let rec_env = execute_invocation(&rec_inv, &transport);
+    assert_eq!(rec_env.status, "ok", "{}", rec_env.message);
+
+    let calls = transport.hosts_calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].action, "update");
+    assert_eq!(calls[0].ip, "10.0.0.5");
+    assert_eq!(
+        calls[0].domains,
+        vec![
+            "radarr.aether.local".to_string(),
+            "sonarr.aether.local".to_string()
+        ]
+    );
+    assert_eq!(calls[1].action, "remove");
+    assert_eq!(calls[1].domains, vec!["radarr.aether.local".to_string()]);
+    assert_eq!(calls[2].action, "reconcile");
+    assert_eq!(calls[2].ip, "127.0.0.1");
+
+    // Validation rejections
+    assert!(parse_cli_args(["hosts", "update", "not-an-ip", "app.aether.local"]).is_err());
+    assert!(parse_cli_args(["hosts", "remove", "bad;domain"]).is_err());
 }

@@ -91,7 +91,7 @@ tools should not copy `.deployment.json` into `.recovery_state.json`.
 ## Documented Parity Gaps & Intentional Boundaries
 
 1. **`--from-source` Fallback Mode (`ReleaseError::Unsupported`)**:
-   - `deploy/release-manager.sh --from-source` runs `git fetch`, `rsync`, `npm ci && NEXT_STATIC_EXPORT=1 npm run build`, and `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend` on the target host.
+   - `deploy/release-manager.sh --from-source` runs `git fetch`, `rsync`, `bash scripts/build_wasm_frontend.sh --stage`, and `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend` on the target host.
    - `af-release` intentionally rejects `--from-source` with `ReleaseError::Unsupported` (`ExitCode::ConfigurationOrUsageError = 4`) to enforce the v4.0 pull-based, SHA-256-verified single-binary architecture and avoid requiring Node.js/Rust toolchains on production hosts. Callers needing an emergency source build should invoke `deploy/release-manager.sh --from-source` directly (checked via [`is_unsupported_error`]).
 2. **OS User Ownership (`chown aetherflow:aetherflow`)**:
    - `af-release` enforces `0700` directory permissions on `DATA_DIR` and `data-snapshot/`, and `0600` file permissions **before writing** on SQLite databases, snapshots, manifests, recovery journals, and `.env` files on Unix.

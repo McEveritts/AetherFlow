@@ -3973,6 +3973,7 @@ Nov  1 04:01:25 host sshd[107]: Accepted publickey for admin from 10.0.0.1 port 
         let live_rep = apply_network_tuning(&root, false).expect("live tuning succeeds");
         assert!(live_rep.applied);
         assert!(!live_rep.dry_run);
+        assert!(!live_rep.sysctl_reloaded);
         assert!(live_rep.config_path.is_file());
 
         let content = fs::read_to_string(&live_rep.config_path).unwrap();
@@ -4058,5 +4059,60 @@ Nov  1 04:01:25 host sshd[107]: Accepted publickey for admin from 10.0.0.1 port 
             execute_coordinated_restore(&receipt.primary_artifact_path, Path::new("/"), bad_opts)
                 .unwrap_err();
         assert!(err_root.is_security_rejection());
+    }
+
+    #[test]
+    fn default_host_targets_prioritize_etc_aetherflow_and_omit_v3_php_dashboard() {
+        let tmp = TempTestDir::new("v4-backup-targets");
+        let host_root = tmp.path().join("host");
+        let live_db = host_root.join("var/lib/aetherflow/aetherflow.sqlite");
+        create_sample_wal_database(&live_db);
+
+        let etc_v4 = host_root.join("etc/aetherflow");
+        fs::create_dir_all(&etc_v4).unwrap();
+        fs::write(etc_v4.join("aetherflow.env"), b"PORT=8080\n").unwrap();
+        fs::write(
+            etc_v4.join("release-manager.conf"),
+            b"RELEASE_CHANNEL=stable\n",
+        )
+        .unwrap();
+
+        let targets = default_host_targets_for_root(&host_root, &host_root.join("home/aetherflow"));
+        assert_eq!(targets[0].archive_relative_path, "etc/aetherflow");
+        assert!(!targets
+            .iter()
+            .any(|t| t.archive_relative_path.contains("var/www/html/dashboard")));
+
+        let cfg = HostBackupConfig::for_isolated_root(&host_root, "v4.0.0");
+        let receipt = create_host_archive_backup(&cfg, Some("2026-11-19-v4")).unwrap();
+        assert!(receipt
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.relative_path == "etc/aetherflow/aetherflow.env"));
+        assert!(receipt
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.relative_path == "etc/aetherflow/release-manager.conf"));
+
+        let stage_root = tmp.path().join("stage");
+        fs::create_dir_all(&stage_root).unwrap();
+        let restore_receipt = execute_coordinated_restore(
+            &receipt.primary_artifact_path,
+            &stage_root,
+            RestorePreflightOptions {
+                host_app_version: "v4.0.0".to_string(),
+                max_supported_sqlite_user_version: Some(50),
+                overwrite_policy: OverwritePolicy::AllowRegularFilesInStaging,
+                require_artifact_sidecar: true,
+            },
+        )
+        .unwrap();
+        assert!(restore_receipt.sqlite_verified);
+        assert!(stage_root.join("etc/aetherflow/aetherflow.env").is_file());
+        assert!(stage_root
+            .join("etc/aetherflow/release-manager.conf")
+            .is_file());
     }
 }

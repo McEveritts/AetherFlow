@@ -4,7 +4,7 @@ The AetherMarketplace is your portal to extending the capabilities of your bare-
 
 ## Key Features
 
-- **One-Click Deploy & In-Place Updates**: Automated installation, update checking, and configuration backed by 15 native declarative Rust recipes (`af-runner`) and idempotent `common.sh` installers.
+- **One-Click Deploy & In-Place Updates**: Automated installation, update checking, and configuration backed by 12 native declarative Rust recipes (`af-runner`) and idempotent `common.sh` installers.
 - **Hyperspeed Feedback**: Real-time `[PROGRESS:<pct>]` installation telemetry streamed over WebSockets to circular progress indicators in the UI.
 - **Native Orchestration**: Every app runs as a native `systemd` service (`af-<app>.service`) with optional `af-systemd-sandbox` isolation and automatic `<app>.<baseDomain>` subdomain routing.
 - **Safe Uninstallation & Rollbacks**: Transactional rollback journals and removal scripts that preserve application data by default unless `DELETE_DATA=true` is explicitly requested.

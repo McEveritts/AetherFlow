@@ -1,6 +1,6 @@
 export const heroData = {
   h1: "Orchestrating the Next Era of Bare-Metal Infrastructure.",
-  subheadline: "AetherFlow v4.0.0 is a sovereign, single-binary control plane and Obsidian V2 dashboard. Compiled from an 11-crate Rust workspace (Axum + Tokio) with an embedded Next.js 16 SPA, it orchestrates 77 native Linux services, scoped McBrowser file management, and human-gated FlowAI operations directly against systemd.",
+  subheadline: "AetherFlow v4.0.0 pairs a 12-crate Rust Control Plane (backend-rs, Axum + Tokio) with a Leptos Rust WebAssembly Dashboard (frontend-rs) served from external web/dist assets. It orchestrates a 77-app bare-metal catalog, Native McBrowser (af-files), Zero-Sudo aetherflow-runner privilege isolation, Whatbox-style Subdomain Ingress, and human-gated FlowAI directly against systemd.",
   primaryCta: {
     label: "View on GitHub",
     href: "https://github.com/McEveritts/AetherFlow"
@@ -13,11 +13,11 @@ export const directives = {
   cards: [
     {
       title: "100% Bare-Metal & systemd",
-      copy: "Manage 77 native Linux services under granular systemd cgroups and af-systemd-sandbox profiles with zero Docker daemon overhead or bridge latency."
+      copy: "Manage a 77-app bare-metal catalog of native Linux services under granular systemd cgroups and af-systemd-sandbox profiles with zero Docker daemon overhead or bridge latency."
     },
     {
-      title: "11-Crate Rust Control Plane",
-      copy: "From the Axum HTTP/WebSocket API and bundled SQLite WAL engine to NVML GPU FFI and the unified af CLI, strict memory and type safety are enforced everywhere."
+      title: "Rust Control Plane (backend-rs)",
+      copy: "From the 12-crate Axum HTTP/WebSocket API and bundled SQLite WAL engine to NVML GPU FFI, Zero-Sudo aetherflow-runner, and the unified af CLI, strict memory and type safety are enforced everywhere."
     },
     {
       title: "AI-Native, Human-Gated",
@@ -27,16 +27,16 @@ export const directives = {
 };
 
 export const architectureData = {
-  title: "A Single-Binary Executable Built for Sovereign Hosts",
+  title: "A Pure-Rust Control Plane & WASM Dashboard Built for Sovereign Hosts",
   body: "Uncompromising systems engineering designed for bare-metal longevity. Zero production Node.js daemons. Zero Docker runtime dependencies.",
   columns: [
     {
-      title: "The Control Plane (11-Crate Rust Workspace)",
-      copy: "Built on Axum and Tokio, aetherflow-api runs unprivileged under ProtectSystem=strict while isolating root lifecycle, WireGuard/Tailscale, and declarative package operations behind the /run/aetherflow/runner.sock UNIX domain socket daemon."
+      title: "Rust Control Plane (backend-rs) & Zero-Sudo aetherflow-runner",
+      copy: "Built on Axum and Tokio across 12 workspace crates, aetherflow-api runs unprivileged under ProtectSystem=strict while Zero-Sudo aetherflow-runner isolates root lifecycle, WireGuard/Tailscale, and declarative package operations behind the /run/aetherflow/runner.sock UNIX domain socket daemon."
     },
     {
-      title: "The Obsidian V2 Interface & Native McBrowser",
-      copy: "A Next.js 16 static export embedded directly into the Rust binary via rust-embed, featuring Frame-0 WebSocket telemetry, canonical streaming analytics, and Native McBrowser (af-files) for capability-scoped file management and resumable 64 GiB uploads."
+      title: "Leptos Rust WebAssembly Dashboard & Native McBrowser",
+      copy: "Compiled from the 4-crate frontend-rs workspace into external web/dist WebAssembly assets, featuring Frame-0 WebSocket telemetry, canonical streaming analytics, and Native McBrowser (af-files) for capability-scoped file management and resumable 64 GiB uploads."
     }
   ]
 };
@@ -65,8 +65,8 @@ export const statusMomentumData = {
       copy: "Isolated aetherflow-self-update.service deployments verify SHA256SUMS, capture WAL-safe SQLite backups, check executable readiness, and automatically roll back on failure."
     },
     {
-      title: "Automatic Subdomain TLS Ingress",
-      copy: "Configure a baseDomain once to automatically provision <app>.<baseDomain> Apache2 routes, Let's Encrypt SANs via af-certbot-sync, and .aether.local split-horizon DNS."
+      title: "Whatbox-Style Subdomain Ingress",
+      copy: "Configure a baseDomain once to automatically provision Whatbox-style <app>.<baseDomain> Apache2 reverse-proxy routes, Let's Encrypt SANs via af-certbot-sync, and .aether.local split-horizon DNS."
     },
     {
       title: "Unified Admin CLI (af)",
@@ -77,7 +77,7 @@ export const statusMomentumData = {
 
 export const ctaData = {
   title: "Command your infrastructure.",
-  body: "Explore the 11-crate Rust architecture, browse the 77-app bare-metal catalog, and deploy AetherFlow v4.0.0.",
+  body: "Explore the Rust control plane and Leptos WebAssembly architecture, browse the 77-app bare-metal catalog, and deploy AetherFlow v4.0.0.",
   button: {
     label: "View Repository",
     href: "https://github.com/McEveritts/AetherFlow"

@@ -13,8 +13,8 @@
         RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
         RewriteRule ^/?(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
 
-        DocumentRoot "/srv/aetherflow"
-        <Directory "/srv/aetherflow/">
+        DocumentRoot "/var/www/aetherflow-default"
+        <Directory "/var/www/aetherflow-default/">
                 Options -Indexes -Includes -ExecCGI
                 AllowOverride None
                 Require all granted
@@ -40,8 +40,8 @@
         Header always set Referrer-Policy "strict-origin-when-cross-origin"
         Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
 
-        DocumentRoot "/srv/aetherflow"
-        <Directory "/srv/aetherflow/">
+        DocumentRoot "/var/www/aetherflow-default"
+        <Directory "/var/www/aetherflow-default/">
                 Options -Indexes -Includes -ExecCGI
                 AllowOverride None
                 AuthType Digest

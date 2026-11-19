@@ -33,7 +33,7 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 
 ## Upgrading from v3.2.x to v4.0.0
 
-v4.0.0 replaces the legacy Go control plane (Zero-Go codebase) with the 12-crate **Rust (`Axum` + `Tokio`)** workspace compiling `aetherflow-api`, the unified `af` (`af-cli`) binary, and the native Rust `speedtest-backend` (`af-librespeed`). The Leptos dashboard ships as external `web/dist` files. The updater switches the complete release together and preserves the existing HTTP/WebSocket API, `/run/aetherflow/runner.sock` socket, and SQLite data.
+v4.0.0 replaces the legacy Go control plane (Zero-Go codebase) with the 11-crate **Rust (`Axum` + `Tokio`)** workspace (`backend-rs`) compiling `aetherflow-api`, the unified `af` (`af-cli`) binary, and the native Rust `speedtest-backend` (`af-librespeed`), paired with the 4-crate **Leptos Rust WebAssembly (`frontend-rs`)** dashboard shipped as external `web/dist` files. The updater switches the complete release together and preserves the existing HTTP/WebSocket API, `/run/aetherflow/runner.sock` socket, and SQLite data.
 
 ### Live SQLite Database Path Resolution
 Both `af-release` and `deploy/release-manager.sh` resolve the live SQLite database in this exact 4-tier order:

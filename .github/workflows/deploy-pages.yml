@@ -7,7 +7,6 @@ on:
       - master
     paths:
       - 'apps/website/**'
-      - 'packages/ui/**'
       - 'package.json'
       - 'package-lock.json'
   workflow_dispatch:

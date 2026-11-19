@@ -11,7 +11,16 @@ fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_s
         .unwrap_or_else(|e| e.into_inner());
     let directory = TempTestDir::new("full_init_epoch");
     let path = directory.db_file("full.sqlite");
-    let previous = std::env::var_os("DB_PATH");
+    struct DbPathGuard(Option<std::ffi::OsString>);
+    impl Drop for DbPathGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("DB_PATH", value),
+                None => std::env::remove_var("DB_PATH"),
+            }
+        }
+    }
+    let _db_path_guard = DbPathGuard(std::env::var_os("DB_PATH"));
     std::env::set_var("DB_PATH", &path);
     crate::init_db().expect("empty full schema initializes");
     let plugin_description: String = {
@@ -114,10 +123,6 @@ fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_s
             .unwrap();
     }
     crate::init_db().expect("full initialization remains repeatable after marker repair");
-    match previous {
-        Some(value) => std::env::set_var("DB_PATH", value),
-        None => std::env::remove_var("DB_PATH"),
-    }
 }
 
 struct TempTestDir {

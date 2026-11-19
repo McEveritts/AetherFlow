@@ -1,6 +1,6 @@
 # Streaming repair validation gate
 
-This is the validation gate for the [seven-phase implementation](streaming-jellystat-implementation-plan.md). Passing these commands is not permission to deploy, migrate a real database, reconcile historical rows, or claim live-client acceptance. Local feature tests and external acceptance are recorded separately.
+This is the validation gate for the canonical streaming history implementation (see [Streaming History Contract](streaming-history-contract.md)). Passing these commands is not permission to deploy, migrate a real database, reconcile historical rows, or claim live-client acceptance. Local feature tests and external acceptance are recorded separately.
 
 ## Reproduce the checks
 
@@ -18,11 +18,9 @@ Each check has a GNU `timeout` bound of ten minutes and a ten-second termination
 
 ### Scoped mode
 
-1. Run the existing `streaming_ext::tests` through the `af-streaming-tests` Cargo workspace member using the workspace lockfile. It imports the repository's actual streaming, authentication, and WebSocket modules with workspace dependencies, not copied implementations or mocks. This isolates unrelated API compilation blockers, not Streaming behavior.
-2. Generate fresh serialized Rust fixtures and run both `StreamingTab.test.tsx` and `StreamingTab.rust-contract.test.tsx` through the standard npm/Jest entrypoint with `AF_STREAMING_CONTRACT_FIXTURE`. Missing fixture generation fails the gate rather than silently skipping contract tests.
-3. Run frontend TypeScript without incremental state and lint the Streaming component, utility, and both suites.
-
-`frontend/jest.config.mjs` replaces the TypeScript config with the same Next/Jest setup, so standard `npm --workspace frontend test -- --runInBand` no longer needs an undeclared `ts-node` loader. Direct Jest runs without the fixture environment still skip the serialized contract suite; use the validation script when claiming Rust-to-React contract coverage.
+1. Run the streaming integration and contract tests inside `af-api` (or `scripts/validate-streaming.sh` when targeting the scoped harness) using the workspace lockfile. They exercise the repository's actual streaming, authentication, and WebSocket modules with workspace dependencies, not copied implementations or mocks.
+2. Run the `frontend-rs` workspace tests and `e2e/` Playwright browser suites against the built WASM bundle served from `web/dist`.
+3. Historical reference: earlier pre-WASM checkpoints ran Jest/TypeScript checks under `frontend/`; current v4.0 verification uses `frontend-rs` + `e2e/` Playwright suites.
 
 ### Integrated mode
 
@@ -70,7 +68,7 @@ The metadata increment additionally covers verified cold-start source identity, 
 
 ## Disposable Browser Acceptance — November 2, 2026
 
-[streaming-browser-acceptance.md](streaming-browser-acceptance.md) records actual browser checks against the real router/static UI and a synthetic temporary database: desktop/mobile layout, stable drilldown, compact JSON download/upload/preview without restore, linked/unlinked privacy, and keyboard refresh. The ordinary mounted-router regression uses a child process to isolate its temporary global DB pool. Browser fixture and tab were stopped/closed. No live provider or production data was used.
+Historical synthetic browser checks against the real router/static UI and a synthetic temporary database verified desktop/mobile layout, stable drilldown, compact JSON download/upload/preview without restore, linked/unlinked privacy, and keyboard refresh. The ordinary mounted-router regression uses a child process to isolate its temporary global DB pool. Browser fixture and tab were stopped/closed. No live provider or production data was used.
 
 ## Historical Local Evidence — November 1, 2026
 

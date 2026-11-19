@@ -202,8 +202,10 @@ function _apacheconf() {
 	sed -i "s/\"REALM\"/\"${REALM}\"/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/HTPASSWD/\/etc\/htpasswd/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/PORT/${PORT}/g" /etc/apache2/sites-enabled/default-ssl.conf
-	mkdir -p /srv
-	ln -sfn /opt/AetherFlow /srv/aetherflow
+	install -d -m 0755 /var/www/aetherflow-default
+	if [[ -L /srv/aetherflow && "$(readlink /srv/aetherflow 2>/dev/null)" == "/opt/AetherFlow" ]]; then
+		rm -f /srv/aetherflow
+	fi
 	sed -i "s/ServerTokens OS/ServerTokens Prod/g" /etc/apache2/conf-enabled/security.conf
 	sed -i "s/ServerSignature On/ServerSignature Off/g" /etc/apache2/conf-enabled/security.conf
 	\cp -f ${local_setup}templates/fileshare.conf.template /etc/apache2/sites-enabled/fileshare.conf

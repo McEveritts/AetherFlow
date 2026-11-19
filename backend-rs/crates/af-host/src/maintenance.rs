@@ -125,6 +125,12 @@ pub struct TuningReport {
     pub applied: bool,
     /// Whether execution was dry-run only.
     pub dry_run: bool,
+    /// Whether `sysctl` was reloaded live on the host after writing the drop-in.
+    #[serde(default)]
+    pub sysctl_reloaded: bool,
+    /// Diagnostic note if live `sysctl` reload was skipped or unsupported (e.g. container environment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sysctl_reload_note: Option<String>,
 }
 
 /// Computes the standard network sysctl tuning parameters matching `packages/system/af-tune`.
@@ -148,8 +154,47 @@ pub fn compute_sysctl_network_tuning() -> BTreeMap<String, String> {
     map
 }
 
+/// Returns `true` when `root` targets the live host filesystem (`/`) rather than an isolated test root.
+pub fn is_live_host_root(root: &Path) -> bool {
+    af_models::normalize_lexical_path(root, "root")
+        .map(|normalized| normalized == Path::new("/"))
+        .unwrap_or_else(|_| root == Path::new("/"))
+}
+
+fn apply_sysctl_with_runner<F>(conf_path: &Path, runner: F) -> (bool, Option<String>)
+where
+    F: FnOnce(&Path) -> std::io::Result<std::process::Output>,
+{
+    match runner(conf_path) {
+        Ok(out) if out.status.success() => (true, None),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() { stderr } else { stdout };
+            let note = format!(
+                "sysctl reload returned {} (tuning file {} saved for next boot; container or read-only /proc/sys may restrict live sysctl): {}",
+                out.status,
+                conf_path.display(),
+                detail
+            );
+            eprintln!("[af-host] WARNING: {}", note);
+            (false, Some(note))
+        }
+        Err(err) => {
+            let note = format!(
+                "sysctl binary could not be executed ({}); tuning file {} saved for next boot",
+                err,
+                conf_path.display()
+            );
+            eprintln!("[af-host] WARNING: {}", note);
+            (false, Some(note))
+        }
+    }
+}
+
 /// Writes `/etc/sysctl.d/99-aetherflow-tune.conf` (relative to `root`) with optimized network
-/// tuning parameters using symlink-safe atomic file replacement.
+/// tuning parameters using symlink-safe atomic file replacement, and applies `sysctl -p`
+/// immediately when running against the live host root (`/`).
 pub fn apply_network_tuning(root: &Path, dry_run: bool) -> HostBackupResult<TuningReport> {
     let conf_rel = Path::new("etc/sysctl.d/99-aetherflow-tune.conf");
     let conf_path = root.join(conf_rel);
@@ -165,6 +210,8 @@ pub fn apply_network_tuning(root: &Path, dry_run: bool) -> HostBackupResult<Tuni
             settings,
             applied: false,
             dry_run: true,
+            sysctl_reloaded: false,
+            sysctl_reload_note: None,
         });
     }
 
@@ -242,11 +289,24 @@ pub fn apply_network_tuning(root: &Path, dry_run: bool) -> HostBackupResult<Tuni
         )
     })?;
 
+    let (sysctl_reloaded, sysctl_reload_note) = if is_live_host_root(root) {
+        apply_sysctl_with_runner(&conf_path, |path| {
+            std::process::Command::new("sysctl")
+                .arg("-p")
+                .arg(path)
+                .output()
+        })
+    } else {
+        (false, None)
+    };
+
     Ok(TuningReport {
         config_path: conf_path,
         settings,
         applied: true,
         dry_run: false,
+        sysctl_reloaded,
+        sysctl_reload_note,
     })
 }
 
@@ -517,4 +577,58 @@ fn compute_dir_tree_bytes(dir: &Path, depth: usize) -> HostBackupResult<u64> {
     }
 
     Ok(total)
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn live_host_root_and_sysctl_runner_handle_containers_and_temp_roots() {
+        assert!(is_live_host_root(Path::new("/")));
+        assert!(is_live_host_root(Path::new("/.")));
+        assert!(!is_live_host_root(Path::new("/tmp/test-root")));
+
+        let conf = Path::new("/etc/sysctl.d/99-aetherflow-tune.conf");
+        #[cfg(unix)]
+        {
+            let (ok_reloaded, ok_note) = apply_sysctl_with_runner(conf, |_| {
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            });
+            assert!(ok_reloaded);
+            assert!(ok_note.is_none());
+
+            let (ro_reloaded, ro_note) = apply_sysctl_with_runner(conf, |_| {
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(256),
+                    stdout: Vec::new(),
+                    stderr: b"sysctl: setting key \"net.core.rmem_max\": Read-only file system"
+                        .to_vec(),
+                })
+            });
+            assert!(!ro_reloaded);
+            assert!(ro_note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Read-only file system"));
+        }
+
+        let (missing_reloaded, missing_note) = apply_sysctl_with_runner(conf, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "sysctl not found",
+            ))
+        });
+        assert!(!missing_reloaded);
+        assert!(missing_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sysctl binary could not be executed"));
+    }
 }
