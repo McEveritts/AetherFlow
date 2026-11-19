@@ -4569,6 +4569,7 @@ mod hardening_tests {
             db.parent().unwrap().join("oidc-device.pem"),
         );
         env::set_var("OIDC_ISSUER", "https://auth.example.test");
+        env::set_var("ALLOWED_HOSTS", "localhost");
         env::remove_var("CSRF_DISABLED");
 
         let conn = af_db::get_conn().unwrap();
