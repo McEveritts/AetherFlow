@@ -628,7 +628,7 @@ fn ServiceCard(
             <div class="flex gap-3 justify-between items-start">
                 <div class="flex items-start gap-3 min-w-0">
                     {move || {
-                        info.with(|v| safe_service_icon(v)).filter(|_| !img_failed.get()).map(|src| {
+                        info.with(safe_service_icon).filter(|_| !img_failed.get()).map(|src| {
                             let alt = info.with(|v| field(v, &["name", "slug", "id"]));
                             view! {
                                 <img

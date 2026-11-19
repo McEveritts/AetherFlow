@@ -532,20 +532,20 @@ fn decode_iso_8859_15(bytes: &[u8]) -> String {
 }
 
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
-    let slice = if little_endian && bytes.starts_with(&[0xFF, 0xFE]) {
-        &bytes[2..]
-    } else if !little_endian && bytes.starts_with(&[0xFE, 0xFF]) {
-        &bytes[2..]
+    let bom = if little_endian {
+        &[0xff, 0xfe]
     } else {
-        bytes
+        &[0xfe, 0xff]
     };
-    let units: Vec<u16> = slice
-        .chunks_exact(2)
-        .map(|pair| {
+    let slice = bytes.strip_prefix(bom).unwrap_or(bytes);
+    let (pairs, _) = slice.as_chunks::<2>();
+    let units: Vec<u16> = pairs
+        .iter()
+        .map(|&pair| {
             if little_endian {
-                u16::from_le_bytes([pair[0], pair[1]])
+                u16::from_le_bytes(pair)
             } else {
-                u16::from_be_bytes([pair[0], pair[1]])
+                u16::from_be_bytes(pair)
             }
         })
         .collect();
@@ -673,10 +673,10 @@ pub(super) fn build_preferences_payload(
     let backend_sort = if matches!(sort, "name" | "size" | "modified") {
         sort
     } else {
-        match base["sort"].as_str() {
-            Some(existing @ ("name" | "size" | "modified")) => existing,
-            _ => "name",
-        }
+        base["sort"]
+            .as_str()
+            .filter(|value| matches!(*value, "name" | "size" | "modified"))
+            .unwrap_or("name")
     };
     let resolved_theme = if is_valid_editor_theme(editor_theme) {
         editor_theme

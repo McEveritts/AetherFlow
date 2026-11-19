@@ -1057,33 +1057,44 @@ fn invalid_oidc_client_response() -> Response {
         .into_response()
 }
 
-fn extract_oidc_client_credentials(
-    headers: &HeaderMap,
-    form: &HashMap<String, String>,
-) -> Result<(String, String), Response> {
-    let auth_count = headers.get_all(header::AUTHORIZATION).iter().count();
-    if auth_count > 1 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_request",
-                "error_description": "multiple Authorization headers"
-            })),
-        )
-            .into_response());
-    }
-    if auth_count == 1 {
-        if form.contains_key("client_id") || form.contains_key("client_secret") {
-            return Err((
+enum ClientCredentialError {
+    Ambiguous(&'static str),
+    InvalidClient,
+}
+
+impl IntoResponse for ClientCredentialError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Ambiguous(description) => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "invalid_request",
-                    "error_description": "multiple client authentication methods"
+                    "error_description": description
                 })),
             )
-                .into_response());
+                .into_response(),
+            Self::InvalidClient => invalid_oidc_client_response(),
         }
-        return extract_basic_auth(headers).ok_or_else(invalid_oidc_client_response);
+    }
+}
+
+fn extract_oidc_client_credentials(
+    headers: &HeaderMap,
+    form: &HashMap<String, String>,
+) -> Result<(String, String), ClientCredentialError> {
+    let auth_count = headers.get_all(header::AUTHORIZATION).iter().count();
+    if auth_count > 1 {
+        return Err(ClientCredentialError::Ambiguous(
+            "multiple Authorization headers",
+        ));
+    }
+    if auth_count == 1 {
+        if form.contains_key("client_id") || form.contains_key("client_secret") {
+            return Err(ClientCredentialError::Ambiguous(
+                "multiple client authentication methods",
+            ));
+        }
+        return extract_basic_auth(headers).ok_or(ClientCredentialError::InvalidClient);
     }
     let client_id = form.get("client_id").cloned().unwrap_or_default();
     let client_secret = form.get("client_secret").cloned().unwrap_or_default();
@@ -1354,7 +1365,7 @@ fn oidc_token_blocking(
     let grant_type = form.get("grant_type").cloned().unwrap_or_default();
     let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
         Ok(creds) => creds,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
 
     let Ok(is_public_client) = authenticate_oidc_client(&client_id, &client_secret, true) else {
@@ -2014,7 +2025,7 @@ pub async fn oidc_revoke(
 fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
     let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
         Ok(creds) => creds,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     if client_id.is_empty() {
         return (
@@ -2216,7 +2227,7 @@ fn oidc_introspect_blocking(
 ) -> Response {
     let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
         Ok(creds) => creds,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     if client_id.is_empty() {
         return (
@@ -2386,7 +2397,7 @@ fn oidc_device_authorize_blocking(
 ) -> Response {
     let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
         Ok(creds) => creds,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     if authenticate_oidc_client(&client_id, &client_secret, false) != Ok(false) {
         return invalid_oidc_client_response();

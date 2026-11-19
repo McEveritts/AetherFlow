@@ -1,3 +1,13 @@
+## Nightly Patch Notes — November 19, 2026 — Dashboard and operator workflows
+
+- Overview charts align live and historical samples on a UTC time axis, show gaps in collection, and support six telemetry windows. Daily transfer totals and capacity charts use server-side history aggregation.
+- Services and Marketplace restore update checks, release notes, launch eligibility, and shortcuts to application ingress settings. Operators can inspect component logs, restart receipts, approval details, and audit history.
+- Streaming adds playback filters, distribution charts, and structured administration. Account, accessibility, and display settings restore personal dashboard controls.
+- McBrowser restores file previews, gallery navigation, workspace preferences, and editor themes. Text editing supports files up to 10 MiB with conflict-aware saves.
+- Restore the browser consent flow for OIDC device authorization and require confidential clients to authenticate at the device authorization endpoint.
+
+---
+
 ## Nightly Patch Notes — November 18, 2026 — Rust WASM Dashboard
 
 - Ship the Leptos dashboard and workers as separate `web/dist` files beside the Rust API, `af` CLI, and LibreSpeed `speedtest-backend`. The release uses the Zero-Go layout and canonical `config/` directory.

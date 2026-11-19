@@ -1616,7 +1616,8 @@ fn probe_display_refresh_rate(context: AppContext) {
     };
     let raf_id = Rc::new(Cell::new(None::<i32>));
     let raf_id_cleanup = Rc::clone(&raf_id);
-    let callback_slot: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+    type FrameCallback = Closure<dyn FnMut(f64)>;
+    let callback_slot = Rc::new(RefCell::new(None::<FrameCallback>));
     let callback_slot_inner = Rc::clone(&callback_slot);
     let callback_slot_cleanup = Rc::clone(&callback_slot);
     let mut frames = 0u32;
