@@ -111,7 +111,7 @@ async function readRules(page: Page): Promise<Rule[]> {
 }
 
 test('real Users role and Notifications alert changes persist for their server identities', async ({ page, context, baseURL }) => {
-  test.setTimeout(120_000); // The shared live login limiter can return Retry-After: 60.
+  test.setTimeout(180_000); // The shared live login limiter can return Retry-After: 60.
   const database = disposableDatabase(baseURL);
   const origin = new URL(baseURL!).origin;
   await context.route(url => url.origin !== origin, route => route.abort());

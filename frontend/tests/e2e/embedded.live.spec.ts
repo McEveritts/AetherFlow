@@ -61,6 +61,30 @@ with sqlite3.connect(database, timeout=15) as connection:
   return Number(id);
 }
 
+function seedFreshTelemetryHistory(): void {
+  const databasePath = process.env.AETHERFLOW_DB_PATH || process.env.DB_PATH;
+  expect(databasePath, 'Run this live matrix through scripts/run_embedded_e2e.sh --playwright').toBeTruthy();
+  execFileSync('python3', ['-B', '-c', `
+import datetime, pathlib, sqlite3, sys
+database = pathlib.Path(sys.argv[1]).resolve(strict=True)
+if database.parent.name != 'data' or not database.parent.parent.name.startswith('aetherflow-embedded-e2e.'):
+    raise SystemExit('Refusing to seed telemetry outside the isolated embedded E2E database')
+now = datetime.datetime.now(datetime.timezone.utc)
+rows = [
+    ((now - datetime.timedelta(seconds=10 * offset)).strftime('%Y-%m-%d %H:%M:%S'),
+     20 + offset, 2 + offset / 10, 8, offset * 1024, offset * 2048)
+    for offset in range(12, 0, -1)
+]
+with sqlite3.connect(database, timeout=15) as connection:
+    connection.executemany(
+        'INSERT INTO metrics_history '
+        '(timestamp, cpu_avg, mem_used_gb, mem_total_gb, disk_read_bps, disk_write_bps) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        rows,
+    )
+`, databasePath!], { encoding: 'utf8' });
+}
+
 // This scenario verifies persisted editor state. Applying an OS filesystem quota
 // requires the privileged runner, which the host-safe live matrix disables.
 function provisionPersistedQuota(userId: number, bytes: number): void {
@@ -443,6 +467,7 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
       });
     });
     // 1. Verify backend readiness and setup status directly against the real Rust control plane
+    seedFreshTelemetryHistory();
     const readyRes = await request.get('/health/ready');
     expect(readyRes.ok()).toBeTruthy();
     const readyJson = await readyRes.json();
@@ -766,6 +791,7 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     await sidebar.getByRole('button', { name: /Settings/i }).click();
     await expect(page.getByRole('heading', { name: 'Navigation & Localization' })).toBeVisible();
 
+    seedFreshTelemetryHistory();
     await sidebar.hover();
     await sidebar.getByRole('button', { name: /Overview/i }).click();
     await expect(windowSelector).toBeVisible();
