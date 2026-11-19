@@ -431,6 +431,15 @@ fn static_translation_keys_exist_in_the_english_catalog() {
         "",
         &mut catalog,
     );
+    for (key, value) in &catalog {
+        if key.contains('{') {
+            assert_eq!(
+                placeholders(key),
+                placeholders(value),
+                "placeholders changed in {key}"
+            );
+        }
+    }
     let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     scan(&crate_root.join("src"), &catalog);
     scan(&crate_root.join("../af-web-ui/src"), &catalog);

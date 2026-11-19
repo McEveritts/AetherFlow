@@ -493,6 +493,22 @@ pub fn get_system_metrics_core() -> SystemMetrics {
     // 4. Network & Active Connections
     state.networks.refresh(true);
     let (total_rx, total_tx) = read_net_totals(&state.networks);
+    let elapsed = state
+        .last_net_check
+        .map(|t| now.duration_since(t).as_secs_f64().max(0.01));
+    let mut interfaces = Vec::new();
+    for (name, data) in state
+        .networks
+        .iter()
+        .filter(|(name, _)| name.as_str() != "lo")
+    {
+        interfaces.push(serde_json::json!({
+            "name": name,
+            "rx_bps": elapsed.map(|dt| data.received() as f64 / dt),
+            "tx_bps": elapsed.map(|dt| data.transmitted() as f64 / dt),
+        }));
+    }
+    interfaces.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     let (down_speed, up_speed) = if let Some(last_net) = state.last_net_check {
         let duration = now.duration_since(last_net).as_secs_f64().max(0.01);
         let rx_diff = total_rx.saturating_sub(state.last_net_rx);
@@ -569,6 +585,7 @@ pub fn get_system_metrics_core() -> SystemMetrics {
     swap.insert("used".to_string(), swap_used);
 
     let mut network = HashMap::new();
+    network.insert("interfaces".into(), serde_json::Value::Array(interfaces));
     network.insert("down".to_string(), serde_json::Value::String(down_speed));
     network.insert("up".to_string(), serde_json::Value::String(up_speed));
     network.insert(
@@ -869,7 +886,7 @@ fn refresh_top_processes(state: &mut TelemetryState, now: Instant) {
         .values()
         .filter_map(|p| {
             let pid = p.pid().as_u32() as i32;
-            if pid == 2 {
+            if pid == 2 || p.thread_kind().is_some() {
                 return None;
             }
             if let Some(parent) = p.parent() {
@@ -1101,6 +1118,35 @@ fn update_gpu_metrics(state: &mut TelemetryState) {
     }
 }
 
+fn udev_properties(record: &str) -> HashMap<&str, &str> {
+    record
+        .lines()
+        .filter_map(|line| line.strip_prefix("E:")?.split_once('='))
+        .collect()
+}
+
+fn memory_devices(record: &str) -> (i32, String) {
+    let properties = udev_properties(record);
+    let mut banks = 0;
+    let mut types = std::collections::BTreeSet::new();
+    for (key, size) in &properties {
+        let Some(slot) = key
+            .strip_prefix("MEMORY_DEVICE_")
+            .and_then(|key| key.strip_suffix("_SIZE"))
+        else {
+            continue;
+        };
+        if slot.parse::<usize>().is_err() || size.parse::<u64>().unwrap_or(0) == 0 {
+            continue;
+        }
+        banks += 1;
+        if let Some(kind) = properties.get(format!("MEMORY_DEVICE_{slot}_TYPE").as_str()) {
+            types.insert(*kind);
+        }
+    }
+    (banks, types.into_iter().collect::<Vec<_>>().join(" / "))
+}
+
 /// Returns detailed hardware report for the host hardware inventory.
 pub fn get_detailed_hardware() -> HardwareReport {
     let mut sys = System::new_all();
@@ -1131,10 +1177,12 @@ pub fn get_detailed_hardware() -> HardwareReport {
         threads,
     });
 
+    let (banks, mem_type) =
+        memory_devices(&fs::read_to_string("/run/udev/data/+dmi:id").unwrap_or_default());
     let memory = Some(MemoryInfo {
         total_bytes: sys.total_memory() as i64,
-        banks: 0,
-        mem_type: String::new(),
+        banks,
+        mem_type,
     });
 
     let gpus: Vec<GpuInfo> = discover_gpus()
@@ -1165,11 +1213,25 @@ pub fn get_detailed_hardware() -> HardwareReport {
                 .unwrap_or_default()
                 .trim()
                 .to_string();
+            let record = fs::read_to_string(entry.path().join("ifindex"))
+                .ok()
+                .and_then(|index| index.trim().parse::<u32>().ok())
+                .and_then(|index| fs::read_to_string(format!("/run/udev/data/n{index}")).ok())
+                .unwrap_or_default();
+            let props = udev_properties(&record);
             network.push(NetworkInfo {
                 name,
                 mac,
-                vendor: "Unknown".to_string(),
-                product: "Unknown".to_string(),
+                vendor: props
+                    .get("ID_VENDOR_FROM_DATABASE")
+                    .copied()
+                    .unwrap_or_default()
+                    .into(),
+                product: props
+                    .get("ID_MODEL_FROM_DATABASE")
+                    .copied()
+                    .unwrap_or_default()
+                    .into(),
             });
         }
     }
@@ -1178,7 +1240,7 @@ pub fn get_detailed_hardware() -> HardwareReport {
     if let Ok(entries) = fs::read_dir("/sys/block") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("dm-") {
+            if !entry.path().join("device").exists() {
                 continue;
             }
             let size_sectors = read_sysfs_f64(&entry.path().join("size")).unwrap_or(0.0) as u64;
@@ -1206,6 +1268,8 @@ pub fn get_detailed_hardware() -> HardwareReport {
         }
     }
 
+    network.sort_by(|a, b| a.name.cmp(&b.name));
+    storage.sort_by(|a, b| a.name.cmp(&b.name));
     HardwareReport {
         system_vendor,
         system_product,
@@ -1220,6 +1284,13 @@ pub fn get_detailed_hardware() -> HardwareReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_metadata_counts_only_populated_slots() {
+        let record = "E:MEMORY_DEVICE_0_SIZE=4096\nE:MEMORY_DEVICE_0_TYPE=DDR4\nE:MEMORY_DEVICE_1_SIZE=0\nE:MEMORY_DEVICE_2_SIZE=8192\nE:MEMORY_DEVICE_2_TYPE=DDR4";
+        assert_eq!(memory_devices(record), (2, "DDR4".into()));
+        assert_eq!(memory_devices(""), (0, String::new()));
+    }
 
     #[test]
     fn test_format_bytes_matches_go() {

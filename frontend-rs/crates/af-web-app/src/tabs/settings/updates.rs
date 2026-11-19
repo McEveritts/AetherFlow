@@ -361,6 +361,12 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                     <p role="status" class="text-slate-400 whitespace-pre-wrap">
                         {move || check.data.with(|v| text(v, "message"))}
                     </p>
+                    {move || check.data.with(|v| {
+                        let url = text(v, "url");
+                        url.starts_with("https://github.com/McEveritts/AetherFlow/").then(|| view! {
+                            <a class="underline" href=url target="_blank" rel="noopener noreferrer">{move || tt(context, "View release on GitHub")}</a>
+                        })
+                    })}
                     <Show when=move || {
                         !check.loading.get() && check.error.get().is_none()
                             && check.data.with(|v| v["updateAvailable"] == true)

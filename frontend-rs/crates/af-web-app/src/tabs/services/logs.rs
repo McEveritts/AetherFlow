@@ -1,12 +1,21 @@
 //! Administrator journal session and export controls.
 use super::helpers::{copy_text, field, service_units};
 use crate::state::{app, json_rows, use_api};
-use crate::tabs::l10n::{tt, Modal, SearchInput};
+use crate::tabs::l10n::{tt, tt_with, Badge, Modal, SearchInput};
+use af_web_core::api::ApiClient;
 use af_web_ui::use_worker_rows;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
+
+fn build_ai_debug_prompt(unit_name: &str, lines: &[String]) -> String {
+    let start = lines.len().saturating_sub(30);
+    let tail = lines[start..].join("\n");
+    format!(
+        "Analyze the following terminal output for the service '{unit_name}'. Identify the root cause of any errors and recommend remediation steps. Do not start a conversation, just provide the root cause and recommendation.\n\nLogs:\n{tail}"
+    )
+}
 
 fn download_logs(name: &str, content: &str) -> Result<(), String> {
     let document = web_sys::window()
@@ -63,7 +72,7 @@ fn log_level(row: &Value) -> String {
     .into()
 }
 #[component]
-pub(super) fn ServiceLogsModal(
+pub(crate) fn ServiceLogsModal(
     open: RwSignal<bool>,
     service: RwSignal<Option<Value>>,
 ) -> impl IntoView {
@@ -72,6 +81,10 @@ pub(super) fn ServiceLogsModal(
     let following = RwSignal::new(true);
     let query = RwSignal::new(String::new());
     let severity = RwSignal::new("ALL".to_string());
+    let analyzing = RwSignal::new(false);
+    let ai_analysis = RwSignal::new(None::<Value>);
+    let ai_ticket = RwSignal::new(0u64);
+    let remediation_open = RwSignal::new(false);
     let units = Signal::derive(move || {
         service.with(|v| {
             let Some(v) = v else {
@@ -82,8 +95,15 @@ pub(super) fn ServiceLogsModal(
     });
     let unit = RwSignal::new(String::new());
     Effect::new(move |_| {
+        let requested = service.with(|v| {
+            v.as_ref()
+                .map(|v| field(v, &["initial_unit", "process", "id", "slug"]))
+                .unwrap_or_default()
+        });
         let units = units.get();
-        if !units.contains(&unit.get_untracked()) {
+        if !requested.is_empty() && units.contains(&requested) {
+            unit.set(requested);
+        } else if !units.contains(&unit.get_untracked()) {
             unit.set(units.first().cloned().unwrap_or_default());
         }
     });
@@ -99,8 +119,12 @@ pub(super) fn ServiceLogsModal(
     Effect::new(move |_| {
         unit.track();
         lines.track();
-        // Never relabel a previous unit's cached lines as the newly selected journal.
+        // Never relabel a previous unit's cached lines or diagnostics as the newly selected journal.
         logs.data.set(Value::Null);
+        ai_ticket.update(|n| *n = n.wrapping_add(1));
+        analyzing.set(false);
+        ai_analysis.set(None);
+        remediation_open.set(false);
     });
     let interval = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         2000,
@@ -237,7 +261,123 @@ pub(super) fn ServiceLogsModal(
                     >
                         {move || tt(context, "Common.refresh")}
                     </button>
+                    <Show when=move || context.is_admin()>
+                        <button
+                            type="button"
+                            class="glass-button-primary px-3 py-2 min-h-11"
+                            disabled=move || analyzing.get() || visible.with(Vec::is_empty)
+                            on:click=move |_| {
+                                if !context.is_admin() || analyzing.get_untracked() {
+                                    return;
+                                }
+                                let captured = visible.with_untracked(|rows| {
+                                    rows.iter()
+                                        .map(|v| {
+                                            format!(
+                                                "{} [{}] {}",
+                                                field(v, &["timestamp", "time"]),
+                                                field(v, &["level"]),
+                                                field(v, &["message"])
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                });
+                                if captured.is_empty() {
+                                    return;
+                                }
+                                let active_unit = unit.get_untracked();
+                                let prompt = build_ai_debug_prompt(&active_unit, &captured);
+                                ai_ticket.update(|n| *n = n.wrapping_add(1));
+                                let ticket = ai_ticket.get_untracked();
+                                analyzing.set(true);
+                                ai_analysis.set(None);
+                                spawn_local(async move {
+                                    let body = json!({
+                                        "message": prompt,
+                                        "context_mode": "logs",
+                                    });
+                                    let result = ApiClient
+                                        .post("/api/v1/auth/ai/support", Some(&body))
+                                        .await;
+                                    if ai_ticket.try_get_untracked() != Some(ticket) {
+                                        return;
+                                    }
+                                    analyzing.set(false);
+                                    match result {
+                                        Ok(data) => ai_analysis.set(Some(data)),
+                                        Err(e) => context.toast(tt(context, &e.message), true),
+                                    }
+                                });
+                            }
+                        >
+                            {move || {
+                                if analyzing.get() {
+                                    tt(context, "Analyzing logs…")
+                                } else {
+                                    tt(context, "AI Auto-Debug")
+                                }
+                            }}
+                        </button>
+                    </Show>
                 </div>
+                <Show when=move || ai_analysis.with(Option::is_some)>
+                    {move || {
+                        ai_analysis.get().map(|data| {
+                            let reply = field(&data, &["reply"]);
+                            let proposed = data.get("proposed_action").filter(|v| v.is_object()).cloned();
+                            let has_proposed = proposed.is_some();
+                            let healthy = reply.contains("No critical");
+                            let recommendation = proposed
+                                .as_ref()
+                                .map(|p| field(p, &["description", "title"]))
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| tt(context, "No immediate remediation required."));
+                            view! {
+                                <section
+                                    aria-label=move || tt(context, "FlowAI Diagnostic Result")
+                                    class="rounded-xl border border-indigo-400/20 bg-white/[0.04] p-4 space-y-2 min-w-0"
+                                >
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <h4 class="text-sm font-semibold text-slate-200">
+                                            {move || tt(context, "FlowAI Diagnostic Result")}
+                                        </h4>
+                                        <Badge
+                                            label=Signal::derive(move || {
+                                                if healthy {
+                                                    tt(context, "HEALTHY")
+                                                } else {
+                                                    tt(context, "ERROR DETECTED")
+                                                }
+                                            })
+                                            tone=if healthy { "success" } else { "warning" }
+                                        />
+                                    </div>
+                                    <p class="text-xs text-slate-300 whitespace-pre-wrap break-words">
+                                        {reply}
+                                    </p>
+                                    <p class="text-xs text-indigo-300 break-words">
+                                        {tt_with(
+                                            context,
+                                            "Suggested remediation: {recommendation}",
+                                            &[("recommendation", &recommendation)],
+                                        )}
+                                    </p>
+                                    <Show when=move || has_proposed>
+                                        <div class="flex justify-end pt-2">
+                                            <button
+                                                type="button"
+                                                class="glass-button-primary px-3 py-2 min-h-11 text-xs"
+                                                on:click=move |_| remediation_open.set(true)
+                                            >
+                                                {move || tt(context, "Review Proposed Remediation")}
+                                            </button>
+                                        </div>
+                                    </Show>
+                                </section>
+                            }
+                        })
+                    }}
+                </Show>
                 <SearchInput value=query placeholder="Search journal logs" />
                 <div
                     class="flex flex-wrap gap-2"
@@ -346,5 +486,65 @@ pub(super) fn ServiceLogsModal(
                 </div>
             </div>
         </Modal>
+        <Modal open=remediation_open title="Remediation proposed">
+            {move || {
+                let proposed = ai_analysis
+                    .get()
+                    .and_then(|d| d.get("proposed_action").cloned())
+                    .unwrap_or(Value::Null);
+                let title = field(&proposed, &["title", "action"]);
+                let desc = field(&proposed, &["description"]);
+                view! {
+                    <div class="space-y-4 min-w-0">
+                        <p class="text-sm text-slate-300">
+                            {move || tt(
+                                context,
+                                "FlowAI forwarded this proposed remediation to your Approval Inbox. No autonomous action has occurred.",
+                            )}
+                        </p>
+                        {(!title.is_empty()).then(|| view! {
+                            <p class="text-sm font-semibold text-amber-300 break-words">{title}</p>
+                        })}
+                        <p class="text-xs font-mono text-emerald-300 bg-white/[0.04] border border-white/10 rounded-xl p-3 break-words">
+                            {if desc.is_empty() {
+                                tt(context, "Run orchestrated restart sequence.")
+                            } else {
+                                desc
+                            }}
+                        </p>
+                        <div class="flex justify-end">
+                            <button
+                                type="button"
+                                class="glass-button-primary px-4 py-2 min-h-11"
+                                on:click=move |_| {
+                                    remediation_open.set(false);
+                                    context.toast(
+                                        tt(context, "Remediation was forwarded to your Approval Inbox."),
+                                        false,
+                                    );
+                                }
+                            >
+                                {move || tt(context, "Acknowledge")}
+                            </button>
+                        </div>
+                    </div>
+                }
+            }}
+        </Modal>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_debug_prompt_uses_tail_of_up_to_30_lines() {
+        let lines = (1..=45).map(|i| format!("line-{i}")).collect::<Vec<_>>();
+        let prompt = build_ai_debug_prompt("sonarr.service", &lines);
+        assert!(prompt.contains("service 'sonarr.service'"));
+        assert!(!prompt.contains("line-15\n"));
+        assert!(prompt.contains("line-16"));
+        assert!(prompt.contains("line-45"));
     }
 }

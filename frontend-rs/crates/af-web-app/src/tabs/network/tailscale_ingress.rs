@@ -1,5 +1,23 @@
 use super::*;
 
+pub(super) fn normalize_ingress_target(target: String) -> Option<String> {
+    let trimmed = target.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+pub(super) fn filter_ingress_names(rows: &[Value], focused: Option<&str>) -> Vec<String> {
+    let names = rows
+        .iter()
+        .map(|v| text(v, "appName"))
+        .filter(|name| !name.is_empty());
+    match focused.and_then(|s| normalize_ingress_target(s.to_string())) {
+        Some(target) => names
+            .filter(|name| name.eq_ignore_ascii_case(&target))
+            .collect(),
+        None => names.collect(),
+    }
+}
+
 pub(super) fn ingress_rows(value: &Value) -> Vec<Value> {
     crate::tabs::contracts::grid_rows::<crate::tabs::contracts::IngressConfig>(&value["configs"])
 }
@@ -19,6 +37,17 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
     poll_resource(services, 15_000);
     let draft = RwSignal::new(FormDraft::new(json!({"baseDomain":""})));
     let busy = RwSignal::new(false);
+    let focused_app = RwSignal::new(
+        context
+            .take_pending_subtab(crate::state::TabId::Network)
+            .and_then(normalize_ingress_target),
+    );
+    Effect::new(move |_| {
+        context.pending_subtab.track();
+        if let Some(target) = context.take_pending_subtab(crate::state::TabId::Network) {
+            focused_app.set(normalize_ingress_target(target));
+        }
+    });
     Effect::new(move |_| {
         let value = settings.data.get();
         if value.is_object() {
@@ -188,7 +217,32 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
             <ResourceFeedback resource=settings />
             <ResourceFeedback resource=services />
             <ResourceFeedback resource=configs />
-            <Show when=move || ingress_rows(&configs.data.get()).iter().any(|value| !text(value, "appName").is_empty())>
+            <Show when=move || focused_app.get().is_some()>
+                <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-400/25 bg-indigo-500/10 px-4 py-3 text-sm">
+                    <span>
+                        {move || {
+                            focused_app
+                                .get()
+                                .map(|app| {
+                                    tt_with(context, "Focused application: {app}", &[("app", &app)])
+                                })
+                                .unwrap_or_default()
+                        }}
+                    </span>
+                    <button
+                        type="button"
+                        class="glass-button px-3 py-1.5 text-xs"
+                        on:click=move |_| focused_app.set(None)
+                    >
+                        {move || tt(context, "Show all applications")}
+                    </button>
+                </div>
+            </Show>
+            <Show when=move || {
+                let rows = ingress_rows(&configs.data.get());
+                let focused = focused_app.get();
+                !filter_ingress_names(&rows, focused.as_deref()).is_empty()
+            }>
             <div
                 role="table"
                 aria-label=move || tt(context, "Application external access")
@@ -196,11 +250,9 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
             >
                 <For
                     each=move || {
-                        ingress_rows(&configs.data.get())
-                            .iter()
-                            .map(|v| text(v, "appName"))
-                            .filter(|name| !name.is_empty())
-                            .collect::<Vec<_>>()
+                        let rows = ingress_rows(&configs.data.get());
+                        let focused = focused_app.get();
+                        filter_ingress_names(&rows, focused.as_deref())
                     }
                     key=|name| name.clone()
                     children=move |name| {
@@ -215,6 +267,29 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                     }
                 />
             </div>
+            </Show>
+            <Show when=move || {
+                let rows = ingress_rows(&configs.data.get());
+                focused_app.get().is_some_and(|target| {
+                    !configs.loading.get()
+                        && rows.iter().any(|v| !text(v, "appName").is_empty())
+                        && filter_ingress_names(&rows, Some(&target)).is_empty()
+                })
+            }>
+                <p role="status" class="text-sm text-slate-400 mt-4">
+                    {move || {
+                        focused_app
+                            .get()
+                            .map(|app| {
+                                tt_with(
+                                    context,
+                                    "No external access entry found for {app}",
+                                    &[("app", &app)],
+                                )
+                            })
+                            .unwrap_or_default()
+                    }}
+                </p>
             </Show>
             <Show when=move || {
                 !configs.loading.get()
@@ -310,5 +385,25 @@ pub(super) fn IngressRow(
                 <DraftButtons draft busy on_save=save label="Save external access" />
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_ingress_rows_by_targeted_application_case_insensitively() {
+        let rows = vec![
+            json!({ "appName": "sonarr" }),
+            json!({ "appName": "radarr" }),
+        ];
+        assert_eq!(filter_ingress_names(&rows, None), vec!["sonarr", "radarr"]);
+        assert_eq!(filter_ingress_names(&rows, Some("Sonarr")), vec!["sonarr"]);
+        assert_eq!(
+            filter_ingress_names(&rows, Some("   ")),
+            vec!["sonarr", "radarr"]
+        );
+        assert!(filter_ingress_names(&rows, Some("bazarr")).is_empty());
     }
 }

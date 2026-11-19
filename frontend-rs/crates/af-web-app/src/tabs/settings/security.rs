@@ -1,4 +1,5 @@
 use super::*;
+use serde::Deserialize;
 
 const MAX_AVATAR_URI_BYTES: usize = 2 * 1024 * 1024;
 
@@ -127,6 +128,159 @@ mod avatar_tests {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct PersonalQuotaContract {
+    #[serde(deserialize_with = "crate::tabs::contracts::number")]
+    quota_bytes: Option<f64>,
+    #[serde(deserialize_with = "crate::tabs::contracts::number")]
+    used_bytes: Option<f64>,
+    #[serde(deserialize_with = "crate::tabs::contracts::number")]
+    available_bytes: Option<f64>,
+    #[serde(deserialize_with = "crate::tabs::contracts::number")]
+    usage_pct: Option<f64>,
+    configured: Option<bool>,
+    #[serde(deserialize_with = "crate::tabs::contracts::string")]
+    status: String,
+    #[serde(deserialize_with = "crate::tabs::contracts::string")]
+    source: String,
+    #[serde(deserialize_with = "crate::tabs::contracts::string")]
+    updated_at: String,
+    #[serde(rename = "usedGB", deserialize_with = "crate::tabs::contracts::number")]
+    used_gb: Option<f64>,
+    #[serde(
+        rename = "totalGB",
+        deserialize_with = "crate::tabs::contracts::number"
+    )]
+    total_gb: Option<f64>,
+    #[serde(deserialize_with = "crate::tabs::contracts::number")]
+    percentage: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PersonalQuotaSummary {
+    pub used_bytes: f64,
+    pub quota_bytes: f64,
+    pub available_bytes: f64,
+    pub percentage: f64,
+    pub configured: bool,
+    pub status: String,
+    pub source: String,
+    pub updated_at: String,
+}
+
+pub(super) fn summarize_personal_quota(value: &Value) -> Option<PersonalQuotaSummary> {
+    if !value.is_object() {
+        return None;
+    }
+    let parsed: PersonalQuotaContract = serde_json::from_value(value.clone()).ok()?;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let used_bytes = parsed
+        .used_bytes
+        .or_else(|| parsed.used_gb.map(|gb| gb * GIB))
+        .unwrap_or(0.0)
+        .max(0.0);
+    let quota_bytes = parsed
+        .quota_bytes
+        .or_else(|| parsed.total_gb.map(|gb| gb * GIB))
+        .unwrap_or(0.0)
+        .max(0.0);
+    let configured = parsed.configured.unwrap_or(quota_bytes > 0.0) && quota_bytes > 0.0;
+    let available_bytes = parsed
+        .available_bytes
+        .unwrap_or_else(|| {
+            if configured {
+                (quota_bytes - used_bytes).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .max(0.0);
+    let percentage = parsed
+        .usage_pct
+        .or(parsed.percentage)
+        .unwrap_or_else(|| {
+            if configured {
+                (used_bytes / quota_bytes) * 100.0
+            } else {
+                0.0
+            }
+        })
+        .max(0.0);
+    let status = if parsed.status.trim().is_empty() {
+        "active".to_string()
+    } else {
+        parsed.status
+    };
+    let source = if parsed.source.trim().is_empty() {
+        "manual".to_string()
+    } else {
+        parsed.source
+    };
+    Some(PersonalQuotaSummary {
+        used_bytes,
+        quota_bytes,
+        available_bytes,
+        percentage,
+        configured,
+        status,
+        source,
+        updated_at: parsed.updated_at,
+    })
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+
+    #[test]
+    fn personal_quota_summary_handles_configured_unconfigured_and_gb_fallbacks() {
+        assert!(summarize_personal_quota(&Value::Null).is_none());
+
+        let configured = summarize_personal_quota(&json!({
+            "user_id": 7,
+            "username": "alice",
+            "quota_bytes": 10_737_418_240_i64,
+            "used_bytes": 2_147_483_648_i64,
+            "available_bytes": 8_589_934_592_i64,
+            "usage_pct": 20.0,
+            "configured": true,
+            "status": "active",
+            "source": "runner",
+            "updated_at": "2026-11-19T05:00:00Z"
+        }))
+        .unwrap();
+        assert!(configured.configured);
+        assert_eq!(configured.percentage, 20.0);
+        assert_eq!(configured.status, "active");
+        assert_eq!(configured.source, "runner");
+        assert_eq!(bytes(configured.used_bytes), "2.0 GiB");
+        assert_eq!(bytes(configured.quota_bytes), "10.0 GiB");
+
+        let unconfigured = summarize_personal_quota(&json!({
+            "user_id": 7,
+            "username": "alice",
+            "quota_bytes": 0,
+            "used_bytes": 536_870_912_i64,
+            "configured": false
+        }))
+        .unwrap();
+        assert!(!unconfigured.configured);
+        assert_eq!(unconfigured.percentage, 0.0);
+        assert_eq!(unconfigured.status, "active");
+        assert_eq!(unconfigured.source, "manual");
+
+        let legacy = summarize_personal_quota(&json!({
+            "usedGB": 1.5,
+            "totalGB": 3.0,
+            "percentage": 50.0
+        }))
+        .unwrap();
+        assert!(legacy.configured);
+        assert_eq!(legacy.percentage, 50.0);
+    }
+}
+
 #[component]
 pub(super) fn ProfileSecurity() -> impl IntoView {
     let context = app();
@@ -217,6 +371,8 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
     };
     let sessions = use_api("/api/v1/auth/sessions".to_string());
     poll_resource(sessions, 30_000);
+    let quota = use_api("/api/v1/auth/user/quota".to_string());
+    poll_resource(quota, 30_000);
     let enrollment = RwSignal::new(Value::Null);
     let enroll_open = RwSignal::new(false);
     let recovery = RwSignal::new(Vec::<Value>::new());
@@ -278,7 +434,7 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
                     "PUT",
                     json!({"current_password":sent["current_password"],"new_password":sent["new_password"]}),
                 ),
-                "setup" => ("/api/v1/auth/user/2fa/setup", "GET", Value::Null),
+                "setup" => ("/api/v1/auth/user/2fa/setup", "POST", Value::Null),
                 "verify" => (
                     "/api/v1/auth/user/2fa/verify",
                     "POST",
@@ -380,6 +536,51 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
             }
             if busy.try_get_untracked().is_some() {
                 busy_guard.release();
+            }
+        });
+    };
+    let other_sessions = Memo::new(move |_| {
+        sessions.data.with(|v| {
+            v["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["is_current"] == false)
+                .filter_map(|s| {
+                    s["jti"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    let revoke_others = move |_| {
+        if busy.get_untracked() {
+            return;
+        }
+        let ids = other_sessions.get_untracked();
+        let epoch = context.session_epoch.get_untracked();
+        busy.set(true);
+        let mut guard = crate::tabs::busy::BusyGuard::new(busy);
+        spawn_local(async move {
+            for id in ids {
+                if busy.try_get_untracked().is_none()
+                    || context.session_epoch.try_get_untracked() != Some(epoch)
+                {
+                    return;
+                }
+                if let Err(error) = ApiClient
+                    .delete(&format!("/api/v1/auth/sessions/{}", encode(&id)), None)
+                    .await
+                {
+                    context.toast(error.message, true);
+                    break;
+                }
+            }
+            if busy.try_get_untracked().is_some() {
+                sessions.refresh();
+                guard.release();
             }
         });
     };
@@ -521,8 +722,107 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
                 {move || tt(context, "Regenerate recovery codes")}
             </button>
         </ObsCard>
+        <section aria-label=move || tt(context, "Account Storage Quota")>
+        <ObsCard title=Signal::derive(move || tt(context, "Account Storage Quota"))>
+            <ResourceFeedback resource=quota />
+            {move || {
+                summarize_personal_quota(&quota.data.get()).map(|summary| {
+                    let used = bytes(summary.used_bytes);
+                    let limit = if summary.configured {
+                        bytes(summary.quota_bytes)
+                    } else {
+                        tt(context, "No quota limit configured")
+                    };
+                    let pct_text = format!("{:.1}", summary.percentage);
+                    let pct_text_for_bar = pct_text.clone();
+                    let avail_text = bytes(summary.available_bytes);
+                    let bar_width = format!("{:.1}", summary.percentage.clamp(0.0, 100.0));
+                    let bar_class = if summary.percentage >= 95.0 {
+                        "fill-rose-400"
+                    } else if summary.percentage >= 80.0 {
+                        "fill-amber-400"
+                    } else {
+                        "fill-emerald-400"
+                    };
+                    let updated = if summary.updated_at.trim().is_empty() {
+                        tt(context, "Not reported")
+                    } else {
+                        summary.updated_at.clone()
+                    };
+                    let configured = summary.configured;
+                    let valuenow = summary.percentage.min(100.0);
+                    let status_text = summary.status.clone();
+                    let source_text = summary.source.clone();
+                    view! {
+                        <div class="space-y-3 text-sm">
+                            <p class="text-slate-200">
+                                {tt_with(
+                                    context,
+                                    "{used} used · {limit}",
+                                    &[("used", &used), ("limit", &limit)],
+                                )}
+                            </p>
+                            {configured.then(|| {
+                                view! {
+                                    <div
+                                        role="progressbar"
+                                        aria-label=move || tt(context, "Storage quota used")
+                                        aria-valuemin="0"
+                                        aria-valuemax="100"
+                                        aria-valuenow=valuenow
+                                        aria-valuetext=tt_with(
+                                            context,
+                                            "{pct}% used",
+                                            &[("pct", &pct_text_for_bar)],
+                                        )
+                                        class="h-2 rounded-full bg-white/5 overflow-hidden"
+                                    >
+                                        <svg
+                                            viewBox="0 0 100 8"
+                                            preserveAspectRatio="none"
+                                            class="w-full h-full block"
+                                            aria-hidden="true"
+                                        >
+                                            <rect
+                                                x="0"
+                                                y="0"
+                                                height="8"
+                                                rx="4"
+                                                width=bar_width
+                                                class=bar_class
+                                            />
+                                        </svg>
+                                    </div>
+                                    <p class="text-xs text-slate-400">
+                                        {tt_with(
+                                            context,
+                                            "{pct}% used · {available} available",
+                                            &[("pct", &pct_text), ("available", &avail_text)],
+                                        )}
+                                    </p>
+                                }
+                            })}
+                            <p class="text-xs text-slate-400">
+                                {tt_with(
+                                    context,
+                                    "Status: {status} · Source: {source} · Updated: {updated}",
+                                    &[
+                                        ("status", &tt(context, &status_text)),
+                                        ("source", &tt(context, &source_text)),
+                                        ("updated", &updated),
+                                    ],
+                                )}
+                            </p>
+                        </div>
+                    }
+                })
+            }}
+        </ObsCard>
+        </section>
         <ObsCard title=Signal::derive(move || tt(context, "Settings.sessionFamilies"))>
             <ResourceFeedback resource=sessions />
+            <button type="button" class="glass-button px-3 py-2" disabled=move || busy.get() || other_sessions.with(Vec::is_empty)
+                on:click=revoke_others>{move || tt(context, "Revoke all other sessions")}</button>
             {move || {
                 sessions
                     .data
@@ -572,6 +872,15 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
             <code class="block break-all my-4">
                 {move || enrollment.with(|v| text(v, "secret"))}
             </code>
+            <button type="button" class="glass-button px-3 py-2" on:click=move |_| {
+                let secret = enrollment.with_untracked(|v| text(v, "secret"));
+                if let Some(window) = web_sys::window() {
+                    let write = window.navigator().clipboard().write_text(&secret);
+                    spawn_local(async move {
+                        if JsFuture::from(write).await.is_err() { context.toast(tt(context, "Clipboard unavailable"), true); }
+                    });
+                }
+            }>{move || tt(context, "Copy setup key")}</button>
             <form
                 class="space-y-4"
                 on:submit=move |e| {

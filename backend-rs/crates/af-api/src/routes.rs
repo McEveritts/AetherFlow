@@ -156,6 +156,15 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         "X-Content-Type-Options",
         HeaderValue::from_static("nosniff"),
     );
+    if matches!(
+        req_path.as_str(),
+        "/api/v1/auth/plugins" | "/api/auth/plugins"
+    ) {
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+    }
     if is_plugin_ui && !is_plugin_proxy {
         h.insert("X-Frame-Options", HeaderValue::from_static("SAMEORIGIN"));
     } else {
@@ -700,7 +709,7 @@ async fn health_ready() -> Response {
         .into_response()
 }
 
-async fn authenticated_ready() -> Response {
+pub(crate) async fn database_is_ready() -> bool {
     let ready = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::task::spawn_blocking(|| -> anyhow::Result<()> {
@@ -711,7 +720,11 @@ async fn authenticated_ready() -> Response {
         }),
     )
     .await;
-    let healthy = matches!(ready, Ok(Ok(Ok(()))));
+    matches!(ready, Ok(Ok(Ok(()))))
+}
+
+async fn authenticated_ready() -> Response {
+    let healthy = database_is_ready().await;
     (
         if healthy {
             StatusCode::OK
@@ -808,28 +821,36 @@ async fn get_hardware_info() -> Json<af_models::HardwareReport> {
 
 async fn get_services(Extension(auth_user): Extension<AuthUser>) -> Response {
     let diagnostics_allowed = crate::ws::package_diagnostics_allowed(&auth_user);
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(|| {
-            let jobs = af_services::package_job_snapshot()?;
-            af_services::get_active_services_with_jobs(&jobs)
-        }),
-    )
-    .await
-    {
-        Ok(Ok(Ok(services))) => {
+    match read_service_inventory().await {
+        Some(services) => {
             let mut services = serde_json::to_value(services).unwrap_or_default();
             if !diagnostics_allowed {
                 crate::ws::sanitize_services_for_viewer(&mut services);
             }
             Json(services).into_response()
         }
-        _ => api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "STATUS_UNAVAILABLE",
-            "Service status could not be confirmed; retry shortly",
-        ),
+        None => service_inventory_unavailable(),
     }
+}
+
+pub(crate) async fn read_service_inventory(
+) -> Option<HashMap<String, af_services::ServiceStatusItem>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(af_services::get_active_services),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .ok()
+}
+
+pub(crate) fn service_inventory_unavailable() -> Response {
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "STATUS_UNAVAILABLE",
+        "Service status could not be confirmed; retry shortly",
+    )
 }
 
 #[derive(Clone, Deserialize)]
@@ -1256,9 +1277,6 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
         }
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
             public_domain = af_services::format_app_public_domain(&p.name, &base_domain);
-            if p.status == "installed" || p.status == "running" {
-                external_access = true;
-            }
         }
 
         let mut app = MarketplaceApp {
@@ -1275,6 +1293,8 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
             external_access_enabled: external_access,
             tls_enabled,
             web_path: p.web_path,
+            bind_scope: af_services::service_bind_scope_for_id(&p.name).to_owned(),
+            web_scheme: af_services::service_web_scheme_for_id(&p.name, active_port).to_owned(),
             progress: 0,
             started_at: None,
             job_id: None,

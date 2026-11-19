@@ -47,6 +47,11 @@ pub(super) struct PlaybackSession {
     pub server_id: String,
     pub server_name: String,
     pub item_name: String,
+    #[serde(deserialize_with = "string")]
+    pub item_type: String,
+    pub has_artwork: bool,
+    #[serde(deserialize_with = "string")]
+    pub artwork_item_id: String,
     pub user_name: String,
     #[serde(deserialize_with = "string")]
     pub series_name: String,
@@ -110,7 +115,151 @@ pub(super) struct Dashboard {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
+pub(super) struct StreamTypeDistribution {
+    pub direct_play_count: i64,
+    pub direct_play_pct: f64,
+    pub direct_stream_count: i64,
+    pub direct_stream_pct: f64,
+    pub transcode_count: i64,
+    pub transcode_pct: f64,
+}
+
+impl StreamTypeDistribution {
+    pub(super) fn rows(&self, total_plays: i64) -> Vec<(&'static str, i64, f64, &'static str)> {
+        let known = self.direct_play_count + self.direct_stream_count + self.transcode_count;
+        let unknown_count = (total_plays - known).max(0);
+        let mut out = vec![
+            (
+                "Direct Play",
+                self.direct_play_count,
+                self.direct_play_pct.clamp(0.0, 100.0),
+                "bg-emerald-400",
+            ),
+            (
+                "Direct Stream",
+                self.direct_stream_count,
+                self.direct_stream_pct.clamp(0.0, 100.0),
+                "bg-cyan-400",
+            ),
+            (
+                "Transcode",
+                self.transcode_count,
+                self.transcode_pct.clamp(0.0, 100.0),
+                "bg-amber-400",
+            ),
+        ];
+        if unknown_count > 0 {
+            let unknown_pct = if total_plays > 0 {
+                ((unknown_count as f64 / total_plays as f64) * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            out.push(("Unknown", unknown_count, unknown_pct, "bg-slate-400"));
+        }
+        out
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct BreakdownEntry {
+    #[serde(deserialize_with = "string")]
+    pub label: String,
+    pub count: i64,
+    pub pct: f64,
+    pub watch_time_secs: i64,
+    pub data_used_bytes: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct AnalyticsTimeSeriesPoint {
+    #[serde(deserialize_with = "string")]
+    pub date: String,
+    pub plays: i64,
+    pub watch_time_secs: f64,
+    pub data_used_bytes: i64,
+    pub peak_bandwidth_mbps: f64,
+    pub direct_play_count: i64,
+    pub direct_stream_count: i64,
+    pub transcode_count: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct StreamingUserStat {
+    #[serde(deserialize_with = "string")]
+    pub user_id: String,
+    #[serde(deserialize_with = "string")]
+    pub user_name: String,
+    #[serde(deserialize_with = "string")]
+    pub provider: String,
+    pub total_plays: i64,
+    pub total_watch_secs: i64,
+    pub total_data_bytes: i64,
+    pub unique_items: i64,
+    pub direct_play_count: i64,
+    pub transcode_count: i64,
+    pub avg_completion_pct: f64,
+    #[serde(deserialize_with = "string")]
+    pub last_device: String,
+    #[serde(deserialize_with = "string")]
+    pub last_seen_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct StreamingTitleStat {
+    #[serde(deserialize_with = "string")]
+    pub item_id: String,
+    #[serde(deserialize_with = "string")]
+    pub item_name: String,
+    #[serde(deserialize_with = "string")]
+    pub item_type: String,
+    #[serde(deserialize_with = "string")]
+    pub series_name: String,
+    pub production_year: i32,
+    #[serde(deserialize_with = "string")]
+    pub provider: String,
+    #[serde(deserialize_with = "string")]
+    pub video_resolution: String,
+    #[serde(deserialize_with = "string")]
+    pub video_codec: String,
+    pub total_plays: i64,
+    pub unique_viewers: i64,
+    pub total_watch_secs: i64,
+    pub total_data_bytes: i64,
+    pub avg_completion_pct: f64,
+    #[serde(deserialize_with = "string")]
+    pub last_watched_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
 pub(super) struct DashboardAnalytics {
+    pub window_days: i32,
+    pub total_plays: i64,
+    pub total_watch_time_secs: i64,
+    pub total_data_used_bytes: i64,
+    pub unique_users: i64,
+    pub unique_titles: i64,
+    pub avg_completion_pct: f64,
+    pub peak_bandwidth_mbps: f64,
+    pub stream_types: StreamTypeDistribution,
+    #[serde(deserialize_with = "nullable")]
+    pub media_type_breakdown: Vec<BreakdownEntry>,
+    #[serde(deserialize_with = "nullable")]
+    pub resolution_breakdown: Vec<BreakdownEntry>,
+    #[serde(deserialize_with = "nullable")]
+    pub codec_breakdown: Vec<BreakdownEntry>,
+    #[serde(deserialize_with = "string")]
+    pub time_series_granularity: String,
+    #[serde(deserialize_with = "nullable")]
+    pub time_series: Vec<AnalyticsTimeSeriesPoint>,
+    #[serde(deserialize_with = "nullable")]
+    pub top_users: Vec<StreamingUserStat>,
+    #[serde(deserialize_with = "nullable")]
+    pub top_titles: Vec<StreamingTitleStat>,
     #[serde(deserialize_with = "nullable")]
     pub recent_history: Vec<HistoryItem>,
     #[serde(deserialize_with = "nullable")]
@@ -484,5 +633,55 @@ mod tests {
             json!({"manifest":{"format":"aetherflow.streaming-history"},"data":[]})
         )
         .is_err());
+    }
+
+    #[test]
+    fn dashboard_analytics_decodes_distributions_and_unknown_stream_type_bucket() {
+        let dashboard: Dashboard = serde_json::from_value(json!({
+            "analytics": {
+                "windowDays": 30,
+                "totalPlays": 10,
+                "totalWatchTimeSecs": 5400,
+                "totalDataUsedBytes": 2147483648_i64,
+                "uniqueUsers": 2,
+                "uniqueTitles": 3,
+                "peakBandwidthMbps": 42.5,
+                "streamTypes": {
+                    "directPlayCount": 6,
+                    "directPlayPct": 60.0,
+                    "directStreamCount": 2,
+                    "directStreamPct": 20.0,
+                    "transcodeCount": 1,
+                    "transcodePct": 10.0
+                },
+                "mediaTypeBreakdown": [
+                    { "label": "Movie", "count": 7, "pct": 70.0, "watchTimeSecs": 4200, "dataUsedBytes": 1610612736_i64 }
+                ],
+                "resolutionBreakdown": null,
+                "codecBreakdown": [],
+                "timeSeriesGranularity": "daily",
+                "timeSeries": [
+                    { "date": "2026-11-18", "plays": 4, "watchTimeSecs": 2000, "dataUsedBytes": 1073741824_i64, "peakBandwidthMbps": 25.0, "directPlayCount": 3, "directStreamCount": 1, "transcodeCount": 0 }
+                ],
+                "topUsers": [
+                    { "userId": "u1", "userName": "alice", "provider": "jellyfin", "totalPlays": 6, "totalWatchSecs": 3600, "totalDataBytes": 1073741824_i64 }
+                ],
+                "topTitles": [
+                    { "itemId": "m1", "itemName": "Blade Runner", "videoResolution": "2160p", "videoCodec": "hevc", "totalPlays": 5, "totalDataBytes": 1073741824_i64 }
+                ]
+            }
+        }))
+        .unwrap();
+        assert_eq!(dashboard.analytics.total_plays, 10);
+        assert_eq!(dashboard.analytics.media_type_breakdown.len(), 1);
+        assert!(dashboard.analytics.resolution_breakdown.is_empty());
+        let rows = dashboard
+            .analytics
+            .stream_types
+            .rows(dashboard.analytics.total_plays);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[3].0, "Unknown");
+        assert_eq!(rows[3].1, 1);
+        assert!((rows[3].2 - 10.0).abs() < 0.01);
     }
 }

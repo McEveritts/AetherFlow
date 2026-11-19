@@ -96,7 +96,11 @@ impl TransferQueue {
             open: RwSignal::new(false),
         };
         Effect::new(move |_| {
-            context.session_epoch.track();
+            let epoch = context.session_epoch.get();
+            if queue.inner.with_value(|inner| inner.epoch != epoch) {
+                queue.clear();
+                queue.inner.update_value(|inner| inner.epoch = epoch);
+            }
             queue.publish();
         });
         on_cleanup(move || {
@@ -174,7 +178,7 @@ impl TransferQueue {
             return;
         }
         let epoch = self.context.session_epoch.try_get_untracked();
-        let rows = self.inner.with_value(|inner| {
+        let rows: Vec<TransferRow> = self.inner.with_value(|inner| {
             inner
                 .jobs
                 .iter()
@@ -186,7 +190,19 @@ impl TransferQueue {
                 })
                 .collect()
         });
+        let summaries = rows
+            .iter()
+            .map(|row| crate::state::TransferSummary {
+                id: row.id,
+                path: leaf(&row.path).to_owned(),
+                sent: row.sent,
+                size: row.size,
+                status: row.status.label().to_owned(),
+                active: !row.status.terminal(),
+            })
+            .collect();
         self.rows.set(rows);
+        let _ = self.context.transfers.try_set(summaries);
     }
     pub(super) fn add(self, files: web_sys::FileList, directory: &str, conflict: &str) {
         let Some(epoch) = self.context.session_epoch.try_get_untracked() else {

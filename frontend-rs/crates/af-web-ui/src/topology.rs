@@ -24,7 +24,10 @@ pub fn QrCodeSvg(
 }
 
 #[component]
-pub fn AppTopologyMap(#[prop(into)] services: Signal<Vec<(String, Value)>>) -> impl IntoView {
+pub fn AppTopologyMap(
+    #[prop(into)] services: Signal<Vec<(String, Value)>>,
+    #[prop(into)] links: Signal<Vec<(String, String)>>,
+) -> impl IntoView {
     let mode = RwSignal::new("graph".to_string());
     let zoom = RwSignal::new(1.0f64);
     let pan = RwSignal::new((0.0f64, 0.0f64));
@@ -94,7 +97,7 @@ pub fn AppTopologyMap(#[prop(into)] services: Signal<Vec<(String, Value)>>) -> i
                     when=move || mode.get() == "graph"
                     fallback=move || view! {
                         <div class="grid sm:grid-cols-2 gap-4">
-                            {[ServiceGroup::Core, ServiceGroup::Active, ServiceGroup::Stopped, ServiceGroup::Exception]
+                            {[ServiceGroup::Core, ServiceGroup::Active, ServiceGroup::Stopped, ServiceGroup::Exception, ServiceGroup::Other]
                                 .into_iter().map(|group| view! {
                                     <crate::ObsCard title=group_key(group)>
                                         {move || nodes.get().into_iter().filter(|node| node.group == group).map(|node| {
@@ -141,18 +144,25 @@ pub fn AppTopologyMap(#[prop(into)] services: Signal<Vec<(String, Value)>>) -> i
                             let (x, y) = pan.get();
                             format!("translate({x},{y}) translate(400,200) scale({}) translate(-400,-200)", zoom.get())
                         }>
+                            {move || nodes.with(|nodes| {
+                                let positions: std::collections::HashMap<_, _> = nodes.iter().map(|node| (node.id.as_str(), (node.x,node.y))).collect();
+                                links.get().into_iter().filter_map(|(source,target)| {
+                                    let (x1,y1) = *positions.get(source.as_str())?;
+                                    let (x2,y2) = *positions.get(target.as_str())?;
+                                    Some(view! { <line data-source=source data-target=target x1=x1 y1=y1 x2=x2 y2=y2 stroke="var(--af-topo-edge)" /> })
+                                }).collect_view()
+                            })}
                             {move || nodes.get().into_iter().map(|node| {
                                 let inspect = node.clone();
                                 let keyboard = node.clone();
                                 let color = match node.group {
                                     ServiceGroup::Core => "var(--af-topo-core)",
                                     ServiceGroup::Active => "var(--af-topo-active)",
+                                    ServiceGroup::Other => "var(--obs-slate-400)",
                                     ServiceGroup::Stopped => "var(--af-topo-stopped)",
                                     ServiceGroup::Exception => "var(--af-topo-exception)",
                                 };
                                 view! {
-                                    <g>
-                                        <line x1="400" y1="200" x2=node.x y2=node.y stroke="var(--af-topo-edge)"/>
                                         <g
                                             role="button"
                                             tabindex="0"
@@ -174,7 +184,6 @@ pub fn AppTopologyMap(#[prop(into)] services: Signal<Vec<(String, Value)>>) -> i
                                             <circle r="6" fill=color/>
                                             <text y="40" text-anchor="middle" fill="var(--obs-slate-200)" font-size="12">{node.label.clone()}</text>
                                         </g>
-                                    </g>
                                 }
                             }).collect_view()}
                         </g>
@@ -202,6 +211,7 @@ fn group_key(group: ServiceGroup) -> &'static str {
     match group {
         ServiceGroup::Core => "Overview.corePlatformCount",
         ServiceGroup::Active => "Overview.runningCount",
+        ServiceGroup::Other => "Other services",
         ServiceGroup::Stopped => "Overview.stoppedCount",
         ServiceGroup::Exception => "Overview.exceptionsCount",
     }

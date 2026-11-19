@@ -170,57 +170,9 @@ pub(super) fn domain(value: &Value) -> &'static str {
         "Productivity & Desktop"
     }
 }
-pub(super) fn valid_domain(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-}
 pub(super) fn app_url(value: &Value, settings: &Value) -> Option<String> {
-    let path = field(value, &["web_path"]);
-    let path = if path.is_empty() {
-        String::new()
-    } else {
-        format!("/{}", path.trim_start_matches('/'))
-    };
-    let public = field(value, &["public_domain"]);
-    if value["external_access_enabled"] == true && valid_domain(&public) {
-        return Some(format!(
-            "{}://{public}{path}",
-            if value["tls_enabled"] == false {
-                "http"
-            } else {
-                "https"
-            }
-        ));
-    }
-    let base = field(settings, &["baseDomain", "base_domain"]);
-    let id = field(value, &["id"]);
-    if valid_domain(&base)
-        && !id.is_empty()
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Some(format!("https://{id}.{base}{path}"));
-    }
-    let host = web_sys::window()?.location().hostname().ok()?;
-    if value["bind_scope"] == "loopback"
-        && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
-    {
-        return None;
-    }
-    let port = ["active_port", "default_port"]
-        .iter()
-        .find_map(|key| value[*key].as_u64().filter(|n| *n > 0 && *n <= 65535))?;
-    Some(format!(
-        "{}://{host}:{port}{path}",
-        if value["web_scheme"] == "https" {
-            "https"
-        } else {
-            "http"
-        }
-    ))
+    let host = web_sys::window().and_then(|w| w.location().hostname().ok());
+    crate::tabs::services::launch_url_with_host(value, settings, host.as_deref())
 }
 
 #[component]
@@ -355,8 +307,74 @@ pub(super) fn PackageCard(
                                 })
                         }}
                     </span>
+                    <Show when=move || package.with(|p| p["update_available"] == true)>
+                        {move || {
+                            package.with(|p| {
+                                let latest = field(p, &["latest_version"]);
+                                let label = if latest.is_empty() {
+                                    tt(context, "Update available")
+                                } else {
+                                    tt_with(
+                                        context,
+                                        "Update {version}",
+                                        &[("version", &format!("v{}", latest.trim_start_matches(['v', 'V'])))],
+                                    )
+                                };
+                                match crate::tabs::services::safe_release_url(p) {
+                                    Some(url) => view! {
+                                        <a
+                                            href=url
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            title=move || tt(context, "View release notes")
+                                            class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:text-amber-200"
+                                        >
+                                            {label}
+                                        </a>
+                                    }
+                                    .into_any(),
+                                    None => view! {
+                                        <Badge
+                                            label=Signal::stored(label)
+                                            tone="warning"
+                                        />
+                                    }
+                                    .into_any(),
+                                }
+                            })
+                        }}
+                    </Show>
+                    <Show when=move || package.with(|p| !field(p, &["update_error"]).is_empty())>
+                        <span class="text-xs text-rose-300 break-words">
+                            {move || package.with(|p| {
+                                tt_with(
+                                    context,
+                                    "Update check failed: {error}",
+                                    &[("error", &field(p, &["update_error"]))],
+                                )
+                            })}
+                        </span>
+                    </Show>
                 </Show>
             </div>
+            <Show when=move || !busy.get() && job.with(|j| j.as_ref().is_none_or(|j| !j.active && j.error.is_none())) && package.with(|p| {
+                let st = field(&p["last_job"], &["status"]);
+                !st.is_empty() && st != "completed"
+            })>
+                <p role="status" class="text-xs text-rose-300 break-words">
+                    {move || package.with(|p| {
+                        let last = &p["last_job"];
+                        let act = field(last, &["action"]);
+                        let st = field(last, &["status"]);
+                        let msg = field(last, &["sanitized_summary", "message"]);
+                        if msg.is_empty() {
+                            tt_with(context, "Last {action}: {status}", &[("action", &tt(context, &act)), ("status", &tt(context, &st))])
+                        } else {
+                            tt_with(context, "Last {action}: {status} — {message}", &[("action", &tt(context, &act)), ("status", &tt(context, &st)), ("message", &msg)])
+                        }
+                    })}
+                </p>
+            </Show>
             <Show when=move || busy.get()>
                 <div class="space-y-2">
                     <progress
@@ -471,6 +489,26 @@ pub(super) fn PackageCard(
                                 }
                             })
                     }}
+                    <Show when=move || {
+                        context.is_admin()
+                            && package.with(crate::tabs::services::external_access_target).is_some()
+                    }>
+                        <button
+                            type="button"
+                            class="glass-button px-3 py-2 min-h-11 text-xs inline-flex items-center"
+                            title=move || {
+                                let name = package.with(|p| field(p, &["name", "id"]));
+                                tt_with(context, "Configure external access for {name}", &[("name", &name)])
+                            }
+                            on:click=move |_| {
+                                if let Some(target) = package.with_untracked(crate::tabs::services::external_access_target) {
+                                    context.navigate_to_subtab(crate::state::TabId::Network, target);
+                                }
+                            }
+                        >
+                            {move || tt(context, "External access")}
+                        </button>
+                    </Show>
                 </Show>
                 <Show when=move || job.with(Option::is_some)>
                     <button

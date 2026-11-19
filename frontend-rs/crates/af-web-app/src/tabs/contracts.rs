@@ -536,6 +536,8 @@ pub struct StreamingSummaryContract {
     pub transcode: Option<f64>,
     #[serde(alias = "totalBandwidthMbps", deserialize_with = "number")]
     pub total_bandwidth_mbps: Option<f64>,
+    #[serde(alias = "isDemoMode", deserialize_with = "boolean")]
+    pub is_demo_mode: bool,
     #[serde(alias = "updatedAt")]
     pub updated_at: String,
     #[serde(flatten)]

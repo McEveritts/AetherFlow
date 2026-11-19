@@ -242,15 +242,11 @@ fn prune_old_metrics() {
     let Ok(conn) = af_db::get_conn() else {
         return;
     };
-    let cutoff = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
-    match conn.execute(
-        "DELETE FROM metrics_history WHERE timestamp < ?1 OR timestamp < datetime('now', '-7 days')",
-        params![cutoff],
-    ) {
+    match conn.execute(af_db::PRUNE_METRICS_HISTORY_SQL, []) {
         Ok(rows) if rows > 0 => {
             tracing::info!(
                 count = rows,
-                retention = "7d",
+                retention = "90d",
                 "metrics recorder: pruned old entries"
             );
         }

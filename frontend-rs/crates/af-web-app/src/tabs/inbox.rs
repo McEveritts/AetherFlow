@@ -7,7 +7,26 @@ use af_web_core::{api::ApiClient, draft::FormDraft};
 use af_web_ui::SkeletonBox;
 use leptos::prelude::*;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use wasm_bindgen_futures::spawn_local;
+
+const ENVELOPE_KEYS: &[&str] = &[
+    "id",
+    "action",
+    "status",
+    "source",
+    "reason",
+    "risk_level",
+    "riskLevel",
+    "classification",
+    "created_at",
+    "resolved_at",
+    "resolved_by",
+    "executed_at",
+    "execution_log",
+    "parameters",
+    "payload",
+];
 
 fn text(value: &Value, key: &str) -> String {
     match &value[key] {
@@ -16,6 +35,7 @@ fn text(value: &Value, key: &str) -> String {
         v => v.to_string(),
     }
 }
+
 fn risk(value: &Value) -> &'static str {
     let action = super::contracts::decode::<super::contracts::ActionApprovalRequest>(value);
     let level = if action.risk_level.is_empty() {
@@ -30,6 +50,104 @@ fn risk(value: &Value) -> &'static str {
         _ => "MEDIUM",
     }
 }
+
+fn risk_tone(classification: &str) -> &'static str {
+    match classification {
+        "LOW" => "success",
+        "HIGH" | "CRITICAL" => "danger",
+        _ => "warning",
+    }
+}
+
+fn status_tone(status: &str) -> &'static str {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "executed" | "approved" => "success",
+        "rejected" | "failed" => "danger",
+        "pending" => "warning",
+        _ => "neutral",
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedServiceGate {
+    service: String,
+    operation: String,
+    manager: Option<String>,
+}
+
+fn parse_service_gate_command(raw_action: &str) -> Option<ParsedServiceGate> {
+    let trimmed = raw_action.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    for (prefix, operation) in [
+        ("restart_service:", "restart"),
+        ("start_service:", "start"),
+        ("stop_service:", "stop"),
+        ("service_restart:", "restart"),
+        ("service_start:", "start"),
+        ("service_stop:", "stop"),
+        ("restart:", "restart"),
+        ("start:", "start"),
+        ("stop:", "stop"),
+    ] {
+        if lower.starts_with(prefix) {
+            let rest = trimmed[prefix.len()..].trim();
+            if rest.is_empty() {
+                return None;
+            }
+            if let Some((svc, mgr)) = rest.split_once(':') {
+                let svc = svc.trim();
+                let mgr = mgr.trim();
+                if svc.is_empty() || svc.contains(':') || mgr.contains(':') {
+                    return None;
+                }
+                return Some(ParsedServiceGate {
+                    service: svc.to_string(),
+                    operation: operation.to_string(),
+                    manager: (!mgr.is_empty()).then(|| mgr.to_string()),
+                });
+            }
+            return Some(ParsedServiceGate {
+                service: rest.to_string(),
+                operation: operation.to_string(),
+                manager: None,
+            });
+        }
+    }
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.len() == 2 {
+        let verb = parts[0].to_ascii_lowercase();
+        if matches!(verb.as_str(), "restart" | "start" | "stop") {
+            return Some(ParsedServiceGate {
+                service: parts[1].to_string(),
+                operation: verb,
+                manager: None,
+            });
+        }
+    }
+    if parts.len() == 3 && parts[0].eq_ignore_ascii_case("systemctl") {
+        let verb = parts[1].to_ascii_lowercase();
+        if matches!(verb.as_str(), "restart" | "start" | "stop") {
+            return Some(ParsedServiceGate {
+                service: parts[2].to_string(),
+                operation: verb,
+                manager: Some("systemd".to_string()),
+            });
+        }
+    }
+    None
+}
+
+fn is_core_deferred_restart(operation: &str, target: &str) -> bool {
+    operation.eq_ignore_ascii_case("restart")
+        && matches!(
+            target.trim().trim_end_matches(".service"),
+            "aetherflow-api" | "aetherflow-runner"
+        )
+}
+
 fn target_summary(value: &Value) -> String {
     let action = super::contracts::decode::<super::contracts::ActionApprovalRequest>(value);
     let payload = super::contracts::decode::<super::contracts::ActionScope>(&action.payload);
@@ -52,6 +170,9 @@ fn target_summary(value: &Value) -> String {
             };
         }
     }
+    if let Some(parsed) = parse_service_gate_command(&action.action) {
+        return parsed.service;
+    }
     if let Some((_, target)) = action.action.split_once(':') {
         return target.trim().into();
     }
@@ -60,6 +181,162 @@ fn target_summary(value: &Value) -> String {
         return parts.last().unwrap_or(&"").to_string();
     }
     "Scope is defined by the complete action payload below; inspect it before approval.".into()
+}
+
+fn format_parameter_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Value::Array(items) if items.is_empty() => None,
+        Value::Array(items) => {
+            if items.iter().all(Value::is_string) {
+                let joined = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (!joined.is_empty()).then_some(joined)
+            } else {
+                serde_json::to_string(value).ok()
+            }
+        }
+        Value::Object(map) if map.is_empty() => None,
+        Value::Object(_) => serde_json::to_string(value).ok(),
+        other => Some(other.to_string()),
+    }
+}
+
+fn extract_action_parameters(value: &Value) -> Vec<(String, String)> {
+    let mut entries = BTreeMap::<String, String>::new();
+    if let Some(params) = value.get("parameters") {
+        match params {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    if let Some(formatted) = format_parameter_value(v) {
+                        entries.insert(k.clone(), formatted);
+                    }
+                }
+            }
+            other => {
+                if let Some(formatted) = format_parameter_value(other) {
+                    entries.insert("parameters".into(), formatted);
+                }
+            }
+        }
+    }
+    if let Some(payload) = value.get("payload") {
+        match payload {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    if let Some(formatted) = format_parameter_value(v) {
+                        let key = if entries.contains_key(k) {
+                            format!("payload.{k}")
+                        } else {
+                            k.clone()
+                        };
+                        entries.insert(key, formatted);
+                    }
+                }
+            }
+            other => {
+                if let Some(formatted) = format_parameter_value(other) {
+                    entries.insert("payload".into(), formatted);
+                }
+            }
+        }
+    }
+    if let Some(root) = value.as_object() {
+        for (k, v) in root {
+            if ENVELOPE_KEYS.contains(&k.as_str()) {
+                continue;
+            }
+            if !entries.contains_key(k) {
+                if let Some(formatted) = format_parameter_value(v) {
+                    entries.insert(k.clone(), formatted);
+                }
+            }
+        }
+    }
+    if entries.is_empty() {
+        if let Some(parsed) = parse_service_gate_command(&text(value, "action")) {
+            entries.insert("operation".into(), parsed.operation);
+            entries.insert("service".into(), parsed.service);
+            if let Some(mgr) = parsed.manager {
+                entries.insert("manager".into(), mgr);
+            }
+        }
+    }
+    entries.into_iter().collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActionBreakdown {
+    risk_level: &'static str,
+    raw_classification: String,
+    operation: String,
+    target: String,
+    manager: Option<String>,
+    executable_gate: bool,
+    core_impact: bool,
+    parameters: Vec<(String, String)>,
+}
+
+fn analyze_action(value: &Value) -> ActionBreakdown {
+    let risk_level = risk(value);
+    let raw_classification = text(value, "classification");
+    let raw_action = text(value, "action");
+    let gate = parse_service_gate_command(&raw_action);
+    let target = target_summary(value);
+    let (operation, manager, executable_gate) = match gate {
+        Some(parsed) => {
+            let mgr = parsed.manager.or_else(|| {
+                let explicit = text(value, "managed_by");
+                (!explicit.trim().is_empty()).then_some(explicit)
+            });
+            (parsed.operation, mgr, true)
+        }
+        None => {
+            let explicit_op = value
+                .pointer("/parameters/operation")
+                .or_else(|| value.pointer("/parameters/action"))
+                .or_else(|| value.pointer("/payload/operation"))
+                .or_else(|| value.pointer("/payload/action"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    raw_action
+                        .split_once(':')
+                        .map(|(verb, _)| verb.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_else(|| raw_action.clone());
+            let explicit_mgr = text(value, "managed_by");
+            (
+                explicit_op,
+                (!explicit_mgr.trim().is_empty()).then_some(explicit_mgr),
+                false,
+            )
+        }
+    };
+    let core_impact = executable_gate && is_core_deferred_restart(&operation, &target);
+    let parameters = extract_action_parameters(value);
+    ActionBreakdown {
+        risk_level,
+        raw_classification,
+        operation,
+        target,
+        manager,
+        executable_gate,
+        core_impact,
+        parameters,
+    }
 }
 
 #[component]
@@ -153,6 +430,19 @@ fn ApprovalInbox() -> impl IntoView {
             })
             .collect::<Vec<_>>()
     });
+    let risk_counts = Memo::new(move |_| {
+        let mut critical_high = 0usize;
+        let mut medium = 0usize;
+        let mut low = 0usize;
+        for row in rows.get() {
+            match risk(&row) {
+                "CRITICAL" | "HIGH" => critical_high += 1,
+                "LOW" => low += 1,
+                _ => medium += 1,
+            }
+        }
+        (critical_high, medium, low)
+    });
     let inspect = Callback::new(move |action: Value| {
         let Some(id) = action["id"].as_i64() else {
             return;
@@ -229,6 +519,44 @@ fn ApprovalInbox() -> impl IntoView {
             <p role="status" class="text-sm text-amber-300">
                 {move || tt_with(context, "Inbox.awaitingApprovalCount", &[("count", &context.pending.get().to_string())])}
             </p>
+            <div
+                role="region"
+                aria-label=move || tt(context, "Inbox.summaryRegion")
+                class="grid grid-cols-2 xl:grid-cols-4 gap-3 min-w-0"
+            >
+                <div class="glass-card p-4 min-w-0">
+                    <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
+                        {move || tt(context, "Inbox.summaryMatching")}
+                    </span>
+                    <div class="text-xl font-bold font-mono text-slate-100 mt-1">
+                        {move || total.get()}
+                    </div>
+                </div>
+                <div class="glass-card p-4 min-w-0">
+                    <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
+                        {move || tt(context, "Inbox.summaryCriticalHigh")}
+                    </span>
+                    <div class="text-xl font-bold font-mono text-rose-300 mt-1">
+                        {move || risk_counts.get().0}
+                    </div>
+                </div>
+                <div class="glass-card p-4 min-w-0">
+                    <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
+                        {move || tt(context, "Inbox.summaryMedium")}
+                    </span>
+                    <div class="text-xl font-bold font-mono text-amber-300 mt-1">
+                        {move || risk_counts.get().1}
+                    </div>
+                </div>
+                <div class="glass-card p-4 min-w-0">
+                    <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
+                        {move || tt(context, "Inbox.summaryLow")}
+                    </span>
+                    <div class="text-xl font-bold font-mono text-emerald-300 mt-1">
+                        {move || risk_counts.get().2}
+                    </div>
+                </div>
+            </div>
             <TabsBar
                 id_prefix="inbox"
                 tabs=vec![
@@ -282,29 +610,30 @@ fn ApprovalInbox() -> impl IntoView {
                             .into_iter()
                             .map(|action| {
                                 let classification = risk(&action);
+                                let status_str = text(&action, "status");
+                                let exec_log = text(&action, "execution_log");
                                 let review = action.clone();
                                 let source_action = action.clone();
                                 view! {
                                     <ObsCard>
                                         <div class="flex flex-wrap items-start justify-between gap-4">
-                                            <div class="min-w-0 space-y-2">
+                                            <div class="min-w-0 flex-1 space-y-2">
                                                 <h3 class="font-semibold break-words">
                                                     {text(&action, "action")}
                                                 </h3>
                                                 <div class="flex flex-wrap gap-2 items-center text-xs">
                                                     <Badge
                                                         label=classification
-                                                        tone=if matches!(classification, "HIGH" | "CRITICAL") {
-                                                            "danger"
-                                                        } else {
-                                                            "warning"
-                                                        }
+                                                        tone=risk_tone(classification)
                                                     />
-                                                    <Badge label=text(&action, "status") />
+                                                    <Badge
+                                                        label=status_str.clone()
+                                                        tone=status_tone(&status_str)
+                                                    />
                                                     <span>
                                                         {move || format!(
                                                             "{} · #{}",
-                                                        tt(context, &text(&source_action, "source")),
+                                                            tt(context, &text(&source_action, "source")),
                                                             text(&source_action, "id"),
                                                         )}
                                                     </span>
@@ -315,9 +644,19 @@ fn ApprovalInbox() -> impl IntoView {
                                                 <p class="text-xs text-slate-400">
                                                     {move || tt_with(context, "Created {created} · Target: {target}", &[("created", &(text(&action, "created_at")).to_string()), ("target", &tt(context, &target_summary(&action)))])}
                                                 </p>
+                                                {(!exec_log.trim().is_empty()).then(|| view! {
+                                                    <div class="bg-slate-950/80 rounded-lg p-2.5 border border-white/10">
+                                                        <p class="text-xs font-semibold text-slate-400 mb-1">
+                                                            {move || tt(context, "Inbox.executionLogHeading")}
+                                                        </p>
+                                                        <pre class="text-xs font-mono text-slate-300 whitespace-pre-wrap break-all">
+                                                            {exec_log}
+                                                        </pre>
+                                                    </div>
+                                                })}
                                             </div>
                                             <button
-                                                class="glass-button-primary px-4 py-2"
+                                                class="glass-button-primary px-4 py-2 shrink-0"
                                                 on:click=move |_| inspect.run(review.clone())
                                             >
                                                 {move || tt(context, "Inspect action")}
@@ -506,37 +845,184 @@ pub fn ActionDetailModal(
                 <h3 class="text-lg font-semibold break-words">
                     {move || text(&action.get(), "action")}
                 </h3>
-                <p class="text-sm text-amber-300">
-                    {move || {
-                        tt_with(context, "{risk} RISK · {source} · Target / blast radius: {target}", &[("risk", &(tt(context, risk(&action.get()))).to_string()), ("source", &(tt(context, &(text(&action.get(), "source")).to_string())).to_string()), ("target", &tt(context, &target_summary(&action.get())))])
-                    }}
-                </p>
-                <dl class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                    {[
-                        ("status", "Status"),
-                        ("source", "Source"),
-                        ("reason", "Reason"),
-                        ("created_at", "Created at"),
-                        ("resolved_at", "Resolved at"),
-                        ("resolved_by", "Resolved by"),
-                        ("executed_at", "Executed at"),
-                    ]
-                        .into_iter()
-                        .map(|(key, label)| {
-                            view! {
-                                <div>
-                                    <dt class="text-slate-400">{move || tt(context, label)}</dt>
-                                    <dd class="break-words">{move || tt(context, &text(&action.get(), key))}</dd>
+                {move || {
+                    let current = action.get();
+                    let breakdown = analyze_action(&current);
+                    let status_str = text(&current, "status");
+                    let action_id = text(&current, "id");
+                    let reason_str = text(&current, "reason");
+                    let exec_log = text(&current, "execution_log");
+                    let resolved_by = text(&current, "resolved_by");
+                    let resolved_at = text(&current, "resolved_at");
+                    let raw_class = breakdown.raw_classification.clone();
+                    let show_raw_class = !raw_class.trim().is_empty()
+                        && !raw_class.eq_ignore_ascii_case(breakdown.risk_level);
+                    let target_for_warn = breakdown.target.clone();
+                    let manager_display = breakdown
+                        .manager
+                        .clone()
+                        .unwrap_or_else(|| tt(context, "Inbox.defaultManager"));
+                    view! {
+                        <div class="space-y-4 min-w-0">
+                            <div class="flex flex-wrap items-center gap-2 text-xs">
+                                <Badge
+                                    label=breakdown.risk_level
+                                    tone=risk_tone(breakdown.risk_level)
+                                />
+                                {show_raw_class.then(|| view! {
+                                    <Badge
+                                        label=raw_class
+                                        tone=risk_tone(breakdown.risk_level)
+                                    />
+                                })}
+                                {(!status_str.is_empty()).then(|| view! {
+                                    <Badge
+                                        label=status_str.clone()
+                                        tone=status_tone(&status_str)
+                                    />
+                                })}
+                                <Badge
+                                    label=tt(
+                                        context,
+                                        if breakdown.executable_gate {
+                                            "Inbox.executableGate"
+                                        } else {
+                                            "Inbox.subsystemGate"
+                                        },
+                                    )
+                                    tone=if breakdown.executable_gate { "indigo" } else { "muted" }
+                                />
+                                {(!action_id.is_empty()).then(|| view! {
+                                    <span class="font-mono text-slate-400">{format!("#{action_id}")}</span>
+                                })}
+                            </div>
+
+                            {breakdown.core_impact.then(|| view! {
+                                <div role="alert" class="af-danger-banner text-xs">
+                                    {tt_with(
+                                        context,
+                                        "Inbox.coreImpactWarning",
+                                        &[("target", &target_for_warn)],
+                                    )}
                                 </div>
-                            }
-                        })
-                        .collect_view()}
-                </dl>
-                <details open>
-                    <summary class="cursor-pointer font-semibold">
+                            })}
+
+                            <p class="text-sm text-amber-300">
+                                {tt_with(
+                                    context,
+                                    "{risk} RISK · {source} · Target / blast radius: {target}",
+                                    &[
+                                        ("risk", &tt(context, breakdown.risk_level)),
+                                        ("source", &tt(context, &text(&current, "source"))),
+                                        ("target", &tt(context, &breakdown.target)),
+                                    ],
+                                )}
+                            </p>
+
+                            <div class="bg-white/5 rounded-xl p-3.5 border border-white/10 space-y-3">
+                                <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                                    {tt(context, "Inbox.commandBreakdownHeading")}
+                                </h4>
+                                <dl class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                                    <div>
+                                        <dt class="text-xs text-slate-400">{tt(context, "Inbox.operationLabel")}</dt>
+                                        <dd class="font-mono text-slate-100 break-words">{breakdown.operation}</dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-xs text-slate-400">{tt(context, "Inbox.targetLabel")}</dt>
+                                        <dd class="font-mono text-slate-100 break-words">{tt(context, &breakdown.target)}</dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-xs text-slate-400">{tt(context, "Inbox.managerLabel")}</dt>
+                                        <dd class="font-mono text-slate-200 break-words">{manager_display}</dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-xs text-slate-400">{tt(context, "Inbox.riskLabel")}</dt>
+                                        <dd class="text-slate-200 break-words">{tt(context, breakdown.risk_level)}</dd>
+                                    </div>
+                                </dl>
+                            </div>
+
+                            {(!breakdown.parameters.is_empty()).then(|| view! {
+                                <div class="bg-white/5 rounded-xl p-3.5 border border-white/10 space-y-2.5">
+                                    <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                                        {tt(context, "Inbox.parametersHeading")}
+                                    </h4>
+                                    <dl class="divide-y divide-white/10 text-sm">
+                                        {breakdown
+                                            .parameters
+                                            .into_iter()
+                                            .map(|(key, val)| {
+                                                view! {
+                                                    <div class="py-2 flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 sm:gap-4 min-w-0">
+                                                        <dt class="font-mono text-xs text-slate-400 shrink-0">{key}</dt>
+                                                        <dd class="font-mono text-xs text-slate-100 break-all">{val}</dd>
+                                                    </div>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </dl>
+                                </div>
+                            })}
+
+                            <dl class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                                <div>
+                                    <dt class="text-slate-400">{tt(context, "Status")}</dt>
+                                    <dd class="break-words">{tt(context, &status_str)}</dd>
+                                </div>
+                                <div>
+                                    <dt class="text-slate-400">{tt(context, "Source")}</dt>
+                                    <dd class="break-words">{tt(context, &text(&current, "source"))}</dd>
+                                </div>
+                                <div>
+                                    <dt class="text-slate-400">{tt(context, "Created at")}</dt>
+                                    <dd class="break-words">{text(&current, "created_at")}</dd>
+                                </div>
+                                <div>
+                                    <dt class="text-slate-400">{tt(context, "Resolved by")}</dt>
+                                    <dd class="break-words">
+                                        {if resolved_by.trim().is_empty() {
+                                            tt(context, "Inbox.unresolved")
+                                        } else {
+                                            resolved_by
+                                        }}
+                                    </dd>
+                                </div>
+                                {(!resolved_at.trim().is_empty()).then(|| view! {
+                                    <div>
+                                        <dt class="text-slate-400">{tt(context, "Resolved at")}</dt>
+                                        <dd class="break-words">{resolved_at}</dd>
+                                    </div>
+                                })}
+                            </dl>
+
+                            {(!reason_str.trim().is_empty()).then(|| view! {
+                                <div class="bg-white/5 rounded-xl p-3.5 border border-white/10">
+                                    <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                                        {tt(context, "Reason")}
+                                    </h4>
+                                    <p class="text-sm text-slate-200 break-words">{reason_str}</p>
+                                </div>
+                            })}
+
+                            {(!exec_log.trim().is_empty()).then(|| view! {
+                                <div class="bg-slate-950 rounded-xl p-3.5 border border-white/10 space-y-1.5">
+                                    <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                                        {tt(context, "Inbox.executionLogHeading")}
+                                    </h4>
+                                    <pre class="text-xs font-mono text-slate-200 whitespace-pre-wrap break-all max-h-48 overflow-auto">
+                                        {exec_log}
+                                    </pre>
+                                </div>
+                            })}
+                        </div>
+                    }
+                }}
+                <details>
+                    <summary class="cursor-pointer font-semibold text-sm text-slate-300">
                         {move || tt(context, "Full payload and command parameters")}
                     </summary>
-                    <pre class="bg-slate-950 rounded-xl p-3 text-xs whitespace-pre-wrap break-all max-h-80 overflow-auto">
+                    <pre class="bg-slate-950 rounded-xl p-3 mt-2 text-xs whitespace-pre-wrap break-all max-h-80 overflow-auto">
                         {move || serde_json::to_string_pretty(&action.get()).unwrap_or_default()}
                     </pre>
                 </details>
@@ -625,7 +1111,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approval_risk_supports_canonical_and_legacy_classifications() {
+    fn approval_risk_and_tones_support_canonical_and_legacy_classifications() {
         assert_eq!(
             risk(&json!({"risk_level":"CRITICAL","classification":"low"})),
             "CRITICAL"
@@ -634,10 +1120,21 @@ mod tests {
         assert_eq!(risk(&json!({"classification":"safe"})), "LOW");
         assert_eq!(risk(&json!({"risk_level":"unknown"})), "MEDIUM");
         assert_eq!(risk(&Value::Null), "MEDIUM");
+
+        assert_eq!(risk_tone("LOW"), "success");
+        assert_eq!(risk_tone("MEDIUM"), "warning");
+        assert_eq!(risk_tone("HIGH"), "danger");
+        assert_eq!(risk_tone("CRITICAL"), "danger");
+
+        assert_eq!(status_tone("executed"), "success");
+        assert_eq!(status_tone("approved"), "success");
+        assert_eq!(status_tone("pending"), "warning");
+        assert_eq!(status_tone("rejected"), "danger");
+        assert_eq!(status_tone("failed"), "danger");
     }
 
     #[test]
-    fn approval_scope_prefers_explicit_targets_and_preserves_multi_target_context() {
+    fn approval_scope_prefers_explicit_targets_and_parses_service_gate_managers() {
         assert_eq!(
             target_summary(&json!({"target":"sonarr","action":"restart:radarr"})),
             "sonarr"
@@ -655,10 +1152,70 @@ mod tests {
             "jellyfin.service"
         );
         assert_eq!(
+            target_summary(&json!({"action":"restart_service:jellyfin:systemd"})),
+            "jellyfin"
+        );
+        assert_eq!(
             target_summary(&json!({"action":"restart: radarr"})),
             "radarr"
         );
         assert!(target_summary(&json!({"action":"unstructured"}))
             .contains("inspect it before approval"));
+    }
+
+    #[test]
+    fn analyze_action_extracts_structured_parameters_gate_manager_and_core_impact() {
+        let core = analyze_action(&json!({
+            "id": 9,
+            "action": "restart_service:aetherflow-api:systemd",
+            "classification": "critical",
+            "source": "FlowAI",
+            "status": "pending",
+            "reason": "Recycle API worker"
+        }));
+        assert_eq!(core.risk_level, "CRITICAL");
+        assert_eq!(core.operation, "restart");
+        assert_eq!(core.target, "aetherflow-api");
+        assert_eq!(core.manager.as_deref(), Some("systemd"));
+        assert!(core.executable_gate);
+        assert!(core.core_impact);
+        assert_eq!(
+            core.parameters,
+            vec![
+                ("manager".into(), "systemd".into()),
+                ("operation".into(), "restart".into()),
+                ("service".into(), "aetherflow-api".into()),
+            ]
+        );
+
+        let rich = analyze_action(&json!({
+            "id": 12,
+            "action": "Apply bandwidth throttle",
+            "classification": "warn",
+            "source": "SecurityGateway",
+            "status": "pending",
+            "parameters": {
+                "interface": "eth0",
+                "rate_mbps": 250,
+                "targets": ["198.51.100.82", "198.51.100.99"]
+            },
+            "payload": {
+                "burst_kb": 64
+            },
+            "timeout_secs": 30
+        }));
+        assert_eq!(rich.risk_level, "MEDIUM");
+        assert!(!rich.executable_gate);
+        assert!(!rich.core_impact);
+        assert_eq!(
+            rich.parameters,
+            vec![
+                ("burst_kb".into(), "64".into()),
+                ("interface".into(), "eth0".into()),
+                ("rate_mbps".into(), "250".into()),
+                ("targets".into(), "198.51.100.82, 198.51.100.99".into()),
+                ("timeout_secs".into(), "30".into()),
+            ]
+        );
     }
 }

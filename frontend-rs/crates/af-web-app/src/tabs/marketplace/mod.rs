@@ -553,6 +553,14 @@ mod tests {
         assert!(lifecycle("queued"));
         assert_eq!(status_label("install_failed"), "Failed");
         assert_eq!(phase("update"), "updating");
-        assert!(!valid_domain("example.com/path"));
+        assert_eq!(
+            crate::tabs::services::launch_url_with_host(
+                &json!({"id":"sonarr", "default_port":8989}),
+                &json!({"baseDomain":"example.com/path"}),
+                Some("localhost")
+            )
+            .as_deref(),
+            Some("http://localhost:8989")
+        );
     }
 }

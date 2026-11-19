@@ -6828,6 +6828,13 @@ async fn post_runner_json<T: Serialize + ?Sized>(
     )
 }
 
+/// Ask the running daemon itself. A socket path can survive a daemon crash.
+pub async fn runner_is_ready() -> bool {
+    post_runner_json("/v1/health", &(), Duration::from_secs(2))
+        .await
+        .is_ok_and(|response| response.success && response.output == "ready")
+}
+
 pub async fn dispatch_heal_restart(service_name: &str) -> anyhow::Result<bool> {
     let req = SystemctlRequest {
         service: service_name.to_string(),

@@ -10,7 +10,7 @@ use af_web_core::api::ApiClient;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 #[component]
-fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
+pub(crate) fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
     let context = app();
     let resource = use_api(Signal::derive(move || {
         format!("/api/v1/auth/fs?path={}", encode(&current_path.get()))

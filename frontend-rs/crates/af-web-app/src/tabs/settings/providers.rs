@@ -61,12 +61,15 @@ pub(super) fn ProviderSettings(
                 {move || tt(context, "Settings.flowAIEngine")}
             </h2>
             <div class="grid sm:grid-cols-2 gap-5">
-                <DraftInput
-                    draft
-                    field="aiModel"
-                    label=move || tt(context, "Settings.defaultModel")
-                    placeholder="Installed model identifier"
-                />
+                <label class="block text-sm space-y-2">
+                    <span>{move || tt(context, "Settings.defaultModel")}</span>
+                    <input class="glass-input w-full px-3 py-2" list="settings-model-presets"
+                        prop:value=move || text(&draft_value(draft), "aiModel")
+                        on:input=move |e| edit(draft, "aiModel", json!(event_target_value(&e))) />
+                </label>
+                <datalist id="settings-model-presets">
+                    {crate::tabs::ai_chat::MODEL_PRESETS.into_iter().map(|id| view! { <option value=id /> }).collect_view()}
+                </datalist>
                 <DraftSelect
                     draft
                     field="localProvider"
@@ -99,6 +102,7 @@ pub(super) fn ProviderSettings(
                 ]
                     .into_iter()
                     .map(move |(field, label)| {
+                        let visible = RwSignal::new(false);
                         view! {
                             <label class="block text-sm space-y-2">
                                 <span>
@@ -111,7 +115,7 @@ pub(super) fn ProviderSettings(
                                     }}
                                 </span>
                                 <input
-                                    type="password"
+                                    type=move || if visible.get() { "text" } else { "password" }
                                     autocomplete="new-password"
                                     class="glass-input w-full px-3 py-2"
                                     placeholder=move || {
@@ -136,6 +140,9 @@ pub(super) fn ProviderSettings(
                                         json!(event_target_value(&event)),
                                     )
                                 />
+                                <button type="button" aria-pressed=move || visible.get().to_string()
+                                    class="glass-button px-2 py-1"
+                                    on:click=move |_| visible.update(|v| *v = !*v)>{move || tt(context, "Show entered key")}</button>
                                 <span class="block text-xs text-slate-400">
                                     {move || {
                                         draft

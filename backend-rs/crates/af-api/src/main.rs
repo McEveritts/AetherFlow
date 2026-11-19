@@ -6,6 +6,7 @@ pub mod intelligence;
 pub mod mcbrowser;
 #[cfg(test)]
 mod mcbrowser_integration_tests;
+mod metrics_rollup;
 pub mod middlewares;
 pub mod network;
 pub mod notifications_ext;

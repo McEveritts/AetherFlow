@@ -419,11 +419,11 @@ test.describe('Rust WASM appliance parity', () => {
     const bounds = await header.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.height).toBeLessThanOrEqual(104);
-    for (const name of ['Open navigation', 'Open Command Palette', 'Toggle theme', 'Notifications']) {
+    for (const name of ['Open navigation', 'Open Command Palette', 'Toggle theme', 'Notifications', 'Account menu']) {
       await expect(header.getByRole('button', { name, exact: true })).toBeVisible();
     }
     await expect(header.getByRole('combobox', { name: 'Locale', exact: true })).toBeVisible();
-    const actions = await header.locator('.af-header-actions > :not(.af-user-badge)').evaluateAll((elements) =>
+    const actions = await header.locator('.af-header-actions > *').evaluateAll((elements) =>
       elements.map((element) => {
         const rect = element.getBoundingClientRect();
         return { y: rect.y, right: rect.right, bottom: rect.bottom };

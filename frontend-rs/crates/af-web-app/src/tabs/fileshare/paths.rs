@@ -50,7 +50,7 @@ pub(super) fn absolute_path(raw: &str) -> Result<String, String> {
     }
     Ok(format!("/{}", parts.join("/")))
 }
-pub(super) fn parent_path(path: &str) -> String {
+pub(crate) fn parent_path(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     trimmed
         .rsplit_once('/')

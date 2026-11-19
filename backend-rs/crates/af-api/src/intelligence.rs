@@ -3633,7 +3633,48 @@ pub fn query_metrics_history_rows(
 }
 
 pub async fn get_metrics_history(Query(q): Query<HashMap<String, String>>) -> Response {
-    let Ok(conn) = af_db::get_conn() else {
+    if let Some(mode) = q.get("aggregate") {
+        let daily = match mode.as_str() {
+            "daily_transfer" => true,
+            "capacity" => false,
+            _ => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_AGGREGATE",
+                    "Unknown history aggregation",
+                )
+            }
+        };
+        let days = q
+            .get("days")
+            .and_then(|d| d.parse::<i64>().ok())
+            .unwrap_or(30)
+            .clamp(1, 90);
+        let now = Utc::now();
+        let start = (now.date_naive() - Duration::days(days - 1))
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let db = af_db::get_read_conn()?;
+            Ok(if daily {
+                crate::metrics_rollup::daily_transfer(&db, start, now.timestamp())?
+            } else {
+                crate::metrics_rollup::capacity(&db, start, now.timestamp())?
+            })
+        })
+        .await;
+        return match result {
+            Ok(Ok(value)) => Json(value).into_response(),
+            _ => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "HISTORY_UNAVAILABLE",
+                "Metrics history unavailable",
+            ),
+        };
+    }
+    let Ok(conn) = af_db::get_read_conn() else {
         return Json(serde_json::json!([])).into_response();
     };
     let snapshots = query_metrics_history_rows(&conn, &q);
@@ -4168,99 +4209,144 @@ fn tailscale_status_value(raw: &serde_json::Value) -> serde_json::Value {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn get_system_topology() -> Response {
-    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let runner_sock = af_runner::runner_socket_path();
-    let runner_online = StdPath::new(&runner_sock).exists();
+    let (inventory, runner_online, db_online) = tokio::join!(
+        crate::routes::read_service_inventory(),
+        af_runner::runner_is_ready(),
+        crate::routes::database_is_ready()
+    );
+    let Some(inventory) = inventory else {
+        return crate::routes::service_inventory_unavailable();
+    };
+    Json(topology_from_inventory(inventory, runner_online, db_online)).into_response()
+}
 
+fn topology_from_inventory(
+    inventory: HashMap<String, af_services::ServiceStatusItem>,
+    runner_online: bool,
+    db_online: bool,
+) -> serde_json::Value {
+    use serde_json::json;
+    let mut links = Vec::new();
+    let label_for = |id: &str| {
+        inventory
+            .iter()
+            .find(|(_, item)| item.id == id)
+            .map(|(label, _)| label.clone())
+    };
+    let api = label_for("aetherflow-api");
+    let gateway = label_for("apache2");
+    let runner = label_for("aetherflow-runner").unwrap_or_else(|| "Runner Daemon".into());
     let mut nodes = vec![
-        serde_json::json!({
-            "id": "AetherFlow API",
-            "group": 1,
-            "status": "running",
-            "details": format!("Port {} (Rust/Axum)", port),
-        }),
-        serde_json::json!({
-            "id": "Runner Daemon",
-            "group": 1,
-            "status": if runner_online { "running" } else { "stopped" },
-            "details": if runner_online { runner_sock } else { "Socket offline / direct mode".to_string() },
-        }),
-        serde_json::json!({
-            "id": "SQLite WAL",
-            "group": 2,
-            "status": "running",
-            "details": "SQLite (WAL mode)",
-        }),
-        serde_json::json!({
-            "id": "Redis Cache",
-            "group": 2,
-            "status": "stopped",
-            "details": "Disabled / Memory cache active",
-        }),
-        serde_json::json!({
-            "id": "Apache2 Reverse Proxy",
-            "group": 3,
-            "status": "running",
-            "details": "Apache2 + AetherFlow Subdomain Gateway (443 / 80)",
-        }),
+        json!({"id":runner,"service_id":"aetherflow-runner","group":1,"status":if runner_online {"running"} else {"unknown"},"details":"Privileged runner socket"}),
+        json!({"id":"SQLite WAL","group":2,"status":if db_online {"running"} else {"unknown"},"details":"SQLite (WAL mode)"}),
+        json!({"id":"Redis Cache","group":2,"status":"disabled","details":"Memory cache active"}),
     ];
-
-    let mut links = vec![
-        serde_json::json!({ "source": "AetherFlow API", "target": "Runner Daemon", "value": 1 }),
-        serde_json::json!({ "source": "AetherFlow API", "target": "SQLite WAL", "value": 1 }),
-        serde_json::json!({ "source": "Apache2 Reverse Proxy", "target": "AetherFlow API", "value": 1 }),
-    ];
-
-    if let Ok(pkgs) = af_services::get_packages() {
-        for pkg in pkgs {
-            if (pkg.status == "running" || pkg.status == "installed") && !pkg.name.is_empty() {
-                let label = if pkg.label.is_empty() {
-                    pkg.name.clone()
-                } else {
-                    pkg.label.clone()
-                };
-                let node_status = if pkg.status == "running" {
-                    "running"
-                } else {
-                    "stopped"
-                };
-                let mut details = if pkg.status == "running" {
-                    "Running".to_string()
-                } else {
-                    "Installed (inactive)".to_string()
-                };
-                if let Ok(Some(ingress)) = af_db::get_app_ingress_config(&pkg.name) {
-                    if ingress.listen_port > 0 {
-                        details = format!("Port {}", ingress.listen_port);
-                        if !ingress.public_domain.is_empty() {
-                            details = format!("{} | {}", details, ingress.public_domain);
-                        }
-                    }
-                } else if let Some(bp) = af_services::get_blueprint(&pkg.name) {
-                    if bp.default_port > 0 {
-                        details = format!("Port {} (blueprint)", bp.default_port);
-                    }
-                }
-                nodes.push(serde_json::json!({
-                    "id": label,
-                    "group": 4,
-                    "status": node_status,
-                    "details": details,
-                }));
-                links.push(serde_json::json!({
-                    "source": "Apache2 Reverse Proxy",
-                    "target": label,
-                    "value": 1,
-                }));
+    if let Some(api) = &api {
+        for target in [runner.as_str(), "SQLite WAL"] {
+            links.push(json!({"source": api, "target": target, "value": 1}));
+        }
+        if let Some(gateway) = &gateway {
+            links.push(json!({"source": gateway, "target": api, "value": 1}));
+        }
+    }
+    let mut inventory: Vec<_> = inventory.into_iter().collect();
+    inventory.sort_by(|a, b| a.0.cmp(&b.0));
+    for (label, item) in inventory {
+        if item.id == "aetherflow-runner" {
+            continue;
+        }
+        let group = match item.id.as_str() {
+            "aetherflow-api" | "aetherflow-frontend" => 1,
+            "apache2" => 3,
+            _ => 4,
+        };
+        // Keep graph metadata limited to operational information.
+        let mut details = item.status.clone();
+        if item.active_port > 0 {
+            details = format!("Port {}", item.active_port);
+            if !item.public_domain.is_empty() {
+                details.push_str(&format!(" | {}", item.public_domain));
+            }
+        } else if item.default_port > 0 {
+            details = format!("Port {} (blueprint)", item.default_port);
+        }
+        nodes.push(json!({"id":label,"service_id":item.id,"group":group,"status":item.status,"details":details}));
+        if group == 4
+            && (item.control_scope == "shared-vhost"
+                || (item.external_access_enabled && !item.public_domain.is_empty()))
+        {
+            if let Some(gateway) = &gateway {
+                links.push(json!({"source":gateway,"target":label,"value":1}));
+            }
+        } else if item.id == "aetherflow-frontend" {
+            if let Some(api) = &api {
+                links.push(json!({"source":api,"target":label,"value":1}));
             }
         }
     }
+    json!({"nodes":nodes,"links":links})
+}
 
-    Json(serde_json::json!({
-        "nodes": nodes,
-        "links": links,
-    }))
-    .into_response()
+#[cfg(test)]
+#[test]
+fn topology_uses_inventory_status_and_one_gateway() {
+    let mut items = HashMap::new();
+    for (name, id, status) in [
+        ("Apache2 Web Server", "apache2", "running"),
+        ("AetherFlow API", "aetherflow-api", "running"),
+        ("Privileged runner", "aetherflow-runner", "running"),
+        ("Jellyfin", "jellyfin", "running"),
+        ("Other", "other", "unknown"),
+    ] {
+        items.insert(
+            name.to_string(),
+            af_services::ServiceStatusItem {
+                id: id.into(),
+                status: status.into(),
+                external_access_enabled: id == "jellyfin",
+                public_domain: if id == "jellyfin" {
+                    "media.example.test".into()
+                } else {
+                    String::new()
+                },
+                ..Default::default()
+            },
+        );
+    }
+    let topology = topology_from_inventory(items, false, true);
+    let nodes = topology["nodes"].as_array().unwrap();
+    let runners: Vec<_> = nodes
+        .iter()
+        .filter(|n| n["service_id"] == "aetherflow-runner")
+        .collect();
+    assert_eq!(runners.len(), 1);
+    assert_eq!(runners[0]["id"], "Privileged runner");
+    assert_eq!(runners[0]["status"], "unknown");
+    assert!(topology["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["target"] == "Privileged runner"));
+    assert!(nodes
+        .iter()
+        .any(|n| n["id"] == "SQLite WAL" && n["status"] == "running"));
+    assert!(nodes
+        .iter()
+        .any(|n| n["id"] == "Jellyfin" && n["status"] == "running"));
+    assert!(nodes
+        .iter()
+        .any(|n| n["id"] == "Other" && n["status"] == "unknown"));
+    assert!(!topology["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["target"] == "Other"));
+    assert_eq!(nodes.iter().filter(|n| n["group"] == 3).count(), 1);
+    assert!(topology["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["source"] == "Apache2 Web Server" && l["target"] == "Jellyfin"));
 }
 
 pub(crate) fn infer_log_level(line: &str) -> &'static str {

@@ -7,6 +7,20 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
+pub(super) const MODEL_PRESETS: [&str; 11] = [
+    "gemini-4-argon",
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "llama3.2:latest",
+    "qwen2.5-coder-7b-instruct",
+];
+
 const PROVIDERS: [(&str, &str, &str); 6] = [
     ("gemini", "Google Gemini", "geminiApiKey"),
     ("anthropic", "Anthropic Claude", "anthropicApiKey"),
@@ -22,7 +36,7 @@ const PROVIDERS: [(&str, &str, &str); 6] = [
 fn text(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_string()
 }
-fn valid_model(model: &str) -> bool {
+pub(super) fn valid_model(model: &str) -> bool {
     !matches!(
         model.trim().to_ascii_lowercase().as_str(),
         "" | "gemini"
@@ -515,22 +529,15 @@ pub fn AiChatTab() -> impl IntoView {
                 />
             </label>
             <datalist id="flowai-models">
-                {[
-                    "gemini-4-argon",
-                    "gpt-6-astra",
-                    "gpt-6.1-sol",
-                    "gpt-6.1-terra",
-                    "gpt-6-luna",
-                    "claude-fable-5-1",
-                    "claude-opus-5-5",
-                    "claude-sonnet-5-5",
-                    "claude-haiku-5-5",
-                    "llama3.2:latest",
-                    "qwen2.5-coder-7b-instruct",
-                ]
-                    .into_iter()
-                    .map(|id| view! { <option value=id /> })
-                    .collect_view()}
+                {move || {
+                    let current = provider.get();
+                    MODEL_PRESETS.into_iter().filter(|id| match current.as_str() {
+                        "gemini" => id.starts_with("gemini-"),
+                        "openai" => id.starts_with("gpt-"),
+                        "anthropic" => id.starts_with("claude-"),
+                        _ => !id.starts_with("gemini-") && !id.starts_with("gpt-"),
+                    }).map(|id| view! { <option value=id /> }).collect_view()
+                }}
             </datalist>
             <div class="grid grid-cols-1 lg:grid-cols-4 gap-5 min-w-0">
                 <aside class="space-y-3 min-w-0">
@@ -615,14 +622,20 @@ pub fn AiChatTab() -> impl IntoView {
                             "Audit Recent Security Events",
                         ]
                             .into_iter()
-                            .map(|prompt| {
+                            .zip([
+                                "Analyze CPU, memory and disk use and identify resource bottlenecks.",
+                                "Review running services and identify failed or degraded units that need attention.",
+                                "Review storage capacity, quota use and media pipeline bottlenecks.",
+                                "Summarize recent security events and identify any that need investigation.",
+                            ])
+                            .map(|(label, prompt)| {
                                 view! {
                                     <button
                                         class="glass-button px-3 py-2 text-xs"
                                         disabled=move || busy.get()
-                                        on:click=move |_| input.set(tt(context, prompt))
+                                        on:click=move |_| { input.set(tt(context, prompt)); send.run(()); }
                                     >
-                                        {move || tt(context, prompt)}
+                                        {move || tt(context, label)}
                                     </button>
                                 }
                             })

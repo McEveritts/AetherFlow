@@ -1364,6 +1364,9 @@ pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
     }))
 }
 
+pub const PRUNE_METRICS_HISTORY_SQL: &str =
+    "DELETE FROM metrics_history WHERE julianday(timestamp) < julianday('now', '-90 days')";
+
 pub fn prune_expired_data() {
     let Ok(conn) = get_conn() else {
         return;
@@ -1386,7 +1389,7 @@ pub fn prune_expired_data() {
 
     let static_queries = [
         "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
-        "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
+        PRUNE_METRICS_HISTORY_SQL,
         "DELETE FROM login_history WHERE replace(CAST(created_at AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
         "DELETE FROM streaming_bandwidth_samples WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
     ];

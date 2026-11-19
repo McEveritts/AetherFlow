@@ -6,6 +6,7 @@ pub enum ServiceGroup {
     Core,
     Active,
     Stopped,
+    Other,
     Exception,
 }
 pub fn is_core_service(slug: &str) -> bool {
@@ -15,16 +16,24 @@ pub fn is_core_service(slug: &str) -> bool {
             .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
             .collect::<String>()
             .as_str(),
-        "aetherflowapi" | "aetherflowfrontend" | "aetherflow" | "apache2" | "nginx"
+        "aetherflowapi"
+            | "aetherflowfrontend"
+            | "aetherflow"
+            | "aetherflowrunner"
+            | "runnerdaemon"
+            | "apache2"
+            | "apache2webserver"
+            | "nginx"
     )
 }
 pub fn is_service_exception(info: &Value) -> bool {
-    matches!(info["status"].as_str(), Some("error" | "degraded"))
-        || matches!(
-            info["job_status"].as_str(),
-            Some("install_failed" | "failed")
-        )
-        || info["last_job"]["status"] == "failed"
+    matches!(
+        info["status"].as_str(),
+        Some("failed" | "error" | "degraded")
+    ) || matches!(
+        info["job_status"].as_str(),
+        Some("install_failed" | "failed")
+    ) || info["last_job"]["status"] == "failed"
         || (info["last_job"]["action"] == "install"
             && info["last_job"]["status"] != "completed"
             && info["last_job"]["error"]
@@ -40,13 +49,15 @@ pub fn service_group(slug: &str, info: &Value) -> ServiceGroup {
         ServiceGroup::Exception
     } else if is_core_service(slug) {
         ServiceGroup::Core
+    } else if matches!(info["status"].as_str(), Some("running" | "active")) {
+        ServiceGroup::Active
     } else if matches!(
         info["status"].as_str(),
-        Some("running" | "active" | "installed")
+        Some("stopped" | "inactive" | "disabled")
     ) {
-        ServiceGroup::Active
-    } else {
         ServiceGroup::Stopped
+    } else {
+        ServiceGroup::Other
     }
 }
 pub fn format_service_name(slug: &str) -> String {

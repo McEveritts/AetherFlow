@@ -25,6 +25,114 @@ impl EditorStatus {
     }
 }
 
+/// Maximum UTF-8 payload editable in plain-text mode (matches backend `MAX_EDITOR_CONTENT_BYTES`).
+pub const MAX_TEXT_EDITOR_BYTES: usize = 10 * 1024 * 1024;
+
+pub const BUNDLED_EDITOR_THEMES: [&str; 17] = [
+    "chrome",
+    "github",
+    "solarized_light",
+    "monokai",
+    "dracula",
+    "twilight",
+    "tomorrow_night",
+    "solarized_dark",
+    "textmate",
+    "clouds",
+    "dawn",
+    "eclipse",
+    "xcode",
+    "nord_dark",
+    "one_dark",
+    "terminal",
+    "github_dark",
+];
+
+pub const EDITOR_LANGUAGES: &[(&str, &str)] = &[
+    ("text", "Plain text"),
+    ("rust", "Rust"),
+    ("go", "Go"),
+    ("python", "Python"),
+    ("typescript", "TypeScript"),
+    ("tsx", "TSX"),
+    ("javascript", "JavaScript"),
+    ("jsx", "JSX"),
+    ("json", "JSON"),
+    ("json5", "JSON5"),
+    ("toml", "TOML"),
+    ("yaml", "YAML"),
+    ("shell", "Shell"),
+    ("batchfile", "Batch"),
+    ("powershell", "PowerShell"),
+    ("markdown", "Markdown"),
+    ("html", "HTML"),
+    ("xml", "XML"),
+    ("svg", "SVG"),
+    ("css", "CSS"),
+    ("scss", "SCSS"),
+    ("less", "Less"),
+    ("sql", "SQL"),
+    ("ini", "INI / Env"),
+    ("properties", "Properties"),
+    ("dockerfile", "Dockerfile"),
+    ("makefile", "Makefile"),
+    ("gitignore", "Gitignore"),
+    ("diff", "Diff / Patch"),
+    ("c_cpp", "C / C++"),
+    ("java", "Java"),
+    ("csharp", "C#"),
+    ("php", "PHP"),
+    ("ruby", "Ruby"),
+    ("lua", "Lua"),
+    ("perl", "Perl"),
+    ("swift", "Swift"),
+    ("kotlin", "Kotlin"),
+    ("scala", "Scala"),
+    ("graphql", "GraphQL"),
+    ("prisma", "Prisma"),
+    ("terraform", "Terraform"),
+    ("nginx", "Nginx"),
+    ("apache_conf", "Apache Conf"),
+    ("latex", "LaTeX"),
+];
+
+pub fn editor_theme_class(theme: &str) -> &'static str {
+    let normalized = theme.trim().to_ascii_lowercase();
+    let key = normalized.strip_prefix("ace/theme/").unwrap_or(&normalized);
+    match key {
+        "chrome" => "af-editor-theme-chrome",
+        "github" => "af-editor-theme-github",
+        "solarized_light" => "af-editor-theme-solarized-light",
+        "monokai" => "af-editor-theme-monokai",
+        "dracula" => "af-editor-theme-dracula",
+        "twilight" => "af-editor-theme-twilight",
+        "tomorrow_night" => "af-editor-theme-tomorrow-night",
+        "solarized_dark" => "af-editor-theme-solarized-dark",
+        "textmate" => "af-editor-theme-textmate",
+        "clouds" => "af-editor-theme-clouds",
+        "dawn" => "af-editor-theme-dawn",
+        "eclipse" => "af-editor-theme-eclipse",
+        "xcode" => "af-editor-theme-xcode",
+        "nord_dark" => "af-editor-theme-nord-dark",
+        "one_dark" => "af-editor-theme-one-dark",
+        "terminal" => "af-editor-theme-terminal",
+        "github_dark" => "af-editor-theme-github-dark",
+        _ => "",
+    }
+}
+
+pub fn editor_theme_tone(theme: &str) -> &'static str {
+    let normalized = theme.trim().to_ascii_lowercase();
+    let key = normalized.strip_prefix("ace/theme/").unwrap_or(&normalized);
+    match key {
+        "chrome" | "github" | "solarized_light" | "textmate" | "clouds" | "dawn" | "eclipse"
+        | "xcode" => "light",
+        "monokai" | "dracula" | "twilight" | "tomorrow_night" | "solarized_dark" | "nord_dark"
+        | "one_dark" | "terminal" | "github_dark" => "dark",
+        _ => "",
+    }
+}
+
 fn line_count(text: &str) -> usize {
     text.bytes().filter(|byte| *byte == b'\n').count() + 1
 }
@@ -35,8 +143,89 @@ fn gutter_text(text: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-fn within_editor_limit(text: &str) -> bool {
+pub fn within_highlight_limit(text: &str) -> bool {
     text.len() <= MAX_EDITOR_BYTES
+}
+pub fn within_editor_limit(text: &str) -> bool {
+    text.len() <= MAX_TEXT_EDITOR_BYTES
+}
+fn literal_find_ranges(code: &str, pattern: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+    if pattern.is_empty() {
+        return vec![];
+    }
+    if case_sensitive {
+        return code
+            .match_indices(pattern)
+            .map(|(start, m)| (start, start + m.len()))
+            .collect();
+    }
+    let needle: Vec<char> = pattern.chars().flat_map(char::to_lowercase).collect();
+    if needle.is_empty() {
+        return vec![];
+    }
+    let mut folded: Vec<(char, usize, usize)> = Vec::with_capacity(code.len());
+    for (idx, ch) in code.char_indices() {
+        let end = idx + ch.len_utf8();
+        for lower in ch.to_lowercase() {
+            folded.push((lower, idx, end));
+        }
+    }
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= folded.len() {
+        if folded[i..i + needle.len()]
+            .iter()
+            .zip(&needle)
+            .all(|((c, _, _), n)| c == n)
+        {
+            let start = folded[i].1;
+            let end = folded[i + needle.len() - 1].2;
+            ranges.push((start, end));
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+fn plain_find_replace(
+    code: &str,
+    pattern: &str,
+    replacement: Option<&str>,
+    case_sensitive: bool,
+) -> (Vec<(usize, usize)>, String, usize) {
+    let ranges = literal_find_ranges(code, pattern, case_sensitive);
+    let Some(repl) = replacement else {
+        return (ranges, String::new(), 0);
+    };
+    if ranges.is_empty() {
+        return (ranges, code.to_owned(), 0);
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut last = 0usize;
+    let mut count = 0usize;
+    for &(start, end) in &ranges {
+        if start < last
+            || end > code.len()
+            || !code.is_char_boundary(start)
+            || !code.is_char_boundary(end)
+        {
+            continue;
+        }
+        out.push_str(&code[last..start]);
+        out.push_str(repl);
+        last = end;
+        count += 1;
+    }
+    out.push_str(&code[last..]);
+    (ranges, out, count)
+}
+fn next_match_range(ranges: &[(usize, usize)], cursor_byte: usize) -> Option<(usize, usize)> {
+    ranges
+        .iter()
+        .copied()
+        .find(|&(start, _)| start >= cursor_byte)
+        .or_else(|| ranges.first().copied())
 }
 fn byte_offset(text: &str, utf16: u32) -> usize {
     let mut units = 0;
@@ -74,12 +263,13 @@ fn record_edit(
 pub fn McBrowserCodeEditor(
     value: RwSignal<String>,
     #[prop(into)] language: String,
+    #[prop(optional, into)] theme: Signal<String>,
     #[prop(optional, into)] readonly: Signal<bool>,
     #[prop(optional)] on_save: Option<Callback<String>>,
     #[prop(default = true)] show_save: bool,
 ) -> impl IntoView {
     let pool = StoredValue::new_local(WorkerPool::shared());
-    let lang = StoredValue::new(language);
+    let active_language = RwSignal::new(language);
     let highlighted = RwSignal::new(String::new());
     let generation = RwSignal::new(0u64);
     let textarea = NodeRef::<leptos::html::Textarea>::new();
@@ -94,7 +284,13 @@ pub fn McBrowserCodeEditor(
         .clamp(12, 24);
     #[cfg(not(target_arch = "wasm32"))]
     let initial_font = 14u8;
+    #[cfg(target_arch = "wasm32")]
+    let initial_wrap =
+        af_web_core::api::storage_get("aetherflow-editor-word-wrap").as_deref() == Some("true");
+    #[cfg(not(target_arch = "wasm32"))]
+    let initial_wrap = false;
     let font = RwSignal::new(initial_font);
+    let wrap_lines = RwSignal::new(initial_wrap);
     let preview = RwSignal::new(false);
     let find_open = RwSignal::new(false);
     let find = RwSignal::new(String::new());
@@ -103,6 +299,7 @@ pub fn McBrowserCodeEditor(
     let case_sensitive = RwSignal::new(false);
     let status = RwSignal::new(EditorStatus::Message(String::new()));
     let cursor = RwSignal::new((1usize, 1usize));
+    let plain_mode = Memo::new(move |_| value.with(|text| !within_highlight_limit(text)));
     let update_cursor = move || {
         if let Some(editor) = textarea.get() {
             let text = value.get_untracked();
@@ -121,10 +318,14 @@ pub fn McBrowserCodeEditor(
     };
     Effect::new(move |_| {
         let text = value.get();
+        let language = active_language.get();
         generation.update(|g| *g += 1);
+        if !within_highlight_limit(&text) {
+            highlighted.set(String::new());
+            return;
+        }
         let ticket = generation.get_untracked();
         let pool = pool.get_value();
-        let language = lang.get_value();
         spawn_local(async move {
             let result = pool
                 .execute(WorkerRequest::TokenizeCode {
@@ -150,6 +351,16 @@ pub fn McBrowserCodeEditor(
             "aetherflow-editor-font-size",
             &font.get_untracked().to_string(),
         );
+    });
+    Effect::new(move |_| {
+        let wrap = wrap_lines.get();
+        #[cfg(target_arch = "wasm32")]
+        af_web_core::api::storage_set(
+            "aetherflow-editor-word-wrap",
+            if wrap { "true" } else { "false" },
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = wrap;
     });
     let undo_action = move || {
         if readonly.get_untracked() {
@@ -211,7 +422,7 @@ pub fn McBrowserCodeEditor(
                                 record_edit(value, undo, redo, current);
                                 status.set(EditorStatus::Message("Clipboard updated".into()));
                             } else {
-                                status.set(EditorStatus::Message("Editor limit is 256 KiB".into()));
+                                status.set(EditorStatus::Message("Editor limit is 10 MiB".into()));
                             }
                         }
                     }
@@ -248,18 +459,56 @@ pub fn McBrowserCodeEditor(
         if replace && readonly.get_untracked() {
             return;
         }
-        let pool = pool.get_value();
         let original = value.get_untracked();
         let pattern = find.get_untracked();
         let replacement = replace.then(|| replacement.get_untracked());
+        let use_regex = regex.get_untracked();
+        let match_case = case_sensitive.get_untracked();
+        let cursor_byte = textarea
+            .get()
+            .and_then(|editor| editor.selection_end().ok().flatten())
+            .map(|utf16| byte_offset(&original, utf16))
+            .unwrap_or(0);
+        if !within_highlight_limit(&original) {
+            if use_regex {
+                status.set(EditorStatus::Message(
+                    "Regex search is limited to 256 KiB".into(),
+                ));
+                return;
+            }
+            let (ranges, text, replacements) =
+                plain_find_replace(&original, &pattern, replacement.as_deref(), match_case);
+            if replace {
+                if !within_editor_limit(&text) {
+                    status.set(EditorStatus::Message("Editor limit is 10 MiB".into()));
+                } else {
+                    status.set(EditorStatus::Replaced(replacements));
+                    record_edit(value, undo, redo, text);
+                }
+            } else if let (Some((start, end)), Some(editor)) =
+                (next_match_range(&ranges, cursor_byte), textarea.get())
+            {
+                status.set(EditorStatus::Message("Match selected".into()));
+                let _ = editor.focus();
+                let _ = editor.set_selection_range(
+                    original[..start].encode_utf16().count() as u32,
+                    original[..end].encode_utf16().count() as u32,
+                );
+                update_cursor();
+            } else {
+                status.set(EditorStatus::Message("No matches".into()));
+            }
+            return;
+        }
+        let pool = pool.get_value();
         spawn_local(async move {
             match pool
                 .execute(WorkerRequest::FindReplace {
                     code: original.clone(),
                     pattern,
                     replacement,
-                    regex: regex.get_untracked(),
-                    case_sensitive: case_sensitive.get_untracked(),
+                    regex: use_regex,
+                    case_sensitive: match_case,
                 })
                 .await
             {
@@ -275,13 +524,13 @@ pub fn McBrowserCodeEditor(
                         status.set(EditorStatus::Replaced(replacements));
                         record_edit(value, undo, redo, text);
                     } else if let (Some((start, end)), Some(editor)) =
-                        (ranges.first(), textarea.get())
+                        (next_match_range(&ranges, cursor_byte), textarea.get())
                     {
                         status.set(EditorStatus::Message("Match selected".into()));
                         let _ = editor.focus();
                         let _ = editor.set_selection_range(
-                            original[..*start].encode_utf16().count() as u32,
-                            original[..*end].encode_utf16().count() as u32,
+                            original[..start].encode_utf16().count() as u32,
+                            original[..end].encode_utf16().count() as u32,
                         );
                         update_cursor();
                     } else {
@@ -304,7 +553,20 @@ pub fn McBrowserCodeEditor(
     };
     view! {
         <div
-            class="af-editor min-w-0 max-w-full border border-white/10 rounded-xl overflow-clip"
+            class=move || {
+                let theme_cls = editor_theme_class(&theme.get());
+                if theme_cls.is_empty() {
+                    "af-editor min-w-0 max-w-full border border-white/10 rounded-xl overflow-clip"
+                        .to_string()
+                } else {
+                    format!(
+                        "af-editor {theme_cls} min-w-0 max-w-full border border-white/10 rounded-xl overflow-clip"
+                    )
+                }
+            }
+            data-editor-theme=move || theme.get()
+            data-editor-tone=move || editor_theme_tone(&theme.get())
+            data-editor-language=move || active_language.get()
             on:keydown=move |event| {
                 if event.ctrl_key() || event.meta_key() {
                     match event.key().to_lowercase().as_str() {
@@ -363,12 +625,37 @@ pub fn McBrowserCodeEditor(
                 <button class="glass-button px-3" on:click=move |_| clipboard("copy")>{move || ui_t("Copy")}</button>
                 <button class="glass-button px-3" disabled=move || readonly.get() on:click=move |_| clipboard("cut")>{move || ui_t("Cut")}</button>
                 <button class="glass-button px-3" disabled=move || readonly.get() on:click=move |_| clipboard("paste")>{move || ui_t("Paste")}</button>
+                <select
+                    class="glass-input px-2 py-1 text-xs"
+                    data-testid="editor-language-select"
+                    aria-label=move || ui_t("Syntax language")
+                    prop:value=move || active_language.get()
+                    on:change=move |event| active_language.set(event_target_value(&event))
+                >
+                    {EDITOR_LANGUAGES
+                        .iter()
+                        .map(|(code, label)| {
+                            let code_val = (*code).to_owned();
+                            let label_txt = (*label).to_owned();
+                            view! { <option value=code_val>{label_txt}</option> }
+                        })
+                        .collect_view()}
+                </select>
+                <button
+                    class="glass-button px-3"
+                    data-testid="editor-word-wrap"
+                    aria-pressed=move || wrap_lines.get().to_string()
+                    on:click=move |_| wrap_lines.update(|wrap| *wrap = !*wrap)
+                >
+                    {move || ui_t("Word wrap")}
+                </button>
                 <button
                     class="glass-button px-3" aria-pressed=move || preview.get().to_string()
                     on:click=move |_| preview.update(|preview| *preview = !*preview)
                 >
                     {move || ui_t("Markdown preview")}
                 </button>
+                <Show when=move || plain_mode.get()><crate::Badge label="Plain text · >256 KiB" tone="muted"/></Show>
                 <Show when=move || readonly.get()><crate::Badge label="ReadOnly · Locked" tone="warning"/></Show>
                 <Show when=move || show_save && on_save.is_some()>
                 <button
@@ -384,7 +671,7 @@ pub fn McBrowserCodeEditor(
                 </Show>
             </div>
             <Show when=move || find_open.get()>
-                <div class="flex flex-wrap gap-2 p-3 border-b border-white/10">
+                <div class="af-editor-find flex flex-wrap gap-2 p-3 border-b border-white/10">
                     <input
                         class="glass-input px-2" placeholder=move || ui_t("Find") aria-label=move || ui_t("Find")
                         prop:value=move || find.get()
@@ -407,20 +694,49 @@ pub fn McBrowserCodeEditor(
                     <button class="glass-button px-3" disabled=move || readonly.get() on:click=move |_| run_find(true)>{move || ui_t("Replace all")}</button>
                 </div>
             </Show>
-            <div class=move || format!("af-editor-body flex min-w-0 max-w-full af-editor-fs-{}", font.get())>
+            <div class=move || {
+                format!(
+                    "af-editor-body flex min-w-0 max-w-full af-editor-fs-{}{}",
+                    font.get(),
+                    if wrap_lines.get() { " af-editor-wrap" } else { "" }
+                )
+            }>
                 <pre node_ref=gutter aria-hidden="true" class="af-editor-gutter">{move || value.with(|text| gutter_text(text))}</pre>
                 <div class="af-editor-layers min-w-0 flex-1 relative">
-                    <pre node_ref=overlay aria-hidden="true" class="af-editor-highlight" inner_html=move || format!("{}\n", highlighted.get())></pre>
+                    <pre
+                        node_ref=overlay
+                        aria-hidden="true"
+                        class="af-editor-highlight"
+                        inner_html=move || {
+                            if plain_mode.get() {
+                                String::new()
+                            } else {
+                                format!("{}\n", highlighted.get())
+                            }
+                        }
+                    ></pre>
                     <textarea
-                        node_ref=textarea aria-label=move || ui_t("Editor text") class="af-editor-input"
-                        spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"
-                        readonly=move || readonly.get() prop:value=move || value.get()
+                        node_ref=textarea
+                        aria-label=move || ui_t("Editor text")
+                        class=move || {
+                            if plain_mode.get() {
+                                "af-editor-input af-editor-plain"
+                            } else {
+                                "af-editor-input"
+                            }
+                        }
+                        spellcheck="false"
+                        autocomplete="off"
+                        autocapitalize="off"
+                        wrap=move || if wrap_lines.get() { "soft" } else { "off" }
+                        readonly=move || readonly.get()
+                        prop:value=move || value.get()
                         on:input=move |event| {
                             let next = event_target_value(&event);
                             if within_editor_limit(&next) {
                                 record_edit(value, undo, redo, next);
                             } else {
-                                status.set(EditorStatus::Message("Editor limit is 256 KiB".into()));
+                                status.set(EditorStatus::Message("Editor limit is 10 MiB".into()));
                                 if let Some(editor) = textarea.get() {
                                     editor.set_value(&value.get_untracked());
                                 }
@@ -497,12 +813,80 @@ mod tests {
 
     #[test]
     fn editor_limit_counts_bytes_and_accepts_the_exact_limit() {
-        assert!(within_editor_limit(&"x".repeat(MAX_EDITOR_BYTES)));
-        assert!(!within_editor_limit(&"x".repeat(MAX_EDITOR_BYTES + 1)));
+        assert!(within_highlight_limit(&"x".repeat(MAX_EDITOR_BYTES)));
+        assert!(!within_highlight_limit(&"x".repeat(MAX_EDITOR_BYTES + 1)));
         let mut utf8 = "é".repeat(MAX_EDITOR_BYTES / 2);
-        assert!(within_editor_limit(&utf8));
+        assert!(within_highlight_limit(&utf8));
         utf8.push('é');
         assert!(utf8.chars().count() < MAX_EDITOR_BYTES);
-        assert!(!within_editor_limit(&utf8));
+        assert!(!within_highlight_limit(&utf8));
+        assert!(within_editor_limit(&utf8));
+        assert!(within_editor_limit(&"x".repeat(MAX_TEXT_EDITOR_BYTES)));
+        assert!(!within_editor_limit(&"x".repeat(MAX_TEXT_EDITOR_BYTES + 1)));
+    }
+
+    #[test]
+    fn plain_find_replace_handles_case_insensitive_unicode_and_replacements() {
+        let source = "Alpha café ALPHA";
+        let (ranges, _, _) = plain_find_replace(source, "alpha", None, false);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&source[ranges[0].0..ranges[0].1], "Alpha");
+        assert_eq!(&source[ranges[1].0..ranges[1].1], "ALPHA");
+
+        let (_, replaced, count) = plain_find_replace(source, "alpha", Some("Beta"), false);
+        assert_eq!(count, 2);
+        assert_eq!(replaced, "Beta café Beta");
+
+        let (sensitive, _, _) = plain_find_replace(source, "alpha", None, true);
+        assert!(sensitive.is_empty());
+    }
+
+    #[test]
+    fn editor_theme_class_maps_all_17_bundled_themes_to_finite_classes() {
+        let mut light_count = 0usize;
+        let mut dark_count = 0usize;
+        for theme in BUNDLED_EDITOR_THEMES {
+            let class = editor_theme_class(theme);
+            assert!(
+                class.starts_with("af-editor-theme-"),
+                "expected finite theme class for {theme}, got {class:?}"
+            );
+            assert_eq!(editor_theme_class(&format!("ace/theme/{theme}")), class);
+            let tone = editor_theme_tone(theme);
+            assert!(
+                matches!(tone, "light" | "dark"),
+                "expected light or dark tone for {theme}, got {tone:?}"
+            );
+            assert_eq!(editor_theme_tone(&format!("ace/theme/{theme}")), tone);
+            if tone == "light" {
+                light_count += 1;
+            } else {
+                dark_count += 1;
+            }
+        }
+        assert_eq!(light_count, 8);
+        assert_eq!(dark_count, 9);
+        assert_eq!(editor_theme_class("nord_dark"), "af-editor-theme-nord-dark");
+        assert_eq!(
+            editor_theme_class("github_dark"),
+            "af-editor-theme-github-dark"
+        );
+        assert_eq!(editor_theme_class("textmate"), "af-editor-theme-textmate");
+        assert_eq!(editor_theme_tone("chrome"), "light");
+        assert_eq!(editor_theme_tone("dracula"), "dark");
+        assert_eq!(editor_theme_tone("  ACE/THEME/SOLARIZED_LIGHT "), "light");
+        assert_eq!(editor_theme_class("custom_unknown"), "");
+        assert_eq!(editor_theme_tone("custom_unknown"), "");
+        assert_eq!(editor_theme_tone(""), "");
+    }
+
+    #[test]
+    fn next_match_range_advances_past_cursor_and_wraps_at_eof() {
+        let ranges = vec![(0, 5), (12, 17), (30, 35)];
+        assert_eq!(next_match_range(&ranges, 0), Some((0, 5)));
+        assert_eq!(next_match_range(&ranges, 5), Some((12, 17)));
+        assert_eq!(next_match_range(&ranges, 17), Some((30, 35)));
+        assert_eq!(next_match_range(&ranges, 35), Some((0, 5)));
+        assert_eq!(next_match_range(&[], 0), None);
     }
 }

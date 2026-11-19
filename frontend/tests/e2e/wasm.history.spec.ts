@@ -218,8 +218,8 @@ test('downloads the requested CSV if its valid response arrives after a filter c
 test('offers only history filters accepted by the packaged API', async ({ page }) => {
   const fixture = await historyFixture(page);
   await openHistory(page);
-  const provider = page.getByLabel('Server provider');
-  const media = page.getByLabel('Media type');
+  const provider = page.getByRole('combobox', { name: 'Server provider' });
+  const media = page.getByRole('combobox', { name: 'Media type' });
   expect(await provider.locator('option').evaluateAll(options => options.map(option => (option as HTMLOptionElement).value))).toEqual(['', 'jellyfin', 'emby']);
   expect(await media.locator('option').evaluateAll(options => options.map(option => (option as HTMLOptionElement).value))).toEqual(['', 'Movie', 'Episode', 'Audio', 'Video', 'Unknown']);
   for (const value of ['jellyfin', 'emby', '']) {

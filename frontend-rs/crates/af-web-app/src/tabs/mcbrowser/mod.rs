@@ -3,7 +3,7 @@
 use super::fileshare::{
     encode, relative_path, share_url, text, ShareCreateModal, ShareLinkDetails,
 };
-use crate::state::{app, json_rows, use_api, worker_pool, ApiResource, AppContext};
+use crate::state::{app, json_rows, use_api, worker_pool, ApiResource, AppContext, TabId};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{
     Badge, ConfirmDialog, DataGrid, Drawer, EmptyState, Modal, ObsCard, SearchInput, TabPanel,
@@ -12,9 +12,9 @@ use crate::tabs::l10n::{
 use af_web_core::{
     api::{ApiClient, ApiError},
     draft::FormDraft,
-    worker::{WorkerRequest, WorkerResponse, MAX_EDITOR_BYTES},
+    worker::{WorkerRequest, WorkerResponse},
 };
-use af_web_ui::{use_worker_rows, GridColumn, SkeletonBox};
+use af_web_ui::{use_worker_rows, GridColumn, SkeletonBox, MAX_TEXT_EDITOR_BYTES};
 use gloo_events::EventListener;
 use leptos::prelude::*;
 use serde_json::{json, Value};
@@ -37,6 +37,18 @@ use toolbar::*;
 mod policy_audit;
 use policy_audit::*;
 
+fn resolve_mcbrowser_subtab(requested: &str, is_admin: bool) -> &'static str {
+    if is_admin {
+        match requested {
+            "policy" => "policy",
+            "events" => "events",
+            _ => "workspace",
+        }
+    } else {
+        "workspace"
+    }
+}
+
 #[component]
 pub fn McBrowserTab() -> impl IntoView {
     let context = app();
@@ -46,7 +58,12 @@ pub fn McBrowserTab() -> impl IntoView {
     }));
     let usage = use_api(format!("{BASE}/usage"));
     let policy = use_api(format!("{BASE}/policy"));
-    let subtab = RwSignal::new("workspace".to_owned());
+    let preferences = use_api(format!("{BASE}/preferences"));
+    let initial_subtab = context
+        .take_pending_subtab(TabId::McBrowser)
+        .map(|target| resolve_mcbrowser_subtab(&target, context.is_admin()).to_owned())
+        .unwrap_or_else(|| "workspace".to_owned());
+    let subtab = RwSignal::new(initial_subtab);
     let refresh = Callback::new(move |()| {
         entries.refresh();
         usage.refresh();
@@ -66,6 +83,11 @@ pub fn McBrowserTab() -> impl IntoView {
     let sort = RwSignal::new("name".to_owned());
     let descending = RwSignal::new(false);
     let grid = RwSignal::new(false);
+    let editor_theme = RwSignal::new("chrome".to_owned());
+    let pref_sync = StoredValue::new_local(PreferenceSyncState::default());
+    let pref_disposed = StoredValue::new_local(false);
+    let pref_epoch = RwSignal::new(0u64);
+    let pref_error = RwSignal::new(Option::<String>::None);
     let conflict = RwSignal::new("error".to_owned());
     let media_open = RwSignal::new(false);
     let media_path = RwSignal::new(String::new());
@@ -86,6 +108,101 @@ pub fn McBrowserTab() -> impl IntoView {
         .copied()
         .unwrap_or(false)
     };
+    Effect::new(move |_| {
+        context.pending_subtab.track();
+        let is_admin = context.is_admin();
+        if let Some(target) = context.take_pending_subtab(TabId::McBrowser) {
+            subtab.set(resolve_mcbrowser_subtab(&target, is_admin).to_owned());
+        }
+    });
+    let flush_preferences = move || {
+        let auth = context.session_epoch.get_untracked();
+        let run_epoch = pref_epoch.get_untracked();
+        spawn_local(async move {
+            loop {
+                if pref_disposed.try_get_value() != Some(false)
+                    || context.session_epoch.try_get_untracked() != Some(auth)
+                    || pref_epoch.try_get_untracked() != Some(run_epoch)
+                {
+                    return;
+                }
+                let next_payload = pref_sync
+                    .try_update_value(|sync| sync.take_next_payload())
+                    .flatten();
+                let Some(payload) = next_payload else {
+                    return;
+                };
+                let result = ApiClient
+                    .put(&format!("{BASE}/preferences"), Some(&payload))
+                    .await;
+                if pref_disposed.try_get_value() != Some(false)
+                    || context.session_epoch.try_get_untracked() != Some(auth)
+                    || pref_epoch.try_get_untracked() != Some(run_epoch)
+                {
+                    return;
+                }
+                match result {
+                    Ok(saved) => {
+                        let _ = pref_sync.try_update_value(|sync| sync.on_success(payload, saved));
+                        pref_error.set(None);
+                    }
+                    Err(failure) => {
+                        let message = failure.to_string();
+                        let _ = pref_sync.try_update_value(|sync| sync.on_error(message.clone()));
+                        pref_error.set(Some(message));
+                        return;
+                    }
+                }
+            }
+        });
+    };
+    let retry_preferences = move || {
+        let should_flush = pref_sync
+            .try_update_value(|sync| sync.retry())
+            .unwrap_or(false);
+        if should_flush {
+            pref_error.set(None);
+            flush_preferences();
+        }
+    };
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        pref_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+        let _ = pref_sync.try_update_value(PreferenceSyncState::reset);
+        pref_error.set(None);
+        editor_theme.set("chrome".to_owned());
+        preferences.data.set(Value::Null);
+    });
+    Effect::new(move |_| {
+        let data = preferences.data.get();
+        if data.is_object() {
+            let hydrated = pref_sync
+                .try_update_value(|sync| sync.hydrate(data))
+                .flatten();
+            if let Some(saved) = hydrated {
+                pref_error.set(None);
+                grid.set(saved.grid);
+                sort.set(saved.sort);
+                descending.set(saved.descending);
+                editor_theme.set(saved.editor_theme);
+            }
+        }
+    });
+    Effect::new(move |_| {
+        let current_grid = grid.get();
+        let current_sort = sort.get();
+        let current_desc = descending.get();
+        let current_theme = editor_theme.get();
+        let should_flush = pref_sync
+            .try_update_value(|sync| {
+                sync.queue_change(current_grid, current_sort, current_desc, current_theme)
+            })
+            .unwrap_or(false);
+        if should_flush {
+            pref_error.set(None);
+            flush_preferences();
+        }
+    });
     Effect::new(move |_| {
         path.track();
         search_generation.update(|generation| *generation += 1);
@@ -180,6 +297,28 @@ pub fn McBrowserTab() -> impl IntoView {
             }
         });
     };
+    let open_in_editor = Callback::new(move |target: String| {
+        if !can("read") {
+            return;
+        }
+        if editor.saving.get_untracked() || editor.loading.get_untracked() {
+            context.toast(
+                tt(context, "Wait for the current editor request to finish."),
+                true,
+            );
+            return;
+        }
+        if editor.path.get_untracked() == target {
+            editor.open.set(true);
+            return;
+        }
+        if editor.dirty_untracked() {
+            pending_editor.set(target);
+            switch_editor.set(true);
+        } else {
+            editor.load(target);
+        }
+    });
     let open_entry = Callback::new(move |row: Value| {
         let target = match relative_path(&text(&row, "path"), false) {
             Ok(path) => path,
@@ -200,38 +339,55 @@ pub fn McBrowserTab() -> impl IntoView {
         if !can("read") {
             return;
         }
-        if !media_kind(&target).is_empty() {
+        let size = row["size"].as_u64().unwrap_or(0);
+        let mkind = media_kind(&target);
+        if !mkind.is_empty() {
+            if mkind == "csv" && size > MAX_CSV_PREVIEW_BYTES {
+                context.toast(
+                    tt(
+                        context,
+                        "CSV preview is limited to 5 MiB. Download larger files.",
+                    ),
+                    true,
+                );
+                return;
+            }
+            if mkind == "epub" && size > MAX_EPUB_BYTES {
+                context.toast(
+                    tt(
+                        context,
+                        "EPUB preview is limited to 64 MiB. Download larger files.",
+                    ),
+                    true,
+                );
+                return;
+            }
             media_path.set(target);
             media_open.set(true);
             return;
         }
-        if row["size"].as_u64().unwrap_or(0) > MAX_EDITOR_BYTES as u64 {
+        if size > MAX_TEXT_EDITOR_BYTES as u64 {
             context.toast(
                 tt(
                     context,
-                    "Text editing is limited to 256 KiB. Download larger files.",
+                    "Text editing is limited to 10 MiB. Download larger files.",
                 ),
                 true,
             );
             return;
         }
-        if editor.saving.get_untracked() || editor.loading.get_untracked() {
-            context.toast(
-                tt(context, "Wait for the current editor request to finish."),
-                true,
-            );
-            return;
-        }
-        if editor.path.get_untracked() == target {
-            editor.open.set(true);
-            return;
-        }
-        if editor.dirty_untracked() {
-            pending_editor.set(target);
-            switch_editor.set(true);
-        } else {
-            editor.load(target);
-        }
+        open_in_editor.run(target);
+    });
+    let previewable_items = Signal::derive(move || {
+        sorted.with(|rows| {
+            rows.iter()
+                .filter(|row| row["kind"] != "directory")
+                .filter_map(|row| {
+                    let target = relative_path(&text(row, "path"), false).ok()?;
+                    (!media_kind(&target).is_empty()).then_some(target)
+                })
+                .collect::<Vec<_>>()
+        })
     });
     let upload_files = move |files: web_sys::FileList| {
         if !can("create") {
@@ -257,6 +413,7 @@ pub fn McBrowserTab() -> impl IntoView {
         })
     }));
     on_cleanup(move || {
+        pref_disposed.set_value(true);
         unload.set_value(None);
         queue.inner.update_value(|inner| inner.disposed = true);
     });
@@ -420,6 +577,34 @@ pub fn McBrowserTab() -> impl IntoView {
                             search: Callback::new(search),
                             upload_files: Callback::new(upload_files),
                         } />
+                        <Show when=move || pref_error.get().is_some()>
+                            <p
+                                role="alert"
+                                class="text-xs text-amber-300 mb-2 flex flex-wrap items-center gap-3"
+                                data-testid="mcbrowser-prefs-error"
+                            >
+                                <span>
+                                    {move || {
+                                        tt_with(
+                                            context,
+                                            "Could not save workspace preferences: {error}",
+                                            &[(
+                                                "error",
+                                                &pref_error.get().unwrap_or_default(),
+                                            )],
+                                        )
+                                    }}
+                                </span>
+                                <button
+                                    type="button"
+                                    class="underline"
+                                    data-testid="mcbrowser-prefs-retry"
+                                    on:click=move |_| retry_preferences()
+                                >
+                                    {move || tt(context, "Retry")}
+                                </button>
+                            </p>
+                        </Show>
                         <p role="alert" class="text-sm text-rose-300">
                             {move || {
                                 entries
@@ -475,8 +660,54 @@ pub fn McBrowserTab() -> impl IntoView {
                                     )
                                     children=move |row| {
                                         let row = StoredValue::new(row);
+                                        let thumb_failed = RwSignal::new(false);
+                                        let thumb_src = row.with_value(|row| {
+                                            let row_path = text(row, "path");
+                                            let size = row["size"].as_u64().unwrap_or(0);
+                                            if row["kind"] != "directory"
+                                                && media_kind(&row_path) == "image"
+                                                && size <= MAX_THUMBNAIL_SOURCE_BYTES
+                                            {
+                                                Some(format!(
+                                                    "{BASE}/preview/thumb?path={}",
+                                                    encode(&row_path)
+                                                ))
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                        let thumb_alt = row.with_value(|row| text(row, "name"));
                                         view! {
-                                            <div class="flex flex-wrap items-center gap-3 p-3 border-b border-white/5 min-w-0">
+                                            <div class=move || {
+                                                if grid.get() {
+                                                    "flex flex-col gap-2 p-3 rounded-xl border border-white/10 bg-white/[0.02] min-w-0"
+                                                } else {
+                                                    "flex flex-wrap items-center gap-3 p-3 border-b border-white/5 min-w-0"
+                                                }
+                                            }>
+                                                {thumb_src.clone().map(|src| {
+                                                    let alt = thumb_alt.clone();
+                                                    view! {
+                                                        <Show when=move || grid.get() && can("read") && !thumb_failed.get()>
+                                                            <button
+                                                                type="button"
+                                                                class="w-full overflow-hidden rounded-lg border border-white/10 bg-slate-950/60"
+                                                                on:click=move |_| open_entry.run(row.get_value())
+                                                            >
+                                                                <img
+                                                                    src=src.clone()
+                                                                    alt=alt.clone()
+                                                                    loading="lazy"
+                                                                    decoding="async"
+                                                                    class="w-full h-36 object-cover"
+                                                                    data-testid="mcbrowser-grid-thumb"
+                                                                    on:error=move |_| thumb_failed.set(true)
+                                                                />
+                                                            </button>
+                                                        </Show>
+                                                    }
+                                                })}
+                                                <div class="flex flex-wrap items-center gap-3 min-w-0 w-full">
                                                 <input
                                                     type="checkbox"
                                                     aria-label=move || {
@@ -570,6 +801,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                                                 }
                                                             })
                                                     })}
+                                                </div>
                                             </div>
                                         }
                                     }
@@ -628,8 +860,18 @@ pub fn McBrowserTab() -> impl IntoView {
                 </Show>
             </TabPanel>
             <TransferPanel queue />
-            <EditorPanel editor readonly=Signal::derive(move || !can("modify")) />
-            <MediaPreview open=media_open path=media_path />
+            <EditorPanel
+                editor
+                editor_theme
+                readonly=Signal::derive(move || !can("modify"))
+            />
+            <MediaPreview
+                open=media_open
+                path=media_path
+                items=previewable_items
+                can_download=Signal::derive(move || can("download"))
+                on_edit=open_in_editor
+            />
             <ActionsDialog actions />
             <ShareCreateModal
                 open=share_open
@@ -698,8 +940,20 @@ mod tests {
         assert_eq!(media_kind("photo.avif"), "image");
         assert_eq!(media_kind("movie.mkv"), "video");
         assert_eq!(media_kind("track.flac"), "audio");
+        assert_eq!(media_kind("metrics/export.csv"), "csv");
+        assert_eq!(media_kind("metrics/export.TSV"), "csv");
+        assert_eq!(media_kind("books/manual.epub"), "epub");
         assert_eq!(media_kind("document.html"), "");
         assert_eq!(media_kind("README"), "");
+    }
+
+    #[test]
+    fn mcbrowser_subtab_resolution_gates_admin_routes() {
+        assert_eq!(resolve_mcbrowser_subtab("policy", true), "policy");
+        assert_eq!(resolve_mcbrowser_subtab("events", true), "events");
+        assert_eq!(resolve_mcbrowser_subtab("policy", false), "workspace");
+        assert_eq!(resolve_mcbrowser_subtab("events", false), "workspace");
+        assert_eq!(resolve_mcbrowser_subtab("unknown", true), "workspace");
     }
 
     #[test]

@@ -4,7 +4,6 @@ use crate::state::{
 };
 use af_web_core::{
     api::{storage_get, storage_set, ApiClient},
-    charts::Point,
     worker::{SearchItem, SearchMatch, WorkerRequest, WorkerResponse},
     worker_pool::WorkerPool,
     ws::{BrowserConnection, ConnectionState, TransportEvent},
@@ -119,7 +118,7 @@ fn refresh_shell(context: AppContext, revisions: ShellRefreshState) {
                 .ok()
                 .filter(|_| revisions.metrics.try_get_untracked() == Some(metrics_revision))
             {
-                context.metrics.set(metrics);
+                context.publish_metrics(metrics);
             }
             if let Ok(services) = services {
                 context.finish_services_request(services_request, services);
@@ -272,19 +271,7 @@ fn AuthenticatedShell() -> impl IntoView {
             }
             TransportEvent::Metrics(metrics) => {
                 revisions.metrics.update(|n| *n = n.wrapping_add(1));
-                if let Some(cpu) = metrics["cpu_usage"].as_f64() {
-                    let point = Point {
-                        x: js_sys::Date::now(),
-                        y: cpu,
-                    };
-                    context.history.update(|history| {
-                        history.push(point);
-                        if history.len() > 2400 {
-                            history.drain(..history.len() - 2400);
-                        }
-                    });
-                }
-                context.metrics.set(metrics);
+                context.publish_metrics(metrics);
             }
             TransportEvent::Services(services) => {
                 context.publish_live_services(services);
@@ -500,9 +487,90 @@ fn MobileNavigation() -> impl IntoView {
     }
 }
 
+fn safe_avatar_src(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if (trimmed.starts_with('/') && !trimmed.starts_with("//"))
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn palette_items(context: AppContext, locale: &str) -> Vec<SearchItem> {
+    let is_admin = context.is_admin();
+    let mut items: Vec<SearchItem> = TabId::ALL
+        .into_iter()
+        .filter(|t| !t.is_admin_only() || is_admin)
+        .map(|tab| SearchItem {
+            id: tab.key().into(),
+            text: tab.localized_label(locale),
+        })
+        .collect();
+    let t = |key: &str| af_web_core::i18n::translate(locale, key);
+    items.push(SearchItem {
+        id: "action:toggle-theme".into(),
+        text: t("Shell.toggleTheme"),
+    });
+    items.push(SearchItem {
+        id: "action:notifications".into(),
+        text: t("Shell.notifications"),
+    });
+    items.push(SearchItem {
+        id: "action:settings-profile".into(),
+        text: t("Account & Profile Security"),
+    });
+    items.push(SearchItem {
+        id: "action:settings-display".into(),
+        text: t("Configure Display & Preferences"),
+    });
+    items.push(SearchItem {
+        id: "action:services-attention".into(),
+        text: t("Triage Services Needing Attention"),
+    });
+    if is_admin {
+        items.push(SearchItem {
+            id: "action:mcbrowser-policy".into(),
+            text: t("Settings.mcbrowserPolicy"),
+        });
+    }
+    items.push(SearchItem {
+        id: "action:logout".into(),
+        text: t("Shell.logout"),
+    });
+    items
+}
+
+fn dispatch_palette_selection(context: AppContext, id: &str) {
+    match id {
+        "action:toggle-theme" => context.toggle_theme(),
+        "action:notifications" => context.notifications_open.set(true),
+        "action:settings-profile" => context.navigate_to_subtab(TabId::Settings, "profile"),
+        "action:settings-display" => context.navigate_to_subtab(TabId::Settings, "general"),
+        "action:services-attention" => context.navigate_to_subtab(TabId::Services, "attention"),
+        "action:mcbrowser-policy" if context.is_admin() => {
+            context.navigate_to_subtab(TabId::McBrowser, "policy");
+        }
+        "action:logout" => context.logout(),
+        _ => context.select_tab(TabId::from_key(id)),
+    }
+}
+
 #[component]
 pub fn Header() -> impl IntoView {
     let context = app();
+    let account_open = RwSignal::new(false);
+    let transfers_open = RwSignal::new(false);
+    let avatar_failed = RwSignal::new(false);
+    Effect::new(move |_| {
+        let _ = context.typed_user().map(|u| u.avatar_url);
+        avatar_failed.set(false);
+    });
     view! {
         <header class="af-header sticky top-0 z-20 flex flex-wrap gap-3 items-center justify-between px-4 md:px-8 py-4 border-b border-white/5 backdrop-blur-xl">
             <div class="af-header-heading flex items-center gap-3 min-w-0">
@@ -549,22 +617,204 @@ pub fn Header() -> impl IntoView {
                 >
                     {move || shell_icon(if context.is_light() { "moon" } else { "sun" })}
                 </button>
+                <Show when=move || !context.transfers.with(Vec::is_empty)>
+                    <div class="af-header-popover-anchor relative">
+                        <button
+                            type="button"
+                            class="glass-button px-3 text-xs inline-flex items-center gap-1.5"
+                            data-testid="header-transfers-trigger"
+                            aria-haspopup="true"
+                            aria-expanded=move || transfers_open.get().to_string()
+                            aria-label=move || context.t("Background transfers")
+                            on:click=move |_| {
+                                account_open.set(false);
+                                transfers_open.update(|open| *open = !*open);
+                            }
+                        >
+                            <span class="af-header-control-label">{move || context.t("Transfers")}</span>
+                            <span class="px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-200 tabular-nums">
+                                {move || context.transfers.with(|rows| {
+                                    let active = rows.iter().filter(|r| r.active).count();
+                                    if active > 0 { active } else { rows.len() }
+                                })}
+                            </span>
+                        </button>
+                        <Show when=move || transfers_open.get()>
+                            <div
+                                role="dialog"
+                                aria-label=move || context.t("Background transfers")
+                                data-testid="header-transfers-popover"
+                                class="absolute right-0 mt-2 w-80 max-w-[90vw] glass-card p-3 z-40 border border-white/10 space-y-2 shadow-xl"
+                            >
+                                <div class="flex items-center justify-between gap-2">
+                                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                                        {move || context.t("Background transfers")}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        class="text-xs text-cyan-300 underline"
+                                        on:click=move |_| {
+                                            transfers_open.set(false);
+                                            context.select_tab(TabId::McBrowser);
+                                        }
+                                    >
+                                        {move || context.t("Navigation.mcbrowser")}
+                                    </button>
+                                </div>
+                                <ul class="space-y-2 max-h-60 overflow-auto">
+                                    {move || context.transfers.get().into_iter().map(|row| {
+                                        let pct = if row.size > 0 {
+                                            ((row.sent as f64 / row.size as f64) * 100.0).clamp(0.0, 100.0)
+                                        } else {
+                                            0.0
+                                        };
+                                        view! {
+                                            <li class="text-xs border-b border-white/5 pb-2 space-y-1">
+                                                <div class="flex justify-between gap-2">
+                                                    <span class="font-mono truncate">{row.path}</span>
+                                                    <span class="text-slate-400 shrink-0">{move || context.t(&row.status)}</span>
+                                                </div>
+                                                <progress class="w-full h-1.5" max="100" value=pct />
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ul>
+                            </div>
+                        </Show>
+                    </div>
+                </Show>
                 <button
                     class="glass-button px-3 relative"
                     aria-label=move || context.t("Shell.notifications")
-                    on:click=move |_| context.notifications_open.set(true)
+                    on:click=move |_| {
+                        account_open.set(false);
+                        transfers_open.set(false);
+                        context.notifications_open.set(true);
+                    }
                 >
                     {shell_icon("bell")}
                     <Show when=move || context.notifications.with(|notes| notes.iter().any(|note| note["read"] != true))>
                         <span class="af-notification-dot"></span>
                     </Show>
                 </button>
-                <span
-                    class="af-user-badge text-sm px-3 py-2 rounded-full bg-indigo-500/10 text-indigo-200"
-                    title=move || context.typed_user().map(|user| user.role).unwrap_or_else(|| "user".into())
+                <div
+                    class="af-header-popover-anchor relative"
+                    on:keydown=move |event: web_sys::KeyboardEvent| {
+                        if event.key() == "Escape" {
+                            account_open.set(false);
+                        }
+                    }
                 >
-                    {move || context.typed_user().map(|user| user.username).unwrap_or_else(|| context.t("Shell.operator"))}
-                </span>
+                    <button
+                        type="button"
+                        class="af-user-badge text-sm px-3 py-2 rounded-full bg-indigo-500/10 text-indigo-200 inline-flex items-center gap-2 hover:bg-indigo-500/20"
+                        data-testid="header-account-menu-trigger"
+                        aria-label=move || context.t("Account menu")
+                        aria-haspopup="menu"
+                        aria-expanded=move || account_open.get().to_string()
+                        title=move || context.typed_user().map(|user| user.role).unwrap_or_else(|| "user".into())
+                        on:click=move |_| {
+                            transfers_open.set(false);
+                            account_open.update(|open| *open = !*open);
+                        }
+                    >
+                        {move || {
+                            let user = context.typed_user();
+                            let avatar = user
+                                .as_ref()
+                                .filter(|_| !avatar_failed.get())
+                                .and_then(|u| safe_avatar_src(&u.avatar_url));
+                            let initial = user
+                                .as_ref()
+                                .and_then(|u| u.username.chars().next())
+                                .unwrap_or('A')
+                                .to_ascii_uppercase()
+                                .to_string();
+                            if let Some(src) = avatar {
+                                view! {
+                                    <img
+                                        src=src
+                                        alt=""
+                                        class="w-5 h-5 rounded-full object-cover shrink-0"
+                                        on:error=move |_| avatar_failed.set(true)
+                                    />
+                                }
+                                    .into_any()
+                            } else {
+                                view! {
+                                    <span
+                                        aria-hidden="true"
+                                        data-initial=initial
+                                        class="af-avatar-initial w-5 h-5 rounded-full bg-indigo-400/25 text-indigo-100 text-xs font-semibold inline-flex items-center justify-center shrink-0"
+                                    ></span>
+                                }
+                                    .into_any()
+                            }
+                        }}
+                        <span class="af-header-control-label">{move || context.typed_user().map(|user| user.username).unwrap_or_else(|| context.t("Shell.operator"))}</span>
+                    </button>
+                    <Show when=move || account_open.get()>
+                        <div
+                            role="menu"
+                            aria-label=move || context.t("Account menu")
+                            data-testid="header-account-menu"
+                            class="absolute right-0 mt-2 w-64 glass-card p-3 z-40 border border-white/10 space-y-2 shadow-xl"
+                        >
+                            <div class="pb-2 border-b border-white/10 space-y-0.5">
+                                <p class="text-sm font-semibold text-slate-100 truncate">
+                                    {move || context.typed_user().map(|user| user.username).unwrap_or_else(|| context.t("Shell.operator"))}
+                                </p>
+                                <p class="text-xs text-slate-400 truncate">
+                                    {move || {
+                                        let user = context.typed_user();
+                                        let role = user.as_ref().map(|u| u.role.clone()).unwrap_or_else(|| "user".into());
+                                        let email = user.as_ref().map(|u| u.email.trim().to_string()).unwrap_or_default();
+                                        if email.is_empty() {
+                                            role
+                                        } else {
+                                            format!("{role} · {email}")
+                                        }
+                                    }}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-white/5"
+                                data-testid="header-account-profile"
+                                on:click=move |_| {
+                                    account_open.set(false);
+                                    context.navigate_to_subtab(TabId::Settings, "profile");
+                                }
+                            >
+                                {move || context.t("Account & Profile Security")}
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-white/5"
+                                on:click=move |_| {
+                                    account_open.set(false);
+                                    context.navigate_to_subtab(TabId::Settings, "general");
+                                }
+                            >
+                                {move || context.t("Configure Display & Preferences")}
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                class="w-full text-left text-sm px-3 py-2 rounded-lg text-rose-300 hover:bg-rose-500/10"
+                                data-testid="header-account-logout"
+                                on:click=move |_| {
+                                    account_open.set(false);
+                                    context.logout();
+                                }
+                            >
+                                {move || context.t("Shell.logout")}
+                            </button>
+                        </div>
+                    </Show>
+                </div>
             </div>
         </header>
     }
@@ -701,20 +951,13 @@ pub fn GlobalCommandPalette() -> impl IntoView {
         generation.update(|g| *g += 1);
         let ticket = generation.get_untracked();
         let pool = pool.get_value();
-        let items = TabId::ALL
-            .into_iter()
-            .filter(|t| !t.is_admin_only() || context.is_admin())
-            .map(|tab| SearchItem {
-                id: tab.key().into(),
-                text: tab.localized_label(&locale),
-            })
-            .collect();
+        let items = palette_items(context, &locale);
         spawn_local(async move {
             if let WorkerResponse::SearchResults { items } = pool
                 .execute(WorkerRequest::FuzzySearch {
                     query,
                     items,
-                    limit: 16,
+                    limit: 24,
                 })
                 .await
             {
@@ -726,7 +969,7 @@ pub fn GlobalCommandPalette() -> impl IntoView {
         });
     });
     let select = move |id: &str| {
-        context.select_tab(TabId::from_key(id));
+        dispatch_palette_selection(context, id);
         context.command_open.set(false);
         query.set(String::new());
     };
@@ -881,5 +1124,64 @@ pub fn ToastContainer() -> impl IntoView {
                 }
             }/>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatar_src_rejects_script_and_protocol_relative_urls() {
+        assert_eq!(
+            safe_avatar_src("/api/v1/auth/profile/avatar"),
+            Some("/api/v1/auth/profile/avatar".into())
+        );
+        assert_eq!(
+            safe_avatar_src("https://example.com/a.png"),
+            Some("https://example.com/a.png".into())
+        );
+        assert_eq!(safe_avatar_src("//evil.example/a.png"), None);
+        assert_eq!(safe_avatar_src("javascript:alert(1)"), None);
+        assert_eq!(safe_avatar_src("data:image/svg+xml,<svg/>"), None);
+        assert_eq!(safe_avatar_src("   "), None);
+    }
+
+    #[test]
+    fn command_palette_includes_role_appropriate_actions_and_dispatches_subtabs() {
+        Owner::new().with(|| {
+            let context = AppContext::new();
+            context
+                .user
+                .set(Some(json!({"id": 2, "username": "member", "role": "user"})));
+            let user_items = palette_items(context, "en");
+            assert!(user_items.iter().any(|i| i.id == "action:toggle-theme"));
+            assert!(user_items.iter().any(|i| i.id == "action:settings-profile"));
+            assert!(user_items
+                .iter()
+                .any(|i| i.id == "action:services-attention"));
+            assert!(!user_items.iter().any(|i| i.id == "action:mcbrowser-policy"));
+
+            dispatch_palette_selection(context, "action:settings-profile");
+            assert_eq!(context.tab.get_untracked(), TabId::Settings);
+            assert_eq!(
+                context.take_pending_subtab(TabId::Settings).as_deref(),
+                Some("profile")
+            );
+
+            context
+                .user
+                .set(Some(json!({"id": 1, "username": "admin", "role": "admin"})));
+            let admin_items = palette_items(context, "en");
+            assert!(admin_items
+                .iter()
+                .any(|i| i.id == "action:mcbrowser-policy"));
+            dispatch_palette_selection(context, "action:mcbrowser-policy");
+            assert_eq!(context.tab.get_untracked(), TabId::McBrowser);
+            assert_eq!(
+                context.take_pending_subtab(TabId::McBrowser).as_deref(),
+                Some("policy")
+            );
+        });
     }
 }

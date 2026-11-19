@@ -55,6 +55,7 @@ const test = base.extend<{ networkGate: NetworkGate; httpCachePage: Page }>({
           'content-type': 'application/json',
           'cache-control': 'public, max-age=3600',
           'content-length': Buffer.byteLength(fixture.body),
+          'x-test-request-agent': incoming.headers['user-agent'] || '',
         }).end(fixture.body);
         return;
       }
@@ -96,6 +97,39 @@ const test = base.extend<{ networkGate: NetworkGate; httpCachePage: Page }>({
 
 test.describe('Live public static and plugin cache boundaries', () => {
   test.use({ serviceWorkers: 'allow' });
+
+  for (const override of [false, true]) {
+    test(`preserves the page user agent for plugin catalog reads (override=${override})`, async ({ browser, networkGate }) => {
+      const context = await browser.newContext({
+        serviceWorkers: 'allow',
+        ...(override ? { userAgent: 'AetherFlow dashboard compatibility test' } : {}),
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(`${networkGate.origin}/manifest.json`);
+        await page.evaluate(async () => {
+          await navigator.serviceWorker.register('/sw.js');
+          await navigator.serviceWorker.ready;
+        });
+        await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
+        for (const path of ['/api/v1/auth/plugins', '/api/auth/plugins']) {
+          networkGate.seed(path, '{"plugins":[]}');
+          const result = await page.evaluate(async path => {
+            const response = await fetch(path, { credentials: 'include', cache: 'no-store' });
+            return {
+              body: await response.json(), agent: response.headers.get('x-test-request-agent'),
+              expected: navigator.userAgent, cached: Boolean(await caches.match(path)),
+            };
+          }, path);
+          expect(result.body).toEqual({ plugins: [] });
+          expect(result.agent).toBe(result.expected);
+          expect(result.cached).toBe(false);
+        }
+      } finally {
+        await context.close();
+      }
+    });
+  }
 
   test('removes legacy entries and reaches authorization while retaining public offline assets', async ({ page, httpCachePage, request, networkGate }) => {
     test.setTimeout(90_000);

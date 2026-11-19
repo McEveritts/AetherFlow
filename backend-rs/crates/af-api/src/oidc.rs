@@ -455,12 +455,18 @@ pub async fn oidc_discovery(
     Json(serde_json::json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{}/api/v1/public/oidc/authorize", issuer),
+        "device_authorization_endpoint": format!("{}/api/v1/public/oidc/device/authorize", issuer),
         "token_endpoint": format!("{}/api/v1/public/oidc/token", issuer),
         "userinfo_endpoint": format!("{}/api/v1/public/oidc/userinfo", issuer),
         "jwks_uri": format!("{}/api/v1/public/oidc/jwks", issuer),
         "revocation_endpoint": format!("{}/api/v1/public/oidc/revoke", issuer),
         "introspection_endpoint": format!("{}/api/v1/public/oidc/introspect", issuer),
         "response_types_supported": ["code"],
+        "grant_types_supported": [
+            "authorization_code",
+            "refresh_token",
+            "urn:ietf:params:oauth:grant-type:device_code"
+        ],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "scopes_supported": ["openid", "profile", "email"],
@@ -1024,12 +1030,64 @@ fn oidc_consent_blocking(user: AuthUser, payload: ConsentRequest) -> Response {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn extract_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
-    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let encoded = auth.strip_prefix("Basic ")?.trim();
-    let decoded = BASE64_STD.decode(encoded).ok()?;
+    let mut auth_headers = headers.get_all(header::AUTHORIZATION).iter();
+    let auth = auth_headers.next()?.to_str().ok()?.trim();
+    if auth_headers.next().is_some() {
+        return None;
+    }
+    let (scheme, rest) = auth.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = BASE64_STD.decode(rest.trim()).ok()?;
     let text = String::from_utf8(decoded).ok()?;
     let (id, secret) = text.split_once(':')?;
+    if id.is_empty() || secret.is_empty() {
+        return None;
+    }
     Some((id.to_string(), secret.to_string()))
+}
+
+fn invalid_oidc_client_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Basic realm=\"oidc\"")],
+        Json(serde_json::json!({ "error": "invalid_client" })),
+    )
+        .into_response()
+}
+
+fn extract_oidc_client_credentials(
+    headers: &HeaderMap,
+    form: &HashMap<String, String>,
+) -> Result<(String, String), Response> {
+    let auth_count = headers.get_all(header::AUTHORIZATION).iter().count();
+    if auth_count > 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": "multiple Authorization headers"
+            })),
+        )
+            .into_response());
+    }
+    if auth_count == 1 {
+        if form.contains_key("client_id") || form.contains_key("client_secret") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_request",
+                    "error_description": "multiple client authentication methods"
+                })),
+            )
+                .into_response());
+        }
+        return extract_basic_auth(headers).ok_or_else(invalid_oidc_client_response);
+    }
+    let client_id = form.get("client_id").cloned().unwrap_or_default();
+    let client_secret = form.get("client_secret").cloned().unwrap_or_default();
+    Ok((client_id, client_secret))
 }
 
 fn authenticate_oidc_client(
@@ -1054,6 +1112,9 @@ fn authenticate_oidc_client(
         if allow_public && client_secret.is_empty() {
             return Ok(true);
         }
+        return Err(());
+    }
+    if client_secret.is_empty() {
         return Err(());
     }
     let mut hasher = Sha256::new();
@@ -1291,22 +1352,13 @@ fn oidc_token_blocking(
     form: HashMap<String, String>,
 ) -> Response {
     let grant_type = form.get("grant_type").cloned().unwrap_or_default();
-    let mut client_id = form.get("client_id").cloned().unwrap_or_default();
-    let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
-
-    if client_id.is_empty() {
-        if let Some((basic_id, basic_secret)) = extract_basic_auth(&headers) {
-            client_id = basic_id;
-            client_secret = basic_secret;
-        }
-    }
+    let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
+        Ok(creds) => creds,
+        Err(resp) => return resp,
+    };
 
     let Ok(is_public_client) = authenticate_oidc_client(&client_id, &client_secret, true) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "invalid_client" })),
-        )
-            .into_response();
+        return invalid_oidc_client_response();
     };
 
     match grant_type.as_str() {
@@ -1960,17 +2012,14 @@ pub async fn oidc_revoke(
 }
 
 fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
-    let mut client_id = form.get("client_id").cloned().unwrap_or_default();
-    let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
-    if client_id.is_empty() {
-        if let Some((basic_id, basic_secret)) = extract_basic_auth(&headers) {
-            client_id = basic_id;
-            client_secret = basic_secret;
-        }
-    }
+    let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
+        Ok(creds) => creds,
+        Err(resp) => return resp,
+    };
     if client_id.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"oidc\"")],
             Json(serde_json::json!({
                 "error": "invalid_client",
                 "error_description": "client authentication required"
@@ -1979,11 +2028,7 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
             .into_response();
     }
     if authenticate_oidc_client(&client_id, &client_secret, true).is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "invalid_client" })),
-        )
-            .into_response();
+        return invalid_oidc_client_response();
     }
 
     let token = form.get("token").cloned().unwrap_or_default();
@@ -2169,17 +2214,14 @@ fn oidc_introspect_blocking(
     peer_ip: Option<std::net::IpAddr>,
     form: HashMap<String, String>,
 ) -> Response {
-    let mut client_id = form.get("client_id").cloned().unwrap_or_default();
-    let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
-    if client_id.is_empty() {
-        if let Some((basic_id, basic_secret)) = extract_basic_auth(&headers) {
-            client_id = basic_id;
-            client_secret = basic_secret;
-        }
-    }
+    let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
+        Ok(creds) => creds,
+        Err(resp) => return resp,
+    };
     if client_id.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"oidc\"")],
             Json(serde_json::json!({
                 "error": "invalid_client",
                 "error_description": "client authentication required"
@@ -2188,11 +2230,7 @@ fn oidc_introspect_blocking(
             .into_response();
     }
     if authenticate_oidc_client(&client_id, &client_secret, false).is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "invalid_client" })),
-        )
-            .into_response();
+        return invalid_oidc_client_response();
     }
 
     let token_str = form.get("token").cloned().unwrap_or_default();
@@ -2305,6 +2343,34 @@ fn generate_user_code() -> String {
     )
 }
 
+fn normalize_device_user_code(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("user_code is required");
+    }
+    if trimmed.len() > 16
+        || trimmed.starts_with('-')
+        || trimmed.ends_with('-')
+        || trimmed.contains("--")
+    {
+        return Err("invalid_user_code");
+    }
+    let mut compact = String::with_capacity(8);
+    for ch in trimmed.chars() {
+        if ch == '-' || ch == ' ' {
+            continue;
+        }
+        if !ch.is_ascii_alphanumeric() {
+            return Err("invalid_user_code");
+        }
+        compact.push(ch.to_ascii_uppercase());
+    }
+    if compact.len() != 8 {
+        return Err("invalid_user_code");
+    }
+    Ok(format!("{}-{}", &compact[..4], &compact[4..]))
+}
+
 pub async fn oidc_device_authorize(
     crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
     headers: HeaderMap,
@@ -2318,7 +2384,13 @@ fn oidc_device_authorize_blocking(
     peer_ip: Option<std::net::IpAddr>,
     form: HashMap<String, String>,
 ) -> Response {
-    let client_id = form.get("client_id").cloned().unwrap_or_default();
+    let (client_id, client_secret) = match extract_oidc_client_credentials(&headers, &form) {
+        Ok(creds) => creds,
+        Err(resp) => return resp,
+    };
+    if authenticate_oidc_client(&client_id, &client_secret, false) != Ok(false) {
+        return invalid_oidc_client_response();
+    }
     let scope = validate_oidc_scopes(form.get("scope").map(String::as_str).unwrap_or(""));
 
     let Ok(conn) = af_db::get_conn() else {
@@ -2328,22 +2400,6 @@ fn oidc_device_authorize_blocking(
         )
             .into_response();
     };
-
-    let confidential_client = conn
-        .query_row(
-            "SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
-            params![client_id],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .is_some_and(|h| !h.trim().is_empty());
-    if !confidential_client {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid_client" })),
-        )
-            .into_response();
-    }
 
     let mut dc_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut dc_bytes);
@@ -2387,24 +2443,43 @@ fn oidc_device_authorize_blocking(
     .into_response()
 }
 
-pub async fn oidc_device_verify(Json(req): Json<serde_json::Value>) -> Response {
-    blocking_response(move || oidc_device_verify_blocking(req)).await
-}
-
-fn oidc_device_verify_blocking(req: serde_json::Value) -> Response {
-    let user_code = req
-        .get("user_code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_ascii_uppercase();
-    if user_code.is_empty() {
+pub async fn oidc_device_verify(req: Request) -> Response {
+    let Some(user) = req.extensions().get::<AuthUser>().cloned() else {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "user_code is required" })),
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Unauthorized" })),
         )
             .into_response();
-    }
+    };
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 32 * 1024).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid body" })),
+        )
+            .into_response();
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid JSON" })),
+        )
+            .into_response();
+    };
+    blocking_response(move || oidc_device_verify_blocking(user, body)).await
+}
+
+fn oidc_device_verify_blocking(user: AuthUser, req: serde_json::Value) -> Response {
+    let raw_code = req.get("user_code").and_then(|v| v.as_str()).unwrap_or("");
+    let user_code = match normalize_device_user_code(raw_code) {
+        Ok(code) => code,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response();
+        }
+    };
 
     let Ok(conn) = af_db::get_read_conn() else {
         return (
@@ -2413,6 +2488,14 @@ fn oidc_device_verify_blocking(req: serde_json::Value) -> Response {
         )
             .into_response();
     };
+
+    if crate::auth::load_active_human_subject(&conn, user.user_id).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "access_denied" })),
+        )
+            .into_response();
+    }
 
     let Ok((status, scope, client_id, expires_at)) = conn.query_row(
         "SELECT status, scope, client_id, expires_at FROM oidc_device_codes WHERE user_code = ?1",
@@ -2451,19 +2534,34 @@ fn oidc_device_verify_blocking(req: serde_json::Value) -> Response {
             .into_response();
     }
 
-    let client_name: String = conn
-        .query_row(
-            "SELECT name FROM oidc_clients WHERE id = ?1",
-            params![client_id],
-            |r| r.get(0),
+    let Ok((client_name, secret_hash)) = conn.query_row(
+        "SELECT name, COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
+        params![client_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid_client" })),
         )
-        .unwrap_or_default();
+            .into_response();
+    };
+    if secret_hash.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid_client" })),
+        )
+            .into_response();
+    }
+
+    let validated_scope = validate_oidc_scopes(&scope);
 
     Json(serde_json::json!({
         "status": status,
-        "scope": scope,
+        "user_code": user_code,
+        "scope": validated_scope,
         "client_id": client_id,
         "client_name": client_name,
+        "expires_at": expires_at,
     }))
     .into_response()
 }
@@ -2476,6 +2574,17 @@ pub async fn oidc_device_consent(req: Request) -> Response {
         )
             .into_response();
     };
+    let peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let ip = crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip);
+    let ua = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 32 * 1024).await else {
         return (
             StatusCode::BAD_REQUEST,
@@ -2490,27 +2599,33 @@ pub async fn oidc_device_consent(req: Request) -> Response {
         )
             .into_response();
     };
-    blocking_response(move || oidc_device_consent_blocking(user, body)).await
+    blocking_response(move || oidc_device_consent_blocking(user, body, ip, ua)).await
 }
 
-fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Response {
-    let user_code = body
-        .get("user_code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_ascii_uppercase();
-    let approved = body
-        .get("approved")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if user_code.is_empty() {
+fn oidc_device_consent_blocking(
+    user: AuthUser,
+    body: serde_json::Value,
+    ip: String,
+    ua: String,
+) -> Response {
+    let raw_code = body.get("user_code").and_then(|v| v.as_str()).unwrap_or("");
+    let user_code = match normalize_device_user_code(raw_code) {
+        Ok(code) => code,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response();
+        }
+    };
+    let Some(approved) = body.get("approved").and_then(|v| v.as_bool()) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "user_code is required" })),
+            Json(serde_json::json!({ "error": "approved boolean is required" })),
         )
             .into_response();
-    }
+    };
 
     let status = if approved { "approved" } else { "denied" };
     let Ok(mut conn) = af_db::get_conn() else {
@@ -2535,17 +2650,37 @@ fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Resp
             .into_response();
     }
 
-    let now_rfc3339 = Utc::now().to_rfc3339();
-    let matched_codes: Vec<String> = match tx.prepare(
-        "SELECT device_code FROM oidc_device_codes WHERE user_code = ?1 AND status = 'pending' AND expires_at > ?2 LIMIT 2",
-    ) {
-        Ok(mut stmt) => match stmt.query_map(params![user_code, &now_rfc3339], |r| r.get::<_, String>(0)) {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => Vec::new(),
+    let Ok((device_code, client_id, scope, stored_status, expires_at)) = tx.query_row(
+        "SELECT device_code, client_id, scope, status, expires_at FROM oidc_device_codes WHERE user_code = ?1",
+        params![user_code],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
         },
-        Err(_) => Vec::new(),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid_user_code" })),
+        )
+            .into_response();
     };
-    if matched_codes.len() != 1 {
+
+    let expired = DateTime::parse_from_rfc3339(&expires_at)
+        .map(|dt| Utc::now() > dt.with_timezone(&Utc))
+        .unwrap_or(true);
+    if expired {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "expired_token" })),
+        )
+            .into_response();
+    }
+    if stored_status != "pending" {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "invalid_user_code" })),
@@ -2553,21 +2688,106 @@ fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Resp
             .into_response();
     }
 
+    let Ok((client_name, secret_hash)) = tx.query_row(
+        "SELECT name, COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
+        params![client_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid_client" })),
+        )
+            .into_response();
+    };
+    if secret_hash.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid_client" })),
+        )
+            .into_response();
+    }
+
+    let validated_scope = validate_oidc_scopes(&scope);
+    if let Some(expected_client) = body
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if expected_client != client_id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_request" })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(expected_scope) = body
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if validate_oidc_scopes(expected_scope) != validated_scope {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_request" })),
+            )
+                .into_response();
+        }
+    }
+
+    let now_rfc3339 = Utc::now().to_rfc3339();
     let affected = tx
         .execute(
-            "UPDATE oidc_device_codes SET status = ?1, user_id = ?2 WHERE device_code = ?3 AND status = 'pending' AND expires_at > ?4",
-            params![status, user.user_id, &matched_codes[0], &now_rfc3339],
+            "UPDATE oidc_device_codes SET status = ?1, user_id = ?2, scope = ?3 WHERE device_code = ?4 AND status = 'pending' AND expires_at > ?5",
+            params![status, user.user_id, &validated_scope, &device_code, &now_rfc3339],
         )
         .unwrap_or(0);
-    if affected != 1 || tx.commit().is_err() {
+    if affected != 1 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "invalid_user_code" })),
         )
             .into_response();
     }
+    if approved {
+        let _ = tx.execute(
+            "INSERT INTO oidc_consents (user_id, client_id, scope, granted_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) \
+             ON CONFLICT(user_id, client_id) DO UPDATE SET scope = excluded.scope, granted_at = CURRENT_TIMESTAMP",
+            params![user.user_id, &client_id, &validated_scope],
+        );
+    }
+    if tx.commit().is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "server_error" })),
+        )
+            .into_response();
+    }
 
-    Json(serde_json::json!({ "status": status })).into_response()
+    af_db::record_audit(
+        user.user_id,
+        &user.username,
+        if approved {
+            "oidc_device_approve"
+        } else {
+            "oidc_device_deny"
+        },
+        "oidc_client",
+        &client_id,
+        &validated_scope,
+        &ip,
+        &ua,
+    );
+
+    Json(serde_json::json!({
+        "status": status,
+        "client_id": client_id,
+        "client_name": client_name,
+        "scope": validated_scope,
+    }))
+    .into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4275,5 +4495,592 @@ mod hardening_tests {
             .status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn normalize_device_user_code_accepts_short_codes_and_rejects_malformed_inputs() {
+        for (raw, expected) in [
+            ("BCDF-2345", "BCDF-2345"),
+            ("bcdf-2345", "BCDF-2345"),
+            ("bcdf2345", "BCDF-2345"),
+            ("  bcdf 2345  ", "BCDF-2345"),
+            ("wxyz9876", "WXYZ-9876"),
+        ] {
+            assert_eq!(
+                normalize_device_user_code(raw),
+                Ok(expected.to_string()),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(normalize_device_user_code(""), Err("user_code is required"));
+        assert_eq!(
+            normalize_device_user_code("   "),
+            Err("user_code is required")
+        );
+        for bad in [
+            "BCDF",
+            "BCDF-234",
+            "BCDF-23456",
+            "-BCDF2345",
+            "BCDF2345-",
+            "BCDF--2345",
+            "BCDF_2345",
+            "BCDF$2345",
+            "ABCDEFGHIJKLMNOPQ",
+        ] {
+            assert_eq!(
+                normalize_device_user_code(bad),
+                Err("invalid_user_code"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oidc_device_flow_enforces_auth_csrf_client_identity_expiry_and_token_lifecycle() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use tower::ServiceExt;
+
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let db = ensure_shared_test_db();
+        let fixture_root = db.parent().unwrap().join("oidc-device-spa-fixture");
+        fs::create_dir_all(&fixture_root).unwrap();
+        fs::write(
+            fixture_root.join("index.html"),
+            "<!doctype html><title>AetherFlow Device SPA</title>",
+        )
+        .unwrap();
+        env::set_var("STATIC_DIR", &fixture_root);
+        env::set_var(
+            "OIDC_KEY_PATH",
+            db.parent().unwrap().join("oidc-device.pem"),
+        );
+        env::set_var("OIDC_ISSUER", "https://auth.example.test");
+        env::remove_var("CSRF_DISABLED");
+
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (812, 'device-operator', 'user')",
+            [],
+        )
+        .unwrap();
+        let secret_hash = hex::encode(Sha256::digest(b"device-client-secret"));
+        conn.execute(
+            "INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) \
+             VALUES ('tv-client', ?1, 'Living Room Jellyfin TV', '[\"https://tv.example.test/cb\"]')",
+            params![secret_hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) \
+             VALUES ('public-spa', '', 'Public Browser Client', '[\"https://spa.example.test/cb\"]')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let app = crate::routes::build_router();
+
+        // 1. Discovery advertises the RFC 8628 device authorization endpoint and grant type.
+        let discovery_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/openid-configuration")
+                    .header(header::HOST, "localhost")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery_resp.status(), StatusCode::OK);
+        let discovery: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(discovery_resp.into_body(), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            discovery["device_authorization_endpoint"],
+            "https://auth.example.test/api/v1/public/oidc/device/authorize"
+        );
+        assert!(discovery["grant_types_supported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g == "urn:ietf:params:oauth:grant-type:device_code"));
+
+        // 2. Normal SPA entry points `/oauth/device` and `/oauth/device?user_code=...` serve index.html.
+        for uri in ["/oauth/device", "/oauth/device?user_code=BCDF-2345"] {
+            let spa_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::HOST, "localhost")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(spa_resp.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(spa_resp.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(
+                std::str::from_utf8(&body)
+                    .unwrap()
+                    .contains("AetherFlow Device SPA"),
+                "{uri}"
+            );
+        }
+
+        // 3. Public clients, missing secrets, wrong secrets, and ambiguous Basic+form credentials
+        //    are consistently rejected; authenticated confidential clients (Basic or form) succeed.
+        for form_body in [
+            "client_id=public-spa&scope=openid",
+            "client_id=public-spa&client_secret=any&scope=openid",
+            "client_id=tv-client&scope=openid",
+            "client_id=tv-client&client_secret=&scope=openid",
+            "client_id=tv-client&client_secret=wrong-secret&scope=openid",
+            "scope=openid",
+        ] {
+            let rejected = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/public/oidc/device/authorize")
+                        .header(header::HOST, "localhost")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(axum::body::Body::from(form_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rejected.status(),
+                StatusCode::UNAUTHORIZED,
+                "expected 401 for {form_body}"
+            );
+            let err: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(rejected.into_body(), 4096)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(err["error"], "invalid_client", "{form_body}");
+        }
+
+        let bad_basic = BASE64_STD.encode("tv-client:wrong-secret");
+        let good_basic = BASE64_STD.encode("tv-client:device-client-secret");
+
+        let bad_basic_attempt = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/public/oidc/device/authorize")
+                    .header(header::HOST, "localhost")
+                    .header(header::AUTHORIZATION, format!("Basic {bad_basic}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from("scope=openid"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_basic_attempt.status(), StatusCode::UNAUTHORIZED);
+        assert!(bad_basic_attempt
+            .headers()
+            .contains_key(header::WWW_AUTHENTICATE));
+
+        for (auth_hdr, ambiguous_body) in [
+            (
+                &good_basic,
+                "client_secret=device-client-secret&scope=openid",
+            ),
+            (&good_basic, "client_id=tv-client&scope=openid"),
+            (
+                &bad_basic,
+                "client_id=tv-client&client_secret=device-client-secret&scope=openid",
+            ),
+        ] {
+            let ambig = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/public/oidc/device/authorize")
+                        .header(header::HOST, "localhost")
+                        .header(header::AUTHORIZATION, format!("Basic {auth_hdr}"))
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(axum::body::Body::from(ambiguous_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                ambig.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for Basic + {ambiguous_body}"
+            );
+            let err: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(ambig.into_body(), 4096).await.unwrap(),
+            )
+            .unwrap();
+            assert_eq!(err["error"], "invalid_request", "{ambiguous_body}");
+        }
+
+        // Valid HTTP Basic confidential client authentication succeeds cleanly.
+        let basic_authz = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/public/oidc/device/authorize")
+                    .header(header::HOST, "localhost")
+                    .header(header::AUTHORIZATION, format!("Basic {good_basic}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from("scope=openid"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(basic_authz.status(), StatusCode::OK);
+
+        // Valid client_secret_post confidential client authentication succeeds cleanly.
+        let authz_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/public/oidc/device/authorize")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(
+                        "client_id=tv-client&client_secret=device-client-secret&scope=openid%20profile%20email",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authz_resp.status(), StatusCode::OK);
+        let authz: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(authz_resp.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let device_code = authz["device_code"].as_str().unwrap().to_string();
+        let user_code = authz["user_code"].as_str().unwrap().to_string();
+        assert_eq!(
+            authz["verification_uri"],
+            "https://auth.example.test/oauth/device"
+        );
+        assert_eq!(
+            authz["verification_uri_complete"],
+            format!("https://auth.example.test/oauth/device?user_code={user_code}")
+        );
+
+        // 4. Verify and consent enforce authentication (401) and CSRF (403).
+        let unauth_verify = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/verify")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_code": &user_code}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_verify.status(), StatusCode::UNAUTHORIZED);
+
+        let mut ua_headers = HeaderMap::new();
+        ua_headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("af-device-test/1.0"),
+        );
+        let (session_jwt, _) = create_standard_jwt(812, &ua_headers).unwrap();
+        let csrf_token = "csrf-device-test-token-0123456789abcdef";
+        let cookie_header = format!("aetherflow_session={session_jwt}; csrf_token={csrf_token}");
+
+        let no_csrf_verify = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/verify")
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "af-device-test/1.0")
+                    .header(header::COOKIE, &cookie_header)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_code": &user_code}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_csrf_verify.status(), StatusCode::FORBIDDEN);
+
+        // 5. Lowercase unhyphenated short code normalizes and returns server-confirmed client & scopes.
+        let compact_lower = user_code.replace('-', "").to_ascii_lowercase();
+        let verify_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/verify")
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "af-device-test/1.0")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("X-CSRF-Token", csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_code": compact_lower}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+        let verified: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(verify_resp.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verified["status"], "pending");
+        assert_eq!(verified["user_code"], user_code);
+        assert_eq!(verified["client_id"], "tv-client");
+        assert_eq!(verified["client_name"], "Living Room Jellyfin TV");
+        assert_eq!(verified["scope"], "openid profile email");
+
+        // 6. Token polling before approval returns authorization_pending; mismatched client_id on consent fails.
+        let poll_pending = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/public/oidc/oidc/token".replacen("/oidc/oidc", "/oidc", 1))
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(format!(
+                        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&client_id=tv-client&client_secret=device-client-secret&device_code={device_code}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(poll_pending.status(), StatusCode::BAD_REQUEST);
+        let pending_err: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(poll_pending.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pending_err["error"], "authorization_pending");
+
+        let mismatched_consent = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/consent")
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "af-device-test/1.0")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("X-CSRF-Token", csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "user_code": &user_code,
+                            "client_id": "spoofed-client",
+                            "scope": "openid profile email",
+                            "approved": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched_consent.status(), StatusCode::BAD_REQUEST);
+
+        // 7. Explicit approval issues single-use OIDC tokens and marks user_code non-reusable.
+        let approve_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/consent")
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "af-device-test/1.0")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("X-CSRF-Token", csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "user_code": &user_code,
+                            "client_id": "tv-client",
+                            "scope": "openid profile email",
+                            "approved": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approve_resp.status(), StatusCode::OK);
+
+        let token_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/public/oidc/token")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(format!(
+                        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&client_id=tv-client&client_secret=device-client-secret&device_code={device_code}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(token_resp.status(), StatusCode::OK);
+        let tokens: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(token_resp.into_body(), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(tokens["access_token"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+        assert!(tokens["id_token"].as_str().is_some_and(|s| !s.is_empty()));
+
+        // Re-verifying a consumed code returns invalid_user_code.
+        let reverify_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/verify")
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "af-device-test/1.0")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("X-CSRF-Token", csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_code": &user_code}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reverify_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 8. Denial and expired codes return exact RFC/UI error codes.
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO oidc_device_codes (device_code, user_code, client_id, scope, expires_at, status) \
+             VALUES ('dc-expired', 'EXPD-2345', 'tv-client', 'openid', ?1, 'pending')",
+            params![(Utc::now() - Duration::minutes(1)).to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oidc_device_codes (device_code, user_code, client_id, scope, expires_at, status) \
+             VALUES ('dc-deny', 'DENY-2345', 'tv-client', 'openid', ?1, 'pending')",
+            params![(Utc::now() + Duration::minutes(5)).to_rfc3339()],
+        )
+        .unwrap();
+        drop(conn);
+
+        for uri in [
+            "/api/v1/auth/oidc/device/verify",
+            "/api/v1/auth/oidc/device/consent",
+        ] {
+            let expired_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::HOST, "localhost")
+                        .header(header::USER_AGENT, "af-device-test/1.0")
+                        .header(header::COOKIE, &cookie_header)
+                        .header("X-CSRF-Token", csrf_token)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(
+                            serde_json::json!({"user_code": "EXPD-2345", "approved": true})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(expired_resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let err_json: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(expired_resp.into_body(), 4096)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(err_json["error"], "expired_token", "{uri}");
+        }
+
+        let deny_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/oidc/device/consent")
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "af-device-test/1.0")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("X-CSRF-Token", csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_code": "DENY-2345", "approved": false})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deny_resp.status(), StatusCode::OK);
+        let denied_poll = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/public/oidc/token")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(
+                        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&client_id=tv-client&client_secret=device-client-secret&device_code=dc-deny",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied_poll.status(), StatusCode::BAD_REQUEST);
+        let denied_err: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(denied_poll.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(denied_err["error"], "access_denied");
+
+        let _ = fs::remove_dir_all(fixture_root);
     }
 }

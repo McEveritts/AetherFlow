@@ -3,16 +3,230 @@ use super::common::*;
 use super::types::*;
 use crate::state::app;
 use crate::tabs::contracts;
-use crate::tabs::l10n::{tt, tt_with, Badge, ConfirmDialog, Drawer, EmptyState, ObsCard};
-use af_web_core::api::ApiClient;
+use crate::tabs::l10n::{tt, tt_with, Badge, ConfirmDialog, Drawer, EmptyState, Modal, ObsCard};
+use af_web_core::api::{percent_encode_header_component, ApiClient};
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StreamingDemoRequest<'a> {
+    action: &'a str,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct StreamingDemoResponse {
+    message: String,
+    demo_mode: bool,
+    history_seeded: Option<u64>,
+    predictions_seeded: Option<u64>,
+}
+
+pub(super) fn session_artwork_url(
+    session: &PlaybackSession,
+    servers: &[ProviderStatus],
+) -> Option<String> {
+    if !session.has_artwork {
+        return None;
+    }
+    let item_id = session.artwork_item_id.trim();
+    if item_id.is_empty()
+        || item_id.len() > 128
+        || item_id.contains("..")
+        || item_id.contains('/')
+        || item_id.contains('\\')
+    {
+        return None;
+    }
+    let provider = session.provider.trim().to_ascii_lowercase();
+    if !matches!(provider.as_str(), "jellyfin" | "emby") {
+        return None;
+    }
+    let resolved_server_id = if !session.server_id.trim().is_empty() {
+        session.server_id.trim().to_string()
+    } else {
+        let matching: Vec<&ProviderStatus> = servers
+            .iter()
+            .filter(|server| server.provider.eq_ignore_ascii_case(&provider))
+            .collect();
+        if matching.len() != 1 {
+            return None;
+        }
+        let inferred = matching[0].server_id.trim();
+        if inferred.is_empty() {
+            return None;
+        }
+        inferred.to_string()
+    };
+    let encoded_item = percent_encode_header_component(item_id);
+    let encoded_provider = percent_encode_header_component(&provider);
+    let encoded_server = percent_encode_header_component(&resolved_server_id);
+    Some(format!(
+        "/api/v1/auth/streaming/artwork/{encoded_item}?provider={encoded_provider}&serverId={encoded_server}"
+    ))
+}
+
+pub(super) fn has_connected_live_provider(servers: &[ProviderStatus]) -> bool {
+    servers.iter().any(|server| {
+        matches!(server.provider.as_str(), "jellyfin" | "emby") && server.status == "connected"
+    })
+}
+
+pub(super) fn demo_controls_visible(
+    is_admin: bool,
+    servers: &[ProviderStatus],
+    is_demo_mode: bool,
+) -> bool {
+    if !is_admin {
+        return false;
+    }
+    is_demo_mode || !has_connected_live_provider(servers)
+}
+
+pub(super) fn demo_submission_block_reason(
+    is_admin: bool,
+    dashboard_loaded: bool,
+    dashboard_has_error: bool,
+    servers: &[ProviderStatus],
+    is_demo_mode: bool,
+    pending_action: &str,
+) -> Option<&'static str> {
+    if !is_admin {
+        return Some("Administrator privileges are required to modify demo telemetry.");
+    }
+    if !dashboard_loaded || dashboard_has_error {
+        return Some(
+            "Live telemetry status is unavailable or failed to refresh; retry before changing demo mode.",
+        );
+    }
+    match pending_action {
+        "seed" => {
+            if has_connected_live_provider(servers) {
+                return Some(
+                    "A live Jellyfin or Emby provider is connected; demo telemetry cannot be loaded.",
+                );
+            }
+            if is_demo_mode {
+                return Some("Demo telemetry is already active.");
+            }
+            None
+        }
+        "clear" => {
+            if !is_demo_mode {
+                return Some("Demo telemetry is no longer active.");
+            }
+            None
+        }
+        _ => Some("Unsupported demo telemetry action."),
+    }
+}
+
+pub(super) fn demo_confirmation_phrase(action: &str) -> &'static str {
+    if action == "clear" {
+        "CLEAR"
+    } else {
+        "SEED"
+    }
+}
+
+pub(super) fn demo_action_confirmed(action: &str, typed: &str) -> bool {
+    matches!(action, "seed" | "clear") && typed.trim() == demo_confirmation_phrase(action)
+}
+
+pub(super) fn session_subtitle(locale: &str, session: &PlaybackSession) -> String {
+    let mut parts = Vec::new();
+    let user = if session.user_name.trim().is_empty() {
+        af_web_core::i18n::translate(locale, "Unrecorded")
+    } else {
+        session.user_name.trim().to_string()
+    };
+    parts.push(user);
+
+    let series = session.series_name.trim();
+    let season = session.season_number.trim();
+    let episode = session.episode_number.trim();
+    if !series.is_empty() {
+        parts.push(series.to_string());
+    }
+    if !season.is_empty() && !episode.is_empty() {
+        parts.push(format!("S{season} E{episode}"));
+    } else if !season.is_empty() {
+        parts.push(format!("S{season}"));
+    } else if !episode.is_empty() {
+        parts.push(format!("E{episode}"));
+    } else if series.is_empty() && !session.item_type.trim().is_empty() {
+        parts.push(af_web_core::i18n::translate(
+            locale,
+            session.item_type.trim(),
+        ));
+    }
+
+    let state = if session.state.trim().is_empty() {
+        af_web_core::i18n::translate(locale, "Unrecorded")
+    } else {
+        af_web_core::i18n::translate(locale, session.state.trim())
+    };
+    parts.push(state);
+    parts.join(" · ")
+}
+
 #[component]
-fn LiveSession(session: Signal<PlaybackSession>, on_inspect: Callback<Value>) -> impl IntoView {
+fn LiveSession(
+    session: Signal<PlaybackSession>,
+    servers: Signal<Vec<ProviderStatus>>,
+    on_inspect: Callback<Value>,
+) -> impl IntoView {
     let context = app();
+    let artwork_url =
+        Signal::derive(move || session.with(|s| servers.with(|list| session_artwork_url(s, list))));
+    let artwork_failed = RwSignal::new(false);
+    Effect::new(move |_| {
+        artwork_url.track();
+        artwork_failed.set(false);
+    });
     view! {
         <article class="rounded-xl border border-white/10 p-4 space-y-3 min-w-0">
+            <div class="flex items-start gap-3">
+                <div class="w-16 h-24 rounded-xl border border-white/10 bg-white/5 overflow-hidden shrink-0 flex items-center justify-center">
+                    {move || {
+                        let item_name = session.with(|s| display(context, &s.item_name));
+                        match artwork_url.get() {
+                            Some(url) if !artwork_failed.get() => view! {
+                                <img
+                                    src=url
+                                    alt=item_name
+                                    class="w-full h-full object-cover"
+                                    on:error=move |_| artwork_failed.set(true)
+                                />
+                            }
+                            .into_any(),
+                            _ => view! {
+                                <span
+                                    role="img"
+                                    aria-label=tt_with(
+                                        context,
+                                        "Artwork unavailable for {item}",
+                                        &[("item", &item_name)],
+                                    )
+                                    class="text-xs text-slate-400 px-1 text-center"
+                                >
+                                    {move || {
+                                        let kind = session.with(|s| s.item_type.clone());
+                                        if kind.eq_ignore_ascii_case("Audio") {
+                                            tt(context, "Audio")
+                                        } else {
+                                            tt(context, "Media")
+                                        }
+                                    }}
+                                </span>
+                            }
+                            .into_any(),
+                        }
+                    }}
+                </div>
+                <div class="flex-1 min-w-0 space-y-2">
             <div class="flex flex-wrap justify-between gap-2">
                 <h3 class="font-semibold break-words">
                     {move || display(context, &session.get().item_name)}
@@ -31,13 +245,10 @@ fn LiveSession(session: Signal<PlaybackSession>, on_inspect: Callback<Value>) ->
                 }}
             </div>
             <p class="text-sm text-slate-400">
-                {move || {
-                    session
-                        .with(|s| {
-                            tt_with(context, "{user} · {series} · S{season} E{episode} · {state}", &[("user", &(display(context, &s.user_name)).to_string()), ("series", &(s.series_name.clone()).to_string()), ("season", &(s.season_number.clone()).to_string()), ("episode", &(s.episode_number.clone()).to_string()), ("state", &(tt(context, &display(context, &s.state))).to_string())])
-                        })
-                }}
+                {move || session.with(|s| session_subtitle(&crate::tabs::l10n::locale(context), s))}
             </p>
+                </div>
+            </div>
             <progress
                 class="w-full"
                 max="100"
@@ -336,8 +547,278 @@ pub(super) fn ProviderCards(
     }
 }
 #[component]
+pub(super) fn DemoTelemetryBanner(
+    dashboard: crate::state::ApiResource,
+    servers: Signal<Vec<ProviderStatus>>,
+    on_changed: Callback<()>,
+) -> impl IntoView {
+    let context = app();
+    let is_demo_mode = Signal::derive(move || {
+        dashboard
+            .data
+            .with(|d| contracts::decode::<Dashboard>(d).live_summary.is_demo_mode)
+    });
+    let show_banner = Signal::derive(move || {
+        !dashboard.data.with(Value::is_null)
+            && servers
+                .with(|list| demo_controls_visible(context.is_admin(), list, is_demo_mode.get()))
+    });
+    let confirm_open = RwSignal::new(false);
+    let pending_action = RwSignal::new(String::new());
+    let typed_confirmation = RwSignal::new(String::new());
+    let stale_error = RwSignal::new(None::<&'static str>);
+    let busy = RwSignal::new(false);
+
+    let block_reason = Signal::derive(move || {
+        let action = pending_action.get();
+        if action.is_empty() {
+            return None;
+        }
+        let loaded = !dashboard.data.with(Value::is_null);
+        let has_error = dashboard.error.with(Option::is_some);
+        let demo = is_demo_mode.get();
+        servers.with(|list| {
+            demo_submission_block_reason(context.is_admin(), loaded, has_error, list, demo, &action)
+        })
+    });
+
+    Effect::new(move |_| {
+        if !confirm_open.get() {
+            typed_confirmation.set(String::new());
+            stale_error.set(None);
+        }
+    });
+
+    let open_confirm = move |action: &'static str| {
+        if !context.is_admin()
+            || busy.get_untracked()
+            || dashboard.data.with_untracked(Value::is_null)
+            || dashboard.error.with_untracked(Option::is_some)
+        {
+            return;
+        }
+        let demo = is_demo_mode.get_untracked();
+        if servers.with_untracked(|list| {
+            demo_submission_block_reason(context.is_admin(), true, false, list, demo, action)
+                .is_some()
+        }) {
+            return;
+        }
+        stale_error.set(None);
+        pending_action.set(action.into());
+        typed_confirmation.set(String::new());
+        confirm_open.set(true);
+    };
+
+    let submit_demo = Callback::new(move |()| {
+        if busy.get_untracked() || !context.is_admin() {
+            return;
+        }
+        let action = pending_action.get_untracked();
+        let typed = typed_confirmation.get_untracked();
+        if !demo_action_confirmed(&action, &typed) {
+            return;
+        }
+        let loaded = !dashboard.data.with_untracked(Value::is_null);
+        let has_error = dashboard.error.with_untracked(Option::is_some);
+        let demo = is_demo_mode.get_untracked();
+        let blocked = servers.with_untracked(|list| {
+            demo_submission_block_reason(context.is_admin(), loaded, has_error, list, demo, &action)
+        });
+        if let Some(reason) = blocked {
+            stale_error.set(Some(reason));
+            context.toast(tt(context, reason), true);
+            return;
+        }
+        stale_error.set(None);
+        busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        spawn_local(async move {
+            let body =
+                serde_json::to_value(StreamingDemoRequest { action: &action }).unwrap_or_default();
+            match ApiClient
+                .post("/api/v1/admin/streaming/demo", Some(&body))
+                .await
+            {
+                Ok(value) => {
+                    if busy.try_get_untracked().is_none() {
+                        return;
+                    }
+                    let _response = contracts::decode::<StreamingDemoResponse>(&value);
+                    confirm_open.set(false);
+                    typed_confirmation.set(String::new());
+                    stale_error.set(None);
+                    on_changed.run(());
+                    let fallback = if action == "clear" {
+                        "Demo telemetry cleared."
+                    } else {
+                        "Demo Jellyfin streams, codecs, and bandwidth telemetry loaded."
+                    };
+                    context.toast(tt(context, fallback), false);
+                }
+                Err(error) => {
+                    context.toast(tt(context, &error.message), true);
+                }
+            }
+            if busy.try_get_untracked().is_some() {
+                busy_guard.release();
+            }
+        });
+    });
+
+    view! {
+        <Show when=move || show_banner.get()>
+            <ObsCard>
+                <div class="flex flex-wrap items-center justify-between gap-4">
+                    <div class="space-y-1 min-w-0">
+                        <h3 class="text-sm font-semibold">
+                            {move || {
+                                if is_demo_mode.get() {
+                                    tt(
+                                        context,
+                                        "Demo Telemetry Active — Connect Your Jellyfin Server Anytime",
+                                    )
+                                } else {
+                                    tt(
+                                        context,
+                                        "Connect Jellyfin to Track Live Streams, Bandwidth & Play Statistics",
+                                    )
+                                }
+                            }}
+                        </h3>
+                        <p class="text-xs text-slate-400">
+                            {move || tt(
+                                context,
+                                "Demo telemetry writes synthetic Jellyfin session and history entries for previewing charts without a live server.",
+                            )}
+                        </p>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <Show
+                            when=move || is_demo_mode.get()
+                            fallback=move || {
+                                view! {
+                                    <button
+                                        type="button"
+                                        class="glass-button px-4 py-2 text-sm"
+                                        disabled=move || {
+                                            busy.get() || dashboard.error.with(Option::is_some)
+                                        }
+                                        on:click=move |_| open_confirm("seed")
+                                    >
+                                        {move || tt(context, "Load Demo Telemetry")}
+                                    </button>
+                                }
+                            }
+                        >
+                            <button
+                                type="button"
+                                class="glass-button px-4 py-2 text-sm text-amber-300"
+                                disabled=move || {
+                                    busy.get() || dashboard.error.with(Option::is_some)
+                                }
+                                on:click=move |_| open_confirm("clear")
+                            >
+                                {move || tt(context, "Clear Demo Data")}
+                            </button>
+                        </Show>
+                    </div>
+                </div>
+            </ObsCard>
+        </Show>
+        <Modal
+            open=confirm_open
+            title=Signal::derive(move || {
+                if pending_action.get() == "clear" {
+                    tt(context, "Clear streaming demo telemetry?")
+                } else {
+                    tt(context, "Load streaming demo telemetry?")
+                }
+            })
+        >
+            <div class="space-y-4">
+                <p class="text-sm text-slate-300">
+                    {move || {
+                        if pending_action.get() == "clear" {
+                            tt(
+                                context,
+                                "This removes synthetic demo streaming history and disables demo mode.",
+                            )
+                        } else {
+                            tt(
+                                context,
+                                "This seeds synthetic Jellyfin streams and demo history into the streaming database.",
+                            )
+                        }
+                    }}
+                </p>
+                {move || {
+                    block_reason
+                        .get()
+                        .or_else(|| stale_error.get())
+                        .map(|reason| {
+                            view! {
+                                <p role="alert" class="text-sm text-amber-300">
+                                    {move || tt(context, reason)}
+                                </p>
+                            }
+                        })
+                }}
+                <label class="block text-sm space-y-2">
+                    <span>
+                        {move || {
+                            let act = pending_action.get();
+                            tt_with(
+                                context,
+                                "Type {phrase} to confirm demo telemetry change",
+                                &[("phrase", demo_confirmation_phrase(&act))],
+                            )
+                        }}
+                    </span>
+                    <input
+                        type="text"
+                        class="glass-input w-full px-3 py-2"
+                        autocomplete="off"
+                        spellcheck="false"
+                        disabled=move || busy.get()
+                        prop:value=move || typed_confirmation.get()
+                        on:input=move |event| typed_confirmation.set(event_target_value(&event))
+                    />
+                </label>
+                <div class="flex gap-3 justify-end">
+                    <button
+                        type="button"
+                        class="glass-button px-4 py-2"
+                        disabled=move || busy.get()
+                        on:click=move |_| confirm_open.set(false)
+                    >
+                        {move || tt(context, "Common.cancel")}
+                    </button>
+                    <button
+                        type="button"
+                        class="glass-button-primary px-4 py-2"
+                        disabled=move || {
+                            busy.get()
+                                || block_reason.get().is_some()
+                                || !demo_action_confirmed(
+                                    &pending_action.get(),
+                                    &typed_confirmation.get(),
+                                )
+                        }
+                        on:click=move |_| submit_demo.run(())
+                    >
+                        {move || tt(context, "Common.confirm")}
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    }
+}
+
+#[component]
 pub(super) fn ActiveSessions(
     dashboard: crate::state::ApiResource,
+    servers: Signal<Vec<ProviderStatus>>,
     on_inspect: Callback<Value>,
 ) -> impl IntoView {
     let context = app();
@@ -378,7 +859,7 @@ pub(super) fn ActiveSessions(
                                                 .unwrap_or_default()
                                         })
                                 });
-                                view! { <LiveSession session on_inspect=inspect /> }
+                                view! { <LiveSession session servers on_inspect=inspect /> }
                             }
                         />
                     </div>
@@ -393,5 +874,191 @@ pub(super) fn ActiveSessions(
                     </Show>
                 </div>
             </ObsCard>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_artwork_url_uses_session_or_unambiguous_server_and_rejects_ambiguous_or_unsafe() {
+        let servers = vec![ProviderStatus {
+            provider: "jellyfin".into(),
+            server_id: "srv-jf-1".into(),
+            status: "connected".into(),
+            ..Default::default()
+        }];
+        let mut session = PlaybackSession {
+            provider: "jellyfin".into(),
+            has_artwork: true,
+            artwork_item_id: "item 123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            session_artwork_url(&session, &servers).as_deref(),
+            Some("/api/v1/auth/streaming/artwork/item%20123?provider=jellyfin&serverId=srv-jf-1")
+        );
+
+        let ambiguous_servers = vec![
+            ProviderStatus {
+                provider: "jellyfin".into(),
+                server_id: "srv-jf-1".into(),
+                status: "connected".into(),
+                ..Default::default()
+            },
+            ProviderStatus {
+                provider: "jellyfin".into(),
+                server_id: "srv-jf-2".into(),
+                status: "connected".into(),
+                ..Default::default()
+            },
+        ];
+        // Multiple servers for the same provider without session.server_id -> ambiguous.
+        assert_eq!(session_artwork_url(&session, &ambiguous_servers), None);
+
+        // Explicit session.server_id resolves ambiguity cleanly.
+        session.server_id = "explicit-srv".into();
+        assert_eq!(
+            session_artwork_url(&session, &ambiguous_servers).as_deref(),
+            Some(
+                "/api/v1/auth/streaming/artwork/item%20123?provider=jellyfin&serverId=explicit-srv"
+            )
+        );
+
+        // Missing server_id with no matching server or empty server_id cannot infer unambiguously.
+        session.server_id.clear();
+        assert_eq!(session_artwork_url(&session, &[]), None);
+        assert_eq!(
+            session_artwork_url(
+                &session,
+                &[ProviderStatus {
+                    provider: "jellyfin".into(),
+                    server_id: String::new(),
+                    status: "unconfigured".into(),
+                    ..Default::default()
+                }],
+            ),
+            None
+        );
+
+        for bad in ["", "../secret", "a/b", "a\\b"] {
+            session.artwork_item_id = bad.into();
+            assert_eq!(session_artwork_url(&session, &servers), None, "{bad}");
+        }
+
+        session.artwork_item_id = "ok-1".into();
+        session.has_artwork = false;
+        assert_eq!(session_artwork_url(&session, &servers), None);
+
+        session.has_artwork = true;
+        session.provider = "demo".into();
+        assert_eq!(session_artwork_url(&session, &servers), None);
+    }
+
+    #[test]
+    fn demo_controls_and_submission_guard_reject_stale_and_unprivileged_state() {
+        let unconfigured = vec![ProviderStatus {
+            provider: "jellyfin".into(),
+            status: "unconfigured".into(),
+            ..Default::default()
+        }];
+        let connected = vec![ProviderStatus {
+            provider: "jellyfin".into(),
+            status: "connected".into(),
+            ..Default::default()
+        }];
+        let emby_connected = vec![ProviderStatus {
+            provider: "emby".into(),
+            status: "connected".into(),
+            ..Default::default()
+        }];
+
+        assert!(!demo_controls_visible(false, &unconfigured, false));
+        assert!(!demo_controls_visible(false, &unconfigured, true));
+        assert!(demo_controls_visible(true, &unconfigured, false));
+        assert!(!demo_controls_visible(true, &connected, false));
+        assert!(!demo_controls_visible(true, &emby_connected, false));
+        assert!(demo_controls_visible(true, &connected, true));
+
+        assert!(!demo_action_confirmed("seed", ""));
+        assert!(!demo_action_confirmed("seed", "CLEAR"));
+        assert!(demo_action_confirmed("seed", "SEED"));
+        assert!(!demo_action_confirmed("clear", "SEED"));
+        assert!(demo_action_confirmed("clear", " CLEAR "));
+        assert!(!demo_action_confirmed("other", "SEED"));
+
+        assert_eq!(
+            demo_submission_block_reason(true, true, false, &unconfigured, false, "seed"),
+            None
+        );
+        assert_eq!(
+            demo_submission_block_reason(true, true, false, &unconfigured, true, "clear"),
+            None
+        );
+        assert!(
+            demo_submission_block_reason(false, true, false, &unconfigured, false, "seed")
+                .is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, false, false, &unconfigured, false, "seed")
+                .is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, true, &unconfigured, false, "seed").is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, true, &unconfigured, true, "clear").is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, false, &connected, false, "seed").is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, false, &emby_connected, false, "seed")
+                .is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, false, &unconfigured, true, "seed").is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, false, &unconfigured, false, "clear")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn session_subtitle_omits_empty_series_tokens_for_movies_and_audio() {
+        let movie = PlaybackSession {
+            user_name: "alice".into(),
+            item_name: "Inception".into(),
+            item_type: "Movie".into(),
+            state: "playing".into(),
+            ..Default::default()
+        };
+        assert_eq!(session_subtitle("en", &movie), "alice · Movie · playing");
+
+        let audio = PlaybackSession {
+            user_name: "bob".into(),
+            item_name: "Track 1".into(),
+            item_type: "Audio".into(),
+            state: "paused".into(),
+            ..Default::default()
+        };
+        assert_eq!(session_subtitle("en", &audio), "bob · Audio · paused");
+
+        let episode = PlaybackSession {
+            user_name: "carol".into(),
+            item_name: "Pilot".into(),
+            item_type: "Episode".into(),
+            series_name: "Andor".into(),
+            season_number: "1".into(),
+            episode_number: "3".into(),
+            state: "playing".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            session_subtitle("en", &episode),
+            "carol · Andor · S1 E3 · playing"
+        );
     }
 }

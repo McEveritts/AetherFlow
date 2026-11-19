@@ -7,6 +7,7 @@ interface MockOptions {
   setupRequired?: boolean;
   userRole?: UserRole;
   enableWS?: boolean;
+  preserveStorage?: boolean;
 }
 
 interface MockApp {
@@ -105,9 +106,11 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     if (!options.enableWS) {
       (window as Window & { __AF_DISABLE_WS__?: boolean }).__AF_DISABLE_WS__ = true;
     }
-    window.localStorage.clear();
-    window.sessionStorage.clear();
-  }, { enableWS: options.enableWS });
+    if (!options.preserveStorage) {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    }
+  }, { enableWS: options.enableWS, preserveStorage: options.preserveStorage });
 
   await page.route(/\/api(\/v1)?(\/public)?\/csrf-token/, async (route: Route) => {
     await json(route, { csrf_token: 'mock-csrf-token' });
@@ -160,7 +163,18 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
   });
 
   await page.route(/\/api(\/v1)?(\/auth)?\/system\/metrics(\/history)?/, async (route: Route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/history')) {
+    const parsedUrl = new URL(route.request().url());
+    if (parsedUrl.pathname.endsWith('/history')) {
+      if (parsedUrl.searchParams.get('aggregate') === 'daily_transfer') {
+        await json(route, {
+          days: [],
+          counter_resets: 0,
+          invalid_samples: 0,
+          conflicting_samples: 0,
+          duplicate_samples: 0,
+        });
+        return;
+      }
       await json(route, { points: [] });
       return;
     }
@@ -190,6 +204,14 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
       return;
     }
     await json(route, {});
+  });
+
+  await page.route(/\/api\/v1\/admin\/ai\/predictions\/history(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, []);
   });
 
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/(check|status)/, async (route: Route) => {
@@ -286,6 +308,30 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
 
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/packages\/[^/]+\/progress/, async (route: Route) => {
     await json(route, { status: 'idle', progress: 0 });
+  });
+
+  let mcbrowserPrefs = {
+    view: 'list',
+    sort: 'name',
+    direction: 'asc',
+    show_hidden: false,
+    single_click: false,
+    natural_sort: true,
+    redirect_after_copy_move: false,
+    date_format: false,
+    editor_theme: 'chrome',
+    locale: 'en',
+  };
+  await page.route(/\/api\/v1\/auth\/mcbrowser\/preferences(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() === 'PUT') {
+      const next = route.request().postDataJSON();
+      if (next && typeof next === 'object') {
+        mcbrowserPrefs = { ...mcbrowserPrefs, ...(next as Record<string, unknown>) };
+      }
+      await json(route, mcbrowserPrefs);
+      return;
+    }
+    await json(route, mcbrowserPrefs);
   });
 }
 

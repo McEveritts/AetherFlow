@@ -10,7 +10,7 @@ const MEMBER_USER = process.env.E2E_MEMBER_USER || 'live-member';
 function completedTelemetryHistory(page: Page, window?: string) {
   return page.waitForResponse(async response => {
     const url = new URL(response.url());
-    if (url.pathname !== '/api/v1/auth/system/metrics/history' || !response.ok()
+    if (url.pathname !== '/api/v1/auth/system/metrics/history' || !url.searchParams.has('window') || !response.ok()
       || (window !== undefined && url.searchParams.get('window') !== window)) return false;
     // A WebSocket revalidation can supersede a read after its headers arrive.
     // Keep waiting for a complete body; the caller still asserts its contents.

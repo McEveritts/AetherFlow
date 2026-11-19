@@ -53,6 +53,9 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  // The page fetches the catalog with cache: no-store. Let its network
+  // request keep the page's client identity instead of issuing a worker fetch.
+  if (url.pathname === '/api/v1/auth/plugins' || url.pathname === '/api/auth/plugins') return;
   if (isPluginNamespace(url.pathname)) {
     // Neither CacheStorage nor a previously cached HTTP response may stand in
     // for the server's authentication and authorization decision.

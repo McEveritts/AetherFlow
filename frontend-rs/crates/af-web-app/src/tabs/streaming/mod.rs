@@ -18,19 +18,23 @@ mod portability;
 mod reconciliation;
 mod types;
 use administration::HistoryAdministration;
-use analytics::ImportedEstimates;
+use analytics::{DashboardDistributions, ImportedEstimates};
 use connections::StreamingServerSettings;
 use history::CanonicalHistory;
-use live::{ActiveSessions, ProviderCards, StreamingDetails};
+use live::{ActiveSessions, DemoTelemetryBanner, ProviderCards, StreamingDetails};
 #[component]
 pub fn StreamingTab() -> impl IntoView {
     let context = app();
     let active = RwSignal::new("live".to_owned());
     let window = RwSignal::new("30".to_string());
+    let play_method = RwSignal::new("all".to_string());
+    let media_type = RwSignal::new("all".to_string());
     let dashboard = use_api(Signal::derive(move || {
         format!(
-            "/api/v1/auth/streaming/dashboard?window={}&playMethod=all&mediaType=all",
-            window.get()
+            "/api/v1/auth/streaming/dashboard?window={}&playMethod={}&mediaType={}",
+            window.get(),
+            play_method.get(),
+            media_type.get()
         )
     }));
     let poll = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
@@ -129,8 +133,52 @@ pub fn StreamingTab() -> impl IntoView {
             <TabPanel id_prefix="streaming" id=Signal::derive(move || active.get())>
                 <Show when=move || active.get() == "live">
                     <div class="space-y-5">
+                    <DemoTelemetryBanner dashboard servers on_changed=changed />
+                    <div class="grid sm:grid-cols-3 gap-3" role="group" aria-label=move || tt(context, "Telemetry filters")>
+                        <label class="text-xs text-slate-400 space-y-1">
+                            <span class="block">{move || tt(context, "Estimate window ")}</span>
+                            <select
+                                class="glass-input p-2 w-full"
+                                prop:value=move || window.get()
+                                on:change=move |e| window.set(event_target_value(&e))
+                            >
+                                <option value="7">{move || tt(context, "7 days")}</option>
+                                <option value="30">{move || tt(context, "30 days")}</option>
+                                <option value="90">{move || tt(context, "90 days")}</option>
+                                <option value="all">{move || tt(context, "All time")}</option>
+                            </select>
+                        </label>
+                        <label class="text-xs text-slate-400 space-y-1">
+                            <span class="block">{move || tt(context, "Play method")}</span>
+                            <select
+                                class="glass-input p-2 w-full"
+                                prop:value=move || play_method.get()
+                                on:change=move |e| play_method.set(event_target_value(&e))
+                            >
+                                <option value="all">{move || tt(context, "All Methods")}</option>
+                                <option value="DirectPlay">{move || tt(context, "Direct Play")}</option>
+                                <option value="DirectStream">{move || tt(context, "Direct Stream")}</option>
+                                <option value="Transcode">{move || tt(context, "Transcode")}</option>
+                                <option value="Unknown">{move || tt(context, "Unknown")}</option>
+                            </select>
+                        </label>
+                        <label class="text-xs text-slate-400 space-y-1">
+                            <span class="block">{move || tt(context, "Media type")}</span>
+                            <select
+                                class="glass-input p-2 w-full"
+                                prop:value=move || media_type.get()
+                                on:change=move |e| media_type.set(event_target_value(&e))
+                            >
+                                <option value="all">{move || tt(context, "All Media")}</option>
+                                <option value="Movie">{move || tt(context, "Movies")}</option>
+                                <option value="Episode">{move || tt(context, "Episodes")}</option>
+                                <option value="Audio">{move || tt(context, "Audio")}</option>
+                            </select>
+                        </label>
+                    </div>
                     <ProviderCards servers config config_open />
-                    <ActiveSessions dashboard on_inspect=inspect />
+                    <ActiveSessions dashboard servers on_inspect=inspect />
+                    <DashboardDistributions dashboard />
                     </div>
                 </Show>
                 <Show when=move || active.get() == "history">

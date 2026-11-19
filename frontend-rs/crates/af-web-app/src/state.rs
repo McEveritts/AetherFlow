@@ -1,6 +1,5 @@
 use af_web_core::{
     api::{storage_get, storage_set, ApiClient, ApiError},
-    charts::Point,
     ws::ConnectionState,
 };
 use futures::{
@@ -172,23 +171,362 @@ fn normalize_theme(pref: &str) -> &'static str {
     }
 }
 
-fn color_scheme_query() -> Option<wasm_bindgen::JsValue> {
+pub fn normalize_high_refresh_mode(pref: &str) -> &'static str {
+    match pref.trim().to_ascii_lowercase().as_str() {
+        "120" | "120hz" | "high" | "pro" | "promotion" | "on" | "true" => "120hz",
+        "60" | "60hz" | "standard" | "off" | "false" => "standard",
+        _ => "auto",
+    }
+}
+
+pub fn normalize_touch_mode(pref: &str) -> &'static str {
+    match pref.trim().to_ascii_lowercase().as_str() {
+        "on" | "enabled" | "true" | "touch" => "on",
+        "off" | "desktop" | "disabled" | "false" | "mouse" => "off",
+        _ => "auto",
+    }
+}
+
+fn legacy_touch_mode_value(mode: &str) -> &'static str {
+    match normalize_touch_mode(mode) {
+        "on" => "enabled",
+        "off" => "desktop",
+        _ => "auto",
+    }
+}
+
+pub fn quantize_aurora_opacity_pct(pct: f64) -> u8 {
+    if !pct.is_finite() {
+        return 55;
+    }
+    let clamped = pct.clamp(0.0, 100.0);
+    (((clamped / 5.0).round() as i32) * 5).clamp(0, 100) as u8
+}
+
+pub fn normalize_aurora_opacity_pct(raw: &str) -> u8 {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return 55;
+    }
+    if let Some(pct_str) = trimmed.strip_suffix('%') {
+        let Ok(pct) = pct_str.trim().parse::<f64>() else {
+            return 55;
+        };
+        return quantize_aurora_opacity_pct(pct);
+    }
+    let Ok(val) = trimmed.parse::<f64>() else {
+        return 55;
+    };
+    if !val.is_finite() {
+        return 55;
+    }
+    if val < 0.0 {
+        return 0;
+    }
+    let pct = if val <= 1.0 { val * 100.0 } else { val };
+    quantize_aurora_opacity_pct(pct)
+}
+
+pub fn format_aurora_opacity_unit(pct: u8) -> String {
+    let pct = quantize_aurora_opacity_pct(f64::from(pct));
+    match pct {
+        0 => "0".into(),
+        100 => "1".into(),
+        p if p % 10 == 0 => format!("0.{}", p / 10),
+        p => format!("0.{p:02}"),
+    }
+}
+
+pub fn normalize_card_lift(raw: &str) -> i8 {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return -4;
+    }
+    let stripped = trimmed.strip_suffix("px").unwrap_or(&trimmed).trim();
+    match stripped {
+        "false" | "off" | "none" | "flat" | "disabled" | "0" | "-0" => return 0,
+        "true" | "on" | "enabled" | "spring" => return -4,
+        _ => {}
+    }
+    let Ok(val) = stripped.parse::<f64>() else {
+        return -4;
+    };
+    if !val.is_finite() {
+        return -4;
+    }
+    if val.abs() < 1.0 {
+        return 0;
+    }
+    let signed = -val.abs();
+    let buckets = [-2i8, -4, -6, -8];
+    buckets
+        .into_iter()
+        .min_by(|a, b| {
+            (signed - f64::from(*a))
+                .abs()
+                .total_cmp(&(signed - f64::from(*b)).abs())
+        })
+        .unwrap_or(-4)
+}
+
+pub fn quantize_refresh_rate(fps: f64) -> u32 {
+    if !fps.is_finite() || fps <= 0.0 {
+        return 60;
+    }
+    let buckets = [60u32, 75, 90, 120, 144, 165, 240];
+    buckets
+        .into_iter()
+        .min_by(|a, b| {
+            (fps - f64::from(*a))
+                .abs()
+                .total_cmp(&(fps - f64::from(*b)).abs())
+        })
+        .unwrap_or(60)
+}
+
+pub fn resolve_high_refresh_active(mode: &str, detected_hz: u32) -> bool {
+    match normalize_high_refresh_mode(mode) {
+        "120hz" => true,
+        "standard" => false,
+        _ => detected_hz >= 90,
+    }
+}
+
+pub fn resolve_touch_mode_active(mode: &str, detected_touch: bool) -> bool {
+    match normalize_touch_mode(mode) {
+        "on" => true,
+        "off" => false,
+        _ => detected_touch,
+    }
+}
+
+fn parse_bool_str(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "enabled" | "yes" => Some(true),
+        "false" | "0" | "off" | "disabled" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn legacy_storage_envelope(raw: Option<&str>) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(raw?).ok()?;
+    if let Some(state) = parsed.get("state").filter(|v| v.is_object()) {
+        Some(state.clone())
+    } else if parsed.is_object() {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HydratedPreferences {
+    pub locale: Option<String>,
+    pub theme: String,
+    pub immersive_overview: bool,
+    pub show_gpu: bool,
+    pub show_transfer_history: bool,
+    pub reduced_motion: bool,
+    pub haptic_feedback: bool,
+    pub high_refresh_mode: String,
+    pub touch_mode: String,
+    pub aurora_opacity: u8,
+    pub aurora_animation: bool,
+    pub grain_display: bool,
+    pub card_lift: i8,
+}
+
+pub(crate) fn hydrate_preferences_with<F>(get: F) -> HydratedPreferences
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let legacy_sys = legacy_storage_envelope(get("aetherflow-system-storage").as_deref());
+    let legacy_conn = legacy_storage_envelope(get("aetherflow-connection-storage").as_deref());
+    let sys_field = |name: &str| legacy_sys.as_ref().and_then(|obj| obj.get(name));
+    let conn_field = |name: &str| {
+        legacy_conn
+            .as_ref()
+            .and_then(|obj| obj.get(name))
+            .or_else(|| sys_field(name))
+    };
+
+    let locale = get("aetherflow-language")
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            sys_field("language")
+                .and_then(Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+                .map(String::from)
+        })
+        .map(|candidate| {
+            if af_web_core::i18n::LOCALES.contains(&candidate.as_str()) {
+                candidate
+            } else {
+                "en".into()
+            }
+        });
+
+    let theme = get("aetherflow-theme")
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| sys_field("theme").and_then(Value::as_str).map(String::from))
+        .map(|v| normalize_theme(&v).to_string())
+        .unwrap_or_else(|| "dark".into());
+
+    let immersive_overview = get("aetherflow-immersive-overview")
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| {
+            get("aetherflow-dashboard-density")
+                .as_deref()
+                .map(|d| d.trim().eq_ignore_ascii_case("immersive"))
+        })
+        .or_else(|| {
+            conn_field("dashboardDensity")
+                .and_then(Value::as_str)
+                .map(|d| d.trim().eq_ignore_ascii_case("immersive"))
+        })
+        .unwrap_or(false);
+
+    let show_gpu = get("aetherflow-show-gpu")
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| conn_field("showGpuWidget").and_then(Value::as_bool))
+        .unwrap_or(true);
+
+    let show_transfer_history = get("aetherflow-show-transfer-history")
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| conn_field("showDataUsageWidget").and_then(Value::as_bool))
+        .unwrap_or(true);
+
+    let reduced_motion = get("aetherflow-reduced-motion")
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| sys_field("reducedMotion").and_then(Value::as_bool))
+        .unwrap_or(false);
+
+    let haptic_feedback = get("aetherflow-haptic-feedback")
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| sys_field("hapticFeedback").and_then(Value::as_bool))
+        .unwrap_or(true);
+
+    let high_refresh_mode = get("aetherflow-high-refresh-mode")
+        .or_else(|| {
+            sys_field("highRefreshMode")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .map(|v| normalize_high_refresh_mode(&v).to_string())
+        .unwrap_or_else(|| "auto".into());
+
+    let touch_mode = get("aetherflow-touch-mode")
+        .or_else(|| {
+            sys_field("touchMode")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .map(|v| normalize_touch_mode(&v).to_string())
+        .unwrap_or_else(|| "auto".into());
+
+    let aurora_opacity = get("aetherflow-aurora-opacity")
+        .map(|v| normalize_aurora_opacity_pct(&v))
+        .or_else(|| {
+            sys_field("auroraOpacity").and_then(|v| {
+                v.as_f64()
+                    .map(|num| normalize_aurora_opacity_pct(&num.to_string()))
+                    .or_else(|| v.as_str().map(normalize_aurora_opacity_pct))
+            })
+        })
+        .unwrap_or(55);
+
+    let aurora_animation = get("aetherflow-aurora-animation")
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| sys_field("auroraAnimation").and_then(Value::as_bool))
+        .unwrap_or(false);
+
+    let grain_display = get("aetherflow-grain-display")
+        .or_else(|| get("aetherflow-grain"))
+        .as_deref()
+        .and_then(parse_bool_str)
+        .or_else(|| {
+            sys_field("grainDisplay")
+                .and_then(|v| v.as_bool().or_else(|| v.as_str().and_then(parse_bool_str)))
+        })
+        .unwrap_or(true);
+
+    let card_lift = get("aetherflow-card-lift")
+        .map(|v| normalize_card_lift(&v))
+        .or_else(|| {
+            sys_field("cardLift").and_then(|v| {
+                v.as_i64()
+                    .map(|n| normalize_card_lift(&n.to_string()))
+                    .or_else(|| v.as_f64().map(|n| normalize_card_lift(&n.to_string())))
+                    .or_else(|| v.as_bool().map(|b| if b { -4 } else { 0 }))
+                    .or_else(|| v.as_str().map(normalize_card_lift))
+            })
+        })
+        .unwrap_or(-4);
+
+    HydratedPreferences {
+        locale,
+        theme,
+        immersive_overview,
+        show_gpu,
+        show_transfer_history,
+        reduced_motion,
+        haptic_feedback,
+        high_refresh_mode,
+        touch_mode,
+        aurora_opacity,
+        aurora_animation,
+        grain_display,
+        card_lift,
+    }
+}
+
+fn media_query(query: &str) -> Option<wasm_bindgen::JsValue> {
     let window = web_sys::window()?;
     js_sys::Reflect::get(&window, &"matchMedia".into())
         .ok()?
         .dyn_into::<js_sys::Function>()
         .ok()?
-        .call1(&window, &"(prefers-color-scheme: light)".into())
+        .call1(&window, &query.into())
         .ok()
 }
 
+fn media_query_matches(query: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        media_query(query)
+            .and_then(|mql| js_sys::Reflect::get(&mql, &"matches".into()).ok())
+            .and_then(|matches| matches.as_bool())
+            == Some(true)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = query;
+        false
+    }
+}
+
+fn color_scheme_query() -> Option<wasm_bindgen::JsValue> {
+    media_query("(prefers-color-scheme: light)")
+}
+
+fn detect_touch_device() -> bool {
+    // A hoverless desktop or headless browser can report no pointing device.
+    // Use the primary pointer capability to select touch-sized controls.
+    media_query_matches("(pointer: coarse)")
+}
+
+fn detect_reduced_motion_preference() -> bool {
+    media_query_matches("(prefers-reduced-motion: reduce)")
+}
+
 fn theme_is_light(pref: &str) -> bool {
-    pref == "light"
-        || (pref == "system"
-            && color_scheme_query()
-                .and_then(|query| js_sys::Reflect::get(&query, &"matches".into()).ok())
-                .and_then(|matches| matches.as_bool())
-                == Some(true))
+    pref == "light" || (pref == "system" && media_query_matches("(prefers-color-scheme: light)"))
 }
 
 pub fn apply_theme_dom(pref: &str) {
@@ -226,6 +564,75 @@ pub fn apply_reduced_motion_dom(enabled: bool) {
     }
 }
 
+pub fn apply_display_preferences_dom(context: AppContext) {
+    let reduced_user = context.reduced_motion.get();
+    let motion_suppressed = reduced_user || context.system_reduced_motion.get();
+    let refresh_mode = context.high_refresh_mode.get();
+    let detected_hz = context.detected_refresh_rate.get();
+    let high_refresh =
+        !motion_suppressed && resolve_high_refresh_active(&refresh_mode, detected_hz);
+    let touch_pref = context.touch_mode.get();
+    let detected_touch = context.detected_touch_device.get();
+    let touch_active = resolve_touch_mode_active(&touch_pref, detected_touch);
+    let aurora_opacity = quantize_aurora_opacity_pct(f64::from(context.aurora_opacity.get()));
+    let aurora_anim = context.aurora_animation.get() && !motion_suppressed;
+    let grain = context.grain_display.get();
+    let card_lift = if motion_suppressed {
+        0
+    } else {
+        context.card_lift.get()
+    };
+    let density = if context.immersive_overview.get() {
+        "immersive"
+    } else {
+        "compact"
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    if let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    {
+        if reduced_user {
+            let _ = root.set_attribute("data-reduced-motion", "true");
+        } else {
+            let _ = root.remove_attribute("data-reduced-motion");
+        }
+        let _ = root.set_attribute(
+            "data-refresh-mode",
+            normalize_high_refresh_mode(&refresh_mode),
+        );
+        let _ = root.set_attribute(
+            "data-high-refresh",
+            if high_refresh { "true" } else { "false" },
+        );
+        let _ = root.set_attribute("data-touch-preference", normalize_touch_mode(&touch_pref));
+        let _ = root.set_attribute(
+            "data-touch-mode",
+            if touch_active { "true" } else { "false" },
+        );
+        let _ = root.set_attribute("data-aurora-opacity", &aurora_opacity.to_string());
+        let _ = root.set_attribute(
+            "data-aurora-animation",
+            if aurora_anim { "true" } else { "false" },
+        );
+        let _ = root.set_attribute("data-grain", if grain { "true" } else { "false" });
+        let _ = root.set_attribute("data-card-lift", &card_lift.to_string());
+        let _ = root.set_attribute("data-density", density);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (
+        reduced_user,
+        high_refresh,
+        touch_active,
+        aurora_opacity,
+        aurora_anim,
+        grain,
+        card_lift,
+        density,
+    );
+}
+
 pub fn apply_locale_dom(locale: &str) {
     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
         if let Some(root) = document.document_element() {
@@ -241,10 +648,11 @@ pub fn apply_locale_dom(locale: &str) {
     }
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
 fn is_spa_fallback_path(path: &str) -> bool {
     !matches!(
         path.trim_end_matches('/'),
-        "" | "/login" | "/oauth/consent" | "/share"
+        "" | "/login" | "/oauth/consent" | "/oauth/device" | "/share"
     )
 }
 
@@ -423,6 +831,16 @@ struct ServicesOrder {
     accepted: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferSummary {
+    pub id: u64,
+    pub path: String,
+    pub sent: u64,
+    pub size: u64,
+    pub status: String,
+    pub active: bool,
+}
+
 #[derive(Clone, Copy)]
 pub struct AppContext {
     pub user: RwSignal<Option<Value>>,
@@ -431,19 +849,33 @@ pub struct AppContext {
     pub session_epoch: RwSignal<u64>,
     pub authenticated_at: RwSignal<f64>,
     pub tab: RwSignal<TabId>,
+    pub pending_subtab: RwSignal<Option<(TabId, String)>>,
     pub locale: RwSignal<String>,
     pub catalog_revision: RwSignal<u32>,
     pub theme: RwSignal<String>,
+    pub immersive_overview: RwSignal<bool>,
+    pub show_gpu: RwSignal<bool>,
+    pub show_transfer_history: RwSignal<bool>,
     pub reduced_motion: RwSignal<bool>,
+    pub system_reduced_motion: RwSignal<bool>,
     pub haptic_feedback: RwSignal<bool>,
+    pub high_refresh_mode: RwSignal<String>,
+    pub detected_refresh_rate: RwSignal<u32>,
+    pub touch_mode: RwSignal<String>,
+    pub detected_touch_device: RwSignal<bool>,
+    pub aurora_opacity: RwSignal<u8>,
+    pub aurora_animation: RwSignal<bool>,
+    pub grain_display: RwSignal<bool>,
+    pub card_lift: RwSignal<i8>,
     pub settings: RwSignal<Value>,
     pub metrics: RwSignal<Value>,
     pub services: RwSignal<Value>,
     services_order: RwSignal<ServicesOrder>,
-    pub history: RwSignal<Vec<Point>>,
+    pub(crate) live_samples: RwSignal<Vec<crate::tabs::overview::Sample>>,
     pub connection: RwSignal<ConnectionState>,
     pub pending: RwSignal<usize>,
     pub notifications: RwSignal<Vec<Value>>,
+    pub transfers: RwSignal<Vec<TransferSummary>>,
     pub toasts: RwSignal<Vec<Toast>>,
     pub banners: RwSignal<Vec<String>>,
     pub command_open: RwSignal<bool>,
@@ -463,22 +895,14 @@ impl AppContext {
             .unwrap_or_default();
         #[cfg(not(target_arch = "wasm32"))]
         let tab = TabId::default();
-        let locale = initial_preference("aetherflow-language")
-            .filter(|locale| !locale.is_empty())
-            .map(|locale| {
-                if af_web_core::i18n::LOCALES.contains(&locale.as_str()) {
-                    locale
-                } else {
-                    "en".into()
-                }
-            })
-            .unwrap_or_else(|| {
-                #[cfg(target_arch = "wasm32")]
-                let language = web_sys::window().and_then(|window| window.navigator().language());
-                #[cfg(not(target_arch = "wasm32"))]
-                let language: Option<String> = None;
-                detect_browser_locale(language.as_deref()).into()
-            });
+        let hydrated = hydrate_preferences_with(initial_preference);
+        let locale = hydrated.locale.clone().unwrap_or_else(|| {
+            #[cfg(target_arch = "wasm32")]
+            let language = web_sys::window().and_then(|window| window.navigator().language());
+            #[cfg(not(target_arch = "wasm32"))]
+            let language: Option<String> = None;
+            detect_browser_locale(language.as_deref()).into()
+        });
         #[cfg(target_arch = "wasm32")]
         apply_locale_dom(&locale);
         let context = Self {
@@ -488,25 +912,33 @@ impl AppContext {
             session_epoch: RwSignal::new(0),
             authenticated_at: RwSignal::new(0.0),
             tab: RwSignal::new(tab),
+            pending_subtab: RwSignal::new(None),
             locale: RwSignal::new(locale),
             catalog_revision: RwSignal::new(0),
-            theme: RwSignal::new(
-                normalize_theme(&initial_preference("aetherflow-theme").unwrap_or_default()).into(),
-            ),
-            reduced_motion: RwSignal::new(
-                initial_preference("aetherflow-reduced-motion").as_deref() == Some("true"),
-            ),
-            haptic_feedback: RwSignal::new(
-                initial_preference("aetherflow-haptic-feedback").as_deref() != Some("false"),
-            ),
+            theme: RwSignal::new(hydrated.theme),
+            immersive_overview: RwSignal::new(hydrated.immersive_overview),
+            show_gpu: RwSignal::new(hydrated.show_gpu),
+            show_transfer_history: RwSignal::new(hydrated.show_transfer_history),
+            reduced_motion: RwSignal::new(hydrated.reduced_motion),
+            system_reduced_motion: RwSignal::new(detect_reduced_motion_preference()),
+            haptic_feedback: RwSignal::new(hydrated.haptic_feedback),
+            high_refresh_mode: RwSignal::new(hydrated.high_refresh_mode),
+            detected_refresh_rate: RwSignal::new(60),
+            touch_mode: RwSignal::new(hydrated.touch_mode),
+            detected_touch_device: RwSignal::new(detect_touch_device()),
+            aurora_opacity: RwSignal::new(hydrated.aurora_opacity),
+            aurora_animation: RwSignal::new(hydrated.aurora_animation),
+            grain_display: RwSignal::new(hydrated.grain_display),
+            card_lift: RwSignal::new(hydrated.card_lift),
             settings: RwSignal::new(Value::Null),
             metrics: RwSignal::new(Value::Null),
             services: RwSignal::new(Value::Null),
             services_order: RwSignal::new(ServicesOrder::default()),
-            history: RwSignal::new(vec![]),
+            live_samples: RwSignal::new(vec![]),
             connection: RwSignal::new(ConnectionState::Connecting),
             pending: RwSignal::new(0),
             notifications: RwSignal::new(vec![]),
+            transfers: RwSignal::new(vec![]),
             toasts: RwSignal::new(vec![]),
             banners: RwSignal::new(vec![]),
             command_open: RwSignal::new(false),
@@ -537,6 +969,7 @@ impl AppContext {
         if af_web_core::i18n::LOCALES.contains(&locale) {
             storage_set("aetherflow-language", locale);
             self.locale.set(locale.into());
+            self.sync_legacy_system_storage();
             apply_locale_dom(locale);
             self.load_locale(locale.to_string());
         }
@@ -596,12 +1029,103 @@ impl AppContext {
         self.services.set(value);
         true
     }
+    pub(crate) fn publish_metrics(self, metrics: Value) {
+        self.live_samples
+            .update(|samples| crate::tabs::overview::Sample::record_live(samples, &metrics));
+        self.metrics.set(metrics);
+    }
+
     pub(crate) fn publish_live_services(self, value: Value) {
         self.services_order.update(|order| {
             order.issued += 1;
             order.accepted = order.issued;
         });
         self.services.set(value);
+    }
+    fn sync_legacy_system_storage(self) {
+        let mut state_obj = initial_preference("aetherflow-system-storage")
+            .as_deref()
+            .and_then(|raw| legacy_storage_envelope(Some(raw)))
+            .and_then(|val| val.as_object().cloned())
+            .unwrap_or_default();
+        let opacity_pct =
+            quantize_aurora_opacity_pct(f64::from(self.aurora_opacity.get_untracked()));
+        let opacity_unit = (f64::from(opacity_pct) / 100.0 * 100.0).round() / 100.0;
+        state_obj.insert("theme".into(), Value::String(self.theme.get_untracked()));
+        state_obj.insert(
+            "language".into(),
+            Value::String(self.locale.get_untracked()),
+        );
+        state_obj.insert("auroraOpacity".into(), serde_json::json!(opacity_unit));
+        state_obj.insert(
+            "auroraAnimation".into(),
+            Value::Bool(self.aurora_animation.get_untracked()),
+        );
+        state_obj.insert(
+            "grainDisplay".into(),
+            Value::Bool(self.grain_display.get_untracked()),
+        );
+        state_obj.insert(
+            "cardLift".into(),
+            serde_json::json!(self.card_lift.get_untracked()),
+        );
+        state_obj.insert(
+            "highRefreshMode".into(),
+            Value::String(
+                normalize_high_refresh_mode(&self.high_refresh_mode.get_untracked()).into(),
+            ),
+        );
+        state_obj.insert(
+            "touchMode".into(),
+            Value::String(legacy_touch_mode_value(&self.touch_mode.get_untracked()).into()),
+        );
+        state_obj.insert(
+            "hapticFeedback".into(),
+            Value::Bool(self.haptic_feedback.get_untracked()),
+        );
+        state_obj.insert(
+            "reducedMotion".into(),
+            Value::Bool(self.reduced_motion.get_untracked()),
+        );
+        state_obj.insert(
+            "dashboardDensity".into(),
+            Value::String(
+                if self.immersive_overview.get_untracked() {
+                    "immersive"
+                } else {
+                    "compact"
+                }
+                .into(),
+            ),
+        );
+        state_obj.insert(
+            "showGpuWidget".into(),
+            Value::Bool(self.show_gpu.get_untracked()),
+        );
+        state_obj.insert(
+            "showDataUsageWidget".into(),
+            Value::Bool(self.show_transfer_history.get_untracked()),
+        );
+        let envelope = serde_json::json!({
+            "state": state_obj,
+            "version": 0,
+        });
+        if let Ok(serialized) = serde_json::to_string(&envelope) {
+            storage_set("aetherflow-system-storage", &serialized);
+        }
+    }
+    pub fn effective_reduced_motion(self) -> bool {
+        self.reduced_motion.get() || self.system_reduced_motion.get()
+    }
+    pub fn is_high_refresh_active(self) -> bool {
+        !self.effective_reduced_motion()
+            && resolve_high_refresh_active(
+                &self.high_refresh_mode.get(),
+                self.detected_refresh_rate.get(),
+            )
+    }
+    pub fn is_touch_mode_active(self) -> bool {
+        resolve_touch_mode_active(&self.touch_mode.get(), self.detected_touch_device.get())
     }
     pub fn is_light(self) -> bool {
         theme_is_light(&self.theme.get())
@@ -610,11 +1134,40 @@ impl AppContext {
         let pref = normalize_theme(pref);
         storage_set("aetherflow-theme", pref);
         self.theme.set(pref.into());
+        self.sync_legacy_system_storage();
     }
     pub fn toggle_theme(self) {
         let light = theme_is_light(&self.theme.get_untracked());
         self.set_theme(if light { "dark" } else { "light" });
         self.haptic(10);
+    }
+    pub fn set_immersive_overview(self, enabled: bool) {
+        storage_set(
+            "aetherflow-immersive-overview",
+            if enabled { "true" } else { "false" },
+        );
+        storage_set(
+            "aetherflow-dashboard-density",
+            if enabled { "immersive" } else { "compact" },
+        );
+        self.immersive_overview.set(enabled);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_show_gpu(self, enabled: bool) {
+        storage_set(
+            "aetherflow-show-gpu",
+            if enabled { "true" } else { "false" },
+        );
+        self.show_gpu.set(enabled);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_show_transfer_history(self, enabled: bool) {
+        storage_set(
+            "aetherflow-show-transfer-history",
+            if enabled { "true" } else { "false" },
+        );
+        self.show_transfer_history.set(enabled);
+        self.sync_legacy_system_storage();
     }
     pub fn set_reduced_motion(self, enabled: bool) {
         storage_set(
@@ -622,6 +1175,7 @@ impl AppContext {
             if enabled { "true" } else { "false" },
         );
         self.reduced_motion.set(enabled);
+        self.sync_legacy_system_storage();
     }
     pub fn set_haptic_feedback(self, enabled: bool) {
         storage_set(
@@ -629,9 +1183,61 @@ impl AppContext {
             if enabled { "true" } else { "false" },
         );
         self.haptic_feedback.set(enabled);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_high_refresh_mode(self, mode: &str) {
+        let normalized = normalize_high_refresh_mode(mode);
+        storage_set("aetherflow-high-refresh-mode", normalized);
+        self.high_refresh_mode.set(normalized.into());
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_touch_mode(self, mode: &str) {
+        let normalized = normalize_touch_mode(mode);
+        storage_set("aetherflow-touch-mode", normalized);
+        self.touch_mode.set(normalized.into());
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_aurora_opacity(self, pct: u8) {
+        let quantized = quantize_aurora_opacity_pct(f64::from(pct));
+        storage_set(
+            "aetherflow-aurora-opacity",
+            &format_aurora_opacity_unit(quantized),
+        );
+        self.aurora_opacity.set(quantized);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_aurora_opacity_str(self, raw: &str) {
+        self.set_aurora_opacity(normalize_aurora_opacity_pct(raw));
+    }
+    pub fn set_aurora_animation(self, enabled: bool) {
+        storage_set(
+            "aetherflow-aurora-animation",
+            if enabled { "true" } else { "false" },
+        );
+        self.aurora_animation.set(enabled);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_grain_display(self, enabled: bool) {
+        let flag = if enabled { "true" } else { "false" };
+        storage_set("aetherflow-grain-display", flag);
+        storage_set("aetherflow-grain", flag);
+        self.grain_display.set(enabled);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_card_lift(self, lift_px: i8) {
+        let normalized = normalize_card_lift(&lift_px.to_string());
+        storage_set("aetherflow-card-lift", &normalized.to_string());
+        self.card_lift.set(normalized);
+        self.sync_legacy_system_storage();
+    }
+    pub fn set_card_lift_enabled(self, enabled: bool) {
+        self.set_card_lift(if enabled { -4 } else { 0 });
     }
     pub fn haptic(self, ms: u32) {
-        if !self.haptic_feedback.get_untracked() || self.reduced_motion.get_untracked() {
+        if !self.haptic_feedback.get_untracked()
+            || self.reduced_motion.get_untracked()
+            || self.system_reduced_motion.get_untracked()
+        {
             return;
         }
         if let Some(window) = web_sys::window() {
@@ -648,60 +1254,93 @@ impl AppContext {
         let tab = clamp_tab_for_role(tab, self.is_admin());
         self.tab.set(tab);
         self.mobile_open.set(false);
-        if self.normalize_fallback_url(tab) {
-            return;
-        }
-        if let Some(window) =
-            web_sys::window().filter(|w| w.location().pathname().ok().as_deref() == Some("/"))
+        #[cfg(target_arch = "wasm32")]
         {
-            if let Ok(params) = web_sys::UrlSearchParams::new_with_str(
-                &window.location().search().unwrap_or_default(),
-            ) {
-                if tab == TabId::Overview {
-                    params.delete("tab");
-                } else {
-                    params.set("tab", tab.key());
-                }
-                let query = String::from(params.to_string());
-                let target = format!(
-                    "/{}{}",
-                    if query.is_empty() {
-                        String::new()
+            if self.normalize_fallback_url(tab) {
+                return;
+            }
+            if let Some(window) =
+                web_sys::window().filter(|w| w.location().pathname().ok().as_deref() == Some("/"))
+            {
+                if let Ok(params) = web_sys::UrlSearchParams::new_with_str(
+                    &window.location().search().unwrap_or_default(),
+                ) {
+                    if tab == TabId::Overview {
+                        params.delete("tab");
                     } else {
-                        format!("?{query}")
-                    },
-                    window.location().hash().unwrap_or_default()
-                );
-                if current_path() != target {
-                    if let Ok(history) = window.history() {
-                        let _ = history.push_state_with_url(
-                            &wasm_bindgen::JsValue::NULL,
-                            "",
-                            Some(&target),
-                        );
+                        params.set("tab", tab.key());
+                    }
+                    let query = String::from(params.to_string());
+                    let target = format!(
+                        "/{}{}",
+                        if query.is_empty() {
+                            String::new()
+                        } else {
+                            format!("?{query}")
+                        },
+                        window.location().hash().unwrap_or_default()
+                    );
+                    if current_path() != target {
+                        if let Ok(history) = window.history() {
+                            let _ = history.push_state_with_url(
+                                &wasm_bindgen::JsValue::NULL,
+                                "",
+                                Some(&target),
+                            );
+                        }
                     }
                 }
             }
         }
     }
+    pub fn navigate_to_subtab(self, tab: TabId, subtab: impl Into<String>) {
+        let clamped = clamp_tab_for_role(tab, self.is_admin());
+        if clamped == tab {
+            self.pending_subtab.set(Some((clamped, subtab.into())));
+        } else {
+            self.pending_subtab.set(None);
+        }
+        if self.tab.get_untracked() != clamped {
+            self.select_tab(clamped);
+        } else {
+            self.mobile_open.set(false);
+        }
+    }
+    pub fn take_pending_subtab(self, tab: TabId) -> Option<String> {
+        let matched = self.pending_subtab.with_untracked(|pending| {
+            pending
+                .as_ref()
+                .filter(|(target, _)| *target == tab)
+                .map(|(_, subtab)| subtab.clone())
+        });
+        if matched.is_some() {
+            self.pending_subtab.set(None);
+        }
+        matched
+    }
     pub fn normalize_fallback_url(self, tab: TabId) -> bool {
-        if let Some(window) = web_sys::window().filter(|window| {
-            window
-                .location()
-                .pathname()
-                .ok()
-                .is_some_and(|path| is_spa_fallback_path(&path))
-        }) {
-            if let Ok(history) = window.history() {
-                return history
-                    .replace_state_with_url(
-                        &wasm_bindgen::JsValue::NULL,
-                        "",
-                        Some(&format!("/?tab={}", tab.key())),
-                    )
-                    .is_ok();
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window().filter(|window| {
+                window
+                    .location()
+                    .pathname()
+                    .ok()
+                    .is_some_and(|path| is_spa_fallback_path(&path))
+            }) {
+                if let Ok(history) = window.history() {
+                    return history
+                        .replace_state_with_url(
+                            &wasm_bindgen::JsValue::NULL,
+                            "",
+                            Some(&format!("/?tab={}", tab.key())),
+                        )
+                        .is_ok();
+                }
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = tab;
         false
     }
     pub fn replace_tab_url(self, tab: TabId) {
@@ -867,9 +1506,11 @@ impl AppContext {
             order.accepted = order.issued;
         });
         self.services.set(Value::Null);
-        self.history.set(vec![]);
+        self.live_samples.set(vec![]);
         self.pending.set(0);
+        self.pending_subtab.set(None);
         self.notifications.set(vec![]);
+        self.transfers.set(vec![]);
         self.toasts.set(vec![]);
         self.banners.set(vec![]);
         self.mobile_open.set(false);
@@ -964,6 +1605,69 @@ pub fn current_path() -> String {
         })
         .unwrap_or_else(|| "/".into())
 }
+#[cfg(target_arch = "wasm32")]
+fn probe_display_refresh_rate(context: AppContext) {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let raf_id = Rc::new(Cell::new(None::<i32>));
+    let raf_id_cleanup = Rc::clone(&raf_id);
+    let callback_slot: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+    let callback_slot_inner = Rc::clone(&callback_slot);
+    let callback_slot_cleanup = Rc::clone(&callback_slot);
+    let mut frames = 0u32;
+    let mut start_ms = 0.0f64;
+    let win_inner = window.clone();
+
+    *callback_slot.borrow_mut() = Some(Closure::wrap(Box::new(move |timestamp: f64| {
+        if frames == 0 {
+            start_ms = timestamp;
+        }
+        frames += 1;
+        if frames <= 18 {
+            if let Some(cb) = callback_slot_inner.borrow().as_ref() {
+                raf_id.set(
+                    win_inner
+                        .request_animation_frame(cb.as_ref().unchecked_ref())
+                        .ok(),
+                );
+            }
+        } else {
+            raf_id.set(None);
+            let elapsed = timestamp - start_ms;
+            if elapsed > 0.0 {
+                let fps = (18.0 * 1000.0) / elapsed;
+                let _ = context
+                    .detected_refresh_rate
+                    .try_set(quantize_refresh_rate(fps));
+            }
+            let _ = callback_slot_inner.borrow_mut().take();
+        }
+    }) as Box<dyn FnMut(f64)>));
+
+    if let Some(cb) = callback_slot.borrow().as_ref() {
+        raf_id_cleanup.set(
+            window
+                .request_animation_frame(cb.as_ref().unchecked_ref())
+                .ok(),
+        );
+    }
+
+    let handles = StoredValue::new_local((raf_id_cleanup, callback_slot_cleanup));
+    on_cleanup(move || {
+        handles.with_value(|(raf_id, callback)| {
+            if let (Some(id), Some(win)) = (raf_id.take(), web_sys::window()) {
+                let _ = win.cancel_animation_frame(id);
+            }
+            callback.borrow_mut().take();
+        })
+    });
+}
+
 pub fn install_session(context: AppContext) {
     let public_route = web_sys::window()
         .and_then(|w| w.location().pathname().ok())
@@ -973,6 +1677,8 @@ pub fn install_session(context: AppContext) {
     } else {
         context.refresh_session();
     }
+    #[cfg(target_arch = "wasm32")]
+    probe_display_refresh_rate(context);
     let handles = StoredValue::new_local(Vec::<EventListener>::new());
     if let Some(window) = web_sys::window() {
         let storage = EventListener::new(&window, "storage", move |event| {
@@ -982,27 +1688,55 @@ pub fn install_session(context: AppContext) {
             // Read the latest storage snapshot so delayed events cannot restore
             // a stale preference. A null key represents localStorage.clear().
             let key = event.key();
-            if key.is_none() || key.as_deref() == Some("aetherflow-theme") {
-                context.theme.set(
-                    normalize_theme(&storage_get("aetherflow-theme").unwrap_or_default()).into(),
-                );
-            }
-            if key.is_none() || key.as_deref() == Some("aetherflow-language") {
-                let locale = storage_get("aetherflow-language")
-                    .filter(|locale| af_web_core::i18n::LOCALES.contains(&locale.as_str()))
-                    .unwrap_or_else(|| "en".into());
-                context.locale.set(locale.clone());
-                context.load_locale(locale);
-            }
-            if key.is_none() || key.as_deref() == Some("aetherflow-reduced-motion") {
+            let matches_pref = key.is_none()
+                || key.as_deref().is_some_and(|k| {
+                    matches!(
+                        k,
+                        "aetherflow-theme"
+                            | "aetherflow-language"
+                            | "aetherflow-immersive-overview"
+                            | "aetherflow-dashboard-density"
+                            | "aetherflow-show-gpu"
+                            | "aetherflow-show-transfer-history"
+                            | "aetherflow-reduced-motion"
+                            | "aetherflow-haptic-feedback"
+                            | "aetherflow-high-refresh-mode"
+                            | "aetherflow-touch-mode"
+                            | "aetherflow-aurora-opacity"
+                            | "aetherflow-aurora-animation"
+                            | "aetherflow-grain-display"
+                            | "aetherflow-grain"
+                            | "aetherflow-card-lift"
+                            | "aetherflow-system-storage"
+                            | "aetherflow-connection-storage"
+                    )
+                });
+            if matches_pref {
+                let hydrated = hydrate_preferences_with(storage_get);
+                context.theme.set(hydrated.theme);
+                if key.is_none()
+                    || matches!(
+                        key.as_deref(),
+                        Some("aetherflow-language" | "aetherflow-system-storage")
+                    )
+                {
+                    let locale = hydrated.locale.unwrap_or_else(|| "en".into());
+                    context.locale.set(locale.clone());
+                    context.load_locale(locale);
+                }
+                context.immersive_overview.set(hydrated.immersive_overview);
+                context.show_gpu.set(hydrated.show_gpu);
                 context
-                    .reduced_motion
-                    .set(storage_get("aetherflow-reduced-motion").as_deref() == Some("true"));
-            }
-            if key.is_none() || key.as_deref() == Some("aetherflow-haptic-feedback") {
-                context
-                    .haptic_feedback
-                    .set(storage_get("aetherflow-haptic-feedback").as_deref() != Some("false"));
+                    .show_transfer_history
+                    .set(hydrated.show_transfer_history);
+                context.reduced_motion.set(hydrated.reduced_motion);
+                context.haptic_feedback.set(hydrated.haptic_feedback);
+                context.high_refresh_mode.set(hydrated.high_refresh_mode);
+                context.touch_mode.set(hydrated.touch_mode);
+                context.aurora_opacity.set(hydrated.aurora_opacity);
+                context.aurora_animation.set(hydrated.aurora_animation);
+                context.grain_display.set(hydrated.grain_display);
+                context.card_lift.set(hydrated.card_lift);
             }
             if key
                 .as_deref()
@@ -1056,6 +1790,24 @@ pub fn install_session(context: AppContext) {
                 }
             });
             handles.update_value(|handles| handles.push(scheme));
+        }
+        if let Some(pointer_query) = media_query("(pointer: coarse)")
+            .and_then(|query| query.dyn_into::<web_sys::EventTarget>().ok())
+        {
+            let pointer_listener = EventListener::new(&pointer_query, "change", move |_| {
+                context.detected_touch_device.set(detect_touch_device());
+            });
+            handles.update_value(|handles| handles.push(pointer_listener));
+        }
+        if let Some(motion_query) = media_query("(prefers-reduced-motion: reduce)")
+            .and_then(|query| query.dyn_into::<web_sys::EventTarget>().ok())
+        {
+            let motion_listener = EventListener::new(&motion_query, "change", move |_| {
+                context
+                    .system_reduced_motion
+                    .set(detect_reduced_motion_preference());
+            });
+            handles.update_value(|handles| handles.push(motion_listener));
         }
     }
     on_cleanup(move || handles.update_value(Vec::clear));
@@ -1290,8 +2042,11 @@ pub fn json_rows(value: &Value) -> Vec<Value> {
 mod tests {
     use super::{
         clamp_tab_for_role, confirmed_session_identity, detect_browser_locale,
-        is_spa_fallback_path, normalize_theme, run_resource_read, same_authenticated_identity,
-        ApiResource, AppContext, ResourceReads, TabId, Toast,
+        format_aurora_opacity_unit, hydrate_preferences_with, is_spa_fallback_path,
+        normalize_aurora_opacity_pct, normalize_card_lift, normalize_high_refresh_mode,
+        normalize_theme, normalize_touch_mode, quantize_refresh_rate, resolve_high_refresh_active,
+        resolve_touch_mode_active, run_resource_read, same_authenticated_identity, ApiResource,
+        AppContext, ResourceReads, TabId, Toast,
     };
     use af_web_core::models::{DiskPartition, GpuMetric, ProcessInfo, SystemMetrics, User};
     use leptos::prelude::*;
@@ -1609,6 +2364,8 @@ mod tests {
             "/login/",
             "/oauth/consent",
             "/oauth/consent/",
+            "/oauth/device",
+            "/oauth/device/",
             "/share",
             "/share/",
         ] {
@@ -1868,5 +2625,137 @@ mod tests {
         assert_eq!(TabId::Overview.localized_label("de"), "Übersicht");
         assert_eq!(TabId::Services.localized_label("de"), "Dienste");
         assert_eq!(TabId::Settings.localized_label("fr"), "Paramètres");
+    }
+
+    #[test]
+    fn display_preference_normalizers_handle_aliases_and_quantize_steps() {
+        assert_eq!(normalize_high_refresh_mode("auto"), "auto");
+        assert_eq!(normalize_high_refresh_mode("120"), "120hz");
+        assert_eq!(normalize_high_refresh_mode("120Hz"), "120hz");
+        assert_eq!(normalize_high_refresh_mode("60"), "standard");
+        assert_eq!(normalize_high_refresh_mode("60hz"), "standard");
+        assert_eq!(normalize_high_refresh_mode("standard"), "standard");
+        assert_eq!(normalize_high_refresh_mode("unknown"), "auto");
+
+        assert_eq!(normalize_touch_mode("auto"), "auto");
+        assert_eq!(normalize_touch_mode("on"), "on");
+        assert_eq!(normalize_touch_mode("enabled"), "on");
+        assert_eq!(normalize_touch_mode("off"), "off");
+        assert_eq!(normalize_touch_mode("desktop"), "off");
+        assert_eq!(normalize_touch_mode("disabled"), "off");
+        assert_eq!(normalize_touch_mode("unknown"), "auto");
+
+        assert_eq!(normalize_aurora_opacity_pct("0"), 0);
+        assert_eq!(normalize_aurora_opacity_pct("0.55"), 55);
+        assert_eq!(normalize_aurora_opacity_pct("0.84"), 85);
+        assert_eq!(normalize_aurora_opacity_pct("1"), 100);
+        assert_eq!(normalize_aurora_opacity_pct("1.0"), 100);
+        assert_eq!(normalize_aurora_opacity_pct("35%"), 35);
+        assert_eq!(normalize_aurora_opacity_pct("75"), 75);
+        assert_eq!(normalize_aurora_opacity_pct("-0.2"), 0);
+        assert_eq!(normalize_aurora_opacity_pct("invalid"), 55);
+        assert_eq!(format_aurora_opacity_unit(0), "0");
+        assert_eq!(format_aurora_opacity_unit(5), "0.05");
+        assert_eq!(format_aurora_opacity_unit(50), "0.5");
+        assert_eq!(format_aurora_opacity_unit(55), "0.55");
+        assert_eq!(format_aurora_opacity_unit(100), "1");
+
+        assert_eq!(normalize_card_lift("0"), 0);
+        assert_eq!(normalize_card_lift("false"), 0);
+        assert_eq!(normalize_card_lift("flat"), 0);
+        assert_eq!(normalize_card_lift("-4"), -4);
+        assert_eq!(normalize_card_lift("-4px"), -4);
+        assert_eq!(normalize_card_lift("true"), -4);
+        assert_eq!(normalize_card_lift("-6"), -6);
+
+        assert_eq!(quantize_refresh_rate(59.9), 60);
+        assert_eq!(quantize_refresh_rate(119.4), 120);
+        assert_eq!(quantize_refresh_rate(143.8), 144);
+        assert!(resolve_high_refresh_active("auto", 120));
+        assert!(!resolve_high_refresh_active("auto", 60));
+        assert!(resolve_high_refresh_active("120hz", 60));
+        assert!(!resolve_high_refresh_active("standard", 120));
+
+        assert!(resolve_touch_mode_active("auto", true));
+        assert!(!resolve_touch_mode_active("auto", false));
+        assert!(resolve_touch_mode_active("on", false));
+        assert!(!resolve_touch_mode_active("off", true));
+    }
+
+    #[test]
+    fn legacy_zustand_storage_hydrates_and_yields_to_explicit_flat_keys() {
+        use std::collections::BTreeMap;
+
+        let empty = BTreeMap::<String, String>::new();
+        let defaults = hydrate_preferences_with(|k| empty.get(k).cloned());
+        assert_eq!(defaults.theme, "dark");
+        assert_eq!(defaults.locale, None);
+        assert!(!defaults.immersive_overview);
+        assert!(defaults.show_gpu);
+        assert!(defaults.show_transfer_history);
+        assert!(!defaults.reduced_motion);
+        assert!(defaults.haptic_feedback);
+        assert_eq!(defaults.high_refresh_mode, "auto");
+        assert_eq!(defaults.touch_mode, "auto");
+        assert_eq!(defaults.aurora_opacity, 55);
+        assert!(!defaults.aurora_animation);
+        assert!(defaults.grain_display);
+        assert_eq!(defaults.card_lift, -4);
+
+        let mut legacy = BTreeMap::<String, String>::new();
+        legacy.insert(
+            "aetherflow-system-storage".into(),
+            serde_json::json!({
+                "state": {
+                    "theme": "light",
+                    "language": "de",
+                    "auroraOpacity": 0.85,
+                    "auroraAnimation": true,
+                    "grainDisplay": false,
+                    "cardLift": -6,
+                    "highRefreshMode": "120hz",
+                    "touchMode": "enabled",
+                    "hapticFeedback": false
+                },
+                "version": 0
+            })
+            .to_string(),
+        );
+        legacy.insert(
+            "aetherflow-connection-storage".into(),
+            serde_json::json!({
+                "state": {
+                    "dashboardDensity": "immersive",
+                    "showGpuWidget": false,
+                    "showDataUsageWidget": false
+                }
+            })
+            .to_string(),
+        );
+
+        let hydrated = hydrate_preferences_with(|k| legacy.get(k).cloned());
+        assert_eq!(hydrated.theme, "light");
+        assert_eq!(hydrated.locale.as_deref(), Some("de"));
+        assert!(hydrated.immersive_overview);
+        assert!(!hydrated.show_gpu);
+        assert!(!hydrated.show_transfer_history);
+        assert!(!hydrated.haptic_feedback);
+        assert_eq!(hydrated.high_refresh_mode, "120hz");
+        assert_eq!(hydrated.touch_mode, "on");
+        assert_eq!(hydrated.aurora_opacity, 85);
+        assert!(hydrated.aurora_animation);
+        assert!(!hydrated.grain_display);
+        assert_eq!(hydrated.card_lift, -6);
+
+        // Explicit flat keys take precedence over legacy Zustand JSON.
+        legacy.insert("aetherflow-touch-mode".into(), "desktop".into());
+        legacy.insert("aetherflow-high-refresh-mode".into(), "60".into());
+        legacy.insert("aetherflow-aurora-opacity".into(), "0.25".into());
+        legacy.insert("aetherflow-card-lift".into(), "0".into());
+        let overridden = hydrate_preferences_with(|k| legacy.get(k).cloned());
+        assert_eq!(overridden.touch_mode, "off");
+        assert_eq!(overridden.high_refresh_mode, "standard");
+        assert_eq!(overridden.aurora_opacity, 25);
+        assert_eq!(overridden.card_lift, 0);
     }
 }

@@ -17,9 +17,14 @@ pub struct CpuInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MemoryInfo {
     pub total_bytes: i64,
+    #[serde(default, skip_serializing_if = "is_zero_bank_count")]
     pub banks: i32,
     #[serde(rename = "type")]
     pub mem_type: String,
+}
+
+fn is_zero_bank_count(count: &i32) -> bool {
+    *count == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -278,12 +283,16 @@ pub struct MarketplaceApp {
     pub internal_domain: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub public_domain: String,
-    #[serde(skip_serializing_if = "is_false", default)]
+    #[serde(default)]
     pub external_access_enabled: bool,
     #[serde(default)]
     pub tls_enabled: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_path: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub bind_scope: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub web_scheme: String,
     pub progress: i32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub started_at: Option<String>,
@@ -1929,6 +1938,7 @@ mod tests {
         };
         let value = serde_json::to_value(app).unwrap();
         assert_eq!(value["tls_enabled"], false);
+        assert_eq!(value["external_access_enabled"], false);
     }
 
     #[test]

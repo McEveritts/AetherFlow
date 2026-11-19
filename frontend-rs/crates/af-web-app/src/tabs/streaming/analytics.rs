@@ -428,6 +428,330 @@ pub(super) fn HistoryAnalytics(
     }
 }
 
+pub(super) fn stream_type_fill_class(bg_class: &str) -> &'static str {
+    match bg_class {
+        "bg-emerald-400" => "fill-emerald-400",
+        "bg-cyan-400" => "fill-cyan-400",
+        "bg-amber-400" => "fill-amber-400",
+        _ => "fill-slate-400",
+    }
+}
+
+pub(super) fn stream_type_bar_segments(
+    rows: &[(&'static str, i64, f64, &'static str)],
+) -> Vec<(&'static str, f64, f64, &'static str)> {
+    let mut cursor = 0.0_f64;
+    let mut segments = Vec::new();
+    for &(label, _count, pct, bg_class) in rows {
+        if cursor >= 100.0 {
+            break;
+        }
+        let clamped = if pct.is_finite() { pct.max(0.0) } else { 0.0 };
+        let width = clamped.min(100.0 - cursor);
+        if width > 0.0 {
+            segments.push((label, cursor, width, stream_type_fill_class(bg_class)));
+            cursor += width;
+        }
+    }
+    segments
+}
+
+#[component]
+fn BreakdownList(title: &'static str, rows: Vec<BreakdownEntry>) -> impl IntoView {
+    let context = app();
+    let total_rows = rows.len();
+    view! {
+        <section
+            class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3"
+            aria-label=move || tt(context, title)
+        >
+            <h3 class="font-semibold text-sm">{move || tt(context, title)}</h3>
+            {if total_rows == 0 {
+                view! {
+                    <p class="text-xs text-slate-400">
+                        {move || tt(context, "No matching telemetry in this window.")}
+                    </p>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <ul class="space-y-2.5 text-xs">
+                        {rows
+                            .into_iter()
+                            .take(6)
+                            .map(|row| {
+                                let label = if row.label.trim().is_empty() {
+                                    "Unknown".to_string()
+                                } else {
+                                    row.label.clone()
+                                };
+                                let clamped_pct = if row.pct.is_finite() {
+                                    row.pct.clamp(0.0, 100.0)
+                                } else {
+                                    0.0
+                                };
+                                let pct_text = format!("{clamped_pct:.1}%");
+                                let count_text = row.count.to_string();
+                                let aria_label_text = label.clone();
+                                view! {
+                                    <li class="space-y-1">
+                                        <div class="flex items-center justify-between gap-2">
+                                            <span class="font-medium text-slate-200 truncate">
+                                                {tt(context, &label)}
+                                            </span>
+                                            <span class="text-slate-400 font-mono shrink-0">
+                                                {format!("{count_text} ({pct_text})")}
+                                            </span>
+                                        </div>
+                                        <progress
+                                            class="w-full h-1.5 accent-indigo-400"
+                                            max="100"
+                                            value=format!("{clamped_pct:.1}")
+                                            aria-label=move || tt(context, &aria_label_text)
+                                        ></progress>
+                                    </li>
+                                }
+                            })
+                            .collect_view()}
+                    </ul>
+                }
+                .into_any()
+            }}
+        </section>
+    }
+}
+
+#[component]
+pub(super) fn DashboardDistributions(dashboard: crate::state::ApiResource) -> impl IntoView {
+    let context = app();
+    view! {
+        <ObsCard title="Distribution & Trends">
+            {move || {
+                let analytics = dashboard
+                    .data
+                    .with(|d| contracts::decode::<Dashboard>(d).analytics);
+                let locale = crate::tabs::l10n::locale(context);
+                let watch_text = duration(&locale, Some(analytics.total_watch_time_secs.max(0) as f64));
+                let data_text = crate::tabs::settings::bytes(analytics.total_data_used_bytes.max(0) as f64);
+                let bw_text = format!("{:.1} Mbps", analytics.peak_bandwidth_mbps.max(0.0));
+                let stream_rows = analytics.stream_types.rows(analytics.total_plays);
+                let stream_segments = stream_type_bar_segments(&stream_rows);
+                let play_points = analytics
+                    .time_series
+                    .iter()
+                    .filter_map(|row| {
+                        Some(Point {
+                            x: timestamp(&row.date)? as f64,
+                            y: row.plays as f64,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let bw_points = analytics
+                    .time_series
+                    .iter()
+                    .filter_map(|row| {
+                        Some(Point {
+                            x: timestamp(&row.date)? as f64,
+                            y: row.peak_bandwidth_mbps,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let media_rows = analytics.media_type_breakdown.clone();
+                let res_rows = analytics.resolution_breakdown.clone();
+                let codec_rows = analytics.codec_breakdown.clone();
+                let top_users = analytics.top_users.clone();
+                let top_titles = analytics.top_titles.clone();
+                view! {
+                    <div class="space-y-5">
+                        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                                <p class="text-xs text-slate-400">{move || tt(context, "Total plays")}</p>
+                                <p class="text-lg font-semibold font-mono mt-1">{analytics.total_plays}</p>
+                            </div>
+                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                                <p class="text-xs text-slate-400">{move || tt(context, "Watch time")}</p>
+                                <p class="text-lg font-semibold font-mono mt-1">{watch_text}</p>
+                            </div>
+                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                                <p class="text-xs text-slate-400">{move || tt(context, "Data transferred")}</p>
+                                <p class="text-lg font-semibold font-mono mt-1">{data_text}</p>
+                            </div>
+                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                                <p class="text-xs text-slate-400">{move || tt(context, "Peak bandwidth")}</p>
+                                <p class="text-lg font-semibold font-mono mt-1">{bw_text}</p>
+                            </div>
+                        </div>
+
+                        <section
+                            class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3"
+                            aria-label=move || tt(context, "Playback method breakdown")
+                        >
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <h3 class="font-semibold text-sm">{move || tt(context, "Playback method breakdown")}</h3>
+                                <span class="text-xs text-slate-400">
+                                    {tt_with(
+                                        context,
+                                        "{users} viewers · {titles} titles",
+                                        &[
+                                            ("users", &analytics.unique_users.to_string()),
+                                            ("titles", &analytics.unique_titles.to_string()),
+                                        ],
+                                    )}
+                                </span>
+                            </div>
+                            <svg
+                                viewBox="0 0 100 6"
+                                preserveAspectRatio="none"
+                                class="w-full h-2.5 rounded-full bg-white/10 overflow-hidden block"
+                                role="img"
+                                aria-label=move || tt(context, "Playback method breakdown")
+                            >
+                                {stream_segments
+                                    .into_iter()
+                                    .map(|(_, x, width, fill_cls)| {
+                                        view! {
+                                            <rect
+                                                x=format!("{x:.2}")
+                                                y="0"
+                                                width=format!("{width:.2}")
+                                                height="6"
+                                                class=fill_cls
+                                            />
+                                        }
+                                    })
+                                    .collect_view()}
+                            </svg>
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                                {stream_rows
+                                    .into_iter()
+                                    .map(|(label, count, pct, color)| {
+                                        let dot = format!("inline-block w-2.5 h-2.5 rounded-full {color}");
+                                        view! {
+                                            <div class="flex items-center gap-2">
+                                                <span class=dot aria-hidden="true"></span>
+                                                <span>
+                                                    {format!("{}: {} ({:.1}%)", tt(context, label), count, pct)}
+                                                </span>
+                                            </div>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </div>
+                        </section>
+
+                        <div class="grid md:grid-cols-3 gap-4">
+                            <BreakdownList title="Media format distribution" rows=media_rows />
+                            <BreakdownList title="Resolution distribution" rows=res_rows />
+                            <BreakdownList title="Source codec distribution" rows=codec_rows />
+                        </div>
+
+                        {(!play_points.is_empty() || !bw_points.is_empty()).then(|| {
+                            view! {
+                                <div class="grid lg:grid-cols-2 gap-4">
+                                    <div>
+                                        <h4 class="text-sm mb-1">{move || tt(context, "Plays over time")}</h4>
+                                        <AreaChart
+                                            points=Signal::stored(play_points)
+                                            label="Plays over time"
+                                        />
+                                    </div>
+                                    <div>
+                                        <h4 class="text-sm mb-1">{move || tt(context, "Peak bandwidth (Mbps)")}</h4>
+                                        <LineChart
+                                            points=Signal::stored(bw_points)
+                                            label="Peak bandwidth (Mbps)"
+                                        />
+                                    </div>
+                                </div>
+                            }
+                        })}
+
+                        {(!top_users.is_empty() || !top_titles.is_empty()).then(|| {
+                            view! {
+                                <div class="grid lg:grid-cols-2 gap-4 text-xs">
+                                    <section
+                                        class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-2"
+                                        aria-label=move || tt(context, "Top watchers")
+                                    >
+                                        <h3 class="font-semibold text-sm">{move || tt(context, "Top watchers")}</h3>
+                                        {if top_users.is_empty() {
+                                            view! { <p class="text-slate-400">{move || tt(context, "No matching telemetry in this window.")}</p> }.into_any()
+                                        } else {
+                                            view! {
+                                                <ul class="divide-y divide-white/10">
+                                                    {top_users
+                                                        .iter()
+                                                        .take(5)
+                                                        .map(|u| {
+                                                            let name = if u.user_name.is_empty() { tt(context, "Unknown") } else { u.user_name.clone() };
+                                                            let watch = duration(&locale, Some(u.total_watch_secs.max(0) as f64));
+                                                            let data = crate::tabs::settings::bytes(u.total_data_bytes.max(0) as f64);
+                                                            view! {
+                                                                <li class="py-2 flex items-center justify-between gap-2">
+                                                                    <span class="font-medium truncate">{name}</span>
+                                                                    <span class="text-slate-400 font-mono shrink-0">
+                                                                        {format!("{} · {} · {}", tt_with(context, "{count} plays", &[("count", &u.total_plays.to_string())]), watch, data)}
+                                                                    </span>
+                                                                </li>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </ul>
+                                            }.into_any()
+                                        }}
+                                    </section>
+                                    <section
+                                        class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-2"
+                                        aria-label=move || tt(context, "Top titles")
+                                    >
+                                        <h3 class="font-semibold text-sm">{move || tt(context, "Top titles")}</h3>
+                                        {if top_titles.is_empty() {
+                                            view! { <p class="text-slate-400">{move || tt(context, "No matching telemetry in this window.")}</p> }.into_any()
+                                        } else {
+                                            view! {
+                                                <ul class="divide-y divide-white/10">
+                                                    {top_titles
+                                                        .iter()
+                                                        .take(5)
+                                                        .map(|t| {
+                                                            let title = if t.series_name.is_empty() {
+                                                                t.item_name.clone()
+                                                            } else {
+                                                                format!("{} — {}", t.series_name, t.item_name)
+                                                            };
+                                                            let title = if title.trim().is_empty() { tt(context, "Unknown") } else { title };
+                                                            let spec = [t.video_resolution.as_str(), t.video_codec.as_str()]
+                                                                .into_iter()
+                                                                .filter(|s| !s.is_empty())
+                                                                .collect::<Vec<_>>()
+                                                                .join(" · ");
+                                                            let data = crate::tabs::settings::bytes(t.total_data_bytes.max(0) as f64);
+                                                            view! {
+                                                                <li class="py-2 flex items-center justify-between gap-2">
+                                                                    <span class="font-medium truncate">
+                                                                        {if spec.is_empty() { title } else { format!("{title} ({spec})") }}
+                                                                    </span>
+                                                                    <span class="text-slate-400 font-mono shrink-0">
+                                                                        {format!("{} · {}", tt_with(context, "{count} plays", &[("count", &t.total_plays.to_string())]), data)}
+                                                                    </span>
+                                                                </li>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </ul>
+                                            }.into_any()
+                                        }}
+                                    </section>
+                                </div>
+                            }
+                        })}
+                    </div>
+                }
+            }}
+        </ObsCard>
+    }
+}
+
 #[component]
 pub(super) fn ImportedEstimates(
     dashboard: crate::state::ApiResource,
@@ -487,5 +811,25 @@ pub(super) fn ImportedEstimates(
                     }}
                 </div>
             </ObsCard>
+    }
+}
+
+#[cfg(test)]
+mod distribution_bar_tests {
+    use super::stream_type_bar_segments;
+
+    #[test]
+    fn stream_type_bar_segments_accumulate_offsets_and_clamp_overflow() {
+        let rows = [
+            ("Direct Play", 6, 60.0, "bg-emerald-400"),
+            ("Direct Stream", 2, 20.0, "bg-cyan-400"),
+            ("Transcode", 3, 35.0, "bg-amber-400"),
+            ("Unknown", 0, 0.0, "bg-slate-400"),
+        ];
+        let segments = stream_type_bar_segments(&rows);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], ("Direct Play", 0.0, 60.0, "fill-emerald-400"));
+        assert_eq!(segments[1], ("Direct Stream", 60.0, 20.0, "fill-cyan-400"));
+        assert_eq!(segments[2], ("Transcode", 80.0, 20.0, "fill-amber-400"));
     }
 }

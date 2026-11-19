@@ -10,14 +10,14 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function trackReads(page: Page, path: string) {
-  await page.addInitScript((path) => {
+async function trackReads(page: Page, path: string, queryKey?: string) {
+  await page.addInitScript(({ path, queryKey }) => {
     const state: ReadProbe = { attempts: [], active: 0, maximum: 0 };
     (window as Window & { __resourceReads?: ReadProbe }).__resourceReads = state;
     const fetch = window.fetch.bind(window);
     window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input), location.href);
-      if (url.pathname !== path) return fetch(input, init);
+      if (url.pathname !== path || (queryKey && !url.searchParams.has(queryKey))) return fetch(input, init);
       const attempt: Attempt = { url: url.pathname + url.search, outcome: 'pending' };
       state.attempts.push(attempt);
       state.active += 1;
@@ -38,7 +38,7 @@ async function trackReads(page: Page, path: string) {
         throw error;
       });
     };
-  }, path);
+  }, { path, queryKey });
 }
 
 async function reads(page: Page): Promise<ReadProbe> {
@@ -108,9 +108,9 @@ test('a superseded notifications read aborts before its explicit refresh starts'
 
 test('changing a generic resource path aborts the previous telemetry window read', async ({ page }) => {
   await installAetherFlowMocks(page);
-  await trackReads(page, '/api/v1/auth/system/metrics/history');
+  await trackReads(page, '/api/v1/auth/system/metrics/history', 'window');
   const release = deferred();
-  await page.route('**/api/v1/auth/system/metrics/history?**', async route => {
+  await page.route(url => url.pathname === '/api/v1/auth/system/metrics/history' && url.searchParams.has('window'), async route => {
     await release.promise;
     await route.fulfill({ json: { points: [] } }).catch(() => {});
   });

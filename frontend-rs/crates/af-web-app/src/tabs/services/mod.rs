@@ -1,11 +1,14 @@
 //! Service inventory and guarded administrator controls.
 mod helpers;
 mod logs;
+mod restart;
 
 use self::helpers::*;
-use self::logs::ServiceLogsModal;
-use crate::state::{app, run_resource_read, ApiResource, ResourceReads};
-use crate::tabs::l10n::{tt, tt_with, Badge, EmptyState, ObsCard, SearchInput};
+pub(crate) use self::helpers::{external_access_target, launch_url_with_host, safe_release_url};
+pub(crate) use self::logs::ServiceLogsModal;
+use self::restart::{CoreRestartPhase, CoreRestartTracker};
+use crate::state::{app, run_resource_read, ApiResource, ResourceReads, TabId};
+use crate::tabs::l10n::{tt, tt_with, Badge, ConfirmDialog, EmptyState, ObsCard, SearchInput};
 use af_web_core::api::ApiClient;
 use af_web_ui::use_worker_rows;
 use leptos::prelude::*;
@@ -72,7 +75,17 @@ pub fn ServicesTab() -> impl IntoView {
     let context = app();
     let inventory = use_services_inventory();
     let query = RwSignal::new(String::new());
-    let status = RwSignal::new("all".to_string());
+    let status = RwSignal::new(
+        context
+            .take_pending_subtab(TabId::Services)
+            .unwrap_or_else(|| "all".to_string()),
+    );
+    Effect::new(move |_| {
+        context.pending_subtab.track();
+        if let Some(target) = context.take_pending_subtab(TabId::Services) {
+            status.set(target);
+        }
+    });
     let selected = RwSignal::new(None::<Value>);
     let logs_open = RwSignal::new(false);
     let rows = Signal::derive(move || context.services.with(service_rows));
@@ -96,11 +109,66 @@ pub fn ServicesTab() -> impl IntoView {
                 "attention" => attention(v),
                 "running" => running(v),
                 "stopped" => !running(v) && !attention(v),
+                "updates" => has_available_update(v),
                 _ => true,
             })
             .collect::<Vec<_>>()
     });
+    let updates_count = Signal::derive(move || {
+        rows.with(|list| list.iter().filter(|v| has_available_update(v)).count())
+    });
+    let checking_updates = RwSignal::new(false);
+    let checking_unit = RwSignal::new(None::<String>);
+    let updating_unit = RwSignal::new(None::<String>);
     let refresh = Callback::new(move |()| inventory.refresh());
+    let restarts = CoreRestartTracker::start_polling(context, refresh);
+    let check_all_updates = move |_| {
+        if !context.is_admin() || checking_updates.get_untracked() {
+            return;
+        }
+        checking_updates.set(true);
+        spawn_local(async move {
+            let result = ApiClient
+                .post("/api/v1/admin/packages/updates/check", None)
+                .await;
+            if checking_updates.is_disposed() {
+                return;
+            }
+            checking_updates.set(false);
+            match result {
+                Ok(payload) => {
+                    let count = payload["updates_available"].as_u64().unwrap_or_else(|| {
+                        payload["updates"]
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter(|item| item["update_available"] == true)
+                                    .count() as u64
+                            })
+                            .unwrap_or(0)
+                    });
+                    if count > 0 {
+                        context.toast(
+                            tt_with(
+                                context,
+                                "{count} application updates available.",
+                                &[("count", &count.to_string())],
+                            ),
+                            false,
+                        );
+                    } else {
+                        context.toast(
+                            tt(context, "All installed applications are up to date."),
+                            false,
+                        );
+                    }
+                    inventory.refresh();
+                }
+                Err(error) => context.toast(tt(context, &error.message), true),
+            }
+        });
+    };
     view! {
         <section class="py-5 space-y-5 min-w-0 max-w-full">
             <header class="flex flex-wrap justify-between gap-4 pb-4 border-b border-white/10">
@@ -112,15 +180,33 @@ pub fn ServicesTab() -> impl IntoView {
                         {move || tt(context, "Services.subtitle")}
                     </p>
                 </div>
-                <button
-                    type="button"
-                    class="glass-button px-4 py-2 min-h-11"
-                    disabled=move || inventory.loading.get()
-                    on:click=move |_| inventory.refresh()
-                    aria-label=move || tt(context, "Refresh services")
-                >
-                    {move || tt(context, "Common.refresh")}
-                </button>
+                <div class="flex flex-wrap gap-3">
+                    <Show when=move || context.is_admin()>
+                        <button
+                            type="button"
+                            class="glass-button px-4 py-2 min-h-11"
+                            disabled=move || checking_updates.get()
+                            on:click=check_all_updates
+                        >
+                            {move || {
+                                if checking_updates.get() {
+                                    tt(context, "Marketplace.checkingUpdates")
+                                } else {
+                                    tt(context, "Marketplace.checkUpdates")
+                                }
+                            }}
+                        </button>
+                    </Show>
+                    <button
+                        type="button"
+                        class="glass-button px-4 py-2 min-h-11"
+                        disabled=move || inventory.loading.get()
+                        on:click=move |_| inventory.refresh()
+                        aria-label=move || tt(context, "Refresh services")
+                    >
+                        {move || tt(context, "Common.refresh")}
+                    </button>
+                </div>
             </header>
             <SearchInput value=query placeholder="Search services" />
             <div
@@ -134,6 +220,7 @@ pub fn ServicesTab() -> impl IntoView {
                     ("stopped", "Common.stopped"),
                     ("attention", "Services.attentionFailed"),
                     ("core", "Services.core"),
+                    ("updates", "Services.updates"),
                 ]
                     .into_iter()
                     .map(|(key, label)| {
@@ -146,6 +233,17 @@ pub fn ServicesTab() -> impl IntoView {
                                 on:click=move |_| status.set(key.into())
                             >
                                 {move || tt(context, label)}
+                                {if key == "updates" {
+                                    Some(view! {
+                                        <Show when=move || { updates_count.get() > 0 }>
+                                            <span class="ml-1.5 text-xs font-mono text-amber-300">
+                                                {move || format!("({})", updates_count.get())}
+                                            </span>
+                                        </Show>
+                                    })
+                                } else {
+                                    None
+                                }}
                             </button>
                         }
                     })
@@ -163,6 +261,66 @@ pub fn ServicesTab() -> impl IntoView {
                 <p role="status" class="text-slate-400">
                     {move || tt(context, "Services.loading")}
                 </p>
+            </Show>
+            <Show when=move || {
+                context.is_admin()
+                    && (!restarts.receipts.with(std::collections::BTreeMap::is_empty)
+                        || restarts.notice.get().is_some())
+            }>
+                <div class="rounded-xl border border-indigo-400/20 bg-indigo-500/5 p-4 space-y-2 text-sm">
+                    {move || {
+                        restarts
+                            .notice
+                            .get()
+                            .map(|notice| {
+                                if notice.is_error {
+                                    view! {
+                                        <p role="alert" class="text-rose-300">
+                                            {notice.message}
+                                        </p>
+                                    }
+                                    .into_any()
+                                } else {
+                                    view! {
+                                        <p role="status" class="text-cyan-300">
+                                            {notice.message}
+                                        </p>
+                                    }
+                                    .into_any()
+                                }
+                            })
+                    }}
+                    {move || {
+                        restarts
+                            .receipts
+                            .get()
+                            .into_values()
+                            .map(|entry| {
+                                let phase_key = match entry.phase {
+                                    CoreRestartPhase::WaitingForJob => {
+                                        "Waiting for systemd restart job completion"
+                                    }
+                                    CoreRestartPhase::WaitingForReadiness => {
+                                        "Confirming API and database readiness"
+                                    }
+                                };
+                                view! {
+                                    <p class="text-xs text-slate-300 break-all">
+                                        {tt_with(
+                                            context,
+                                            "{service} · Receipt: {receipt} · {phase}",
+                                            &[
+                                                ("service", &entry.label),
+                                                ("receipt", &entry.job_unit),
+                                                ("phase", &tt(context, phase_key)),
+                                            ],
+                                        )}
+                                    </p>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </div>
             </Show>
             {[
                 ("core", "Services.corePlatform"),
@@ -186,7 +344,18 @@ pub fn ServicesTab() -> impl IntoView {
                                     key=|v| field(v, &["slug", "id", "name"])
                                     children=move |row| {
                                         let id = field(&row, &["slug", "id", "name"]);
-                                        view! { <ServiceCard id rows refresh selected logs_open /> }
+                                        view! {
+                                            <ServiceCard
+                                                id
+                                                rows
+                                                refresh
+                                                selected
+                                                logs_open
+                                                restarts
+                                                checking_unit
+                                                updating_unit
+                                            />
+                                        }
                                     }
                                 />
                             </div>
@@ -226,9 +395,13 @@ fn ServiceCard(
     refresh: Callback<()>,
     selected: RwSignal<Option<Value>>,
     logs_open: RwSignal<bool>,
+    restarts: CoreRestartTracker,
+    checking_unit: RwSignal<Option<String>>,
+    updating_unit: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let context = app();
     let id = StoredValue::new(id);
+    let is_restarting = Signal::derive(move || restarts.is_restarting(&id.get_value()));
     let info = Signal::derive(move || {
         rows.with(|rows| {
             rows.iter()
@@ -238,8 +411,21 @@ fn ServiceCard(
         })
     });
     let busy = RwSignal::new(String::new());
+    let img_failed = RwSignal::new(false);
+    let confirm_action = RwSignal::new(None::<&'static str>);
+    let confirm_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        if !confirm_open.get() {
+            confirm_action.set(None);
+        }
+    });
+    Effect::new(move |_| {
+        info.with(|v| field(v, &["id"]));
+        img_failed.set(false);
+    });
     let action = move |action: &'static str| {
-        if !context.is_admin() || !busy.get_untracked().is_empty() {
+        if !context.is_admin() || !busy.get_untracked().is_empty() || is_restarting.get_untracked()
+        {
             return;
         }
         let row = info.get_untracked();
@@ -247,6 +433,7 @@ fn ServiceCard(
             return;
         }
         let target = field(&row, &["id", "process", "slug"]);
+        let label = field(&row, &["name", "slug", "id"]);
         let process = field(&row, &["id", "process", "slug"]);
         let manager = field(&row, &["managed_by"]);
         let manager = if manager.is_empty() {
@@ -270,8 +457,29 @@ fn ServiceCard(
             }
             match result {
                 Ok(receipt) => {
-                    context.toast(if receipt["status"]=="accepted"{tt_with(context, "Restart scheduled for {target}; reconnecting to confirm runtime health.", &[("target", &(target).to_string())])}else{tt_with(context, "{action} completed for {target}", &[("action", &(tt(context, action)).to_string()), ("target", &(target).to_string())])},false);
-                    refresh.run(());
+                    if receipt["status"] == "accepted" {
+                        restarts.track_accepted(
+                            context,
+                            id.get_value(),
+                            target,
+                            label,
+                            &receipt,
+                            refresh,
+                        );
+                    } else {
+                        context.toast(
+                            tt_with(
+                                context,
+                                "{action} completed for {target}",
+                                &[
+                                    ("action", &(tt(context, action)).to_string()),
+                                    ("target", &(target).to_string()),
+                                ],
+                            ),
+                            false,
+                        );
+                        refresh.run(());
+                    }
                 }
                 Err(e) => {
                     context.toast(tt(context, &e.message), true);
@@ -285,7 +493,9 @@ fn ServiceCard(
         info.with(|v| context.settings.with(|settings| launch_url(v, settings)))
     });
     let status_label = Signal::derive(move || {
-        if busy.get().is_empty() {
+        if is_restarting.get() {
+            format!("{}…", tt(context, "Restart"))
+        } else if busy.get().is_empty() {
             info.with(|value| {
                 let status = field(value, &["status"]);
                 tt(
@@ -308,26 +518,146 @@ fn ServiceCard(
             format!("{}…", tt(context, label))
         }
     });
+    let trigger_check_update = move |_| {
+        let pkg_id = info.with_untracked(|v| field(v, &["id"]));
+        if !context.is_admin()
+            || pkg_id.is_empty()
+            || info.with_untracked(core_service)
+            || checking_unit.with_untracked(|c| c.as_deref() == Some(pkg_id.as_str()))
+        {
+            return;
+        }
+        checking_unit.set(Some(pkg_id.clone()));
+        spawn_local(async move {
+            let result = ApiClient
+                .post(
+                    &format!(
+                        "/api/v1/admin/packages/{}/check-update",
+                        js_sys::encode_uri_component(&pkg_id)
+                    ),
+                    None,
+                )
+                .await;
+            if checking_unit.is_disposed() {
+                return;
+            }
+            checking_unit.set(None);
+            match result {
+                Ok(data) => {
+                    if !field(&data, &["error", "last_error"]).is_empty() {
+                        context.toast(tt(context, &field(&data, &["error", "last_error"])), true);
+                    } else if data["update_available"] == true {
+                        let latest = field(&data, &["latest_version"]);
+                        context.toast(
+                            tt_with(
+                                context,
+                                "Update available for {id}: {version}",
+                                &[
+                                    ("id", &pkg_id),
+                                    (
+                                        "version",
+                                        &format!("v{}", latest.trim_start_matches(['v', 'V'])),
+                                    ),
+                                ],
+                            ),
+                            false,
+                        );
+                    } else {
+                        context.toast(
+                            tt_with(context, "{id} is up to date.", &[("id", &pkg_id)]),
+                            false,
+                        );
+                    }
+                    refresh.run(());
+                }
+                Err(error) => context.toast(tt(context, &error.message), true),
+            }
+        });
+    };
+    let trigger_update = move |_| {
+        let pkg_id = info.with_untracked(|v| field(v, &["id"]));
+        if !context.is_admin()
+            || pkg_id.is_empty()
+            || info.with_untracked(core_service)
+            || updating_unit.with_untracked(|u| u.as_deref() == Some(pkg_id.as_str()))
+        {
+            return;
+        }
+        let target_version = info.with_untracked(|v| field(v, &["latest_version"]));
+        updating_unit.set(Some(pkg_id.clone()));
+        spawn_local(async move {
+            let body = if target_version.is_empty() {
+                Value::Null
+            } else {
+                json!({ "expected_target_version": target_version })
+            };
+            let result = ApiClient
+                .post(
+                    &format!(
+                        "/api/v1/admin/packages/{}/update",
+                        js_sys::encode_uri_component(&pkg_id)
+                    ),
+                    (!body.is_null()).then_some(&body),
+                )
+                .await;
+            if updating_unit.is_disposed() {
+                return;
+            }
+            updating_unit.set(None);
+            match result {
+                Ok(_) => {
+                    context.toast(
+                        tt_with(context, "Update started for {id}", &[("id", &pkg_id)]),
+                        false,
+                    );
+                    refresh.run(());
+                }
+                Err(error) => context.toast(tt(context, &error.message), true),
+            }
+        });
+    };
+    let on_confirm_control = Callback::new(move |(): ()| {
+        if let Some(op) = confirm_action.get_untracked() {
+            confirm_open.set(false);
+            confirm_action.set(None);
+            action(op);
+        }
+    });
     view! {
         <article class="af-service-tile min-w-0 rounded-xl p-4 border border-white/5 space-y-4">
             <div class="flex gap-3 justify-between items-start">
-                <div class="min-w-0">
-                    <h3 class="font-semibold break-words">
-                        {move || info.with(|v| field(v, &["name", "slug", "id"]))}
-                    </h3>
-                    <p class="text-xs text-slate-500 break-all mt-1">
-                        {move || info.with(|value| {
-                            service_subtitle(value).split(" · ")
-                                .map(|label| tt(context, label))
-                                .collect::<Vec<_>>().join(" · ")
-                        })}
-                    </p>
-                    <Show when=move || info.with(|value| value["managed_by"] == "embedded")>
-                        <Badge
-                            label=Signal::derive(move || tt(context, "Services.badgeIntegrated"))
-                            tone="indigo"
-                        />
-                    </Show>
+                <div class="flex items-start gap-3 min-w-0">
+                    {move || {
+                        info.with(|v| safe_service_icon(v)).filter(|_| !img_failed.get()).map(|src| {
+                            let alt = info.with(|v| field(v, &["name", "slug", "id"]));
+                            view! {
+                                <img
+                                    src=src
+                                    alt=alt
+                                    class="h-8 w-8 rounded-lg object-contain bg-white/[0.04] border border-white/10 p-1 shrink-0"
+                                    on:error=move |_| img_failed.set(true)
+                                />
+                            }
+                        })
+                    }}
+                    <div class="min-w-0">
+                        <h3 class="font-semibold break-words">
+                            {move || info.with(|v| field(v, &["name", "slug", "id"]))}
+                        </h3>
+                        <p class="text-xs text-slate-500 break-all mt-1">
+                            {move || info.with(|value| {
+                                service_subtitle(value).split(" · ")
+                                    .map(|label| tt(context, label))
+                                    .collect::<Vec<_>>().join(" · ")
+                            })}
+                        </p>
+                        <Show when=move || info.with(|value| value["managed_by"] == "embedded")>
+                            <Badge
+                                label=Signal::derive(move || tt(context, "Services.badgeIntegrated"))
+                                tone="indigo"
+                            />
+                        </Show>
+                    </div>
                 </div>
                 <span class="flex items-center gap-2 shrink-0">
                     <span
@@ -358,14 +688,69 @@ fn ServiceCard(
             </div>
             <dl class="grid grid-cols-2 gap-3 text-xs">
                 <div>
-                    <dt class="text-slate-500">{move || tt(context, "Version")}</dt>
-                    <dd class="text-slate-300 mt-1 break-all">
-                        {move || {
-                            info.with(|v| {
-                                let version = field(v, &["installed_version", "version"]);
-                                if version.is_empty() { tt(context, "Unreported") } else { tt(context, &version) }
-                            })
-                        }}
+                    <dt class="text-slate-500 flex items-center justify-between gap-2">
+                        <span>{move || tt(context, "Version")}</span>
+                        <Show when=move || context.is_admin() && info.with(|v| !core_service(v) && !field(v, &["id"]).is_empty())>
+                            <button
+                                type="button"
+                                class="text-indigo-300 hover:text-indigo-200 underline text-xs"
+                                disabled=move || checking_unit.with(|c| c.as_deref() == Some(info.with(|v| field(v, &["id"])).as_str()))
+                                on:click=trigger_check_update
+                            >
+                                {move || {
+                                    let pid = info.with(|v| field(v, &["id"]));
+                                    if checking_unit.with(|c| c.as_deref() == Some(pid.as_str())) {
+                                        tt(context, "Checking…")
+                                    } else {
+                                        tt(context, "Check update")
+                                    }
+                                }}
+                            </button>
+                        </Show>
+                    </dt>
+                    <dd class="text-slate-300 mt-1 break-all flex flex-wrap items-center gap-1.5">
+                        <span>
+                            {move || {
+                                info.with(|v| {
+                                    let version = field(v, &["installed_version", "version"]);
+                                    if version.is_empty() { tt(context, "Unreported") } else { tt(context, &version) }
+                                })
+                            }}
+                        </span>
+                        <Show when=move || info.with(has_available_update)>
+                            {move || {
+                                info.with(|v| {
+                                    let latest = field(v, &["latest_version"]);
+                                    let badge_text = if latest.is_empty() {
+                                        tt(context, "Update available")
+                                    } else {
+                                        tt_with(
+                                            context,
+                                            "Update {version}",
+                                            &[("version", &format!("v{}", latest.trim_start_matches(['v', 'V'])))],
+                                        )
+                                    };
+                                    match safe_release_url(v) {
+                                        Some(url) => view! {
+                                            <a
+                                                href=url
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                title=move || tt(context, "View release notes")
+                                                class="text-amber-300 underline hover:text-amber-200 font-semibold"
+                                            >
+                                                {badge_text}
+                                            </a>
+                                        }
+                                        .into_any(),
+                                        None => view! {
+                                            <span class="text-amber-300 font-semibold">{badge_text}</span>
+                                        }
+                                        .into_any(),
+                                    }
+                                })
+                            }}
+                        </Show>
                     </dd>
                 </div>
                 <div>
@@ -374,13 +759,29 @@ fn ServiceCard(
                 </div>
                 {move || {
                     info.with(|v| {
+                        let reassigned = reassigned_default_port(v);
                         resource_metrics(v)
                             .into_iter()
                             .map(|(label, value)| {
+                                let default_badge = if label == "Port" {
+                                    reassigned.map(|(_, def)| format!("def :{def}"))
+                                } else {
+                                    None
+                                };
                                 view! {
                                     <div>
                                         <dt class="text-slate-500">{move || tt(context, label)}</dt>
-                                        <dd class="text-slate-300 mt-1">{move || tt(context, &value)}</dd>
+                                        <dd class="text-slate-300 mt-1 flex flex-wrap items-center gap-1.5">
+                                            <span>{move || tt(context, &value)}</span>
+                                            {default_badge.map(|badge| view! {
+                                                <span
+                                                    class="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono"
+                                                    title=move || tt(context, "Dynamically reassigned from default port")
+                                                >
+                                                    {badge}
+                                                </span>
+                                            })}
+                                        </dd>
                                     </div>
                                 }
                             })
@@ -388,23 +789,168 @@ fn ServiceCard(
                     })
                 }}
             </dl>
-            {move || {
-                launch
-                    .get()
-                    .map(|url| {
-                        view! {
-                            <a
-                                class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs max-w-full break-all"
-                                href=url
-                                target="_blank"
-                                rel="noopener noreferrer"
-                            >
-                                {move || tt(context, "Open App")}
-                            </a>
+            <Show when=move || info.with(|v| !core_service(v) && !field(v, &["update_error"]).is_empty())>
+                <p role="note" class="text-xs text-rose-300 break-words">
+                    {move || info.with(|v| {
+                        tt_with(
+                            context,
+                            "Update check failed: {error}",
+                            &[("error", &field(v, &["update_error"]))],
+                        )
+                    })}
+                </p>
+            </Show>
+            <Show when=move || info.with(is_failed_install)>
+                <div role="status" class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200 space-y-1">
+                    <p class="font-semibold">
+                        {move || tt(context, "Install failed — rollback or recovery is unconfirmed.")}
+                    </p>
+                    <p class="break-words">
+                        {move || info.with(|v| {
+                            let msg = field(&v["last_job"], &["sanitized_summary", "message"]);
+                            if msg.is_empty() {
+                                tt(context, "Inspect installation failure logs before starting or restarting.")
+                            } else {
+                                msg
+                            }
+                        })}
+                    </p>
+                </div>
+            </Show>
+            <Show when=move || info.with(|v| {
+                !is_failed_install(v)
+                    && !field(&v["last_job"], &["status"]).is_empty()
+                    && field(&v["last_job"], &["status"]) != "completed"
+            })>
+                <p role="status" class="text-xs text-rose-300 break-words">
+                    {move || info.with(|v| {
+                        let last = &v["last_job"];
+                        let act = field(last, &["action"]);
+                        let st = field(last, &["status"]);
+                        let msg = field(last, &["sanitized_summary", "message"]);
+                        if msg.is_empty() {
+                            tt_with(context, "Last {action}: {status}", &[("action", &tt(context, &act)), ("status", &tt(context, &st))])
+                        } else {
+                            tt_with(context, "Last {action}: {status} — {message}", &[("action", &tt(context, &act)), ("status", &tt(context, &st)), ("message", &msg)])
                         }
-                    })
-            }}
+                    })}
+                </p>
+            </Show>
+            <Show when=move || info.with(|v| v["components"].as_array().is_some_and(|c| c.len() > 1))>
+                <ul
+                    aria-label=move || tt(context, "Service components")
+                    class="divide-y divide-white/[0.06] text-xs text-slate-400 border-t border-white/5 pt-2"
+                >
+                    {move || {
+                        info.with(|v| {
+                            v["components"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|component| {
+                                    let comp_unit = field(&component, &["unit"]);
+                                    let comp_status = field(&component, &["status"]);
+                                    let comp_role = field(&component, &["role"]);
+                                    let unit_for_logs = comp_unit.clone();
+                                    let unit_title = tt_with(
+                                        context,
+                                        "View logs for {unit}",
+                                        &[("unit", &comp_unit)],
+                                    );
+                                    view! {
+                                        <li class="flex items-center justify-between gap-2 py-1.5 min-w-0">
+                                            <span class="break-all">
+                                                {format!(
+                                                    "{}: {} ({})",
+                                                    comp_unit,
+                                                    if comp_status.is_empty() { "unknown" } else { &comp_status },
+                                                    if comp_role.is_empty() { "required" } else { &comp_role },
+                                                )}
+                                            </span>
+                                            {context.is_admin().then(|| view! {
+                                                <button
+                                                    type="button"
+                                                    class="glass-button px-2.5 py-1 text-xs shrink-0"
+                                                    title=unit_title.clone()
+                                                    on:click=move |_| {
+                                                        let mut row = info.get_untracked();
+                                                        row["initial_unit"] = json!(unit_for_logs.clone());
+                                                        selected.set(Some(row));
+                                                        logs_open.set(true);
+                                                    }
+                                                >
+                                                    {move || tt(context, "Logs")}
+                                                </button>
+                                            })}
+                                        </li>
+                                    }
+                                })
+                                .collect_view()
+                        })
+                    }}
+                </ul>
+            </Show>
+            <div class="flex flex-wrap gap-2 items-center">
+                {move || {
+                    launch
+                        .get()
+                        .map(|url| {
+                            view! {
+                                <a
+                                    class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs max-w-full break-all"
+                                    href=url
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >
+                                    {move || tt(context, "Open App")}
+                                </a>
+                            }
+                        })
+                }}
+                <Show when=move || {
+                    context.is_admin() && info.with(external_access_target).is_some()
+                }>
+                    <button
+                        type="button"
+                        class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs"
+                        title=move || {
+                            let name = info.with(|v| field(v, &["name", "slug", "id"]));
+                            tt_with(context, "Configure external access for {name}", &[("name", &name)])
+                        }
+                        on:click=move |_| {
+                            if let Some(target) = info.with_untracked(external_access_target) {
+                                context.navigate_to_subtab(TabId::Network, target);
+                            }
+                        }
+                    >
+                        {move || tt(context, "External access")}
+                    </button>
+                </Show>
+            </div>
             <Show when=move || context.is_admin()>
+                <Show when=move || info.with(has_available_update)>
+                    <button
+                        type="button"
+                        class="glass-button-primary w-full px-3 py-2 text-xs min-h-11"
+                        disabled=move || {
+                            !busy.get().is_empty()
+                                || is_restarting.get()
+                                || updating_unit.with(|u| u.as_deref() == Some(info.with(|v| field(v, &["id"])).as_str()))
+                        }
+                        on:click=trigger_update
+                    >
+                        {move || {
+                            let pid = info.with(|v| field(v, &["id"]));
+                            let name = info.with(|v| field(v, &["name", "slug", "id"]));
+                            if updating_unit.with(|u| u.as_deref() == Some(pid.as_str())) {
+                                tt(context, "Updating…")
+                            } else {
+                                tt_with(context, "Update {name}", &[("name", &name)])
+                            }
+                        }}
+                    </button>
+                </Show>
                 <div class="flex flex-wrap gap-2 border-t border-white/5 pt-3">
                     {[("start", "Start"), ("stop", "Stop"), ("restart", "Restart")]
                         .into_iter()
@@ -415,6 +961,7 @@ fn ServiceCard(
                                     class="glass-button px-3 py-2 text-xs min-h-11"
                                     disabled=move || {
                                         !busy.get().is_empty()
+                                            || is_restarting.get()
                                             || info
                                                 .with(|v| shared_vhost(v) || v["managed_by"] == "embedded")
                                     }
@@ -427,7 +974,14 @@ fn ServiceCard(
                                             "Control service"
                                         }
                                     )
-                                    on:click=move |_| action(key)
+                                    on:click=move |_| {
+                                        if key == "stop" || info.with_untracked(is_failed_install) {
+                                            confirm_action.set(Some(key));
+                                            confirm_open.set(true);
+                                        } else {
+                                            action(key);
+                                        }
+                                    }
                                 >
                                     {move || tt(context, label)}
                                 </button>
@@ -447,6 +1001,36 @@ fn ServiceCard(
                         {move || tt(context, "Logs")}
                     </button>
                 </div>
+                <ConfirmDialog
+                    open=confirm_open
+                    title=Signal::derive(move || {
+                        let name = info.with(|v| field(v, &["name", "slug", "id"]));
+                        match confirm_action.get() {
+                            Some("stop") => tt_with(context, "Stop {name}?", &[("name", &name)]),
+                            Some("start") => tt_with(
+                                context,
+                                "Start {name} after failed install?",
+                                &[("name", &name)],
+                            ),
+                            _ => tt_with(
+                                context,
+                                "Restart {name} after failed install?",
+                                &[("name", &name)],
+                            ),
+                        }
+                    })
+                    message=Signal::derive(move || match confirm_action.get() {
+                        Some("stop") => tt(
+                            context,
+                            "Stopping this service interrupts active connections until started again.",
+                        ),
+                        _ => tt(
+                            context,
+                            "The previous install failed and recovery state is unconfirmed. Review installation logs before continuing.",
+                        ),
+                    })
+                    on_confirm=on_confirm_control
+                />
                 <Show when=move || info.with(|v| v["enabled"].is_boolean())>
                     <p
                         class="text-xs text-slate-500"

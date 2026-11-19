@@ -214,25 +214,98 @@ pub fn tokenize_code(code: &str, language: &str) -> Vec<TokenSpan> {
     let lang = language.to_ascii_lowercase();
     let hash_comments = matches!(
         lang.as_str(),
-        "python" | "py" | "toml" | "yaml" | "yml" | "shell" | "sh" | "bash" | "ini"
+        "python"
+            | "py"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "shell"
+            | "sh"
+            | "bash"
+            | "ini"
+            | "dockerfile"
+            | "makefile"
+            | "gitignore"
+            | "ruby"
+            | "perl"
+            | "powershell"
+            | "properties"
+            | "nginx"
+            | "apache_conf"
+            | "terraform"
+            | "hcl"
+            | "graphql"
+            | "graphqlschema"
+            | "php"
     );
     let slash_comments = matches!(
         lang.as_str(),
-        "rust" | "rs" | "go" | "javascript" | "js" | "typescript" | "ts" | "tsx" | "jsx" | "css"
+        "rust"
+            | "rs"
+            | "go"
+            | "golang"
+            | "javascript"
+            | "js"
+            | "typescript"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "css"
+            | "scss"
+            | "less"
+            | "json5"
+            | "c_cpp"
+            | "c"
+            | "cpp"
+            | "java"
+            | "csharp"
+            | "php"
+            | "swift"
+            | "kotlin"
+            | "scala"
+            | "prisma"
+            | "terraform"
+            | "hcl"
     );
-    let sql = lang == "sql";
-    let markup = matches!(lang.as_str(), "html" | "xml" | "markdown" | "md");
-    let keywords="fn let mut pub use mod impl struct enum trait match if else for while loop return async await move const static type where self Self crate super true false null None Some Ok Err function var new class import export from default try catch throw interface extends package func defer range go select chan map nil def lambda with as in is and or not pass elif except finally yield True False None select SELECT from FROM where WHERE insert INSERT into INTO update UPDATE delete DELETE create CREATE table TABLE join JOIN order ORDER by BY group GROUP having HAVING limit LIMIT set SET values VALUES primary PRIMARY key KEY echo then fi do done esac case sudo";
+    let dash_comments = matches!(lang.as_str(), "sql" | "lua");
+    let semicolon_comments = matches!(lang.as_str(), "ini" | "properties");
+    let percent_comments = matches!(lang.as_str(), "latex" | "tex");
+    let batchfile = lang == "batchfile";
+    let is_diff = lang == "diff";
+    let markup = matches!(lang.as_str(), "html" | "xml" | "svg" | "markdown" | "md");
+    let property_lang = matches!(
+        lang.as_str(),
+        "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "properties"
+            | "nginx"
+            | "apache_conf"
+            | "terraform"
+            | "hcl"
+            | "makefile"
+    );
+    let keywords="fn let mut pub use mod impl struct enum trait match if else for while loop return async await move const static type where self Self crate super true false null None Some Ok Err function var new class import export from default try catch throw interface extends implements package func defer range go select chan map nil def lambda with as in is and or not pass elif except finally yield True False select SELECT from FROM where WHERE insert INSERT into INTO update UPDATE delete DELETE create CREATE table TABLE join JOIN order ORDER by BY group GROUP having HAVING limit LIMIT set SET values VALUES primary PRIMARY key KEY echo then fi do done esac case sudo FROM RUN CMD COPY ADD ENV WORKDIR EXPOSE ENTRYPOINT ARG LABEL VOLUME USER HEALTHCHECK SHELL int void char bool float double long short unsigned signed auto virtual override template namespace include define typedef public private protected final abstract using foreach switch break continue goto local end elseif repeat until sub my our strict warnings resource data variable output provider module locals model datasource generator schema query mutation subscription fragment server location upstream proxy_pass listen param REM setlocal endlocal";
     let mut spans = Vec::new();
     let mut i = 0;
     while i < code.len() {
         let rest = &code[i..];
         let c = rest.chars().next().expect("nonempty");
         let start = i;
-        let (end, kind) = if (hash_comments && c == '#')
+        let at_line_start = i == 0 || code.as_bytes().get(i.wrapping_sub(1)) == Some(&b'\n');
+        let (end, kind) = if is_diff && at_line_start && rest.starts_with("@@") {
+            (i + rest.find('\n').unwrap_or(rest.len()), "function")
+        } else if is_diff && at_line_start && c == '+' {
+            (i + rest.find('\n').unwrap_or(rest.len()), "string")
+        } else if is_diff && at_line_start && c == '-' {
+            (i + rest.find('\n').unwrap_or(rest.len()), "property")
+        } else if (hash_comments && c == '#')
             || (slash_comments && rest.starts_with("//"))
-            || (sql && rest.starts_with("--"))
-            || (lang == "ini" && c == ';')
+            || (dash_comments && rest.starts_with("--"))
+            || (semicolon_comments && c == ';')
+            || (percent_comments && c == '%')
+            || (batchfile && at_line_start && rest.starts_with("::"))
         {
             (i + rest.find('\n').unwrap_or(rest.len()), "comment")
         } else if slash_comments && rest.starts_with("/*") {
@@ -245,6 +318,13 @@ pub fn tokenize_code(code: &str, language: &str) -> Vec<TokenSpan> {
                 i + rest.find("-->").map(|p| p + 3).unwrap_or(rest.len()),
                 "comment",
             )
+        } else if percent_comments && c == '\\' {
+            let cmd_end = i
+                + 1
+                + rest[1..]
+                    .find(|ch: char| !ch.is_ascii_alphabetic())
+                    .unwrap_or(rest.len().saturating_sub(1));
+            (cmd_end.max(i + 1), "keyword")
         } else if matches!(c, '\'' | '"' | '`') {
             let mut end = i + c.len_utf8();
             let mut escaped = false;
@@ -274,9 +354,8 @@ pub fn tokenize_code(code: &str, language: &str) -> Vec<TokenSpan> {
                     "keyword"
                 } else if code[end..].trim_start().starts_with('(') {
                     "function"
-                } else if lang == "json"
-                    || matches!(lang.as_str(), "yaml" | "yml" | "toml" | "ini")
-                        && code[end..].trim_start().starts_with([':', '='])
+                } else if matches!(lang.as_str(), "json" | "json5")
+                    || (property_lang && code[end..].trim_start().starts_with([':', '=']))
                 {
                     "property"
                 } else {
@@ -806,5 +885,64 @@ mod tests {
         let copy: WorkerEnvelope<WorkerRequest> = serde_json::from_str(&json).unwrap();
         assert_eq!(copy.id, 7);
         assert_eq!(copy.message, request.message);
+    }
+
+    #[test]
+    fn tokenize_code_highlights_extended_109_language_families_safely() {
+        let cases = [
+            (
+                "dockerfile",
+                "FROM alpine:3.20\n# install\nRUN echo ok\n",
+                &["keyword", "comment"][..],
+            ),
+            (
+                "c_cpp",
+                "int main() { /* hi */ return 0; }",
+                &["keyword", "function", "comment", "number"][..],
+            ),
+            (
+                "terraform",
+                "resource \"null_resource\" \"x\" {\n  # note\n  count = 1\n}\n",
+                &["keyword", "string", "comment", "property"][..],
+            ),
+            (
+                "lua",
+                "local function greet() -- café\n  return 1\nend",
+                &["keyword", "function", "comment"][..],
+            ),
+            (
+                "latex",
+                "\\section{Intro} % comment",
+                &["keyword", "comment"][..],
+            ),
+            (
+                "diff",
+                "@@ -1 +1 @@\n-old\n+new\n",
+                &["function", "property", "string"][..],
+            ),
+            (
+                "svg",
+                "<!-- icon --><svg><path /></svg>",
+                &["comment", "tag"][..],
+            ),
+            (
+                "batchfile",
+                ":: comment\necho hi",
+                &["comment", "keyword"][..],
+            ),
+        ];
+        for (lang, code, expected_kinds) in cases {
+            let spans = tokenize_code(code, lang);
+            assert!(
+                spans.iter().all(|s| code.get(s.start..s.end).is_some()),
+                "non-UTF8 span in {lang}"
+            );
+            for expected in expected_kinds {
+                assert!(
+                    spans.iter().any(|s| s.kind == *expected),
+                    "missing {expected} span for {lang}: {spans:?}"
+                );
+            }
+        }
     }
 }

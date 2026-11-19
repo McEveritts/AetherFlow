@@ -7,6 +7,8 @@ pub(super) fn MetadataSettings() -> impl IntoView {
     let status = use_api("/api/v1/admin/ai/metadata/status".to_string());
     poll_resource(status, 2000);
     let draft = RwSignal::new(FormDraft::new(json!({"path":""})));
+    let picker = RwSignal::new(false);
+    let current_path = RwSignal::new("/".to_string());
     let busy = RwSignal::new(false);
     let was_scanning = RwSignal::new(false);
     Effect::new(move |_| {
@@ -46,6 +48,11 @@ pub(super) fn MetadataSettings() -> impl IntoView {
                 }
             >
                 <DraftInput draft field="path" label="Media directory" required=true />
+                <button type="button" class="glass-button px-3 py-2" on:click=move |_| {
+                    let path = text(&draft_value(draft), "path");
+                    current_path.set(if path.starts_with('/') {path} else {"/".into()});
+                    picker.set(true);
+                }>{move || tt(context, "Browse Directories")}</button>
                 <button
                     type="submit"
                     class="glass-button-primary px-4 py-2"
@@ -54,6 +61,18 @@ pub(super) fn MetadataSettings() -> impl IntoView {
                     {move || tt(context, "Scan metadata")}
                 </button>
             </form>
+            <Modal open=picker title="Browse Directories">
+                <Show when=move || picker.get()>
+                    <p class="break-all">{move || current_path.get()}</p>
+                    <button type="button" class="glass-button px-3 py-2" disabled=move || current_path.get() == "/"
+                        on:click=move |_| current_path.update(|p| *p = crate::tabs::fileshare::parent_path(p))>{move || tt(context, "Up")}</button>
+                    <crate::tabs::fileshare::DirectoryPicker current_path />
+                    <button type="button" class="glass-button-primary px-3 py-2" on:click=move |_| {
+                        edit(draft, "path", json!(current_path.get_untracked()));
+                        picker.set(false);
+                    }>{move || tt(context, "Use this directory")}</button>
+                </Show>
+            </Modal>
             <ResourceFeedback resource=status />
             <ResourceFeedback resource=results />
             <p role="status" class="text-sm text-slate-400 my-4">
@@ -61,13 +80,10 @@ pub(super) fn MetadataSettings() -> impl IntoView {
                     status
                         .data
                         .with(|v| {
-                            format!(
-                                "{} / {} · {}% · {}",
-                                text(v, "done"),
-                                text(v, "total"),
-                                text(v, "progress"),
-                                text(v, "error"),
-                            )
+                            let err = text(v, "error");
+                            if !err.is_empty() { return err; }
+                            if v["scanning"] != true && v["total"].as_u64().unwrap_or(0) == 0 { return tt(context, "Idle"); }
+                            format!("{} / {} · {}%", text(v, "done"), text(v, "total"), text(v, "progress"))
                         })
                 }}
             </p>

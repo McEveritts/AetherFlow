@@ -70,7 +70,8 @@ def record_asset_change(dist: Path, path: Path, data: bytes, replacements: dict[
     original = path.read_bytes()
     destination = path
     if rename:
-        stem = re.sub(r"-[0-9a-f]{16,64}(?=(?:_bg)?$)", "", path.stem)
+        # Trunk formats the input digest without padding leading zeroes.
+        stem = re.sub(r"-[0-9a-f]{1,64}(?=(?:_bg)?$)", "", path.stem)
         digest = hashlib.sha256(data).hexdigest()[:16]
         destination = path.with_name(f"{stem}-{digest}{path.suffix}")
         replacements[path.relative_to(dist).as_posix()] = destination.relative_to(dist).as_posix()
@@ -208,7 +209,7 @@ def finalize(dist: Path):
     for path in sorted(dist.rglob("*.wasm")):
         original = path.read_bytes()
         data = strip_wasm_custom_sections(original)
-        if data != original:
+        if data != original or re.fullmatch(r"af-web-app-[a-f0-9]+_bg\.wasm", path.name):
             record_asset_change(dist, path, data, replacements, rename=path.name != "af-web-worker_bg.wasm")
     # Rename leaves before their importers so all embedded URLs match their bytes.
     names = ["af-web-worker_bg.wasm", "af-web-worker.js", "af-web-worker_loader.js"]
@@ -429,7 +430,7 @@ def self_test():
             with tempfile.TemporaryDirectory() as tmp:
                 dist = Path(tmp)
                 original = executable + custom("name", b"debug symbols") + custom("producers") + custom("target_features")
-                old_wasm = "app-0123456789abcdef_bg.wasm"
+                old_wasm = "app-123456789abcdef_bg.wasm"
                 old_glue = "app-0123456789abcdef.js"
                 old_launcher = "a-launcher-0123456789abcdef.js"
                 (dist / old_wasm).write_bytes(original)

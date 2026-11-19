@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn tailscale_logout_message(value: &Value) -> &str {
+    value["message"]
+        .as_str()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .unwrap_or("Logged out from Tailscale.")
+}
+
 #[component]
 pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
     let context = app();
@@ -10,6 +18,8 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
     let busy = RwSignal::new(false);
     let auth_url = RwSignal::new(String::new());
     let down = RwSignal::new(false);
+    let logout = RwSignal::new(false);
+    let logout_error = RwSignal::new(None::<String>);
     Effect::new(move |_| {
         let value = status.data.get()["tailscale"].clone();
         if value.is_object() {
@@ -221,7 +231,23 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 >
                     {move || tt(context, "Down")}
                 </button>
+                <button
+                    type="button"
+                    class="glass-button px-4 py-2 text-rose-300"
+                    disabled=move || busy.get()
+                    on:click=move |_| {
+                        logout_error.set(None);
+                        logout.set(true);
+                    }
+                >
+                    {move || tt(context, "Logout")}
+                </button>
             </div>
+            <Show when=move || logout_error.get().is_some()>
+                <p role="alert" class="text-rose-300 text-sm mb-4">
+                    {move || logout_error.get().map(|err| tt(context, &err))}
+                </p>
+            </Show>
             <Show when=move || !auth_url.get().is_empty()>
                 <a
                     class="glass-button-primary inline-block px-4 py-2 mb-4"
@@ -330,5 +356,66 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 });
             })
         />
+        <ConfirmDialog
+            open=logout
+            title="Log out Tailscale node?"
+            message="Logging out expires this node key and removes active tailnet connectivity until you re-authenticate."
+            busy
+            on_confirm=Callback::new(move |()| {
+                if busy.get_untracked() {
+                    return;
+                }
+                logout_error.set(None);
+                busy.set(true);
+                let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+                spawn_local(async move {
+                    match ApiClient
+                        .post("/api/v1/admin/network/tailscale/logout", None)
+                        .await
+                    {
+                        Ok(value) => {
+                            if logout.try_get_untracked().is_some() {
+                                logout.set(false);
+                                auth_url.set(String::new());
+                                logout_error.set(None);
+                                status.refresh();
+                            }
+                            context.toast(tt(context, tailscale_logout_message(&value)), false);
+                        }
+                        Err(error) => {
+                            if logout.try_get_untracked().is_some() {
+                                logout.set(false);
+                                logout_error.set(Some(error.message.clone()));
+                            }
+                            context.toast(tt(context, &error.message), true);
+                        }
+                    }
+                    if busy.try_get_untracked().is_some() {
+                        busy_guard.release();
+                    }
+                });
+            })
+        />
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tailscale_logout_message_falls_back_when_empty_or_missing() {
+        assert_eq!(
+            tailscale_logout_message(&json!({"message": "Node logged out"})),
+            "Node logged out"
+        );
+        assert_eq!(
+            tailscale_logout_message(&json!({"message": "  "})),
+            "Logged out from Tailscale."
+        );
+        assert_eq!(
+            tailscale_logout_message(&json!({})),
+            "Logged out from Tailscale."
+        );
     }
 }

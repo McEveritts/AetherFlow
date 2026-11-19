@@ -10,6 +10,7 @@ ui = ["dep:af-models", "dep:url", "dep:percent-encoding", "dep:qrcode", "dep:was
 worker-engine = ["dep:regex", "dep:pulldown-cmark", "dep:pulldown-latex", "dep:ammonia"]
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 af-models = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

@@ -241,7 +241,80 @@ pub(super) fn shared_vhost(info: &Value) -> bool {
         && (info["control_scope"] == "shared-vhost"
             || (info["process"] == "apache2" && info["id"] != "apache2"))
 }
-pub(super) fn launch_url(info: &Value, settings: &Value) -> Option<String> {
+pub(super) fn is_failed_install(info: &Value) -> bool {
+    (info["last_job"]["action"] == "install" && info["last_job"]["status"] == "failed")
+        || matches!(info["status"].as_str(), Some("install_failed"))
+        || matches!(info["job_status"].as_str(), Some("install_failed"))
+}
+pub(super) fn has_available_update(info: &Value) -> bool {
+    !core_service(info)
+        && info["update_available"] == true
+        && field(info, &["update_error"]).is_empty()
+}
+pub(crate) fn safe_release_url(info: &Value) -> Option<String> {
+    let url = field(info, &["update_url", "release_url"]);
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        Some(url)
+    } else {
+        None
+    }
+}
+pub(super) fn safe_service_icon(info: &Value) -> Option<String> {
+    if core_service(info) {
+        return None;
+    }
+    let id = field(info, &["id"]).to_ascii_lowercase();
+    if !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        Some(format!("/img/{id}.png"))
+    } else {
+        None
+    }
+}
+pub(super) fn reassigned_default_port(info: &Value) -> Option<(u64, u64)> {
+    let active = ["active_port", "listen_port", "port"]
+        .iter()
+        .find_map(|key| info[*key].as_u64().filter(|n| *n > 0 && *n <= 65535))?;
+    let default = info["default_port"]
+        .as_u64()
+        .filter(|n| *n > 0 && *n <= 65535)?;
+    (active != default).then_some((active, default))
+}
+pub(super) fn effective_web_port(info: &Value) -> Option<u64> {
+    ["active_port", "listen_port", "default_port", "port"]
+        .iter()
+        .find_map(|key| info[*key].as_u64().filter(|n| *n > 0 && *n <= 65535))
+}
+pub(super) fn has_web_ui(info: &Value) -> bool {
+    let id = field(info, &["id", "slug", "process"]).to_ascii_lowercase();
+    let clean = id.trim_end_matches(".service");
+    if matches!(clean, "aetherflow-api" | "aetherflow-runner")
+        || info["has_web_ui"] == false
+        || matches!(
+            info["service_type"].as_str(),
+            Some("cli" | "daemon" | "oneshot")
+        )
+    {
+        return false;
+    }
+    effective_web_port(info).is_some()
+}
+pub(crate) fn external_access_target(info: &Value) -> Option<String> {
+    if core_service(info) || !has_web_ui(info) {
+        return None;
+    }
+    let id = field(info, &["id", "slug", "process"]);
+    (!id.is_empty()).then_some(id)
+}
+pub(crate) fn launch_url_with_host(
+    info: &Value,
+    settings: &Value,
+    browser_host: Option<&str>,
+) -> Option<String> {
     let path = field(info, &["web_path"]);
     let path = if path.is_empty() {
         String::new()
@@ -259,30 +332,38 @@ pub(super) fn launch_url(info: &Value, settings: &Value) -> Option<String> {
             }
         ));
     }
-    let base = field(settings, &["baseDomain", "base_domain"]);
-    let id = field(info, &["id"]);
-    if valid_domain(&base)
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && !id.is_empty()
-    {
-        return Some(format!("https://{id}.{base}{path}"));
-    }
-    let location = web_sys::window()?.location();
-    let host = location.hostname().ok()?;
-    if info["bind_scope"] == "loopback"
-        && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1")
-    {
+    if !has_web_ui(info) {
         return None;
     }
-    let port = ["active_port", "default_port", "port"]
-        .iter()
-        .find_map(|key| info[*key].as_u64().filter(|n| *n > 0 && *n <= 65535))?;
+    let port = effective_web_port(info)?;
     let scheme = if info["web_scheme"] == "https" {
         "https"
     } else {
         "http"
     };
+    if info["bind_scope"] == "loopback" {
+        let host = browser_host?;
+        if !matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") {
+            return None;
+        }
+        return Some(format!("{scheme}://{host}:{port}{path}"));
+    }
+    let base = field(settings, &["baseDomain", "base_domain"]);
+    let id = field(info, &["id", "slug"]);
+    if info["external_access_enabled"] != false
+        && public.is_empty()
+        && valid_domain(&base)
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !id.is_empty()
+    {
+        return Some(format!("https://{id}.{base}{path}"));
+    }
+    let host = browser_host?;
     Some(format!("{scheme}://{host}:{port}{path}"))
+}
+pub(super) fn launch_url(info: &Value, settings: &Value) -> Option<String> {
+    let host = web_sys::window().and_then(|w| w.location().hostname().ok());
+    launch_url_with_host(info, settings, host.as_deref())
 }
 pub(super) fn valid_domain(value: &str) -> bool {
     !value.is_empty()
@@ -416,5 +497,111 @@ mod tests {
         );
         assert!(metrics.contains(&("Memory", "1.0 MiB".into())));
         assert!(metrics.contains(&("Port", "8096".into())));
+    }
+
+    #[test]
+    fn launch_url_blocks_headless_and_loopback_subdomain_fabrication() {
+        let disabled = json!({"id":"sonarr", "active_port":8989, "public_domain":"sonarr.example.com", "external_access_enabled":false});
+        assert_eq!(
+            launch_url_with_host(
+                &disabled,
+                &json!({"baseDomain":"example.com"}),
+                Some("host.test")
+            )
+            .as_deref(),
+            Some("http://host.test:8989")
+        );
+        let with_base = json!({ "baseDomain": "apps.example.com" });
+
+        // Headless packages (default_port == 0) and core control/worker units must not render Open App
+        for id in [
+            "fail2ban",
+            "wireguard",
+            "tailscale",
+            "aetherflow-runner",
+            "aetherflow-api",
+        ] {
+            let service = json!({ "id": id, "default_port": 0, "status": "running" });
+            assert_eq!(
+                launch_url_with_host(&service, &with_base, Some("panel.example.com")),
+                None,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            launch_url_with_host(
+                &json!({ "id": "aetherflow-api", "default_port": 3001, "status": "running" }),
+                &with_base,
+                Some("panel.example.com"),
+            ),
+            None
+        );
+
+        // Loopback-only web services must not fabricate https://<id>.<baseDomain> and are blocked remotely
+        let loopback = json!({
+            "id": "rutorrent",
+            "default_port": 8087,
+            "bind_scope": "loopback",
+            "external_access_enabled": false
+        });
+        assert_eq!(
+            launch_url_with_host(&loopback, &with_base, Some("panel.example.com")),
+            None
+        );
+        assert_eq!(
+            launch_url_with_host(&loopback, &with_base, Some("127.0.0.1")),
+            Some("http://127.0.0.1:8087".into())
+        );
+
+        // Explicit external access wins when configured and valid
+        let exposed_loopback = json!({
+            "id": "rutorrent",
+            "default_port": 8087,
+            "bind_scope": "loopback",
+            "external_access_enabled": true,
+            "public_domain": "rt.example.com",
+            "tls_enabled": true
+        });
+        assert_eq!(
+            launch_url_with_host(&exposed_loopback, &with_base, Some("panel.example.com")),
+            Some("https://rt.example.com".into())
+        );
+
+        // Regular network-scoped web apps can use baseDomain subdomain routing or direct host:port
+        let sonarr = json!({ "id": "sonarr", "default_port": 8989, "active_port": 8989 });
+        assert_eq!(
+            launch_url_with_host(&sonarr, &with_base, Some("panel.example.com")),
+            Some("https://sonarr.apps.example.com".into())
+        );
+        assert_eq!(
+            launch_url_with_host(&sonarr, &json!({}), Some("10.0.0.5")),
+            Some("http://10.0.0.5:8989".into())
+        );
+
+        assert_eq!(
+            reassigned_default_port(&json!({ "active_port": 18989, "default_port": 8989 })),
+            Some((18989, 8989))
+        );
+        assert!(is_failed_install(
+            &json!({ "last_job": { "action": "install", "status": "failed" } })
+        ));
+        assert_eq!(
+            safe_service_icon(&json!({ "id": "Sonarr" })),
+            Some("/img/sonarr.png".into())
+        );
+        assert_eq!(safe_service_icon(&json!({ "id": "../bad" })), None);
+        assert_eq!(external_access_target(&sonarr), Some("sonarr".into()));
+        assert_eq!(
+            external_access_target(&json!({"id":"headless", "default_port":0})),
+            None
+        );
+        assert_eq!(
+            external_access_target(&json!({"id":"aetherflow-runner", "default_port":8080})),
+            None
+        );
+        assert_eq!(
+            external_access_target(&json!({ "id": "aetherflow-api", "default_port": 8080 })),
+            None
+        );
     }
 }

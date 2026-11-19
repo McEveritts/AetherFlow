@@ -707,7 +707,7 @@ pub struct ServiceStatusItem {
     pub internal_domain: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub public_domain: String,
-    #[serde(skip_serializing_if = "is_false", default)]
+    #[serde(default)]
     pub external_access_enabled: bool,
     #[serde(default)]
     pub tls_enabled: bool,
@@ -846,7 +846,7 @@ pub fn resolve_service_web_scheme(target: &str, default_port: i32) -> &'static s
     service_web_scheme_for_id(&clean, default_port)
 }
 
-fn service_web_scheme_for_id(clean: &str, default_port: i32) -> &'static str {
+pub fn service_web_scheme_for_id(clean: &str, default_port: i32) -> &'static str {
     if default_port > 0
         || matches!(
             clean,
@@ -864,7 +864,7 @@ pub fn resolve_service_bind_scope(target: &str) -> &'static str {
     service_bind_scope_for_id(&clean)
 }
 
-fn service_bind_scope_for_id(clean: &str) -> &'static str {
+pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
     if matches!(clean, "maintainerr" | "palate" | "kasmvnc" | "mcvnc") {
         "loopback"
     } else {
@@ -1779,9 +1779,7 @@ pub fn get_active_services_with_jobs(
             public_domain = format_app_public_domain(&p.name, &base_domain);
         }
 
-        let external_access_enabled = ing
-            .map(|c| c.external_access_enabled)
-            .unwrap_or(!public_domain.is_empty());
+        let external_access_enabled = ing.is_some_and(|c| c.external_access_enabled);
         let tls_enabled = ing
             .map(|c| c.tls_enabled)
             .unwrap_or(!public_domain.is_empty());

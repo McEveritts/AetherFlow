@@ -115,7 +115,7 @@ fn bank_count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, D::Erro
 pub struct TopologyEnvelope {
     #[serde(deserialize_with = "nullable")]
     pub nodes: Vec<TopologyRecord>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(alias = "links", deserialize_with = "nullable")]
     pub edges: Vec<TopologyEdge>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

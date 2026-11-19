@@ -133,10 +133,11 @@ pub fn LoginPage() -> impl IntoView {
                         code.set(String::new());
                     } else if data["requires_mfa_setup"].as_bool() == Some(true) {
                         setup_mfa.set(true);
-                        match ApiClient.get("/api/v1/auth/user/2fa/setup").await {
+                        match ApiClient.post("/api/v1/auth/user/2fa/setup", None).await {
                             Ok(data) => qr.set(
-                                data["otpauth_url"]
+                                data["otpauth_uri"]
                                     .as_str()
+                                    .or_else(|| data["otpauth_url"].as_str())
                                     .or_else(|| data["url"].as_str())
                                     .unwrap_or_default()
                                     .into(),

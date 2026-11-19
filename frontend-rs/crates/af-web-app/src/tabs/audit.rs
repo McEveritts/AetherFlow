@@ -2,12 +2,42 @@ use super::settings::{download_text, poll_resource, text, ResourceFeedback};
 use crate::state::{app, use_api};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{DataGrid, Drawer, EmptyState, ObsCard, SearchInput};
+use crate::tabs::services::ServiceLogsModal;
+use af_web_core::api::ApiClient;
 use af_web_core::worker::{execute_worker_request, WorkerRequest, WorkerResponse};
 use af_web_ui::{use_worker_rows, GridColumn};
 use leptos::prelude::*;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use wasm_bindgen_futures::spawn_local;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AuditKpiCounts {
+    pub total: u64,
+    pub operator_approvals: usize,
+    pub ai_proposed: usize,
+    pub system_and_auth: usize,
+}
+
+pub(crate) fn audit_kpi_counts(total: u64, rows: &[Value]) -> AuditKpiCounts {
+    let mut counts = AuditKpiCounts {
+        total,
+        ..Default::default()
+    };
+    for row in rows {
+        let action = text(row, "action");
+        if action.starts_with("action_") {
+            counts.operator_approvals += 1;
+        }
+        if action.contains("ai_") {
+            counts.ai_proposed += 1;
+        }
+        if action.contains("service_") || action.contains("system") || action.contains("user_") {
+            counts.system_and_auth += 1;
+        }
+    }
+    counts
+}
 
 fn event_time(value: &Value) -> f64 {
     let timestamp = super::contracts::decode::<super::contracts::AuditLog>(value).created_at;
@@ -87,6 +117,45 @@ fn AuditAdminContent() -> impl IntoView {
     poll_resource(audit, 30_000);
     let selected = RwSignal::new(Value::Null);
     let drawer = RwSignal::new(false);
+    let detail_action = RwSignal::new(None::<Value>);
+    let detail_loading = RwSignal::new(false);
+    let detail_error = RwSignal::new(None::<String>);
+    let detail_ticket = RwSignal::new(0u64);
+    let log_service = RwSignal::new(None::<Value>);
+    let log_open = RwSignal::new(false);
+    let kpis = Signal::derive(move || {
+        let total = audit.data.with(|v| v["total"].as_u64().unwrap_or(0));
+        let current = super::contracts::grid_rows::<super::contracts::AuditLog>(&audit.data.get());
+        audit_kpi_counts(total, &current)
+    });
+    let inspect_action = move |id: i64| {
+        if !context.is_admin() || id <= 0 {
+            return;
+        }
+        detail_ticket.update(|n| *n = n.wrapping_add(1));
+        let ticket = detail_ticket.get_untracked();
+        detail_loading.set(true);
+        detail_error.set(None);
+        detail_action.set(None);
+        spawn_local(async move {
+            let result = ApiClient.get(&format!("/api/v1/admin/actions/{id}")).await;
+            if detail_ticket.try_get_untracked() != Some(ticket) {
+                return;
+            }
+            detail_loading.set(false);
+            match result {
+                Ok(value) => {
+                    let action = if value["action"].is_object() {
+                        value["action"].clone()
+                    } else {
+                        value
+                    };
+                    detail_action.set(Some(action));
+                }
+                Err(error) => detail_error.set(Some(error.message)),
+            }
+        });
+    };
     Effect::new(move |_| {
         actor.track();
         action.track();
@@ -167,6 +236,27 @@ fn AuditAdminContent() -> impl IntoView {
                     }
                 }
             >
+                <section
+                    aria-label=move || tt(context, "Audit summary")
+                    class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4"
+                >
+                    <ObsCard title="Total Events">
+                        <p class="text-2xl font-bold tabular-nums">{move || kpis.get().total}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Recorded audit entries")}</p>
+                    </ObsCard>
+                    <ObsCard title="Operator Approvals">
+                        <p class="text-2xl font-bold tabular-nums text-emerald-400">{move || kpis.get().operator_approvals}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Manual operator authorizations")}</p>
+                    </ObsCard>
+                    <ObsCard title="AI Proposed">
+                        <p class="text-2xl font-bold tabular-nums text-indigo-300">{move || kpis.get().ai_proposed}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "FlowAI action proposals")}</p>
+                    </ObsCard>
+                    <ObsCard title="System & Auth">
+                        <p class="text-2xl font-bold tabular-nums text-purple-300">{move || kpis.get().system_and_auth}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Service, user, and system changes")}</p>
+                    </ObsCard>
+                </section>
                 <ObsCard>
                     <h2 class="text-lg font-semibold mb-4">
                         {move || tt(context, "Tabs.auditHeading")}
@@ -324,8 +414,19 @@ fn AuditAdminContent() -> impl IntoView {
                                     fields.remove(key);
                                 }
                             }
+                            let target_type = text(&raw, "target_type");
+                            let target_id = text(&raw, "target_id");
+                            detail_ticket.update(|n| *n = n.wrapping_add(1));
+                            detail_loading.set(false);
+                            detail_error.set(None);
+                            detail_action.set(None);
                             selected.set(raw);
                             drawer.set(true);
+                            if target_type == "pending_action" {
+                                if let Ok(action_id) = target_id.trim().parse::<i64>() {
+                                    inspect_action(action_id);
+                                }
+                            }
                         })
                     />
                     <div class="flex flex-wrap justify-between items-center gap-3 mt-5 text-sm">
@@ -370,13 +471,58 @@ fn AuditAdminContent() -> impl IntoView {
                 </ObsCard>
             </Show>
             <Drawer open=drawer title="Audit event details">
-                <p class="text-sm text-slate-400 mb-4">
-                    {move || tt(context, "Original immutable event payload")}
-                </p>
-                <pre class="text-xs whitespace-pre-wrap break-all max-h-[65vh] overflow-auto">
-                    {move || serde_json::to_string_pretty(&selected.get()).unwrap_or_default()}
-                </pre>
+                <div class="space-y-4">
+                    <Show when=move || selected.with(|v| text(v, "target_type") == "service" && !text(v, "target_id").is_empty())>
+                        <button
+                            type="button"
+                            class="glass-button-primary px-4 py-2 min-h-11"
+                            on:click=move |_| {
+                                let target = selected.with_untracked(|v| text(v, "target_id"));
+                                if !target.is_empty() && context.is_admin() {
+                                    log_service.set(Some(json!({
+                                        "id": target.clone(),
+                                        "name": target.clone(),
+                                        "process": target,
+                                    })));
+                                    drawer.set(false);
+                                    log_open.set(true);
+                                }
+                            }
+                        >
+                            {move || tt(context, "Open service logs")}
+                        </button>
+                    </Show>
+                    <Show when=move || detail_loading.get()>
+                        <p role="status" class="text-xs text-indigo-300">
+                            {move || tt(context, "Loading action details…")}
+                        </p>
+                    </Show>
+                    <Show when=move || detail_error.with(Option::is_some)>
+                        <p role="alert" class="text-xs text-rose-300">
+                            {move || detail_error.get().unwrap_or_default()}
+                        </p>
+                    </Show>
+                    <Show when=move || detail_action.with(Option::is_some)>
+                        <div class="space-y-2 border-t border-white/10 pt-3">
+                            <h3 class="text-sm font-semibold">
+                                {move || tt(context, "Linked approval action")}
+                            </h3>
+                            <pre class="text-xs whitespace-pre-wrap break-all max-h-60 overflow-auto">
+                                {move || serde_json::to_string_pretty(&detail_action.get().unwrap_or(Value::Null)).unwrap_or_default()}
+                            </pre>
+                        </div>
+                    </Show>
+                    <p class="text-sm text-slate-400">
+                        {move || tt(context, "Original immutable event payload")}
+                    </p>
+                    <pre class="text-xs whitespace-pre-wrap break-all max-h-[55vh] overflow-auto">
+                        {move || serde_json::to_string_pretty(&selected.get()).unwrap_or_default()}
+                    </pre>
+                </div>
             </Drawer>
+            <Show when=move || log_open.get() && log_service.with(Option::is_some) && context.is_admin()>
+                <ServiceLogsModal open=log_open service=log_service />
+            </Show>
         </section>
     }
 }
@@ -440,5 +586,22 @@ mod tests {
         assert_eq!(extension, "csv");
         assert!(content.contains("\"'=IMPORTDATA(\"\"host\"\")\""));
         assert!(content.contains("\"first,\n\"\"second\"\"\""));
+    }
+
+    #[test]
+    fn kpi_counts_group_operator_ai_and_system_audit_entries() {
+        let rows = vec![
+            json!({"action": "action_approve"}),
+            json!({"action": "action_reject"}),
+            json!({"action": "ai_action_proposed"}),
+            json!({"action": "service_restart"}),
+            json!({"action": "user_role_change"}),
+            json!({"action": "system_update"}),
+        ];
+        let kpis = audit_kpi_counts(42, &rows);
+        assert_eq!(kpis.total, 42);
+        assert_eq!(kpis.operator_approvals, 2);
+        assert_eq!(kpis.ai_proposed, 1);
+        assert_eq!(kpis.system_and_auth, 3);
     }
 }
