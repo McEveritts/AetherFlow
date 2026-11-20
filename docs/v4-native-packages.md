@@ -17,8 +17,8 @@ Instead of invoking arbitrary `bash -c` or `sh -c` lifecycle scripts, the declar
 
 | Package ID | Systemd Unit | Default Port | Service User | Lock File | Version / Verification Strategy |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `fail2ban` | `fail2ban.service` | Host SSH port | `root` | `/install/.fail2ban.lock` | APT (`fail2ban`, `whois`, `python3-systemd`) + `sshd_config` port probe |
-| `quassel` | `quasselcore.service` | `4242` (`req.app_port` override) | `quasselcore` | `/install/.quassel.lock` | APT (`quassel-core`, `openssl`, `ca-certificates`) + `dpkg-query` version probe + narrow `EnsureSelfSignedCert` |
+| `fail2ban` | `fail2ban.service` | Host SSH port | `root` | `/install/.fail2ban.lock` | APT (`fail2ban`, `python3-systemd`, `iptables`) + `sshd_config` port probe |
+| `quassel` | `quasselcore.service` | `4242` (`req.app_port` override) | `quasselcore` | `/install/.quassel.lock` | APT (`quassel-core`, `openssl`) + `dpkg-query` version probe + narrow `GenerateSelfSignedTlsCert` |
 | `threadfin` | `threadfin.service` | `34400` (`req.app_port` override) | `threadfin` | `/install/.threadfin.lock` | Pinned upstream release `1.2.37` over HTTPS with per-architecture SHA-256 + ELF `e_machine` verification |
 
 ---
@@ -26,9 +26,9 @@ Instead of invoking arbitrary `bash -c` or `sh -c` lifecycle scripts, the declar
 ## Quassel Native Recipe (`quassel`)
 
 ### Parity & Security Guarantees
-1. **APT Dependencies**: `quassel-core`, `openssl`, `ca-certificates`.
+1. **APT Dependencies**: `openssl` (staged first) and `quassel-core`.
 2. **System User & Directories**: Ensures system user `quasselcore` and directories `/var/lib/quassel` and `/var/log/quassel` (`0750`, owned by `quasselcore:quasselcore`).
-3. **Certificate Preservation (`EnsureSelfSignedCert`)**:
+3. **Certificate Preservation (`GenerateSelfSignedTlsCert`)**:
    - Checks `/var/lib/quassel/quasselCert.pem` before running `openssl`.
    - Existing certificate bytes are preserved; mode `0600` and service ownership are enforced. The rollback journal records an existing certificate as restorable, never as a newly created file, and retains its pre-operation mode and ownership.
    - If absent, generates a 4096-bit RSA self-signed certificate (`-x509 -nodes -days 3650 -newkey rsa:4096 -subj /CN=quassel.aether.local`) via direct argv `openssl` invocation before installing `quassel-core`. This prevents Debian's post-install script from generating a stock certificate.

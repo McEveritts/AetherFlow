@@ -4,7 +4,7 @@ This is the validation gate for the canonical streaming history implementation (
 
 ## Reproduce the checks
 
-Use the repository root. Install the Node version in `.nvmrc` with your runtime manager (`nvm install && nvm use` for nvm), then install locked dependencies with `npm ci`. The root/frontend manifests require Node >=22.19.0, matching the installed Undici test dependency; the previously used Node 22.12 does not satisfy that requirement. Rust/Cargo and the normal native workspace build prerequisites are also required. Do not install a separate Node daemon or change system services to run these checks.
+Use the repository root. Install the Node version in `.nvmrc` with your runtime manager (`nvm install && nvm use` for nvm), then install locked dependencies with `npm ci`. The root `package.json` requires Node >=22.19.0; the previously used Node 22.12 does not satisfy that requirement. Rust/Cargo and the normal native workspace build prerequisites are also required. Do not install a separate Node daemon or change system services to run these checks.
 
 ```bash
 bash scripts/validate-streaming.sh --scoped
@@ -18,13 +18,13 @@ Each check has a GNU `timeout` bound of ten minutes and a ten-second termination
 
 ### Scoped mode
 
-1. Run the streaming integration and contract tests inside `af-api` (or `scripts/validate-streaming.sh` when targeting the scoped harness) using the workspace lockfile. They exercise the repository's actual streaming, authentication, and WebSocket modules with workspace dependencies, not copied implementations or mocks.
-2. Run the `frontend-rs` workspace tests and `e2e/` Playwright browser suites against the built WASM bundle served from `web/dist`.
-3. Historical reference: earlier pre-WASM checkpoints ran Jest/TypeScript checks under `frontend/`; current v4.0 verification uses `frontend-rs` + `e2e/` Playwright suites.
+1. Run the streaming integration and contract tests inside `af-api` (`streaming_ext::tests`, `streaming_`) and `af-db` (`streaming::tests`) using the workspace lockfile. They exercise the repository's actual streaming, authentication, and WebSocket modules with workspace dependencies and generate the Rust JSON contract fixtures.
+2. Run the `frontend-rs` workspace tests (`cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked`), the `e2e/` TypeScript typecheck (`npm exec --workspace e2e -- tsc --noEmit --incremental false`), and `frontend-rs` Clippy (`-D warnings`).
+3. Historical reference: earlier pre-WASM checkpoints ran Jest/TypeScript checks under `frontend/`; current v4.0 verification uses `frontend-rs` + `e2e/` TypeScript/Playwright suites.
 
 ### Integrated mode
 
-After scoped checks, run integrated `af-api` tests serially, the debug API build, the full frontend test suite with the scoped Rust fixture, whole-frontend lint, and the static frontend build. Scoped success cannot override any integrated failure. This is a local build only: it neither installs the binary nor restarts services. Database migrations exercised by the scoped Rust tests use disposable temporary databases.
+After scoped checks, `scripts/validate-streaming.sh --integrated` runs serial `af-api` tests, the debug `af-api` build, `frontend-rs` workspace tests with the scoped Rust fixture, `frontend-rs` `--all-targets` Clippy (`-D warnings`), and the `frontend-rs` `wasm32-unknown-unknown` build. Scoped success cannot override any integrated failure. This is a local build only: it neither installs the binary nor restarts services. Database migrations exercised by the scoped Rust tests use disposable temporary databases.
 
 The script's Python regression tests simulate external command outcomes only to check orchestration: scoped versus integrated selection, missing fixtures, independent failure reporting, persistent logs, timeouts, and invalid arguments. They do not substitute for the real Rust/frontend checks.
 

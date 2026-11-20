@@ -4,7 +4,7 @@ This checklist documents the runtime architecture, configuration contracts, priv
 
 > [!IMPORTANT]
 > **Verification & Evidence Policy**
-> Code changes, unit tests, or mocked filesystem drills do not by themselves certify production readiness across all target distributions. Refer to [docs/v4-clean-host-testing.md](./v4-clean-host-testing.md) and [docs/v4-lifecycle-testing.md](./v4-lifecycle-testing.md) for the current clean-OS KVM test status and lifecycle verification ledger.
+> Code changes, unit tests, or mocked filesystem drills do not by themselves certify production readiness across all target distributions. Refer to [docs/v4-clean-host-testing.md](./v4-clean-host-testing.md), [docs/v4-lifecycle-testing.md](./v4-lifecycle-testing.md), and [docs/v4-privileged-testing.md](./v4-privileged-testing.md) for the current clean-OS KVM test status and privileged/lifecycle verification ledgers.
 
 ---
 
@@ -94,7 +94,7 @@ systemctl cat aetherflow-runner.service | grep -E "WorkingDirectory|ExecStart"
 ## 4. Deployment Procedure
 
 ### 1. Set Environment Variables
-Ensure all required variables are populated in `/etc/aetherflow/aetherflow.env` with mode `0600` (`chown root:aetherflow` or `aetherflow:aetherflow`).
+Ensure all required variables are populated in `/etc/aetherflow/aetherflow.env` with mode `0640`, owned by `root:aetherflow` (matching `setup/modules/modern_stack.sh`).
 
 ### 2. Build or Pull a Verified Release
 
@@ -208,22 +208,26 @@ sqlite3 /var/lib/aetherflow/aetherflow.sqlite \
 ### JWT Session & SQLite Revocation Lifecycle
 
 ```bash
-# 1. Login and inspect JWT
-TOKEN=$(curl -s -X POST \
+# 1. Login and capture the HttpOnly aetherflow_session cookie (for accounts without 2FA;
+#    TOTP-enrolled accounts return requires_mfa + mfa_token for /api/v1/public/auth/mfa/verify)
+curl -fsS -c /tmp/af-cookies.txt -X POST \
   https://your-server/api/v1/public/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"..."}' | jq -r '.token')
+  -d '{"username":"admin","password":"..."}' >/dev/null
 
-# 2. Logout (records JTI in SQLite revoked_tokens)
-curl -X POST \
-  -H "Authorization: Bearer $TOKEN" \
-  https://your-server/api/v1/auth/auth/logout
+# 2. Fetch a CSRF token and logout (records JTI in SQLite revoked_tokens)
+CSRF=$(curl -fsS -b /tmp/af-cookies.txt -c /tmp/af-cookies.txt \
+  https://your-server/api/v1/public/csrf-token | jq -r '.csrf_token')
+curl -fsS -b /tmp/af-cookies.txt -X POST \
+  -H "X-CSRF-Token: $CSRF" \
+  https://your-server/api/v1/auth/logout
 
-# 3. Verify revoked token is immediately rejected
-curl -s -o /dev/null -w "%{http_code}" \
-  -H "Authorization: Bearer $TOKEN" \
+# 3. Verify the revoked session cookie is immediately rejected
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -b /tmp/af-cookies.txt \
   https://your-server/api/v1/auth/settings
 # Expected: 401
+rm -f /tmp/af-cookies.txt
 ```
 
 ### Encryption at Rest (`enc:v1:`)

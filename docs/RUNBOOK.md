@@ -141,7 +141,7 @@ sudo af sandbox apply qbittorrent
 # Host maintenance (native Rust implementations in af-host)
 sudo af maintenance tune          # Apply BBR + fq + 64 MiB socket sysctl tuning
 sudo af maintenance sentinel      # Scan /var/log/auth.log for SSH brute-force offenders
-sudo af maintenance clean-logs    # Prune stale logs (>7 days)
+sudo af maintenance clean-logs    # Truncate oversized .log files under /var/log and /srv/aetherflow/lock
 sudo af maintenance showspace     # Inspect per-user /home disk usage
 ```
 
@@ -151,10 +151,10 @@ See [Unified Rust Admin CLI (`af`)](./rust-admin-cli.md) for the complete comman
 
 ## Service Recovery (`af-heal`)
 
-1. The `af-heal` worker in `af-services` polls managed `systemd` services every 30 seconds.
+1. The `af-heal` worker in `af-services` (`start_heal_worker(10)`) polls managed `systemd` services every 10 seconds.
 2. If an enabled service enters a `failed` or crashed state:
-   - **Gated Mode (default)**: Queues a `pending_action` in the **Approval Inbox** requiring administrator sign-off.
-   - **Auto-Approve Mode (`AF_HEAL_AUTO_APPROVE=true`)**: Dispatches `systemctl restart` through `/run/aetherflow/runner.sock` up to the **10 restarts/hour** budget per service.
+   - **Gated Mode (default)**: Queues a deduplicated `pending_action` in the **Approval Inbox** requiring administrator sign-off.
+   - **Auto-Approve Mode (`AF_HEAL_AUTO_APPROVE=true` or `1`)**: Dispatches `systemctl restart` through `/run/aetherflow/runner.sock` with exponential backoff (`10s * 2^attempt`, up to **3 retries** per failure incident before requiring manual intervention).
 3. Every approval, rejection, or automated execution is recorded in `admin_audit_log`.
 
 ---
@@ -179,11 +179,11 @@ AetherFlow includes a built-in OpenID Connect provider for downstream applicatio
 - **RSA 2048-bit Key**: Persisted at `OIDC_KEY_PATH` (`/var/lib/aetherflow/oidc_rsa.pem`).
 - **Endpoints**:
   - `GET /.well-known/openid-configuration`
-  - `GET /api/v1/oidc/authorize`
-  - `POST /api/v1/oidc/token`
-  - `GET /api/v1/oidc/userinfo`
-  - `GET /api/v1/oidc/jwks`
-  - `POST /api/v1/oidc/revoke`
+  - `GET /api/v1/public/oidc/authorize`
+  - `POST /api/v1/public/oidc/token`
+  - `GET /api/v1/public/oidc/userinfo`
+  - `GET /api/v1/public/oidc/jwks`
+  - `POST /api/v1/public/oidc/revoke`
 
 ---
 
@@ -199,12 +199,15 @@ sudo af backup create
 sudo af backup list
 sudo af backup verify <backup-filename>
 
-# Perform a non-destructive staged restore into an isolated 0700 directory
-sudo af backup restore <backup-filename> --staging-root /var/backups/af-restore-stage
+# Run a non-destructive preflight against an isolated staging directory
+sudo af backup restore-preflight <backup-filename> --target-root /var/backups/af-restore-stage
+
+# Execute a confirmed staged restore into an isolated 0700 directory
+sudo af backup restore <backup-filename> --target-root /var/backups/af-restore-stage --confirm-destructive-restore
 ```
 
 > [!IMPORTANT]
-> Uncoordinated live root overwrite (`af backup restore` without `--staging-root`) is intentionally blocked (`ExitCode = 6`). Always extract and verify into `--staging-root` first, then replace state during a maintenance window with `aetherflow-api` stopped. See [Rust Host Management (`af-host`)](./rust-host-management.md).
+> Calling `af backup restore` without `--confirm-destructive-restore` (or `--confirm`) is intentionally blocked (`ExitCode = 6`). Always run `restore-preflight` and extract/verify into an isolated `--target-root` staging directory first, then replace state during a maintenance window with `aetherflow-api` stopped. See [Rust Host Management (`af-host`)](./rust-host-management.md).
 
 ---
 
@@ -246,4 +249,4 @@ Supported outbound webhook channels (`discord`, `telegram`, `slack`, `custom`) a
 
 ## Troubleshooting
 
-See the dedicated **[Troubleshooting & FAQ](./troubleshooting.md)** guide for common diagnostics covering `aetherflow-api.service`, `aetherflow-runner.service`, Apache2 Subdomain Gateway routing, `ReadWritePaths` systemd sandboxing, and APT lock contention.
+See the dedicated **[Troubleshooting & FAQ](./troubleshooting.md)** guide for common diagnostics covering `aetherflow-api.service`, `aetherflow-runner.service`, Apache2 Subdomain Gateway routing, `ReadWritePaths` systemd sandboxing, and APT lock contention, and **[Marketplace Lifecycle Log Retention](./marketplace-log-retention.md)** for `/var/log/aetherflow` installer log rotation.

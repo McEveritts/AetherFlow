@@ -10,7 +10,7 @@ restarting that runner, regardless of `KillMode=process`.
 Launch requests are validated, serialized, acknowledged only after systemd
 accepts execution, and assigned an operation ID. Active jobs reject duplicate
 requests. The root-only native recovery journal and the updater unit provide
-restart-surviving status through authenticated `/system/update/status`. A
+restart-surviving status through authenticated `/api/v1/auth/system/update/status` (and `/api/v1/admin/system/update/status`). A
 root-owned `0700` runtime directory and an atomic `0600` environment handoff
 keep forwarded credentials out of command arguments and public unit properties.
 The handoff is removed after systemd acknowledges execution. A retained success
@@ -45,7 +45,7 @@ known-good release. Do not forge or delete recovery state to bypass that guard.
 Run `backend-rs` and `frontend-rs` workspace tests, Clippy, WASM asset checks, and Playwright browser checks. The self-update tests cover command validation, launcher failure, duplicates, native/Bash isolation, runtime mismatch, and stale/failed UI status.
 
 The explicit ignored Rust integration test
-`self_update::tests::updater_survives_caller_restart` executes the actual launcher
+`tests::updater_survives_caller_restart` in `af-runner` executes the actual launcher
 argument builder against disposable services. It requires a functioning systemd
 manager; set `AF_SYSTEMD_TEST_USER=1` for a user manager. CI runs it against the
 system manager on its disposable Linux runner. It verifies both native and Bash

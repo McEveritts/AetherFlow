@@ -50,8 +50,10 @@ and integration acceptance gates pass or differences are explicitly approved.
   source. Its JSON body bound allows sixfold escaping without shrinking that
   decoded limit. Four editor requests may parse/process concurrently; additional
   requests receive `429 EDITOR_BUSY` with `Retry-After: 1` before body parsing.
-- The mounted editor bundles Ace locally with syntax modes, themes, search,
-  undo/redo and safe Markdown/KaTeX preview. Dirty-close/reload confirmation and
+- The mounted editor (`af-web-ui::editor`) is a native Rust/Leptos code editor
+  with 46 syntax modes, 17 built-in themes (accepting legacy `ace/theme/*` names),
+  search/replace, undo/redo, and sanitized Markdown/MathML preview (`pulldown-cmark`,
+  `pulldown-latex`, and `ammonia` in `af-web-worker`). Dirty-close/reload confirmation and
   an unload warning protect unsaved content; ETags protect concurrent saves.
 - Safe Built-In Actions expose checksums, bounded archive extraction, persistent
   archive creation in nine formats, and media metadata inspection. They require

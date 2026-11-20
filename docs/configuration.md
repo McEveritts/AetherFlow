@@ -1,6 +1,6 @@
 # Configuration Reference
 
-AetherFlow v4.0.0 uses a protected FHS environment file (`/etc/aetherflow/aetherflow.env`, mode `0600`) for runtime secrets and host-specific configuration, keeping mutable state strictly separated from immutable release directories (`/opt/AetherFlow/releases/<timestamp>`).
+AetherFlow v4.0.0 uses a protected FHS environment file (`/etc/aetherflow/aetherflow.env`, mode `0640`, owned by `root:aetherflow` when provisioned by `AetherFlow-Setup`) for runtime secrets and host-specific configuration, keeping mutable state strictly separated from immutable release directories (`/opt/AetherFlow/releases/<timestamp>`).
 
 ## Environment File (`/etc/aetherflow/aetherflow.env`)
 
@@ -18,8 +18,10 @@ sudo systemctl restart aetherflow-runner aetherflow-api
 | :--- | :--- | :--- |
 | `JWT_SECRET` | Cryptographically random secret ($\ge 32$ bytes) used to sign HS256 session tokens. | `(Required)` |
 | `AES_MASTER_KEY` | 32-byte key (raw 32-char or Base64-encoded 32 bytes) for AES-256-GCM database secret encryption (`enc:v1:`). | `(Required)` |
-| `PORT` | Loopback port for the `aetherflow-api` Rust HTTP/WebSocket server. | `8080` |
-| `AF_DB_PATH` / `DB_PATH` | Absolute path to the SQLite WAL database. Resolved in order: `AF_DB_PATH` $\to$ `DB_PATH` in `aetherflow.env` $\to$ systemd unit `Environment` $\to$ `/var/lib/aetherflow/aetherflow.sqlite`. | `/var/lib/aetherflow/aetherflow.sqlite` |
+| `PORT` | TCP listen port for the `aetherflow-api` Rust HTTP/WebSocket server. | `8080` |
+| `BIND_ADDR` | Bind address for `aetherflow-api` (`AetherFlow-Setup` sets `127.0.0.1` behind Apache2; bare runtime falls back to `0.0.0.0` unless isolated E2E mode is active). | `127.0.0.1` (Setup) |
+| `STATIC_DIR` | Optional explicit path to the built Rust WASM dashboard bundle; defaults to `web/dist` beside `aetherflow-api`. | `<exe-dir>/web/dist` |
+| `AF_DB_PATH` / `DB_PATH` / `AETHERFLOW_DB_PATH` | Absolute path to the SQLite WAL database. Resolved in order: `AF_DB_PATH` $\to$ `DB_PATH` $\to$ `AETHERFLOW_DB_PATH` (in `aetherflow.env` / systemd `Environment`) $\to$ `/var/lib/aetherflow/aetherflow.sqlite`. | `/var/lib/aetherflow/aetherflow.sqlite` |
 | `AETHERFLOW_RUNNER_SOCK` | UNIX domain socket path for the privileged `aetherflow-runner.service` daemon. | `/run/aetherflow/runner.sock` |
 | `AETHERFLOW_BASE_DOMAIN` | Optional default `baseDomain` for automatic `<app>.<baseDomain>` subdomain ingress provisioning. | `(Configured in UI)` |
 
@@ -110,7 +112,7 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 | `AF_GITHUB_TOKEN` | Optional GitHub token for higher rate limits during update checks (falls back to `GITHUB_TOKEN` / `GH_TOKEN`). | `(Unauthenticated)` |
 | `AETHERFLOW_ENABLE_RUST_PACKAGES` | Opt-in flag (`1` / `true`) enabling `af-runner`'s 12 built-in declarative Rust package recipes before Bash fallback. | `false` |
 | `AETHERFLOW_ENABLE_RUST_RELEASE` | Opt-in flag (`1` / `true`) routing `/v1/self-update` directly through `af-release` (deprecated alias: `AETHERFLOW_USE_RUST_RELEASE`). | `false` |
-| `AF_HEAL_AUTO_APPROVE` | When `true`, `af-heal` restarts crashed systemd units automatically (up to 10/hr) without waiting for Approval Inbox sign-off. | `false` |
+| `AF_HEAL_AUTO_APPROVE` | When `1` or `true`, `af-heal` (10-second poll loop) restarts failed managed systemd units automatically via `aetherflow-runner` with exponential backoff (`10s * 2^attempt`, up to 3 retries) instead of queueing an Approval Inbox action. | `false` |
 | `CLUSTER_MODE` | Multi-node fleet topology (`standalone`, `master`, `worker`). | `standalone` |
 | `CLUSTER_PSK` | Pre-shared key validated via `X-Cluster-PSK` for cluster heartbeat and metrics endpoints. | `(Optional)` |
 

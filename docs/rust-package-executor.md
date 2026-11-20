@@ -132,16 +132,16 @@ Twelve Marketplace applications are registered in `BUILTIN_DECLARATIVE_RECIPES`.
 | :--- | :--- | :--- |
 | `fail2ban` | APT + SSH Port Detection + Systemd | Installs `fail2ban`, `python3-systemd`, `iptables`; probes `/etc/ssh/sshd_config` for custom `Port`; writes `/etc/fail2ban/jail.local`; applies systemd sandbox drop-in before service activation. |
 | `quassel` | APT + Self-Signed TLS + Dpkg Version + Systemd | Installs `quassel-core`, ensures `quasselcore` user and `/var/lib/quassel`, generates 4096-bit self-signed TLS cert (`GenerateSelfSignedTlsCert`), captures installed dpkg version (`CaptureDpkgVersion`), and runs `quasselcore.service`. |
-| `threadfin` | GitHub Binary + Systemd | Resolves latest `Threadfin/Threadfin` release tag, downloads and verifies ELF binary into `/opt/threadfin/threadfin`, creates `threadfin` system user and `/var/lib/threadfin`, and runs `threadfin.service`. |
+| `threadfin` | Pinned GitHub Binary + Systemd | Downloads pinned `Threadfin/Threadfin` release `1.2.37` with per-architecture SHA-256 and ELF verification into `/usr/local/bin/threadfin`, creates `threadfin` system user and `/var/lib/threadfin`, and manages `threadfin.service`. |
 | `znc` | APT + Self-Signed TLS + Systemd | Installs `znc`, creates `znc` user and `/var/lib/znc/configs`, generates `/var/lib/znc/znc.pem` (`GenerateSelfSignedTlsCert`), writes default `znc.conf`, and manages `znc.service`. |
 | `xrdp` | APT + Desktop Session + Systemd | Installs `xrdp`, `xfce4`, `xfce4-goodies`, `dbus-x11`, configures `/etc/xrdp/startwm.sh`, and manages `xrdp.service`. |
 | `novnc` | APT + Websockify Systemd | Installs `novnc`, `python3-websockify`, `tigervnc-standalone-server`, `xfce4`, and manages `novnc.service` on `127.0.0.1:6080`. |
 | `x2go` | APT + SSH Remote Desktop | Installs `x2goserver`, `x2goserver-xsession`, `xfce4`, `xfce4-goodies`, captures dpkg version, and manages `x2goserver.service`. |
 | `prometheus` | APT + Metrics Server | Installs `prometheus`, `prometheus-node-exporter`, writes `/etc/prometheus/prometheus.yml` (`127.0.0.1:9090`), and manages `prometheus.service`. |
 | `netdata` | APT + Local Telemetry Daemon | Installs `netdata`, writes `/etc/netdata/netdata.conf` bound to `127.0.0.1:19999`, and manages `netdata.service`. |
-| `mergerfs` | APT Union Filesystem | Installs `mergerfs` and `fuse3`, creates `/var/lib/aetherflow/mergerfs`, and records installed dpkg version. |
-| `rclone` | APT + Rclone Web RCD | Installs `rclone` and `fuse3`, creates `rclone` user and `/var/lib/rclone`, and manages `rclone-web.service` (`127.0.0.1:5572`). |
-| `syncthing` | APT Continuous File Sync | Installs `syncthing`, creates `syncthing` user and `/var/lib/syncthing`, and manages `syncthing@syncthing.service`. |
+| `mergerfs` | APT Union Filesystem | Installs `mergerfs` and `fuse3`, records installed dpkg version in `/var/lib/mergerfs/.af-version`, and manages `mergerfs.service`. |
+| `rclone` | APT + Rclone Web RCD / VFS | Installs `rclone` and `fuse3`, creates `rclone` user and `/var/lib/rclone`, and manages `rclone.service` (`127.0.0.1:5572`) and `rclone-vfs.service`. |
+| `syncthing` | APT Continuous File Sync | Installs `syncthing`, creates `syncthing` user and `/var/lib/syncthing`, and manages `syncthing.service`. |
 
 ### 5.2 Remaining Marketplace Packages (`PackageEngineMode::LegacyBashFallback`)
 - Other catalog packages continue to execute their native systemd Bash installers under the shared advisory lock and process-group cancellation supervisor. This includes Scrutiny: its previous Rust recipe omitted binary and web asset downloads and therefore no longer registers as executable. ClamAV and Mosquitto are outside the Marketplace catalog and are not registered.

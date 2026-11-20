@@ -1,6 +1,6 @@
 export const heroData = {
   h1: "Orchestrating the Next Era of Bare-Metal Infrastructure.",
-  subheadline: "AetherFlow v4.0.0 pairs a 11-crate Rust Control Plane (backend-rs, Axum + Tokio) with a Leptos Rust WebAssembly Dashboard (frontend-rs) served from external web/dist assets. It orchestrates a 77-app bare-metal catalog, Native McBrowser (af-files), Zero-Sudo aetherflow-runner privilege isolation, Whatbox-style Subdomain Ingress, and human-gated FlowAI directly against systemd.",
+  subheadline: "AetherFlow v4.0.0 pairs an 11-crate Rust Control Plane (backend-rs, Axum + Tokio) with a Leptos Rust WebAssembly Dashboard (frontend-rs) served from external web/dist assets. It orchestrates a 77-app bare-metal catalog, Native McBrowser (af-files), Zero-Sudo aetherflow-runner privilege isolation, Whatbox-style Subdomain Ingress, and human-gated FlowAI directly against systemd.",
   primaryCta: {
     label: "View on GitHub",
     href: "https://github.com/McEveritts/AetherFlow"
@@ -21,7 +21,7 @@ export const directives = {
     },
     {
       title: "AI-Native, Human-Gated",
-      copy: "FlowAI acts as a multi-provider diagnostic engine across Gemini, Claude, OpenAI, and Ollama. Models propose remediations; administrators authorize them in the Approval Inbox."
+      copy: "FlowAI acts as a multi-provider diagnostic engine across Gemini, Claude, OpenAI, Ollama, and LM Studio. Models propose remediations; administrators authorize them in the Approval Inbox."
     }
   ]
 };
@@ -62,7 +62,7 @@ export const statusMomentumData = {
   bullets: [
     {
       title: "Atomic Self-Updates & Rollbacks",
-      copy: "Isolated aetherflow-self-update.service deployments verify SHA256SUMS, capture WAL-safe SQLite backups, check executable readiness, and automatically roll back on failure."
+      copy: "Isolated aetherflow-self-update-*.service transient units verify SHA256SUMS, capture WAL-safe SQLite backups, check executable readiness, and automatically roll back on failure."
     },
     {
       title: "Whatbox-Style Subdomain Ingress",
@@ -70,7 +70,7 @@ export const statusMomentumData = {
     },
     {
       title: "Unified Admin CLI (af)",
-      copy: "Operate packages, services, disk quotas, sandbox drop-ins, verified staged backup restores, and 14-step bare-metal provisioning from a single compiled CLI."
+      copy: "Operate packages, services, disk quotas, sandbox drop-ins, verified staged backup restores, and 14 Rust-native provisioning foundation steps from a single compiled CLI."
     }
   ]
 };

@@ -17,7 +17,7 @@ AetherFlow is engineered for bare-metal performance and strict privilege separat
 
 - **11-Crate Rust Control Plane + 4-Crate WASM UI**: The compiled **Rust (`Axum` + `Tokio`)** backend (`backend-rs`) serves the **Leptos Rust WebAssembly (`frontend-rs`)** dashboard from external `web/dist` assets (`STATIC_DIR`), eliminating separate Node.js runtime daemons, Go binaries, and external Redis dependencies.
 - **Zero-Sudo Socket Boundary (`aetherflow-runner`)**: Privileged root operations (`systemctl`, Marketplace installers, WireGuard/Tailscale control, quotas, and isolated `aetherflow-self-update.service` deployments) are isolated behind `/run/aetherflow/runner.sock` (`aetherflow-runner.service`) with strict allowlists and ancestor-symlink guards.
-- **Native McBrowser (`af-files`)**: Built-in left-sidebar file manager with capability-scoped per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads up to 64 GiB, ETag-guarded Ace code editing, 9-format archive tools, and FlowAI natural-language BFS file search.
+- **Native McBrowser (`af-files`)**: Built-in left-sidebar file manager with capability-scoped per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads up to 64 GiB, ETag-guarded native Rust/Leptos code editing, 9-format archive tools, and FlowAI natural-language BFS file search.
 - **Frame-0 Real-Time Telemetry**: Immediate hardware, process, and NVML GPU telemetry delivered via full-duplex WebSockets ("Hyperspeed") with decoupled UI layout updates.
 
 ### Design Philosophy
@@ -34,7 +34,7 @@ AetherFlow is shaped by three core beliefs:
 ### 1. Unified Obsidian V2 Dashboard
 A high-fidelity "Mission Control" interface built on **Leptos Rust WebAssembly (`frontend-rs`)**:
 - **Open-Canvas Telemetry**: Density-aware real-time hardware tracking (CPU, RAM, Disk I/O, NVML/DRM GPU, Network BDP) with hover-pause sparklines.
-- **Canonical Streaming Analytics**: Live Jellyfin & Plex session cards paired with a snapshot-consistent playback history archive, server-identity verification, and CSV/JSON portability.
+- **Canonical Streaming Analytics**: Live Jellyfin, Plex, and Emby (staged) session cards paired with a snapshot-consistent playback history archive, server-identity verification, and CSV/JSON portability.
 - **Native Network & VPN Control**: Built-in **WireGuard** (`wg0` peer and QR management) and **Tailscale** mesh VPN routing controls.
 
 ### 2. FlowAI Assistant

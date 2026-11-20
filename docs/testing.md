@@ -119,3 +119,13 @@ The historical harness filename is retained for compatibility. The default run u
 The browser configuration requires `PLAYWRIGHT_BASE_URL` pointing to a Rust API with a built WASM bundle. The harness supplies it; there is no Node.js or Next.js development server. All three engines run functional tests. Screenshot baselines run on Chromium. Fixture tests block service workers to keep network interception deterministic; the separate live cache test enables a real service worker and checks that authenticated responses stay out of CacheStorage. Worker fault tests transfer actual upload buffers, then simulate a crash or timeout and verify every resulting chunk checksum.
 
 The Python compatibility harness includes source inspections as well as HTTP checks; its aggregate count is not a count of live browser tests. Native unit tests, mocked browser contracts, live browser tests, and privileged/VM tests must be reported separately.
+
+---
+
+## 6. Specialized Validation & Guest Drill Runbooks
+
+- **[Streaming Validation Gate](./streaming-validation.md)**: Scoped and integrated streaming verification via `scripts/validate-streaming.sh`.
+- **[Clean-Host KVM Matrix Testing](./v4-clean-host-testing.md)**: Four-OS QEMU/KVM clean-host bootstrap, upgrade, and rollback drills (`scripts/v4_vm_matrix.py`).
+- **[Lifecycle & Self-Update Guest Drills](./v4-lifecycle-testing.md)**: Disposable guest drills for transient-unit self-updates and rollback recovery (`scripts/v4_lifecycle_guest_drills.py`).
+- **[Privileged Guest Drills](./v4-privileged-testing.md)**: Disposable guest drills for `af-runner` socket authorization, live WAL backups, and quiesced restores (`scripts/v4_privileged_guest_drills.py`).
+- **[Native Package Guest Drills](./v4-native-package-testing.md)**: Clean-guest lifecycle verification for native Rust package recipes (`scripts/v4_native_package_guest_drills.py`).

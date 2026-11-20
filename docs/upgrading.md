@@ -51,7 +51,7 @@ Before the atomic `/opt/AetherFlow/current` symlink swap, the release engine tak
 # Deploy the latest release on the stable or nightly channel
 sudo af release deploy --local --channel stable
 # (or via the shell release manager)
-sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
+sudo /opt/AetherFlow/current/deploy/release-manager.sh deploy --channel stable
 
 # Roll back to the previous known-good release
 sudo af release rollback --local
@@ -86,7 +86,7 @@ BUILD_FRONTEND=0 bash scripts/build_gold.sh
 ## FAQ: Upgrading
 
 **Q: Will my installed Marketplace apps be affected during an AetherFlow update?**  
-**A:** No. AetherFlow updates only swap `/opt/AetherFlow/current` and restart `aetherflow-runner` and `aetherflow-api`. Your 77 Marketplace applications (Plex, Jellyfin, qBittorrent, Arr stack, etc.) run in independent `af-<app>.service` systemd units and continue running uninterrupted.
+**A:** No. AetherFlow updates only swap `/opt/AetherFlow/current` and restart `aetherflow-runner` and `aetherflow-api`. Your 77 Marketplace applications (Plex, Jellyfin, qBittorrent, Arr stack, etc.) run in independent `af-<app>.service` systemd units and continue running uninterrupted. For Jellyseerr / Seerr application upgrades and manual rollback steps, see [Jellyseerr / Seerr Upgrades](./seerr-upgrades.md).
 
 **Q: Do I need to re-enroll 2FA or re-enter AI API keys after upgrading to v4.0.0?**  
 **A:** TOTP secrets, user accounts, and `AES-256-GCM` encrypted credentials in SQLite are 100% compatible between v3.2.x and v4.0.0 as long as `AES_MASTER_KEY` and `JWT_SECRET` in `/etc/aetherflow/aetherflow.env` remain unchanged. Note: if 2FA was enrolled on an early v3 build that stored legacy unsalted 64-hex SHA-256 recovery code hashes, v4.0.0 rejects unsalted recovery hashes fail-closed (only salted `sha256:v1:<salt>:<hash>` and legacy `$2*` bcrypt hashes are accepted); after signing in with your TOTP authenticator app, regenerate fresh salted `sha256:v1:` recovery codes via **Settings → Security → Regenerate Recovery Codes** (`POST /api/v1/auth/user/2fa/recovery/regenerate`).

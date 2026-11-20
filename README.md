@@ -10,7 +10,7 @@
 [![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-77_Apps-9333ea?style=flat-square)](./packages)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
 
-**[Quickstart](#-quick-installation)** • **[Architecture](#️-system-architecture)** • **[77-App Catalog](#-77-package-bare-metal-catalog)** • **[McBrowser & Streaming](#-native-mcbrowser--streaming-intelligence)** • **[FlowAI](#-human-gated-flowai)** • **[Documentation](#-documentation)** • **[Releases](https://github.com/McEveritts/AetherFlow/releases)**
+**[Quickstart](#-quick-installation)** • **[Architecture](#-system-architecture)** • **[77-App Catalog](#-77-package-bare-metal-catalog)** • **[McBrowser & Streaming](#-native-mcbrowser--streaming-intelligence)** • **[FlowAI](#-human-gated-flowai)** • **[Documentation](#-documentation)** • **[Releases](https://github.com/McEveritts/AetherFlow/releases)**
 
 </div>
 
@@ -25,7 +25,7 @@
 ### Why AetherFlow v4.0.0?
 
 - **Rust Control Plane and WASM Interface** — The **Leptos** dashboard and worker modules are built in `frontend-rs` and shipped as external `web/dist` assets beside **`aetherflow-api`**, the **`af`** administrative CLI, and the Rust LibreSpeed **`speedtest-backend`**. The API serves the UI at runtime, so UI assets can be rebuilt independently. The production dashboard needs no Node.js daemon or Go services.
-- **Native McBrowser (`af-files`)** — Built-in left-sidebar file manager backed by a capability-scoped Rust engine (`af-files`) with private per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads (up to 64 GiB), ETag-guarded Ace code editing, 9-format archive extraction/creation, and FlowAI natural-language BFS file search. See [McBrowser Documentation](./docs/mcbrowser.md).
+- **Native McBrowser (`af-files`)** — Built-in left-sidebar file manager backed by a capability-scoped Rust engine (`af-files`) with private per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads (up to 64 GiB), ETag-guarded native Rust/Leptos code editing, 9-format archive extraction/creation, and FlowAI natural-language BFS file search. See [McBrowser Documentation](./docs/mcbrowser.md).
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations (12 native declarative Rust recipes + serialized Bash installers), `systemctl` transitions, WireGuard/Tailscale management, quota updates, and isolated `aetherflow-self-update.service` deployments are mediated over `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the streaming **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
 - **Frame-0 Real-Time Telemetry & NVML FFI (`Hyperspeed`)** — Immediate frame-0 WebSocket state hydration, decoupled navigation/telemetry rendering, zero-fork `/proc` & `sysinfo` sampling, and dynamic `libnvidia-ml.so.1` FFI + DRM `sysfs` GPU discovery.
@@ -97,8 +97,8 @@ flowchart LR
 | **`af-db`** | Bundled `rusqlite` WAL single-writer (`max_size(1)`) + concurrent read-only (`max_size(8)`) connection pools, schema migrations, SQLite-backed JWT revocation and session tracking (zero Redis requirement), and `enc:v1:` AES-256-GCM secret encryption. |
 | **`af-services`** | 77-package Marketplace catalog & update engine, pure-Rust XML/INI/JSON/SQLite/Apache config mutators, `af-heal` watchdog, MediaFlow worker, and HTTPS REST/mTLS cluster heartbeat daemon. |
 | **`af-release`** | Pull-based atomic release engine (`Deploy`, `Rollback`, `Cleanup`, `MigrateSystemd`) with 4-tier SQLite path resolution, WAL-safe pre-swap backups, executable permission normalization, and crash recovery. |
-| **`af-host`** | Shared host backup & verification library (`af-host.backup-manifest.v1`), WAL-consistent `OnlineBackupApi` / `VACUUM INTO` snapshots, 5-digit chunk splitting, staged restore (`--staging-root`), and native host maintenance (`tune`, `sentinel`, `clean-logs`, `showspace`). |
-| **`af-cli`** | Unified **`af`** administrative CLI binary for package lifecycle, systemd services, disk quotas (`setdisk`), sandbox drop-ins, releases, backups, maintenance, and 14-step resumable bare-metal provisioning. |
+| **`af-host`** | Shared host backup & verification library (`af-host.backup-manifest.v1`), WAL-consistent `OnlineBackupApi` / `VACUUM INTO` snapshots, 5-digit chunk splitting, confirmed staged restore (`--target-root <dir> --confirm-destructive-restore`), and native host maintenance (`tune`, `sentinel`, `clean-logs`, `showspace`). |
+| **`af-cli`** | Unified **`af`** administrative CLI binary for package lifecycle, systemd services, disk quotas (`setdisk`), sandbox drop-ins, releases, backups, maintenance, and 14 Rust-native foundation steps for resumable bare-metal provisioning. |
 | **`af-hardware`** | Zero-fork `sysinfo` and `/proc/diskstats` telemetry collector plus dynamic `libloading` FFI bindings to `libnvidia-ml.so.1` for NVIDIA GPU metrics. |
 | **`af-librespeed`** | Native **`speedtest-backend`** replacement with Obsidian V2 telemetry UI, SQLite WAL telemetry vault (plus legacy BoltDB v2 auto-migration), keyed ULID obfuscation, and PNG result badge renderer. |
 | **`af-models`** | Shared `serde` wire contracts, catalog schemas, hardware telemetry structs, and runner IPC payloads. |
@@ -132,7 +132,7 @@ AetherFlow manages **77 native Linux packages** across 7 infrastructure domains,
 
 ## 🗂️ Native McBrowser & Streaming Intelligence
 
-- **Scoped Tenant File Manager (`McBrowser`)** — Manage files directly from the dashboard sidebar without containers or separate logins. Supports drag-and-drop directory uploads, resumable multi-gigabyte transfers, Ace code editing with Markdown/KaTeX preview, password-protected public shares, and FlowAI natural-language search.
+- **Scoped Tenant File Manager (`McBrowser`)** — Manage files directly from the dashboard sidebar without containers or separate logins. Supports drag-and-drop directory uploads, resumable multi-gigabyte transfers, native Rust/Leptos code editing with sanitized Markdown/MathML preview, password-protected public shares, and FlowAI natural-language search.
 - **Canonical Streaming Analytics** — Real-time **Jellyfin**, **Plex**, and **Emby** (staged) session monitoring paired with a snapshot-consistent playback history archive, server-identity verification, asynchronous library/genre metadata enrichment, CSV/JSON portability exports, native Plex/Tautulli playback import, and human-gated history reconciliation. (Emby session commands and item-summary sync remain unsupported.)
 - **WireGuard & Tailscale Control Center** — Provision one-time WireGuard client keypairs/QR codes and manage Tailscale tailnet authentication, advertised subnet routes, and exit-node preferences directly from the **Network** tab.
 
@@ -169,8 +169,9 @@ sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
   --username admin \
   --domain node.example.com
 
-# Repair an existing installation while preserving saved configuration & database
-sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair
+# Repair specific step(s) on an existing installation while preserving saved configuration & database
+# (Run with --list-steps to view available step IDs)
+sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair build_modern
 ```
 
 Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./docs/upgrading.md)** and **[Self-Update Lifecycle](./docs/self-update.md)**. The updater switches the API binaries and the matching `web/dist` dashboard together while preserving the HTTP API and runner socket.
@@ -200,12 +201,16 @@ Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./doc
 | **[Network: WireGuard & Tailscale](./docs/network-vpn.md)** | Managing WireGuard peers/keypairs and Tailscale mesh VPN routes via `aetherflow-runner`. |
 | **[FlowAI Assistant](./docs/flowai.md)** | Multi-provider LLM setup, Support vs. Assistant modes, and Approval Inbox workflow. |
 | **[Streaming History Contract](./docs/streaming-history-contract.md)** | Canonical playback history, server-identity verification, reconciliation, and CSV/JSON portability. |
+| **[Streaming Validation Gate](./docs/streaming-validation.md)** | Scoped and integrated streaming verification harness (`scripts/validate-streaming.sh`) and acceptance gates. |
 | **[AetherMarketplace](./docs/marketplace.md)** | 77-app catalog lifecycle, Palate, Maintainerr, McVNC, KasmVNC, and data retention policies. |
+| **[Marketplace Log Retention](./docs/marketplace-log-retention.md)** | Bounded periodic rotation (`aetherflow-log-retention.timer` / `deploy/log-retention.py`) for installer logs. |
+| **[Jellyseerr / Seerr Upgrades](./docs/seerr-upgrades.md)** | Staged Seerr upgrades, private Node.js/pnpm builds, backups, and manual rollback. |
 | **[Experimental YouTube Frontends](./docs/experimental-youtube.md)** | Native bare-metal installation and operation of Piped and Invidious. |
 | **[Marketplace Developer Guide](./docs/marketplace-developer-guide.md)** | Authoring idempotent `common.sh` package installers and declarative Rust recipes. |
 | **[Unified Rust Admin CLI (`af`)](./docs/rust-admin-cli.md)** | Command reference and exit codes for the `af` (`af-cli`) binary and `af provision`. |
 | **[Rust Release Engine (`af-release`)](./docs/rust-release-engine.md)** | Stage-by-stage atomic release deployment, WAL-safe snapshots, and auto-rollback internals. |
 | **[Rust Package Executor (`af-runner`)](./docs/rust-package-executor.md)** | Declarative Rust package recipes, advisory locking, process-group cancellation, and rollback journals. |
+| **[Native Declarative Packages](./docs/v4-native-packages.md)** | Opt-in native Rust package recipes (`fail2ban`, `quassel`, `threadfin`, and peers) and verification guarantees. |
 | **[Rust Host Management (`af-host`)](./docs/rust-host-management.md)** | Versioned backup manifests, chunking, staged restore, and native host maintenance (`tune`, `sentinel`). |
 | **[Rust Migration Status](./docs/rust-migration-status.md)** | Complete crate-by-crate architecture and migration status matrix for v4.0.0. |
 | **[REST & WebSocket API](./docs/API.md)** | Endpoint specifications, WebSocket ticket handshake, SSE streams, and CSRF rules. |

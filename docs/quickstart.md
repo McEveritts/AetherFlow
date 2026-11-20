@@ -33,20 +33,20 @@ sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
   --domain node.example.com
 ```
 
-To repair an existing installation while preserving your SQLite database and configuration:
+To repair specific step(s) on an existing installation while preserving your SQLite database and configuration (run with `--list-steps` to view available step IDs):
 
 ```bash
-sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair
+sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair build_modern
 ```
 
 > [!NOTE]
-> The installer provisions the single-binary Rust control plane (`aetherflow-api.service`), the privileged UNIX socket daemon (`aetherflow-runner.service`), the unified `af` administrative CLI, Apache2 reverse proxy ingress, and `/etc/aetherflow/aetherflow.env` secrets.
+> The installer provisions the Rust control plane (`aetherflow-api.service`) and external `web/dist` WASM dashboard, the privileged UNIX socket daemon (`aetherflow-runner.service`), the unified `af` administrative CLI, Apache2 reverse proxy ingress, and `/etc/aetherflow/aetherflow.env` secrets.
 
 ---
 
 ## 2. Environment Configuration
 
-Runtime secrets and environment variables are stored in `/etc/aetherflow/aetherflow.env` (mode `0600`):
+Runtime secrets and environment variables are stored in `/etc/aetherflow/aetherflow.env` (mode `0640`, owned by `root:aetherflow`):
 
 ```bash
 # Inspect or customize environment settings
@@ -70,8 +70,8 @@ sudo systemctl status aetherflow-runner aetherflow-api
 sudo af release status
 ```
 
-Navigate to your server's domain or IP in your browser:
-`https://your-server-domain` (via Apache2 TLS proxy) or `http://your-server-ip:8080`
+Navigate to your server's domain or IP in your browser via Apache2:
+`https://your-server-domain` (or `https://your-server-ip`). By default `AetherFlow-Setup` binds `aetherflow-api` strictly to loopback (`BIND_ADDR=127.0.0.1:8080`) behind Apache2; direct `:8080` access is only enabled when explicitly opted in (`AF_ALLOW_DIRECT_8080=1` or `BIND_ADDR=0.0.0.0`).
 
 ---
 

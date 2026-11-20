@@ -9,7 +9,7 @@ In AetherFlow v4.0.0, Marketplace installation, update, reinstall, and removal (
 1. **Declarative Rust Recipes (`backend-rs/crates/af-runner/src/package_executor.rs`)**:
    - 12 packages (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `novnc`, `x2go`, `prometheus`, `netdata`, `mergerfs`, `rclone`, `syncthing`) have native declarative Rust recipes (`DeclarativePackageRecipe`) with `lstat` ancestor-symlink validation, pre-start systemd sandboxing, and `RollbackJournal`. See [Rust Package Executor](./rust-package-executor.md).
 2. **Idempotent Bash Lifecycle Scripts (`packages/package/`)**:
-   - Complex multi-component builds (such as `jellyfin`, `plex`, `palate`, `maintainerr`, `dispatcharr`, `mcvnc`, `invidious`, `piped`, and the `*Arr` stack) use structured Bash scripts under `packages/package/{install,remove}/` that source `packages/common.sh`. Installers also handle update and reinstall actions.
+   - Complex multi-component builds (such as `jellyfin`, `plex`, `palate`, `maintainerr`, `dispatcharr`, `mcvnc`, `invidious`, `piped`, and the `*Arr` stack) use structured Bash scripts under `packages/package/{install,remove}/` that source `packages/common.sh`. Installers also handle update and reinstall actions. Start new installers from [`docs/installpackage-template.sh`](./installpackage-template.sh), and see [Marketplace Lifecycle Log Retention](./marketplace-log-retention.md) for `/var/log/aetherflow` log rotation bounds.
 
 ```bash
 packages/

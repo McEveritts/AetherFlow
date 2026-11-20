@@ -6,7 +6,7 @@
 
 To guarantee zero-downtime safety during migration:
 1. **Production Shell Path Preserved**: `deploy/release-manager.sh` and `deploy/release-manager.conf` remain untouched on disk and continue to be staged into every candidate release directory (`${RELEASE_DIR}/deploy/`).
-2. **No Unsafe Partial Activation**: `af-release` is delivered as a standalone, self-contained workspace crate with explicit dependency-injected traits (`ArtifactProvider`, `LifecycleController`, `HealthProber`). The parent workspace (`backend-rs/Cargo.toml`), privileged runner (`af-runner`), and API binary (`af-api`) can switch `/v1/self-update` and `aetherflow-api release` over to `af-release` once integrated, while falling back to `deploy/release-manager.sh` for any explicitly unsupported legacy mode (such as `--from-source`).
+2. **Integrated Trait-Injected Engine**: `af-release` is integrated into `backend-rs/Cargo.toml`, `af-runner` (`/v1/self-update`), and `af-cli` (`af release`) with explicit dependency-injected traits (`ArtifactProvider`, `LifecycleController`, `HealthProber`), while falling back to `deploy/release-manager.sh` by default or for legacy modes such as `--from-source`.
 3. **Pure Bare-Metal Systemd**: Zero Docker dependencies. All service lifecycle transitions operate strictly on `aetherflow-runner.service` and `aetherflow-api.service` under `/opt/AetherFlow/current`.
 
 ---
@@ -58,7 +58,7 @@ To guarantee zero-downtime safety during migration:
 
 ### Runner & CLI Integration (`af_release::admin`)
 - `validate_self_update_request(req: &af_models::SelfUpdateRequest) -> Result<ValidatedSelfUpdateRequest, af_models::RunnerResponse>`
-  - Accepts `command` $\in$ `{"", "deploy", "rollback"}` and `channel` $\in$ `{"", "stable", "nightly"} (legacy `experimental` aliases `nightly`)`.
+  - Accepts `command` $\in$ `{"", "deploy", "rollback"}` and `channel` $\in$ `{"", "stable", "nightly"}` (legacy `experimental` aliases `nightly`).
 - `execute_self_update_sync(req: &ValidatedSelfUpdateRequest, config: ReleaseConfig) -> (ExitCode, af_models::RunnerResponse)`
 - `run_cli_from_args(args, conf_override) -> (ExitCode, ReleaseResult<ReleaseOutcome>)`
 
@@ -92,13 +92,13 @@ tools should not copy `.deployment.json` into `.recovery_state.json`.
 
 1. **`--from-source` Fallback Mode (`ReleaseError::Unsupported`)**:
    - `deploy/release-manager.sh --from-source` runs `git fetch`, `rsync`, `bash scripts/build_wasm_frontend.sh --stage`, and `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend` on the target host.
-   - `af-release` intentionally rejects `--from-source` with `ReleaseError::Unsupported` (`ExitCode::ConfigurationOrUsageError = 4`) to enforce the v4.0 pull-based, SHA-256-verified single-binary architecture and avoid requiring Node.js/Rust toolchains on production hosts. Callers needing an emergency source build should invoke `deploy/release-manager.sh --from-source` directly (checked via [`is_unsupported_error`]).
+   - `af-release` intentionally rejects `--from-source` with `ReleaseError::Unsupported` (`ExitCode::ConfigurationOrUsageError = 4`) to enforce the v4.0 pull-based, SHA-256-verified prebuilt release architecture and avoid requiring Node.js/Rust toolchains on production hosts. Callers needing an emergency source build should invoke `deploy/release-manager.sh --from-source` directly (checked via [`is_unsupported_error`]).
 2. **OS User Ownership (`chown aetherflow:aetherflow`)**:
    - `af-release` enforces `0700` directory permissions on `DATA_DIR` and `data-snapshot/`, and `0600` file permissions **before writing** on SQLite databases, snapshots, manifests, recovery journals, and `.env` files on Unix.
    - During Stage 0 migration and Stage 4 database restore, `af-release` preserves existing `(uid, gid)` metadata from the previous database/secret file or resolves the `aetherflow` service user via `getpwnam_r` (`lchown`) so files created while running as `root` (`af-runner`) remain readable by `User=aetherflow` (`aetherflow-api.service`).
 3. **Parent Workspace & Runner Integration (`af-runner` & `af-api`)**:
    - `crates/af-release` is registered in `backend-rs/Cargo.toml` and wired into `af-runner/src/lib.rs` (`handle_self_update`), `af-api/src/storage.rs` (`run_update`), and `af-cli` (`af release`).
-   - `handle_self_update` validates incoming requests with `af_release::validate_self_update_request(&req)` (supporting `stable` and `nightly` channels) and executes `af_release::execute_self_update_sync` inside `tokio::task::spawn_blocking` when `AETHERFLOW_ENABLE_RUST_RELEASE=1` (or deprecated alias `AETHERFLOW_USE_RUST_RELEASE=1`) is set (or when `deploy/release-manager.sh` is absent), with automatic fallback to `deploy/release-manager.sh` in its detached cgroup.
+   - `handle_self_update` validates incoming requests with `af_release::validate_self_update_request(&req)` (supporting `stable` and `nightly` channels) and spawns an isolated transient systemd unit (`aetherflow-self-update-<command>-<channel>-<id>.service`) via `systemd-run`. When `AETHERFLOW_ENABLE_RUST_RELEASE=1` (or deprecated alias `AETHERFLOW_USE_RUST_RELEASE=1`) is set and `AETHERFLOW_FORCE_BASH_RELEASE` is not enabled, the transient unit executes the physical `af release <command> --local` binary; otherwise it launches `deploy/release-manager.sh` in the same isolated transient unit so restarting `aetherflow-runner` never terminates the updater.
    - `artifact::prepare_release_permissions` normalizes executable permissions (`0755`) on `aetherflow-api`, `af` (`bin/af`), `speedtest-backend` (`bin/speedtest-backend`), `deploy/release-manager.sh`, `deploy/verify-provenance.py`, `deploy/log-retention.py`, `packages/system/*`, and `packages/package/{install,remove,update}/*` after extraction, and `ReqwestArtifactProvider` falls back to `/releases/latest` HTTP redirect location headers when the GitHub JSON API is rate-limited on the `stable` channel.
 
 ## Isolated Linux Validation
