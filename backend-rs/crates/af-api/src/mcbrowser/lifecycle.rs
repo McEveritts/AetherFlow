@@ -270,18 +270,19 @@ fn finish_account_deletion(target_user_id: i64, deleted: AccountDeletion) {
 fn cleanup_mcbrowser_root(user_id: i64) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::fs::MetadataExt;
-    use std::path::Path;
 
     let configured = std::env::var("AF_MCBROWSER_ROOT").ok();
     let base = super::resolve_configured_base_root(configured.as_deref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid McBrowser storage root"))?;
-    let relative = base
-        .strip_prefix("/")
-        .ok()
-        .and_then(Path::to_str)
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid McBrowser storage path"))?;
-    let browser = af_files::BrowserFs::open(Path::new("/"))?.scoped(relative)?;
+    if base.parent().is_none() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Invalid McBrowser storage path",
+        ));
+    }
+    // As in open_user_browser_fs_at, the operator controls the ancestors.
+    // Reject a symlink at the storage root and confine cleanup to its descriptor.
+    let browser = af_files::BrowserFs::open(&base)?;
     let metadata = browser.directory_metadata()?;
     if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
         return Err(Error::new(

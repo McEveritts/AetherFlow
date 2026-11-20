@@ -1208,9 +1208,12 @@ async fn mounted_editor_accepts_10mib_decoded_text_with_sixfold_json_escaping() 
 }
 
 #[tokio::test]
-async fn account_deletion_serializes_metadata_cleanup_retains_disk_and_revokes_access() {
+async fn account_deletion_serializes_cleanup_through_configured_storage_alias_and_revokes_access() {
     let _guard = TEST_DATABASE_LOCK.lock().await;
     let fixture = HttpFixture::new();
+    let storage_alias = fixture.directory.join("storage-alias");
+    std::os::unix::fs::symlink(&fixture.directory, &storage_alias).unwrap();
+    env::set_var("AF_MCBROWSER_ROOT", storage_alias.join("files"));
     let created = request_json(
         fixture.router(),
         "POST",

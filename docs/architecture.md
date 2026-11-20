@@ -38,7 +38,7 @@ Eleven workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 - **Allowlisted Privileged Verbs**: Exposes `/v1/health`, `/v1/systemctl` (strictly allowlisted unit names and actions), `/v1/package` (12 built-in declarative Rust recipes + legacy Bash fallback serialized under a shared advisory lock), `/v1/package/cancel`, `/v1/blueprint/apply` (sandboxed XML/INI/JSON/TOML/SQLite blueprint mutations), `/v1/ingress/vhost` (Apache2 ACME/TLS vhost sync), `/v1/self-update` (launches isolated `aetherflow-self-update.service` units integrated with `af-release` and `deploy/release-manager.sh`), `/v1/sandbox`, `/v1/hosts` (`/etc/hosts`, Pi-hole, and AdGuard Home `.aether.local` DNS sync), `/v1/network`, `/v1/quota`, and `/v1/app-meta`.
 
 ### 3. `af-files` (`backend-rs/crates/af-files`) — Native McBrowser Scoped File Manager
-- **Capability-Scoped Tenant Storage**: Enforces `0700` per-user roots under `/var/lib/aetherflow/mcbrowser/user-<id>` with ancestor symlink rejection and path-traversal guards.
+- **Capability-Scoped Tenant Storage**: Enforces `0700` per-user roots under `/var/lib/aetherflow/mcbrowser/user-<id>`. The API rejects symlinks at the configured storage root and at per-user roots. File operations and account cleanup are confined to opened directory descriptors. The operator controls the configured root's ancestors.
 - **Resumable Uploads & Safe Actions**: Supports durable chunked uploads up to 64 GiB (`PATCH` 4 MiB chunks), ETag-guarded UTF-8 editing (up to 10 MiB), 9-format archive creation/extraction, password-protected public shares, and FlowAI natural-language BFS file search.
 
 ### 4. `af-db` (`backend-rs/crates/af-db`) — Bundled SQLite WAL & Envelope Encryption

@@ -5263,9 +5263,8 @@ pub async fn handle_deploy_process(
                             "[ROLLBACK] Deployment configuration rejected and rolled back cleanly: {sanitized}"
                         ));
                     } else {
-                        let warns = af_common::redact::redact_secrets(
-                            &rollback_report.warnings.join("; "),
-                        );
+                        let warns =
+                            af_common::redact::redact_secrets(&rollback_report.warnings.join("; "));
                         send_step(format!(
                             "[ROLLBACK] Deployment configuration rejected and rolled back ({warns}): {sanitized}"
                         ));
@@ -6234,7 +6233,8 @@ mod updater_tests {
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn test_deploy_snapshot_distinguishes_absent_from_eacces_and_preserves_unreadable_files() {
+    async fn test_deploy_snapshot_distinguishes_absent_from_eacces_and_preserves_unreadable_files()
+    {
         use std::os::unix::fs::PermissionsExt;
 
         let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
@@ -6258,16 +6258,25 @@ mod updater_tests {
         let creds_path = app_dir.join("credentials.xml");
         let symlink_path = enabled_dir.join("aetherflow-app-sonarr.conf");
 
-        fs::write(&secret_unreadable_path, b"<Config><ApiKey>top-secret</ApiKey></Config>\n")
-            .unwrap();
+        fs::write(
+            &secret_unreadable_path,
+            b"<Config><ApiKey>top-secret</ApiKey></Config>\n",
+        )
+        .unwrap();
         fs::set_permissions(&secret_unreadable_path, fs::Permissions::from_mode(0o000)).unwrap();
 
-        fs::write(&creds_path, b"<Config><Port>8989</Port><ApiKey>keep</ApiKey></Config>\n")
-            .unwrap();
+        fs::write(
+            &creds_path,
+            b"<Config><Port>8989</Port><ApiKey>keep</ApiKey></Config>\n",
+        )
+        .unwrap();
         fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-        std::os::unix::fs::symlink("../sites-available/aetherflow-app-sonarr.conf", &symlink_path)
-            .unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-sonarr.conf",
+            &symlink_path,
+        )
+        .unwrap();
 
         // Snapshot before deploy: absent vs EACCES vs regular 0600 vs symlink.
         assert_eq!(
@@ -6481,10 +6490,9 @@ mod updater_tests {
         )
         .await;
         assert!(!tx_report.fully_reverted);
-        assert!(tx_report
-            .errors
-            .iter()
-            .any(|e| e.contains("was not restarted because configuration rollback did not complete")));
+        assert!(tx_report.errors.iter().any(
+            |e| e.contains("was not restarted because configuration rollback did not complete")
+        ));
 
         // Restore directory permissions; now verify apache reload failure still marks fully_reverted=false
         // and keeps SQLite at 18989, whereas successful reload reverts SQLite to 8989.
