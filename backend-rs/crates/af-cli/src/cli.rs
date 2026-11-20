@@ -2829,12 +2829,12 @@ Applies or previews systemd security drop-ins via af-runner (/v1/sandbox & rende
         HelpTopic::Release => "\
 USAGE:
   af release status [--config <path>]
-  af release deploy [--channel <stable|nightly>] [--local] [--binary <path>] [--frontend-dist <dir>] [--version <ver>] [--keep-releases <n>] [--skip-apache-reload]
-  af release rollback [--channel <stable|nightly>] [--local] [--skip-apache-reload]
+  af release deploy [--channel <stable|nightly>] [--local | --via-runner] [--offline] [--from-source] [--keep-releases <n>] [--config <path>]
+  af release rollback [--channel <stable|nightly>] [--local | --via-runner] [--config <path>]
   af release cleanup [--keep-releases <n>] [--config <path>]
-  af release migrate-systemd [--skip-apache-reload] [--config <path>]
+  af release migrate-systemd [--config <path>]
 
-Reuses af-release's ReleaseEngine and af-runner's /v1/self-update contract without inventing wire formats.
+Deploy and rollback use the runner by default. Local execution uses the Rust release engine.
 "
         .to_string(),
         HelpTopic::Backup => "\
@@ -2843,13 +2843,15 @@ USAGE:
   af backup list [--backup-dir <dir>]
   af backup verify <filename> [--backup-dir <dir>]
   af backup restore-preflight <filename> --target-root <staging_dir> [--backup-dir <dir>] [--host-version <ver>] [--allow-staging-overwrite]
+  af backup restore <filename> --target-root <dir> --confirm-destructive-restore [--backup-dir <dir>] [--allow-overwrite] [--operator-privileged]
+  af backup recover-interrupted [--target-root <dir>] [--backup-dir <dir>] [--operator-privileged]
   af backup delete <filename> [--backup-dir <dir>] [--operator-privileged]
   af backup prune [--backup-dir <dir>] [--max-retained <n>] [--retention-days <days>] [--operator-privileged]
   af backup chunk <filename> <size> [--backup-dir <dir>] [--operator-privileged]
   af backup assemble --output <filename> --sha256 <hex> <chunk1> [chunk2...] [--backup-dir <dir>] [--operator-privileged]
   af backup ownership
 
-Backed by af-host. Live destructive restore ('af backup restore') is intentionally unsupported and fails closed.
+Run restore-preflight against the selected target before authorizing a restore.
 "
         .to_string(),
         HelpTopic::Provision => "\
