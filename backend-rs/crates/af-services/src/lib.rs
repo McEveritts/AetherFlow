@@ -2767,6 +2767,12 @@ mod tests {
 
     #[test]
     fn launch_target_prefers_active_public_ingress_and_hides_loopback_ports() {
+        let name = "tests::launch_target_prefers_active_public_ingress_and_hides_loopback_ports";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        let fixture = crate::inventory_regressions::Fixture::new();
+        env::set_var("AETHERFLOW_CONFIG_ROOT", &fixture.root);
         assert_eq!(qbittorrent_bind_scope(None), "loopback");
         assert_eq!(qbittorrent_bind_scope(Some("192.168.1.20")), "network");
         assert_eq!(
