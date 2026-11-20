@@ -217,6 +217,17 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         result = self.run_remove(DELETE_DATA='true', FAIL_PATH=str(self.root / 'etc/systemd/system/syncthing.service'))
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.root / 'var/lib/syncthing/config.xml').is_file())
+
+    def test_purge_refuses_mounted_service_home(self):
+        home = self.file('home/syncthing/operator-data', 'retained')
+        mountpoint = self.bin / 'mountpoint'
+        mountpoint.write_text('#!/bin/bash\n[[ "${@: -1}" == "$TEST_ROOT/home/syncthing" ]]\n')
+        mountpoint.chmod(0o755)
+        result = self.run_remove(DELETE_DATA='true')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Refusing recursive removal of a mount point', result.stderr)
+        self.assertEqual(home.read_text(), 'retained')
+        self.assertTrue((self.root / 'install/.syncthing.lock').exists())
         self.assertTrue((self.root / 'install/.syncthing.lock').is_file())
 
     def test_absent_account_is_allowed_but_lookup_error_is_not(self):

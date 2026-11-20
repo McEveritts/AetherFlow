@@ -5314,7 +5314,7 @@ purge_system_user() {
             [[ "$status" == 2 ]] || return 1
         fi
     done
-    rm -rf "/home/${username}"
+    safe_rm_rf "/home/${username}"
 }
 
 load_master_credentials() {
