@@ -763,7 +763,7 @@ elif command == 'pihole-FTL':
         pattern = r'(?m)^' + key + r'\s*=.*$'
         replacement = key + ' = "' + arguments[-1] + '"'
         write_file(target, re.sub(pattern, replacement, text) if re.search(pattern, text) else text + '\n' + replacement + '\n')
-    else: print(version)
+    else: print(os.environ.get('AF_FIXTURE_PIHOLE_FTL_VERSION', version))
 elif command == 'pihole':
     if failure == 'bootstrap': sys.exit(77)
     print(version)
@@ -1091,6 +1091,16 @@ youtube_private_port() {
 
 
 class CatalogLifecycleMatrix(unittest.TestCase):
+    def test_pihole_release_target_matches_installed_ftl(self):
+        automation = json.loads((ROOT / "config/package_automation.json").read_text())["pihole"]
+        self.assertEqual(automation["update_repo"], "pi-hole/FTL")
+        self.assertEqual(automation["version_command"], ["/usr/bin/pihole-FTL", "-v"])
+        with InstallerFixture("pihole") as fixture:
+            installed = fixture.run(AF_TARGET_VERSION="6.9", AF_FIXTURE_VERSION="6.6",
+                                    AF_FIXTURE_PIHOLE_FTL_VERSION="v6.9")
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            self.assertEqual((fixture.root / "etc/pihole/.af-version").read_text().strip(), "6.9")
+
     def patch_host_command(self, fixture, command, old, new):
         for directory in (fixture.commands, fixture.root / "usr/bin", fixture.root / "usr/sbin"):
             path = directory / command

@@ -640,11 +640,10 @@
   "pihole": {
     "update_source": "github",
     "require_download_sha256": true,
-    "update_repo": "pi-hole/pi-hole",
+    "update_repo": "pi-hole/FTL",
     "version_command": [
-      "bash",
-      "-lc",
-      "pihole -v -p -c 2>/dev/null"
+      "/usr/bin/pihole-FTL",
+      "-v"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
