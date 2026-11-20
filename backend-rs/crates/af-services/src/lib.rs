@@ -913,10 +913,13 @@ pub fn resolve_service_web_scheme(target: &str, default_port: i32) -> &'static s
 }
 
 pub fn service_web_scheme_for_id(clean: &str, default_port: i32) -> &'static str {
+    if clean == "kasmvnc" {
+        return "https";
+    }
     if default_port > 0
         || matches!(
             clean,
-            "nextcloud" | "rutorrent" | "organizr" | "maintainerr" | "palate" | "kasmvnc" | "mcvnc"
+            "nextcloud" | "rutorrent" | "organizr" | "maintainerr" | "palate" | "mcvnc"
         )
     {
         "http"
@@ -935,9 +938,8 @@ pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
         "qbittorrent" => {
             qbittorrent_bind_scope(mutators::qbittorrent_web_bind_address().as_deref())
         }
-        "maintainerr" | "palate" | "kasmvnc" | "mcvnc" | "nextcloud" | "rutorrent" | "organizr" => {
-            "loopback"
-        }
+        "maintainerr" | "palate" | "kasmvnc" | "mcvnc" | "nextcloud" | "rutorrent" | "organizr"
+        | "seedcross" => "loopback",
         _ => "network",
     }
 }
@@ -3078,7 +3080,7 @@ mod tests {
 
     #[test]
     fn test_service_capabilities_and_scopes() {
-        for app in ["maintainerr", "palate", "kasmvnc", "mcvnc"] {
+        for app in ["maintainerr", "palate", "kasmvnc", "mcvnc", "seedcross"] {
             assert_eq!(
                 resolve_service_bind_scope(app),
                 "loopback",
@@ -3087,7 +3089,7 @@ mod tests {
             );
         }
         assert_eq!(resolve_service_bind_scope("radarr"), "network");
-        assert_eq!(resolve_service_web_scheme("kasmvnc", 6081), "http");
+        assert_eq!(resolve_service_web_scheme("kasmvnc", 6081), "https");
         assert_eq!(resolve_service_web_scheme("radarr", 7878), "http");
 
         for app in [
