@@ -226,7 +226,6 @@ function _apacheconf() {
 	sed -i "s/USERNAME/${username}/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/\"REALM\"/\"${REALM}\"/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/HTPASSWD/\/etc\/htpasswd/g" /etc/apache2/sites-enabled/default-ssl.conf
-	sed -i "s/PORT/${PORT}/g" /etc/apache2/sites-enabled/default-ssl.conf
 	if [[ ! -s /etc/apache2/AetherFlow/htpasswd && -n "${username:-}" && -n "${passwd:-}" ]] && type _write_apache_htpasswd_files &>/dev/null; then
 		_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM:-Welcome to AetherFlow}" || true
 	fi

@@ -884,7 +884,7 @@ _build_modern_stack() {
         fi
     fi
 
-    local port="${existing_port:-${PORT:-8080}}"
+    local port="${existing_port:-8080}"
     local runner_sock="${existing_runner_sock:-/run/aetherflow/runner.sock}"
     local priv_runner="${existing_priv_runner:-true}"
     local default_db_path="${data_dir}/aetherflow.sqlite"

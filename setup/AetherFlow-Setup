@@ -2230,11 +2230,6 @@ if [[ ! -d "${local_setup}" ]]; then
 fi
 # shellcheck disable=2312
 IFACE="$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')"
-PORT="$(shuf -i 2000-61000 -n 1)"
-PORTEND=$((${PORT} + 1500))
-while port_is_listening "${PORT}"; do
-    PORT="$(shuf -i 2000-61000 -n 1)"
-done
 RPORT="$(shuf -i 2000-61000 -n 1)"
 while port_is_listening "${RPORT}"; do
     RPORT="$(shuf -i 2000-61000 -n 1)"

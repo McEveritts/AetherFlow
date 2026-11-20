@@ -266,6 +266,10 @@ _build_modern_stack
                     parsed[k.strip()] = v.strip()
         return parsed, env_file.read_text(encoding="utf-8")
 
+    def test_fresh_install_keeps_proxy_port_when_parent_shell_sets_port(self):
+        parsed, _ = self._run_env_generation(env_vars={"PORT": "45678"})
+        self.assertEqual(parsed.get("PORT"), "8080")
+
     def test_default_ingress_binds_loopback_and_sets_secure_cookie_with_domain(self):
         """Default install with a configured domain must bind 127.0.0.1, COOKIE_SECURE=true, and no direct :8080 domain origins."""
         parsed, _ = self._run_env_generation(
