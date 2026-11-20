@@ -293,6 +293,9 @@ pub fn merge_package_automation(package: &mut Package, automation: &PackageAutom
     package.sandbox_service_ids = automation.sandbox_service_ids.clone();
 }
 
+/// The server resolved the app's launch target and found no usable route.
+pub const APP_LAUNCH_SCOPE_UNAVAILABLE: &str = "unavailable";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MarketplaceApp {
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -321,6 +324,10 @@ pub struct MarketplaceApp {
     pub bind_scope: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_scheme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_scope: Option<String>,
     pub progress: i32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub started_at: Option<String>,

@@ -97,22 +97,10 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
             "Authentication required for marketplace inventory",
         );
     }
-    let Ok(jobs) = af_services::package_job_snapshot() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "STATUS_UNAVAILABLE",
-            "Lifecycle status could not be confirmed; retry shortly",
-        );
-    };
-    let Ok(pkgs) = af_services::get_packages_with_jobs(&jobs) else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to load package catalog configuration",
-        );
-    };
-
     if !is_authenticated {
+        let Ok(pkgs) = af_services::get_package_catalog() else {
+            return marketplace_unavailable();
+        };
         let public_apps: Vec<serde_json::Value> = pkgs
             .into_iter()
             .map(|p| {
@@ -177,6 +165,16 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
             .into_response();
     }
 
+    let Ok(jobs) = af_services::package_job_snapshot() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STATUS_UNAVAILABLE",
+            "Lifecycle status could not be confirmed; retry shortly",
+        );
+    };
+    let Ok(pkgs) = af_services::get_packages_with_jobs(&jobs) else {
+        return marketplace_unavailable();
+    };
     let ingress_map: HashMap<String, AppIngressConfig> = af_db::get_all_app_ingress_configs()
         .unwrap_or_default()
         .into_iter()
@@ -187,9 +185,7 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
     let mut apps = Vec::with_capacity(pkgs.len());
     for p in pkgs {
         let mut active_port = p.default_port;
-        let internal_domain = af_services::get_blueprint(&p.name)
-            .map(|bp| bp.internal_domain)
-            .unwrap_or_default();
+        let internal_domain = af_services::resolve_app_internal_domain(&p.name);
         let mut public_domain = String::new();
         let mut external_access = false;
         let mut tls_enabled = true;
@@ -222,6 +218,8 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
             web_path: p.web_path,
             bind_scope: af_services::service_bind_scope_for_id(&p.name).to_owned(),
             web_scheme: af_services::service_web_scheme_for_id(&p.name, active_port).to_owned(),
+            launch_url: p.launch_url,
+            launch_scope: p.launch_scope,
             progress: 0,
             started_at: None,
             job_id: None,
@@ -235,50 +233,48 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
                 &af_services::workers::public_update_error(&p.update_error),
             ),
             inventory_known: true,
-            inventory_authenticated: is_authenticated,
-            inventory_mode: if is_authenticated {
-                af_models::INVENTORY_MODE_AUTHENTICATED.to_string()
-            } else {
-                af_models::INVENTORY_MODE_PUBLIC_REDACTED.to_string()
-            },
-            last_job: jobs.outcomes.get(&p.name).cloned().map(|outcome| {
-                if is_authenticated {
-                    af_models::MarketplaceJobOutcome {
-                        job_id: outcome.job_id,
-                        action: outcome.action,
-                        status: outcome.status,
-                        started_at: outcome.started_at,
-                        finished_at: outcome.finished_at,
-                        expected_target_version: outcome
-                            .expected_target_version
-                            .map(|v| sanitize_url_or_source_key_for_api(&v)),
-                        achieved_version: outcome
-                            .achieved_version
-                            .map(|v| sanitize_url_or_source_key_for_api(&v)),
-                        failed_stage: if diagnostics_allowed {
-                            outcome
-                                .failed_stage
-                                .map(|s| sanitize_url_or_source_key_for_api(&s))
-                        } else {
-                            None
-                        },
-                        exit_code: if diagnostics_allowed {
-                            outcome.exit_code
-                        } else {
-                            None
-                        },
-                        sanitized_summary: if diagnostics_allowed {
-                            outcome.sanitized_summary.map(|s| {
-                                sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&s))
-                            })
-                        } else {
-                            None
-                        },
-                    }
-                } else {
-                    public_job_outcome(outcome)
-                }
-            }),
+            inventory_authenticated: true,
+            inventory_mode: af_models::INVENTORY_MODE_AUTHENTICATED.to_string(),
+            last_job: jobs
+                .outcomes
+                .get(&p.name)
+                .map(|outcome| af_models::MarketplaceJobOutcome {
+                    job_id: outcome.job_id.clone(),
+                    action: outcome.action.clone(),
+                    status: outcome.status.clone(),
+                    started_at: outcome.started_at.clone(),
+                    finished_at: outcome.finished_at.clone(),
+                    expected_target_version: outcome
+                        .expected_target_version
+                        .as_deref()
+                        .map(sanitize_url_or_source_key_for_api),
+                    achieved_version: outcome
+                        .achieved_version
+                        .as_deref()
+                        .map(sanitize_url_or_source_key_for_api),
+                    failed_stage: if diagnostics_allowed {
+                        outcome
+                            .failed_stage
+                            .as_deref()
+                            .map(sanitize_url_or_source_key_for_api)
+                    } else {
+                        None
+                    },
+                    exit_code: if diagnostics_allowed {
+                        outcome.exit_code
+                    } else {
+                        None
+                    },
+                    sanitized_summary: if diagnostics_allowed {
+                        outcome.sanitized_summary.as_deref().map(|summary| {
+                            sanitize_url_or_source_key_for_api(&af_services::redact_secrets(
+                                summary,
+                            ))
+                        })
+                    } else {
+                        None
+                    },
+                }),
         };
 
         if let Some(job) = jobs.active.get(&p.name).cloned() {
@@ -293,21 +289,15 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         apps.push(app);
     }
 
-    let inv_mode = if is_authenticated {
-        af_models::INVENTORY_MODE_AUTHENTICATED
-    } else {
-        af_models::INVENTORY_MODE_PUBLIC_REDACTED
-    };
-    let inv_auth = if is_authenticated { "true" } else { "false" };
     (
         [
             (
                 axum::http::header::HeaderName::from_static("x-aetherflow-inventory-mode"),
-                axum::http::HeaderValue::from_static(inv_mode),
+                axum::http::HeaderValue::from_static(af_models::INVENTORY_MODE_AUTHENTICATED),
             ),
             (
                 axum::http::header::HeaderName::from_static("x-aetherflow-inventory-authenticated"),
-                axum::http::HeaderValue::from_static(inv_auth),
+                axum::http::HeaderValue::from_static("true"),
             ),
         ],
         Json(apps),
@@ -315,21 +305,12 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         .into_response()
 }
 
-pub(super) fn public_job_outcome(
-    outcome: af_services::PackageJobOutcome,
-) -> af_models::MarketplaceJobOutcome {
-    af_models::MarketplaceJobOutcome {
-        job_id: outcome.job_id,
-        action: outcome.action,
-        status: outcome.status,
-        started_at: outcome.started_at,
-        finished_at: outcome.finished_at,
-        expected_target_version: None,
-        achieved_version: None,
-        failed_stage: None,
-        exit_code: None,
-        sanitized_summary: None,
-    }
+fn marketplace_unavailable() -> Response {
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+        "Failed to load package catalog configuration",
+    )
 }
 
 pub(super) fn package_progress_payload(

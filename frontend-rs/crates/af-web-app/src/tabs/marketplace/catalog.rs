@@ -92,10 +92,11 @@ pub(super) enum PackageActionState {
 }
 
 pub(super) fn installed(value: &Value) -> bool {
-    matches!(
-        value["status"].as_str(),
-        Some("installed" | "running" | "active" | "inactive" | "stopped")
-    ) || !field(value, &["installed_version"]).is_empty()
+    match value["status"].as_str() {
+        Some("installed" | "running" | "active" | "inactive" | "stopped") => true,
+        Some("uninstalled" | "not_installed" | "retired") => false,
+        _ => !field(value, &["installed_version"]).is_empty(),
+    }
 }
 
 pub(super) fn retired_uninstalled(value: &Value) -> bool {
@@ -645,6 +646,12 @@ pub(super) fn DeploymentStatus(ops: MarketplaceOps) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_uninstalled_state_wins_over_stale_version() {
+        let removed = json!({"id":"sonarr", "status":"uninstalled", "installed_version":"4.0.0"});
+        assert_eq!(action_state(&removed), PackageActionState::Installable);
+    }
     use serde_json::json;
 
     #[test]

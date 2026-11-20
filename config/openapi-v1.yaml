@@ -4712,7 +4712,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                $ref: '#/components/schemas/ServiceMap'
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -5492,14 +5492,30 @@ paths:
     get:
       tags:
         - Marketplace
-      summary: Get marketplace
+      summary: List Marketplace applications
+      description: Signed-in callers with catalog access receive live inventory and launch metadata. Anonymous callers receive catalog fields with inventory_known set to false.
+      parameters:
+        - in: query
+          name: require_auth
+          description: Set to 1, true, or yes to require authenticated inventory.
+          schema:
+            type: string
+      security:
+        - {}
+        - cookieAuth: []
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: array
+                items:
+                  $ref: '#/components/schemas/MarketplaceApp'
+        '401':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
   /public/mcbrowser/shares/{token}:
     parameters:
       - in: path
@@ -5867,6 +5883,12 @@ components:
           type: string
         process:
           type: string
+        launch_url:
+          type: string
+          format: uri
+        launch_scope:
+          type: string
+          enum: [public, internal, network, unavailable]
     ServiceMap:
       type: object
       additionalProperties:
@@ -5894,6 +5916,21 @@ components:
           type: string
         update_available:
           type: boolean
+        inventory_known:
+          type: boolean
+        inventory_authenticated:
+          type: boolean
+        inventory_mode:
+          type: string
+          enum: [authenticated, public_redacted]
+        launch_url:
+          type: string
+          format: uri
+          description: Resolved address for an installed app in authenticated inventory.
+        launch_scope:
+          type: string
+          enum: [public, internal, network, unavailable]
+          description: The access path selected by the server. An unavailable target has no launch URL.
     PackageProgress:
       type: object
       properties:

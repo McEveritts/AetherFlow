@@ -1057,7 +1057,7 @@ fn test_uninstall_purge_requires_explicit_true() {
 }
 
 #[test]
-fn test_progress_reports_failed_outcome_after_job_clears_but_public_view_has_no_detail() {
+fn test_progress_reports_failed_outcome_after_job_clears_and_redacts_for_viewers() {
     let outcome = af_services::PackageJobOutcome {
         job_id: "test-job".into(),
         package_id: "sonarr".into(),
@@ -1076,13 +1076,6 @@ fn test_progress_reports_failed_outcome_after_job_clears_but_public_view_has_no_
     let idle = package_progress_payload("sonarr", None, None, false);
     assert_eq!(idle["status"], "idle");
 
-    let public = serde_json::to_value(public_job_outcome(outcome.clone())).unwrap();
-    assert_eq!(public["status"], "failed");
-    assert_eq!(public["started_at"], "2026-11-05T20:00:00.000Z");
-    assert!(
-        public.get("message").is_none(),
-        "unauthenticated catalog must not leak errors"
-    );
     let ordinary = package_progress_payload("sonarr", None, Some(outcome), false);
     assert!(!ordinary.to_string().contains("exit status"));
     assert_eq!(ordinary["last_job"]["job_id"], "test-job");
@@ -1108,6 +1101,7 @@ async fn marketplace_inventory_requires_human_admin_for_lifecycle_diagnostics() 
     }
     let (root, connection) = lifecycle_status_fixture();
     af_db::init_db().unwrap();
+    std::env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
     std::env::set_var("AETHERFLOW_PLUGINS_DIR", root.join("plugins"));
     let catalog = root.join("catalog.json");
     let automation = root.join("automation.json");
@@ -1115,8 +1109,19 @@ async fn marketplace_inventory_requires_human_admin_for_lifecycle_diagnostics() 
         name: "fixture".into(),
         label: "Fixture".into(),
         lock_file: "/install/.fixture.lock".into(),
+        default_port: 12345,
+        web_path: "/open".into(),
         ..Default::default()
     };
+    let vhosts = root.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&vhosts).unwrap();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::write(root.join("install/.fixture.lock"), "installed").unwrap();
+    std::fs::write(
+        vhosts.join("aetherflow-app-fixture.conf"),
+        "<VirtualHost *:80>\n    ServerName fixture.aether.local\n</VirtualHost>\n",
+    )
+    .unwrap();
     std::fs::write(&catalog, serde_json::to_vec(&vec![package]).unwrap()).unwrap();
     std::fs::write(&automation, "{}").unwrap();
     std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", catalog);
@@ -1275,6 +1280,11 @@ async fn marketplace_inventory_requires_human_admin_for_lifecycle_diagnostics() 
             let app = &payload[0];
             assert_eq!(app["inventory_known"], authenticated, "{label}");
             if authenticated {
+                assert_eq!(app["launch_scope"], "internal", "{label}");
+                assert_eq!(
+                    app["launch_url"], "http://fixture.aether.local/open",
+                    "{label}"
+                );
                 assert_eq!(
                     app["last_job"]["job_id"], "inventory-privilege-fixture",
                     "{label}"
@@ -3154,6 +3164,9 @@ async fn test_public_unauthenticated_catalog_strips_all_private_fields() {
     }
     let (root, connection) = lifecycle_status_fixture();
     af_db::init_db().unwrap();
+    let ledger = connection.path().unwrap();
+    std::fs::rename(ledger, root.join("unavailable-ledger.sqlite")).unwrap();
+    assert!(af_services::package_job_snapshot().is_err());
 
     let response = get_marketplace_apps_blocking(HeaderMap::new(), false);
     assert_eq!(response.status(), StatusCode::OK);
@@ -3246,6 +3259,8 @@ async fn test_public_unauthenticated_catalog_strips_all_private_fields() {
             !obj.contains_key("public_domain"),
             "public_domain must be omitted"
         );
+        assert!(!obj.contains_key("launch_url"));
+        assert!(!obj.contains_key("launch_scope"));
         assert!(
             !obj.contains_key("active_job"),
             "active_job must be omitted"

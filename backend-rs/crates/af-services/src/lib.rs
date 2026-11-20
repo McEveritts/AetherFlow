@@ -217,17 +217,7 @@ pub fn get_package_catalog() -> anyhow::Result<Vec<Package>> {
             p.name
         );
         if let Some(auto) = auto_map.get(&p.name) {
-            p.update_source = auto.update_source.clone();
-            p.update_repo = auto.update_repo.clone();
-            p.update_repo_url = auto.update_repo_url.clone();
-            p.update_package = auto.update_package.clone();
-            p.update_channel = auto.update_channel.clone();
-            p.version_command = auto.version_command.clone();
-            p.version_regex = auto.version_regex.clone();
-            p.sandbox_profile = auto.sandbox_profile.clone();
-            p.sandbox_read_write = auto.sandbox_read_write.clone();
-            p.sandbox_service_ids = auto.sandbox_service_ids.clone();
-            p.require_download_sha256 = auto.require_download_sha256;
+            af_models::merge_package_automation(p, auto);
         }
     }
     Ok(pkgs)
@@ -334,6 +324,10 @@ fn launch_target(
     ingress: Option<&af_models::AppIngressConfig>,
     host: &str,
 ) -> (Option<String>, Option<String>) {
+    let unavailable = || (None, Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.into()));
+    if !(1..=65535).contains(&port) {
+        return unavailable();
+    }
     let path = if web_path != "/" && web_path.starts_with('/') && !web_path.starts_with("//") {
         web_path
     } else {
@@ -380,8 +374,8 @@ fn launch_target(
         );
     }
     let scheme = service_web_scheme_for_id(app, port);
-    if !(1..=65535).contains(&port) || scheme.is_empty() {
-        return (None, None);
+    if scheme.is_empty() {
+        return unavailable();
     }
     let bind = (app == "qbittorrent")
         .then(mutators::qbittorrent_web_bind_address)
@@ -392,7 +386,7 @@ fn launch_target(
         service_bind_scope_for_id(app)
     };
     if scope == "loopback" {
-        return (None, None);
+        return unavailable();
     }
     let ip = bind
         .as_deref()
@@ -400,10 +394,10 @@ fn launch_target(
         .filter(|address| !address.is_unspecified())
         .or_else(|| host.parse().ok());
     let Some(ip) = ip else {
-        return (None, None);
+        return unavailable();
     };
     if ip.is_loopback() || ip.is_unspecified() {
-        return (None, None);
+        return unavailable();
     };
     let address = std::net::SocketAddr::new(ip, port as u16);
     (
@@ -444,15 +438,17 @@ fn populate_package_statuses(
                 .unwrap_or(p.default_port);
             (p.launch_url, p.launch_scope) =
                 launch_target(&p.name, port, &p.web_path, config, &host);
-        }
-
-        if let Some(u) = update_map.get(&p.name) {
-            p.installed_version = u.installed_version.clone();
-            p.latest_version = u.latest_version.clone();
-            p.update_available = u.update_available;
-            p.update_checked_at = u.checked_at.clone();
-            p.update_url = u.release_url.clone();
-            p.update_error = workers::public_update_error(&u.error);
+            if let Some(update) = update_map.get(&p.name) {
+                p.installed_version = update.installed_version.clone();
+                p.latest_version = update.latest_version.clone();
+                p.update_available = update.update_available;
+                p.update_checked_at = update.checked_at.clone();
+                p.update_url = update.release_url.clone();
+                p.update_error = workers::public_update_error(&update.error);
+            }
+        } else {
+            p.launch_url = None;
+            p.launch_scope = Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.into());
         }
     }
 
@@ -637,7 +633,7 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         },
         mutator_type: mutator_type.to_string(),
         config_file_path,
-        internal_domain: format!("{}.aether.local", p.name),
+        internal_domain: resolve_app_internal_domain(&p.name),
         is_network_app: matches!(
             p.name.as_str(),
             "pihole" | "adguardhome" | "wireguard" | "tailscale"
@@ -719,11 +715,8 @@ pub fn format_app_public_domain(app_name: &str, base_domain: &str) -> String {
     format!("{}.{}", clean_app.trim_matches('-'), norm)
 }
 
-pub(crate) fn resolve_app_internal_domain(app_name: &str) -> String {
-    get_blueprint(app_name)
-        .map(|blueprint| blueprint.internal_domain.trim().to_lowercase())
-        .filter(|domain| !domain.is_empty())
-        .unwrap_or_else(|| format!("{}.aether.local", app_name.trim().to_lowercase()))
+pub fn resolve_app_internal_domain(app_name: &str) -> String {
+    format!("{}.aether.local", app_name.trim().to_lowercase())
 }
 
 fn package_is_physically_installed(app: &str) -> bool {
@@ -939,7 +932,7 @@ pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
             qbittorrent_bind_scope(mutators::qbittorrent_web_bind_address().as_deref())
         }
         "maintainerr" | "palate" | "kasmvnc" | "mcvnc" | "nextcloud" | "rutorrent" | "organizr"
-        | "seedcross" | "ombi" | "n8n" | "notifiarr" | "invidious" => "loopback",
+        | "seedcross" | "ombi" | "n8n" | "notifiarr" | "invidious" | "piped" => "loopback",
         _ => "network",
     }
 }
@@ -1849,7 +1842,7 @@ pub fn get_active_services_with_jobs(
             active_port = p.default_port;
         }
 
-        let internal_domain = format!("{}.aether.local", p.name.trim().to_lowercase());
+        let internal_domain = resolve_app_internal_domain(&p.name);
 
         let mut public_domain = ing.map(|c| c.public_domain.clone()).unwrap_or_default();
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
@@ -2778,7 +2771,10 @@ mod tests {
         assert_eq!(qbittorrent_bind_scope(Some("192.168.1.20")), "network");
         assert_eq!(
             launch_target("qbittorrent", 8080, "/", None, "192.168.1.9"),
-            (None, None)
+            (
+                None,
+                Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.to_string())
+            )
         );
         let ingress_http = af_models::AppIngressConfig {
             public_domain: "qbit.example.test".to_owned(),

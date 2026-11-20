@@ -262,6 +262,8 @@ pub(crate) fn sanitize_services_for_viewer(services: &mut serde_json::Value) {
                     | "web_path"
                     | "web_scheme"
                     | "bind_scope"
+                    | "launch_url"
+                    | "launch_scope"
                     | "control_scope"
                     | "components"
                     | "units"

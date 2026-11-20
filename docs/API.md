@@ -58,12 +58,14 @@ Controls the lifecycle of the **77 bare-metal applications**.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/v1/public/marketplace` | Lists all 77 catalog packages, categories, installation status, and update availability. |
+| `GET` | `/api/v1/public/marketplace` | Lists all 77 catalog packages and categories. Authenticated callers also receive installation status, update availability, and the resolved app launch target. Use `?require_auth=1` to require live inventory. |
+| `GET` | `/api/v1/auth/packages/{id}/progress` | Returns progress or the terminal lifecycle receipt. Pass `?job_id=<id>` to follow a specific operation across later jobs on the same package. |
 | `POST` | `/api/v1/admin/packages/{id}/install` | Starts asynchronous package installation via `af-runner` (declarative Rust or locked Bash). |
 | `POST` | `/api/v1/admin/packages/{id}/update` | Performs an in-place package update with automatic service stop/restart and rollback protection. |
 | `POST` | `/api/v1/admin/packages/{id}/reinstall` | Repairs or reinstalls an installed package while preserving its service configuration. |
 | `POST` | `/api/v1/admin/packages/{id}/uninstall` | Uninstalls a package (preserving application data unless `?purge=true`). |
 | `POST` | `/api/v1/admin/packages/updates/check` | Checks upstream versions across installed Marketplace packages. |
+| `POST` | `/api/v1/admin/apps/launch` | Starts the dashboard session exchange for eligible Marketplace apps on managed public HTTPS routes. |
 
 ### 4. Native McBrowser (`af-files` — `/api/v1/auth/mcbrowser`)
 Capability-scoped tenant file manager backed by `af-files`. See [Native McBrowser](./mcbrowser.md).

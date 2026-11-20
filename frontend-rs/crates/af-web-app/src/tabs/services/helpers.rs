@@ -315,6 +315,9 @@ pub(crate) fn launch_url_with_host(
     settings: &Value,
     browser_host: Option<&str>,
 ) -> Option<String> {
+    if info["launch_scope"] == af_models::APP_LAUNCH_SCOPE_UNAVAILABLE {
+        return None;
+    }
     let explicit_launch = field(info, &["launch_url"]);
     if explicit_launch.starts_with("http://") || explicit_launch.starts_with("https://") {
         return Some(explicit_launch);
@@ -512,6 +515,24 @@ mod tests {
 
     #[test]
     fn launch_url_blocks_headless_and_loopback_subdomain_fabrication() {
+        let mut resolved = json!({
+            "id": "piped",
+            "default_port": 8280,
+            "internal_domain": "piped.aether.local",
+            "external_access_enabled": false,
+            "launch_scope": "unavailable"
+        });
+        assert_eq!(
+            launch_url_with_host(&resolved, &json!({}), Some("panel.example.com")),
+            None
+        );
+        resolved["launch_scope"] = json!("public");
+        resolved["launch_url"] = json!("https://piped.example.com");
+        assert_eq!(
+            launch_url_with_host(&resolved, &json!({}), Some("panel.example.com")).as_deref(),
+            Some("https://piped.example.com")
+        );
+
         let disabled = json!({"id":"sonarr", "active_port":8989, "public_domain":"sonarr.example.com", "external_access_enabled":false});
         assert_eq!(
             launch_url_with_host(
