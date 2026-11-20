@@ -48,6 +48,50 @@ FORBIDDEN_HELPERS = [
 
 class MarketplaceHelperContractsTest(unittest.TestCase):
 
+    def test_marketplace_version_probes_use_package_fallback_and_native_scrutiny(self):
+        automation = json.loads((ROOT / "config/package_automation.json").read_text())
+        for package, executable, deb in (
+            ("tailscale", "tailscale", "tailscale"),
+            ("rtorrent", "rtorrent", "rtorrent"),
+            ("mergerfs", "mergerfs", "mergerfs"),
+            ("quassel", "quasselcore", "quassel-core"),
+            ("x2go", "x2goversion", "x2goserver"),
+        ):
+            for output, expected in (
+                ("return 1", "2.0.0-1"),
+                ("return 0", "2.0.0-1"),
+                (r"printf '3.0.0\nsecond line\n'", "3.0.0"),
+            ):
+                with self.subTest(package=package, output=output):
+                    fixture = f"{executable}() {{ {output}; }}\n" + r"""
+dpkg-query() {
+    [[ "$1" == '-W' && "$2" == '-f=${Version}' && "$3" == "$1_expected" ]] || return 1
+    printf '2.0.0-1'
+}
+"""
+                    fixture = fixture.replace("$1_expected", deb)
+                    result = subprocess.run(
+                        ["bash", "-c", fixture + automation[package]["version_command"][-1]],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), expected)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = automation["scrutiny"]["version_command"][-1].replace("/opt/scrutiny/bin", directory)
+            for name in ("scrutiny-web-linux-arm64", "scrutiny-web-linux-amd64"):
+                binary = root / name
+                binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{name}'\n")
+                binary.chmod(0o700)
+            link = root / "scrutiny-web"
+            link.symlink_to("scrutiny-web-linux-arm64")
+            for expected in ("scrutiny-web-linux-arm64", "scrutiny-web-linux-amd64"):
+                result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+                link.unlink(missing_ok=True)
+
     def test_postgresql_restore_reads_private_backup_through_inherited_stdin(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

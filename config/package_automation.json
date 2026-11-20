@@ -624,7 +624,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "tailscale version 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' tailscale 2>/dev/null"
+      "version=\"$(tailscale version 2>/dev/null)\" && [[ -n \"${version%%$'\\n'*}\" ]] && printf '%s\\n' \"${version%%$'\\n'*}\" || dpkg-query -W -f='${Version}' tailscale 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -831,7 +831,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "rtorrent -h 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' rtorrent 2>/dev/null"
+      "version=\"$(rtorrent -h 2>/dev/null)\" && [[ -n \"${version%%$'\\n'*}\" ]] && printf '%s\\n' \"${version%%$'\\n'*}\" || dpkg-query -W -f='${Version}' rtorrent 2>/dev/null"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -905,7 +905,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "mergerfs -v 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' mergerfs 2>/dev/null"
+      "version=\"$(mergerfs -v 2>/dev/null)\" && [[ -n \"${version%%$'\\n'*}\" ]] && printf '%s\\n' \"${version%%$'\\n'*}\" || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1140,7 +1140,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "/opt/scrutiny/bin/scrutiny-web-linux-amd64 --version 2>/dev/null"
+      "if [[ -x /opt/scrutiny/bin/scrutiny-web ]]; then /opt/scrutiny/bin/scrutiny-web --version; else /opt/scrutiny/bin/scrutiny-web-linux-amd64 --version; fi 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1411,7 +1411,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "quasselcore --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' quassel-core 2>/dev/null"
+      "version=\"$(quasselcore --version 2>/dev/null)\" && [[ -n \"${version%%$'\\n'*}\" ]] && printf '%s\\n' \"${version%%$'\\n'*}\" || dpkg-query -W -f='${Version}' quassel-core 2>/dev/null"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -1580,7 +1580,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "x2goversion 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' x2goserver 2>/dev/null"
+      "version=\"$(x2goversion 2>/dev/null)\" && [[ -n \"${version%%$'\\n'*}\" ]] && printf '%s\\n' \"${version%%$'\\n'*}\" || dpkg-query -W -f='${Version}' x2goserver 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
