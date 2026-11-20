@@ -875,8 +875,7 @@ pub async fn trigger_apache_cert_sync() {
     }
 }
 
-/// Retroactively provisions `<app>.<baseDomain>` public domains for all installed apps
-/// and updates existing ingress records when the base domain changes.
+/// Reconciles installed app routes at startup using saved ingress settings.
 pub async fn provision_all_installed_app_subdomains() -> usize {
     provision_installed_app_subdomains(&crate::resolve_base_domain()).await
 }
@@ -916,54 +915,26 @@ async fn provision_installed_app_subdomains_admitted(base_domain: &str) -> Resul
                 .map_err(|error| format!("{error:#}"))?;
         }
     }
+    for package in pkgs
+        .iter()
+        .filter(|p| p.status == "installed" && p.default_port > 0)
     {
-        for p in pkgs {
-            if p.status != "installed" {
-                continue;
-            }
-            let Some(bp) = crate::get_blueprint(&p.name) else {
-                continue;
-            };
-            if bp.default_port <= 0 {
-                continue;
-            }
-            let new_pub = if norm_base.is_empty() {
-                String::new()
-            } else {
-                crate::format_app_public_domain(&bp.app_name, &norm_base)
-            };
-
-            let mut cfg =
-                existing_map
-                    .get(&bp.app_name)
-                    .cloned()
-                    .unwrap_or(af_models::AppIngressConfig {
-                        app_name: bp.app_name.clone(),
-                        listen_port: bp.default_port,
-                        public_domain: new_pub.clone(),
-                        external_access_enabled: false,
-                        tls_enabled: false,
-                        ..Default::default()
-                    });
-
-            if cfg.listen_port <= 0 {
-                cfg.listen_port = bp.default_port;
-            }
-            cfg.public_domain = new_pub;
-
+        let existing = existing_map.get(&package.name);
+        let cfg = startup_app_ingress_config(package, &norm_base, existing);
+        sync_apache_app_vhost_with_tls(
+            &cfg.app_name,
+            cfg.listen_port,
+            &crate::resolve_app_internal_domain(&cfg.app_name),
+            &cfg.public_domain,
+            cfg.external_access_enabled,
+            cfg.tls_enabled,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        if existing != Some(&cfg) {
             af_db::set_app_ingress_config(&cfg).map_err(|error| error.to_string())?;
-            sync_apache_app_vhost_with_tls(
-                &cfg.app_name,
-                cfg.listen_port,
-                &crate::resolve_app_internal_domain(&cfg.app_name),
-                &cfg.public_domain,
-                cfg.external_access_enabled,
-                cfg.tls_enabled,
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-            updated_count += 1;
         }
+        updated_count += 1;
     }
 
     sync_network_dns_providers().await?;
@@ -971,12 +942,22 @@ async fn provision_installed_app_subdomains_admitted(base_domain: &str) -> Resul
     Ok(updated_count)
 }
 
-/// Alias matching Go's `SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain)`.
-pub async fn sync_installed_apps_base_domain(
-    _old_base_domain: &str,
-    new_base_domain: &str,
-) -> usize {
-    provision_installed_app_subdomains(new_base_domain).await
+fn startup_app_ingress_config(
+    package: &af_models::Package,
+    base_domain: &str,
+    existing: Option<&AppIngressConfig>,
+) -> AppIngressConfig {
+    let mut config = existing.cloned().unwrap_or_else(|| AppIngressConfig {
+        app_name: package.name.clone(),
+        ..Default::default()
+    });
+    if config.public_domain.trim().is_empty() && !base_domain.is_empty() {
+        config.public_domain = crate::format_app_public_domain(&package.name, base_domain);
+    }
+    if config.listen_port <= 0 {
+        config.listen_port = package.default_port;
+    }
+    config
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1621,6 +1602,33 @@ async fn apply_blueprint_app_config_detailed_admitted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_ingress_keeps_saved_hostname_port_and_exposure() {
+        let package = af_models::Package {
+            name: "sonarr".into(),
+            default_port: 8989,
+            ..Default::default()
+        };
+        let saved = AppIngressConfig {
+            app_name: package.name.clone(),
+            public_domain: "series.custom.example".into(),
+            listen_port: 20001,
+            external_access_enabled: true,
+            tls_enabled: true,
+            ..Default::default()
+        };
+        for base in ["", "new.example"] {
+            assert_eq!(
+                startup_app_ingress_config(&package, base, Some(&saved)),
+                saved
+            );
+        }
+        let seeded = startup_app_ingress_config(&package, "new.example", None);
+        assert_eq!(seeded.public_domain, "sonarr.new.example");
+        assert_eq!(seeded.listen_port, 8989);
+        assert!(!seeded.external_access_enabled);
+    }
 
     #[test]
     fn test_write_file_atomic_rejects_symlink_parent_directory() {
