@@ -321,7 +321,7 @@ def canonical_state_sentinels_for_app(root: Path, catalog_name: str) -> list[Pat
 
 
 PIHOLE_BOOTSTRAP_SCRIPT = '''#!/bin/bash
-printf 'bootstrap https://install.pi-hole.net %s\\n' "$*" >> "$AF_FIXTURE_ROOT/bootstrap.log"
+printf 'bootstrap Pi-hole %s\\n' "$*" >> "$AF_FIXTURE_ROOT/bootstrap.log"
 [[ "${AF_FIXTURE_FAILURE:-}" != bootstrap ]]
 '''
 NODESOURCE_BOOTSTRAP_SCRIPT = '''#!/bin/bash
@@ -486,7 +486,7 @@ elif command in ('curl', 'wget'):
         source_url = source_url.split('?', 1)[0]
         if source_url.endswith('.sha256'): source_url = source_url[:-len('.sha256')]
         elif source_url.endswith('.sha256sum'): source_url = source_url[:-len('.sha256sum')]
-        if source_url == 'https://install.pi-hole.net': return (root / 'pihole-bootstrap.sh').read_bytes()
+        if source_url == 'https://raw.githubusercontent.com/pi-hole/pi-hole/f7c0220e63e753c664a1ec08d42d6b647b86005d/automated%20install/basic-install.sh': return (root / 'pihole-bootstrap.sh').read_bytes()
         if source_url.startswith('https://deb.nodesource.com/setup_'): return (root / 'nodesource-bootstrap.sh').read_bytes()
         if source_url == 'https://get.netdata.cloud/kickstart.sh': return (root / 'netdata-bootstrap.sh').read_bytes()
         if 'SHASUMS256.txt' in source_url:
@@ -1859,7 +1859,7 @@ curl() {
             (
                 "packages/package/install/installpackage-pihole",
                 "AF_PIHOLE_BOOTSTRAP_SHA256",
-                "0c67c8f8358fede4b4dd8d51b429114461c9bb90ad56ff00ef05637f664bf3ac",
+                "4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8",
                 PIHOLE_BOOTSTRAP_SCRIPT,
             ),
             (

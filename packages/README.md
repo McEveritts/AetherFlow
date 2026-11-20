@@ -8,7 +8,7 @@ rejected. Verified URLs and digests are written to the lifecycle log as
 `[BOOTSTRAP-PROVENANCE]` entries before execution.
 
 Pi-hole uses `AF_PIHOLE_BOOTSTRAP_SHA256` (defaulting to the reviewed upstream
-Pi-hole v6.5 `basic-install.sh` SHA-256 digest `0c67c8f8358fede4b4dd8d51b429114461c9bb90ad56ff00ef05637f664bf3ac`);
+Pi-hole v6.6 `basic-install.sh` at commit `f7c0220e63e753c664a1ec08d42d6b647b86005d`, with SHA-256 digest `4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8`);
 the NodeSource fallback uses `AF_NODESOURCE_BOOTSTRAP_SHA256` (defaulting to the
 reviewed upstream NodeSource 20.x setup SHA-256 digest `2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be`).
 Changed upstream content fails closed until its reviewed pin is updated. The

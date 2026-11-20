@@ -155,8 +155,8 @@ EOF
 fi
 
 report_progress 65 "Running official Pi-hole installer..."
-PIHOLE_BOOTSTRAP_SHA256="${AF_PIHOLE_BOOTSTRAP_SHA256:-0c67c8f8358fede4b4dd8d51b429114461c9bb90ad56ff00ef05637f664bf3ac}"
-if ! af_logged fetch_and_run "https://install.pi-hole.net" "$PIHOLE_BOOTSTRAP_SHA256" --unattended; then
+PIHOLE_BOOTSTRAP_SHA256="${AF_PIHOLE_BOOTSTRAP_SHA256:-4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8}"
+if ! af_logged fetch_and_run "https://raw.githubusercontent.com/pi-hole/pi-hole/f7c0220e63e753c664a1ec08d42d6b647b86005d/automated%20install/basic-install.sh" "$PIHOLE_BOOTSTRAP_SHA256" --unattended; then
     print_error "Pi-hole bootstrap verification or execution failed."
     exit 1
 fi
