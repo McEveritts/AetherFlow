@@ -332,10 +332,13 @@ printf 'locale' > dist/locales/en.json.gz
         self.assertEqual((primary / "locales/en.json.gz").read_text(), "locale")
         self.assertFalse((primary / "obsolete.js").exists())
         self.assertFalse(legacy.exists())
-        # Directly selecting Trunk's output must preserve it; an ancestor must
-        # be rejected before cleanup can remove the source or other project files.
+        # Selecting Trunk's output preserves it. Reject overlapping destinations before cleanup.
         source = self.root / "frontend-rs/dist"
-        for destination, expected_status in ((source, 0), (source.parent, 2)):
+        descendant = source / "existing-stage"
+        descendant.mkdir()
+        sentinel = descendant / "keep-me"
+        sentinel.write_text("existing output")
+        for destination, expected_status in ((source, 0), (source.parent, 2), (descendant, 2)):
             with self.subTest(destination=destination):
                 result = subprocess.run(
                     ["bash", str(self.root / "scripts/build_wasm_frontend.sh"), "--stage"],
@@ -344,6 +347,7 @@ printf 'locale' > dist/locales/en.json.gz
                 )
                 self.assertEqual(result.returncode, expected_status, result.stderr)
                 self.assertEqual((source / "app.wasm").read_bytes(), b"wasm")
+                self.assertEqual(sentinel.read_text(), "existing output")
                 self.assertTrue((self.root / "scripts/build_wasm_frontend.sh").is_file())
 
     def test_gold_package_contains_external_assets_and_rejects_incomplete_ui(self):

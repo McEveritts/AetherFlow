@@ -56,23 +56,19 @@ Piped and Invidious are experimental and have [additional installation requireme
 - **Tailscale** installs the official upstream `tailscale` package and `tailscaled.service` daemon from `pkgs.tailscale.com` (verified via `/etc/apt/keyrings/tailscale-archive-keyring.gpg`) and enables IPv4/IPv6 packet forwarding (`/etc/sysctl.d/99-tailscale.conf`). Authenticate the node from **Network → Tailscale Mesh → Connect / Login** (or supply `AF_TAILSCALE_AUTHKEY` / `TAILSCALE_AUTHKEY` during installation). The Network page manages mesh peers, subnet routes, exit-node preferences and service diagnostics. See [Network VPN management](network-vpn.md).
 
 ### Remote Desktop Access
-- **KasmVNC** installs an XFCE desktop under the dedicated `af-kasmvnc` service account. Open it through the AetherFlow gateway with username `admin`; retrieve its generated password with `sudo cat /etc/kasmvnc/aetherflow-password`. The backend listens only on `127.0.0.1:6081` (or AetherFlow's allocated fallback port), with TLS terminated at the gateway. Use HTTPS for remote access; do not expose the unencrypted backend port. Without a gateway, use an SSH tunnel to the loopback port. Display `:20` is reserved for this desktop. Existing KasmVNC credentials survive reinstall/update.
+- **KasmVNC** installs an XFCE desktop under the dedicated `af-kasmvnc` service account. Open it through the AetherFlow gateway with username `admin`. Retrieve its generated password with `sudo cat /etc/kasmvnc/aetherflow-password`. The backend serves HTTPS on `127.0.0.1:6081` or the allocated fallback port. The gateway uses the provisioned upstream certificate to connect to the backend. Direct access requires an SSH tunnel and a client that trusts the KasmVNC certificate. Display `:20` is reserved for this desktop. Existing KasmVNC credentials survive reinstall and updates.
 - KasmVNC uses upstream Debian/Ubuntu `.deb` releases on `amd64` and `arm64`, verifies the release asset's SHA-256 digest, and fails when no matching OS release asset exists. APT is not allowed to remove conflicting packages automatically (including other VNC servers); resolve any conflict explicitly before installing.
 - **McVNC** (`McEveritts/McVNC`) compiles and runs the Rust headless GPU remote desktop under the `af-mcvnc` service account (`video` and `render` groups) with zero-copy EGL/GLES2 GBM `dma-buf` compositing, an embedded Wayland compositor (`WAYLAND_DISPLAY=wayland-mcvnc-0`), VA-API `EncSlice` H.264 / `EncPicture` JPEG on Intel & AMD, and NVENC on NVIDIA. The dashboard listens on `127.0.0.1:6900` (or AetherFlow's allocated fallback port) and stores fleet pairing state in `/var/lib/mcvnc/.local/share/mcvnc/fleet.json`.
 - **XRDP** uses the distribution's `xrdp` and `xrdp-sesman` services with `xorgxrdp` and XFCE. Connect using an RDP client to TCP **3389**, or your existing custom port, with an existing non-root Linux account and its Linux password, not the AetherFlow web login. XRDP has no browser interface, HTTP gateway route, or automatic HTTP port allocation. Restrict RDP access to a trusted network or VPN; the installer does not open firewall ports or change Linux account passwords.
 - Removal preserves desktop data/configuration unless `DELETE_DATA=true` is supplied. XRDP removal restores the original session startup script; neither package removes shared XFCE dependencies or Linux users/home directories.
 
 ### Installing an App
-1. Navigate to the **Marketplace** tab.
-2. Search for or select your desired application.
-3. Click **Install**. 
-4. **Action Gate**: If FlowAI is active and you are in Assistant mode, it may propose the installation for you. You will need to approve it in the **Approval Inbox**.
+1. Sign in as an administrator and open **Marketplace**.
+2. Select the application and click **Install**.
+3. Review the installer settings, then confirm. The job uses the host's configured inputs and prerequisites.
 
 ### Monitoring Progress
-Installation scripts communicate their state back to the dashboard over WebSockets.
-- **Blue (Spinning)**: Dependency resolution and binary download.
-- **Green (Check)**: Service has been successfully created and started.
-- **Red (Alert)**: Installation failed. You can inspect the logs directly in the **System Logs** panel.
+The deployment drawer shows progress and logs for the specific operation. The dashboard polls its job receipt and refreshes the catalog on inventory events. For a failed operation, open **Deployment logs** and check the recorded outcome before retrying.
 
 ### Reinstalling and Removing an App
 Use **Reinstall** on an installed application to reapply its installer in place. The confirmation describes retaining configuration, data, secrets, and the allocated port. Installers can restart the application during this operation.

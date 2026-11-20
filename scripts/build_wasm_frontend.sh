@@ -30,6 +30,10 @@ if [[ "${STAGE}" == "1" ]]; then
     echo "error: staging destination contains the source output: ${destination}" >&2
     exit 2
   fi
+  if [[ "${destination}" == "${source_dist}/"* ]]; then
+    echo "error: staging destination is inside the source output: ${destination}" >&2
+    exit 2
+  fi
   mkdir -p "${destination}"
   # Remove obsolete bundles at cutover; preserve tracked placeholders.
   find "${destination}" -mindepth 1 -maxdepth 1 ! -name .keep -exec rm -rf -- {} +
