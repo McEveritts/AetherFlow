@@ -6,6 +6,30 @@ static ENV_TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
 
 #[test]
 fn test_cloudplow_version_probe_reads_the_deployed_git_commit() {
+    const FIXTURE_CHILD: &str = "AF_CLOUDPLOW_PROBE_TEST_CHILD";
+    if std::env::var_os(FIXTURE_CHILD).is_none() {
+        let config = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .join("config");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "package_lifecycle::version_verification_tests::test_cloudplow_version_probe_reads_the_deployed_git_commit",
+            ])
+            .env(FIXTURE_CHILD, "1")
+            .env("AETHERFLOW_PACKAGES_CONFIG", config.join("packages.json"))
+            .env(
+                "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+                config.join("package_automation.json"),
+            )
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated Cloudplow probe test failed");
+        return;
+    }
+
     let installed = std::env::temp_dir().join(format!("af-cloudplow-{}", uuid::Uuid::new_v4()));
     let checkout = installed.join("opt/cloudplow");
     std::fs::create_dir_all(checkout.join(".git")).unwrap();
