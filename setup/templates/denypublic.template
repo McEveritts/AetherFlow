@@ -1,10 +1,15 @@
-IFS=$'\n'
-L=$(/usr/bin/sort /etc/trackers | /usr/bin/uniq)
-for fn in $L; do
-        /sbin/iptables -D INPUT -d $fn -j DROP
-        /sbin/iptables -D FORWARD -d $fn -j DROP
-        /sbin/iptables -D OUTPUT -d $fn -j DROP
-        /sbin/iptables -A INPUT -d $fn -j DROP
-        /sbin/iptables -A FORWARD -d $fn -j DROP
-        /sbin/iptables -A OUTPUT -d $fn -j DROP
-done
+#!/bin/bash
+[[ -f /etc/trackers ]] || exit 0
+ipv4_cidr_re='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(/([0-9]|[12][0-9]|3[0-2]))?$'
+while IFS= read -r fn; do
+        fn="${fn%%#*}"
+        fn="${fn//[[:space:]]/}"
+        [[ -n "$fn" ]] || continue
+        [[ "$fn" =~ $ipv4_cidr_re ]] || continue
+        /sbin/iptables -D INPUT -d "$fn" -j DROP 2>/dev/null || true
+        /sbin/iptables -D FORWARD -d "$fn" -j DROP 2>/dev/null || true
+        /sbin/iptables -D OUTPUT -d "$fn" -j DROP 2>/dev/null || true
+        /sbin/iptables -A INPUT -d "$fn" -j DROP
+        /sbin/iptables -A FORWARD -d "$fn" -j DROP
+        /sbin/iptables -A OUTPUT -d "$fn" -j DROP
+done < <(/usr/bin/sort -u /etc/trackers)

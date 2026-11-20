@@ -1340,6 +1340,7 @@ async fn default_policy_authorizer_enforces_real_sqlite_policy_and_regex_rules()
     let bfs1 = open_user_browser_fs_at(tmp.path(), 1).unwrap();
     bfs1.create_directory_all("docs/private").unwrap();
     bfs1.create_directory_all("regex_dir/sub").unwrap();
+    bfs1.create_directory_all("empty_directory").unwrap();
     let user1_root = derive_user_root_path(tmp.path(), 1).unwrap();
     fs::write(user1_root.join("docs/readme.txt"), b"public-readme").unwrap();
     fs::write(user1_root.join("docs/private/secret.txt"), b"secret").unwrap();
@@ -1408,6 +1409,22 @@ async fn default_policy_authorizer_enforces_real_sqlite_policy_and_regex_rules()
         .await
         .unwrap();
     assert_eq!(regex_dir_blocked.status(), StatusCode::FORBIDDEN);
+
+    // A regex deny also prevents an unrestricted directory share when
+    // the matching descendant does not exist yet.
+    let response = auth_u1
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcbrowser/shares")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"path":"empty_directory"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     // 3. Sharing "docs/readme.txt" succeeds, and if owner's perm_share is later revoked, public access fails closed
     let file_share = auth_u1

@@ -249,6 +249,7 @@ write_lock() { mkdir -p "$TEST_ROOT/install"; touch "$TEST_ROOT/install/.$1.lock
         return self.run_shell('bash "$TEST_ROOT/packages/package/remove/removepackage-' + app + '"', helpers=(
             "command_exists", "systemd_unit_inactive", "stop_systemd_unit", "purge_systemd_unit",
             "purge_system_user", "remove_apache_app_listener", "purge_app_archive_backups", "safe_rm_rf",
+            "af_restore_resolv_conf_state",
         ), DELETE_DATA=delete_data, **environment)
 
     def commands(self):
@@ -536,6 +537,63 @@ write_lock() { mkdir -p "$TEST_ROOT/install"; touch "$TEST_ROOT/install/.$1.lock
         self.assertNotIn("Skipping", template)
         self.assertNotIn("Go handler", template)
         self.assertNotIn("services/installer.go", template)
+
+    def test_no_remover_runs_host_wide_apt_get_autoremove(self):
+        for script in sorted(REMOVE_DIR.glob("removepackage-*")):
+            with self.subTest(script=script.name):
+                self.assertNotIn("autoremove", script.read_text())
+
+    def test_adguardhome_and_pihole_removers_restore_resolv_conf_symlink_and_regular_file(self):
+        for app, dropin in (
+            ("adguardhome", "etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf"),
+            ("pihole", "etc/systemd/resolved.conf.d/pihole.conf"),
+        ):
+            with self.subTest(app=app, kind="symlink"):
+                self.setUp()
+                self.file(dropin, "[Resolve]\nDNSStubListener=no\n")
+                self.file("etc/resolv.conf", "nameserver 127.0.0.1\n")
+                state = self.file(
+                    f"etc/aetherflow/dns-backup/{app}-resolv.conf.state",
+                    json.dumps({"kind": "symlink", "target": "../run/systemd/resolve/stub-resolv.conf"}) + "\n",
+                )
+                state.chmod(0o600)
+                result = self.run_remove(app)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                resolv = self.root / "etc/resolv.conf"
+                self.assertTrue(resolv.is_symlink())
+                self.assertEqual(os.readlink(resolv), "../run/systemd/resolve/stub-resolv.conf")
+                self.assertFalse((self.root / dropin).exists())
+                self.assertFalse(state.exists())
+                self.assertTrue(any(cmd[:3] == ["systemctl", "restart", "systemd-resolved"] for cmd in self.commands()))
+
+            with self.subTest(app=app, kind="file"):
+                self.setUp()
+                self.file(dropin, "[Resolve]\nDNSStubListener=no\n")
+                self.file("etc/resolv.conf", "nameserver 127.0.0.1\n")
+                bak = self.file(f"etc/aetherflow/dns-backup/{app}-resolv.conf.bak", "nameserver 9.9.9.9\n")
+                bak.chmod(0o600)
+                state = self.file(
+                    f"etc/aetherflow/dns-backup/{app}-resolv.conf.state",
+                    json.dumps({"kind": "file", "mode": 0o644}) + "\n",
+                )
+                state.chmod(0o600)
+                result = self.run_remove(app)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                resolv = self.root / "etc/resolv.conf"
+                self.assertFalse(resolv.is_symlink())
+                self.assertEqual(resolv.read_text(), "nameserver 9.9.9.9\n")
+                self.assertFalse(state.exists())
+                self.assertFalse(bak.exists())
+
+    def test_librespeed_remover_cleans_public_proxy_tls_metadata_directory(self):
+        for delete_data in ("false", "true"):
+            with self.subTest(DELETE_DATA=delete_data):
+                self.setUp()
+                meta = self.file("etc/aetherflow/librespeed/settings.toml", "enable_tls = true\n")
+                self.file("opt/librespeed/settings.toml", 'listen_port=8988\nstatistics_password="secret"\n')
+                result = self.run_remove("librespeed", delete_data)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(meta.parent.exists())
 
 
 if __name__ == "__main__":

@@ -1384,6 +1384,7 @@ pub fn sync_master_credentials_to_installed_apps(username: &str, password: &str)
     for raw in [
         "/etc/transmission-daemon/settings.json",
         "/var/lib/transmission-daemon/info/settings.json",
+        "/var/lib/transmission-daemon/.config/transmission-daemon/settings.json",
     ] {
         let p = resolve_config_path(raw);
         if p.is_file() {

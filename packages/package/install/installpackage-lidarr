@@ -56,13 +56,9 @@ esac
 
 report_progress 35 "Downloading Lidarr (${LIDARR_ARCH})..."
 LIDARR_VERSION="$(github_latest_tag "Lidarr/Lidarr" "2.8.2.4493")"
-LIDARR_URL="https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}"
-if [[ -n "${LIDARR_VERSION:-}" ]]; then
-    LIDARR_URL="https://lidarr.servarr.com/v1/update/master/updatefile?version=${LIDARR_VERSION#v}&os=linux&runtime=netcore&arch=${LIDARR_ARCH}"
-fi
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/lidarr-XXXXXX.tar.gz")"
-af_logged download_file "$LIDARR_URL" "$TMP_TAR"
+af_logged download_servarr_archive "Lidarr/Lidarr" "$LIDARR_VERSION" "$LIDARR_ARCH" "$TMP_TAR"
 
 report_progress 65 "Extracting Lidarr to /opt/Lidarr..."
 stage_app_archive "$TMP_TAR" "/opt/Lidarr" "Lidarr" "/var/lib/lidarr" "${PACKAGE_NAME}"
@@ -103,7 +99,7 @@ af_logged systemctl restart lidarr
 systemctl is-active --quiet lidarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
-seed_servarr_master_user "lidarr" ${APP_PORT} "v1"
+seed_servarr_master_user "lidarr" "${APP_PORT}" "v1"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

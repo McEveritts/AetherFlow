@@ -33,10 +33,13 @@ Handles login, TOTP 2FA verification, OAuth2/OIDC handshakes, and Subdomain Gate
 | `GET` | `/api/v1/auth/ready` | Authenticated readiness probe returning control-plane status and database health (unauthenticated probe: `/health/ready`). |
 | `POST` | `/api/v1/public/auth/login` | Authenticates credentials and issues the JWT session + CSRF token. |
 | `POST` | `/api/v1/public/auth/mfa/verify` | Validates a 6-digit TOTP code or recovery code during login. |
-| `GET` | `/api/v1/public/auth/verify` | Perimeter SSO endpoint for Apache2 Subdomain Gateway (`X-Aetherflow-User` injection). |
+| `GET` | `/api/v1/public/auth/verify` | Perimeter SSO verification for Apache2 Subdomain Gateway (`X-Aetherflow-User` injection). Enforces active, unrevoked administrator sessions (rejecting revoked, expired, non-admin, or plugin-scoped tokens). |
 | `GET` | `/api/v1/auth/session` | Returns the authenticated user's session profile, role, and 2FA status. |
 | `PUT` | `/api/v1/auth/profile` | Updates the authenticated user's profile details. |
 | `POST` | `/api/v1/auth/logout` | Revokes the active JWT (`revoked_tokens`) and clears `aetherflow_session`. |
+
+> [!NOTE]
+> Protected external application requests routed through the Rust gateway require an active administrator session or rate-limited Basic authentication. Administrators enrolled in TOTP use a verified session. Apache-authenticated vhosts and applications with native logins retain their respective policies. See the [external subdomain authentication details](security.md).
 
 ### 2. System, Services & Self-Update (`/api/v1/auth`, `/api/v1/admin`)
 Provides hardware telemetry, `systemd` service lifecycle control (via `aetherflow-runner`), and atomic release management.

@@ -2289,5 +2289,14 @@
     "verifying": "Vérification du code…"
   },
   "Playback method breakdown": "Répartition par méthode de lecture",
-  "Media format distribution": "Répartition par format de média"
+  "Media format distribution": "Répartition par format de média",
+  "Pipeline service & queue telemetry": "Télémétrie des services et de la file du pipeline",
+  "Installed download clients": "Clients de téléchargement installés",
+  "Installed automation apps": "Applications d'automatisation installées",
+  "Transcode queue": "File de transcodage",
+  "None installed": "Aucun installé",
+  "{active} active / {installed} installed": "{active} actifs / {installed} installés",
+  "Loading": "Chargement",
+  "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.": "{count} résumés d'éléments synchronisés dans ce lot borné. D'autres éléments subsistent ; cliquez à nouveau sur synchroniser pour reprendre depuis le point de contrôle enregistré. Il ne s'agit pas de lectures confirmées.",
+  "({remaining} remaining sources)": "({remaining} sources restantes)"
 }

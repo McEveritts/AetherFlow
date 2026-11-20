@@ -2289,5 +2289,14 @@
     "verifying": "Bekræfter kode…"
   },
   "Playback method breakdown": "Fordeling af afspilningsmetode",
-  "Media format distribution": "Medieformatfordeling"
+  "Media format distribution": "Medieformatfordeling",
+  "Pipeline service & queue telemetry": "Pipeline-tjeneste- og køtelemetri",
+  "Installed download clients": "Installerede downloadklienter",
+  "Installed automation apps": "Installerede automatiseringsapps",
+  "Transcode queue": "Omkodningskø",
+  "None installed": "Ingen installeret",
+  "{active} active / {installed} installed": "{active} aktive / {installed} installeret",
+  "Loading": "Indlæser",
+  "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.": "Synkroniserede {count} elementoversigter i denne afgrænsede batch. Flere elementer mangler; klik på synkroniser igen for at fortsætte fra det gemte kontrolpunkt. Dette er ikke bekræftede afspilninger.",
+  "({remaining} remaining sources)": "({remaining} resterende kilder)"
 }

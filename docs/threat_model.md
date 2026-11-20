@@ -17,7 +17,7 @@ This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0*
 | Component | Threat | Mitigation |
 |-----------|--------|------------|
 | Route hierarchy (`af-api`) | Unauthenticated or cross-role access | Three-tier router: `/api/v1/public`, `/api/v1/auth` (JWT + revocation check), `/api/v1/admin` (live DB `role == "admin"` verification). |
-| Plugin proxy (`af-api` / `af-services`) | Plugin token used outside authorized routes | Segment-boundary `api_scopes` verification against `plugin.manifest.json` before proxying or handling requests. |
+| Plugin proxy (`af-api`) | Plugin token used outside authorized routes | Segment-boundary `api_scopes` verification against `plugin.manifest.json` before proxying or handling requests. |
 | Host filesystem picker (`/api/v1/auth/fs`) | Non-admin user enumerating host directories | Restricted strictly to live-verified `admin` accounts before any path canonicalization or existence checks; ordinary users are confined to `af-files` McBrowser. |
 | Cluster metrics (`/cluster/v1/metrics`) | Unauthorized cluster scraping or spoofing | Enforces `X-Cluster-PSK` authentication and validates heartbeat `node_id` and status fields. |
 
@@ -35,7 +35,7 @@ This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0*
 |-----------|--------|------------|
 | Privileged Runner (`af-runner`) | Unprivileged API or plugin process executing arbitrary root commands | `SO_PEERCRED` + `/proc/<pid>/exe` caller verification rejecting plugin binaries and scripting interpreters; zero shell evaluation in `DeclarativeStep` (direct `execve` argv vectors with `stdin(Stdio::null())` and `process_group(0)`). Strict regex allowlists on unit names (`SAFE_SERVICE_NAME`), package IDs (`SAFE_PKG_ID`), usernames (`SAFE_USERNAME`), and APT packages (`SAFE_APT_PKG_NAME`). |
 | Human-Gated FlowAI (`af-api`) | Prompt injection triggering destructive host commands | LLM output is untrusted; proposed mutations are queued into `pending_actions` (Approval Inbox) and cannot execute without explicit administrator authorization (`POST /api/v1/admin/actions/:id/approve`). |
-| Self-Updater (`af-runner::self_update`) | Command injection or credential leak via updater launch | Request channel/command validated via `af_release::validate_self_update_request`; launched in isolated `aetherflow-self-update.service` with atomic `0600` environment handoff removed immediately after systemd accepts execution. |
+| Self-Updater (`af-runner` `/v1/self-update`) | Command injection or credential leak via updater launch | Request channel/command validated via `af_release::validate_self_update_request`; launched in isolated `aetherflow-self-update.service` with atomic `0600` environment handoff removed immediately after systemd accepts execution. |
 
 ### CWE-613 / CWE-384: Session Expiration & Revocation
 

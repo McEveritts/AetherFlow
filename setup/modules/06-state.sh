@@ -82,9 +82,17 @@ _release_lock() {
     fi
 }
 
-# Register cleanup traps so the lockfile is always released.
+# Release installer scratch directory only when owned/allocated under /var/tmp/aetherflow-setup.*
+_af_cleanup_setup_scratch() {
+    local dir="${AF_SETUP_SCRATCH_DIR:-}"
+    if [[ -n "${dir}" && "${dir}" == /var/tmp/aetherflow-setup.* && "${dir}" != *".."* && -d "${dir}" && ! -L "${dir}" ]]; then
+        rm -rf -- "${dir}"
+    fi
+}
+
+# Register cleanup traps so the lockfile and installer scratch dir are always released.
 _setup_lock_trap() {
-    trap '_release_lock' EXIT INT TERM HUP
+    trap '_release_lock; _af_cleanup_setup_scratch' EXIT INT TERM HUP
 }
 
 ################################################################################
@@ -463,14 +471,14 @@ _run_step() {
     
     # Execute the function (in a subshell to capture failures)
     # We background + spinner for visual feedback, just like the original
-    ${func_name} "$@" &
+    "${func_name}" "$@" &
     local pid=$!
 
     # Use the spinner if it's available
     if type spinner &>/dev/null; then
-        spinner ${pid}
+        spinner "${pid}"
     else
-        wait ${pid}
+        wait "${pid}"
     fi
 
     local exit_code=$?
@@ -531,7 +539,7 @@ _run_step_fg() {
     fi
 
     # Run the function directly (foreground, for interactive steps)
-    ${func_name} "$@"
+    "${func_name}" "$@"
     local exit_code=$?
 
     if [[ ${exit_code} -eq 0 ]]; then
@@ -553,7 +561,7 @@ _run_step_fg() {
 ALL_STEPS=(
     bashrc intro checkroot logcheck checkkernel hostname locale
     ssdpblock askcontinue askpartition ask10g
-    askdashtheme adduser askffmpeg askvsftpd denyhosts askbbr
+    adduser askffmpeg askvsftpd denyhosts askbbr
     repos updates depends syscommands skel lshell ffmpeg
     apachesudo
     build_modern

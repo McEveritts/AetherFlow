@@ -1,6 +1,6 @@
 # AetherFlow WASM frontend
 
-The production dashboard uses Rust and Leptos. Trunk builds the application and its dedicated WASM workers; Tailwind produces the stylesheet. The `frontend/` directory retains the browser test harness and legacy reference sources. CI and release builds use `frontend-rs/` for the dashboard. The separate marketing site remains in `apps/website/`.
+The production dashboard uses Rust and Leptos. Trunk builds the application and its dedicated WASM workers; Tailwind produces the stylesheet. The Playwright browser test harness lives in `e2e/`. CI and release builds use `frontend-rs/` (`cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked` and `bash scripts/build_wasm_frontend.sh --stage`) for the dashboard. The separate marketing site remains in `apps/website/`.
 
 | Crate | Responsibility |
 | --- | --- |

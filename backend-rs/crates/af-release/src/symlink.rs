@@ -53,7 +53,7 @@ pub fn canonicalize_preserve_normal(path: &Path) -> PathBuf {
     }
 }
 
-/// Creates a directory symlink from `link_path -> target_dir` and atomically renames it over `current_link`.
+/// Creates a directory symlink from `current_link -> target_dir` and atomically renames it over `current_link`.
 ///
 /// On Unix, uses `std::os::unix::fs::symlink(target_dir, &tmp_link)` followed by `fs::rename(&tmp_link, current_link)`
 /// (POSIX atomic `rename(2)` over an existing symlink, equivalent to `ln -s ... && mv -Tf ...`).
@@ -72,7 +72,30 @@ pub fn atomic_replace_symlink(
             ),
         });
     }
+    atomic_replace_symlink_unchecked(current_link, target_dir, suffix_tag)
+}
 
+/// Atomically replaces `link_path` with a symlink pointing to an existing regular file `target_file`.
+pub fn atomic_replace_file_symlink(
+    link_path: &Path,
+    target_file: &Path,
+    suffix_tag: &str,
+) -> ReleaseResult<()> {
+    if !target_file.is_file() {
+        return Err(ReleaseError::SymlinkSwap {
+            link: link_path.to_path_buf(),
+            target: target_file.to_path_buf(),
+            reason: format!("target file does not exist: {}", target_file.display()),
+        });
+    }
+    atomic_replace_symlink_unchecked(link_path, target_file, suffix_tag)
+}
+
+fn atomic_replace_symlink_unchecked(
+    current_link: &Path,
+    target_path: &Path,
+    suffix_tag: &str,
+) -> ReleaseResult<()> {
     if let Some(parent) = current_link.parent() {
         fs::create_dir_all(parent).map_err(|e| {
             ReleaseError::io(
@@ -94,9 +117,9 @@ pub fn atomic_replace_symlink(
         uuid::Uuid::new_v4()
     ));
 
-    create_symlink_or_pointer(&tmp_link, target_dir).map_err(|e| ReleaseError::SymlinkSwap {
+    create_symlink_or_pointer(&tmp_link, target_path).map_err(|e| ReleaseError::SymlinkSwap {
         link: current_link.to_path_buf(),
-        target: target_dir.to_path_buf(),
+        target: target_path.to_path_buf(),
         reason: format!(
             "failed to create temporary symlink {}: {}",
             tmp_link.display(),
@@ -117,7 +140,7 @@ pub fn atomic_replace_symlink(
         let _ = fs::remove_file(&tmp_link);
         ReleaseError::SymlinkSwap {
             link: current_link.to_path_buf(),
-            target: target_dir.to_path_buf(),
+            target: target_path.to_path_buf(),
             reason: format!(
                 "failed to atomically replace {} -> {}: {}",
                 tmp_link.display(),

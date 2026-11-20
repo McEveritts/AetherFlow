@@ -122,25 +122,94 @@ function _askcontinue() {
 	_save_config continued "yes"
 }
 
-# ask what theme version (8)
-# shellcheck disable=2250,2162
-# NOTE: _askdashtheme removed — legacy PHP dashboard sunset
-# Default theme variable set for any remaining references
-function _askdashtheme() {
-	dash_theme=smoked
-}
+# Write Digest (/etc/htpasswd) and Basic-Auth bcrypt (/etc/apache2/AetherFlow/htpasswd) entries
+function _write_apache_htpasswd_files() {
+	local user_name="$1"
+	local user_pass="$2"
+	local realm="${3:-Welcome to AetherFlow}"
+	local digest_file="${HTPASSWD:-/etc/htpasswd}"
+	local basic_file="${AF_APACHE_HTPASSWD:-/etc/apache2/AetherFlow/htpasswd}"
+	local basic_dir digest_dir tmp_digest ha1
+	basic_dir="$(dirname "${basic_file}")"
+	digest_dir="$(dirname "${digest_file}")"
 
-# NOTE: _askrtorrent, _askqb, and _asktr removed — torrent client installation deferred to AetherFlow Marketplace
-function _askrtorrent() {
-	return 0
-}
+	if [[ ! "${user_name}" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "${realm}" == *:* || "${realm}" =~ [[:cntrl:]] ]]; then
+		printf '[ERROR] Invalid Apache credential username or realm\n' >>"${OUTTO:-/dev/null}"
+		return 1
+	fi
+	if [[ -L "${digest_dir}" || -L "${digest_file}" || ( -e "${digest_file}" && ! -f "${digest_file}" ) ||
+	      -L "${basic_dir}" || -L "${basic_file}" || ( -e "${basic_file}" && ! -f "${basic_file}" ) ]]; then
+		printf '[ERROR] Refusing unsafe Apache credential file paths\n' >>"${OUTTO:-/dev/null}"
+		return 1
+	fi
+	mkdir -p -- "${digest_dir}" || return 1
+	ha1="$(printf '%s' "${user_name}:${realm}:${user_pass}" | md5sum)" || return 1
+	tmp_digest="$(mktemp "${digest_dir}/.htdigest.XXXXXX")" || return 1
+	if { [[ -f "${digest_file}" ]] && ! awk -F: -v u="${user_name}" '$1 != u' "${digest_file}" > "${tmp_digest}"; } ||
+	   ! printf '%s:%s:%s\n' "${user_name}" "${realm}" "${ha1%% *}" >> "${tmp_digest}" ||
+	   ! chown root:www-data "${tmp_digest}" || ! chmod 0640 "${tmp_digest}" ||
+	   ! mv -fT -- "${tmp_digest}" "${digest_file}"; then
+		rm -f -- "${tmp_digest}"
+		return 1
+	fi
 
-function _askqb() {
-	return 0
-}
+	install -d -m 0750 -o root -g "$(getent group www-data >/dev/null 2>&1 && echo www-data || echo root)" "${basic_dir}" 2>/dev/null || mkdir -p "${basic_dir}"
 
-function _asktr() {
-	return 0
+	local bcrypt_entry=""
+	if command -v htpasswd >/dev/null 2>&1; then
+		bcrypt_entry="$(printf '%s\n' "${user_pass}" | htpasswd -niB "${user_name}" 2>/dev/null | head -n1)" || bcrypt_entry=""
+	fi
+	if [[ -z "${bcrypt_entry}" || "${bcrypt_entry}" != "${user_name}:\$2y\$"* ]] && command -v python3 >/dev/null 2>&1; then
+		bcrypt_entry="$(AF_HTPASSWD_USER="${user_name}" AF_HTPASSWD_PASS="${user_pass}" python3 - <<'PY' 2>/dev/null || true
+import ctypes, os
+
+ALPHABET = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+raw = os.urandom(16)
+salt = []
+for i in range(0, 15, 3):
+    b0, b1, b2 = raw[i], raw[i + 1], raw[i + 2]
+    salt.append(ALPHABET[b0 >> 2])
+    salt.append(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)])
+    salt.append(ALPHABET[((b1 & 0x0F) << 2) | (b2 >> 6)])
+    salt.append(ALPHABET[b2 & 0x3F])
+b15 = raw[15]
+salt.append(ALPHABET[b15 >> 2])
+salt.append(ALPHABET[(b15 & 0x03) << 4])
+setting = ("$2y$10$" + "".join(salt)).encode("ascii")
+
+lib = None
+for name in ("libcrypt.so.2", "libcrypt.so.1", "libcrypt.so"):
+    try:
+        lib = ctypes.CDLL(name)
+        break
+    except OSError:
+        pass
+if lib is None:
+    raise SystemExit(1)
+lib.crypt_rn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int]
+lib.crypt_rn.restype = ctypes.c_char_p
+buf = ctypes.create_string_buffer(131072)
+out = lib.crypt_rn(os.environ["AF_HTPASSWD_PASS"].encode("utf-8"), setting, buf, len(buf))
+if not out:
+    raise SystemExit(1)
+digest = out.decode("ascii")
+if not digest.startswith("$2y$"):
+    raise SystemExit(1)
+print(f"{os.environ['AF_HTPASSWD_USER']}:{digest}")
+PY
+)"
+	fi
+	if [[ -n "${bcrypt_entry}" ]]; then
+		local tmp_basic
+		tmp_basic="$(umask 0027 && mktemp "${basic_dir}/.htpasswd.tmp.XXXXXX")" || return 1
+		if { [[ -f "${basic_file}" ]] && ! awk -F: -v u="${user_name}" '$1 != u' "${basic_file}" > "${tmp_basic}"; } ||
+		   ! printf '%s\n' "${bcrypt_entry}" >> "${tmp_basic}" ||
+		   ! chown root:www-data "${tmp_basic}" || ! chmod 0640 "${tmp_basic}" ||
+		   ! mv -fT -- "${tmp_basic}" "${basic_file}"; then
+			rm -f -- "${tmp_basic}"
+			return 1
+		fi
+	fi
 }
 
 # adduser function (10)
@@ -175,12 +244,7 @@ function _adduser() {
 			/usr/sbin/useradd "${username}" -m -G www-data,sudo -s "/bin/bash" 2>/dev/null
 		fi
 		echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
-		mkdir -p "$(dirname "${HTPASSWD}")"
-		touch "${HTPASSWD}"
-		chown root:www-data "${HTPASSWD}" 2>/dev/null || true
-		chmod 0640 "${HTPASSWD}"
-		sed -i "/^${username}:/d" "${HTPASSWD}" 2>/dev/null || true
-		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
+		_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM}" || return 1
 		rm -f /root/"${username}".info.db
 		_save_config username "${username}"
 		_save_config passwd "${passwd}"
@@ -240,12 +304,7 @@ function _adduser() {
 		echo "   ${green}✓ Password autogenerated:${normal} ${bold}${passwd}${normal}"
 		echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
 	fi
-	mkdir -p "$(dirname "${HTPASSWD}")"
-	touch "${HTPASSWD}"
-	chown root:www-data "${HTPASSWD}" 2>/dev/null || true
-	chmod 0640 "${HTPASSWD}"
-	sed -i "/^${username}:/d" "${HTPASSWD}" 2>/dev/null || true
-	(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
+	_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM}" || return 1
 	rm -f /root/"${username}".info.db
 	echo
 
@@ -339,27 +398,4 @@ function _askbbr() {
 	esac
 	echo
 	_save_config bbr "${bbr}"
-}
-################################################################################
-#   //BEGIN UNUSED FUNCTIONS//
-################################################################################
-# ask for bash or lshell function ()
-# Heads Up: lshell is disabled for the initial user on install as your first user
-# should not be limited in shell. Additional created users are automagically
-# added to a limited shell environment.
-# shellcheck disable=2250,2162
-function _askshell() {
-	#echo -ne "${yellow}Set user shell to lshell?${normal} (Default: ${red}N${normal}): "; read responce
-	#case ${responce} in
-	#  [yY] | [yY][Ee][Ss] ) theshell="/usr/bin/lshell" ;;
-	#  [nN] | [nN][Oo] | "" ) theshell="/bin/bash" ;;
-	#  *) theshell="yes" ;;
-	#esac
-	echo -ne "${bold}${yellow}Add user to /etc/sudoers${normal} [${green}y${normal}]es or [n]o: "
-	read -r answer
-	case $answer in
-	[yY] | [yY][Ee][Ss] | "") sudoers="yes" ;;
-	[nN] | [nN][Oo]) sudoers="no" ;;
-	*) sudoers="yes" ;;
-	esac
 }

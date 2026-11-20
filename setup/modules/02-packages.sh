@@ -26,10 +26,52 @@ function _repos() {
 		_af_apt_install software-properties-common lsb-release sudo ca-certificates gnupg wget || return 1
 		LC_ALL=en_US.UTF-8 apt-add-repository ppa:ondrej/php -y >>"${OUTTO}" 2>&1 || return 1
 	elif [[ ${DISTRO} == Debian ]]; then
-		_af_apt_install lsb-release sudo ca-certificates gnupg wget || return 1
+		_af_apt_install lsb-release sudo ca-certificates gnupg curl wget || return 1
 		if [[ "${OS_ID:-}" != "kali" && "${CODENAME:-}" != "kali-rolling" ]]; then
-			wget -qO - https://packages.sury.org/php/apt.gpg | gpg --dearmor --batch --yes -o /usr/share/keyrings/deb.sury.org-php.gpg || return 1
-			chmod 0644 /usr/share/keyrings/deb.sury.org-php.gpg
+			local expected_sury_fpr="${AF_SURY_APT_FPR:-15058500A0235D97F5D10063B188E2B695BD4743}"
+			expected_sury_fpr="${expected_sury_fpr^^}"
+			if [[ ! "${expected_sury_fpr}" =~ ^[0-9A-F]{40}$ ]]; then
+				echo "[ERROR] Invalid AF_SURY_APT_FPR fingerprint: ${expected_sury_fpr}" >>"${OUTTO}" 2>&1
+				return 1
+			fi
+			local sury_tmp_dir sury_gpg_raw sury_keyring_tmp sury_gnupg_home actual_sury_fpr
+			sury_tmp_dir="$(umask 0077 && mktemp -d /var/tmp/aetherflow-sury-key.XXXXXXXXXX)" || return 1
+			sury_gpg_raw="${sury_tmp_dir}/apt.gpg"
+			sury_keyring_tmp="${sury_tmp_dir}/deb.sury.org-php.gpg"
+			sury_gnupg_home="${sury_tmp_dir}/gnupg"
+			install -d -m 0700 "${sury_gnupg_home}" || { rm -rf "${sury_tmp_dir}"; return 1; }
+			if ! curl --proto '=https' --tlsv1.2 -fsSL "${AF_SURY_APT_GPG_URL:-https://packages.sury.org/php/apt.gpg}" -o "${sury_gpg_raw}"; then
+				rm -rf "${sury_tmp_dir}"
+				return 1
+			fi
+			actual_sury_fpr="$(
+				GNUPGHOME="${sury_gnupg_home}" gpg --batch --with-colons --import-options show-only --import "${sury_gpg_raw}" 2>/dev/null | awk -F: '
+					$1 == "pub" { pub_count++; in_pub = 1; next }
+					$1 == "sub" { in_pub = 0; next }
+					in_pub && $1 == "fpr" { print toupper($10); in_pub = 0 }
+					END { if (pub_count != 1) exit 1 }
+				'
+			)" || {
+				echo "[ERROR] Failed to inspect Sury PHP APT signing key fingerprint." >>"${OUTTO}" 2>&1
+				rm -rf "${sury_tmp_dir}"
+				return 1
+			}
+			if [[ "${actual_sury_fpr}" != "${expected_sury_fpr}" ]]; then
+				echo "[ERROR] Sury PHP APT key fingerprint mismatch (expected=${expected_sury_fpr}, actual=${actual_sury_fpr:-none})." >>"${OUTTO}" 2>&1
+				rm -rf "${sury_tmp_dir}"
+				return 1
+			fi
+			if grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${sury_gpg_raw}" 2>/dev/null; then
+				if ! gpg --dearmor --batch --yes -o "${sury_keyring_tmp}" "${sury_gpg_raw}"; then
+					rm -rf "${sury_tmp_dir}"
+					return 1
+				fi
+			else
+				cp -f "${sury_gpg_raw}" "${sury_keyring_tmp}" || { rm -rf "${sury_tmp_dir}"; return 1; }
+			fi
+			install -d -m 0755 /usr/share/keyrings
+			install -m 0644 "${sury_keyring_tmp}" /usr/share/keyrings/deb.sury.org-php.gpg || { rm -rf "${sury_tmp_dir}"; return 1; }
+			rm -rf "${sury_tmp_dir}"
 			echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/php.list
 			chmod 0644 /etc/apt/sources.list.d/php.list
 		fi
@@ -68,7 +110,6 @@ function _updates() {
 	else
 		mkdir -p /install
 	fi
-	if [[ -d /root/tmp ]]; then cd && rm -r tmp; fi
 
 }
 
@@ -118,7 +159,7 @@ function _openssl() {
 # shellcheck disable=2312
 function _syscommands() {
 	mkdir -p /usr/local/bin/AetherFlow
-	\cp -rf ${local_packages}/. /usr/local/bin/AetherFlow
+	\cp -rf "${local_packages}/." /usr/local/bin/AetherFlow
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 dos2unix >>"${OUTTO}" 2>&1
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 chmod +x >>"${OUTTO}" 2>&1
 	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
@@ -178,7 +219,7 @@ EOF
 function _skel() {
 	if [[ -d /etc/skel ]]; then rm -r /etc/skel; fi
 	mkdir -p /etc/skel
-	\cp -rf ${local_setup}templates/skel/. /etc/skel
+	\cp -rf "${local_setup}templates/skel/." /etc/skel
 	_af_apt_install libdigest-sha-perl >>"${OUTTO}" 2>&1 || true
 	cd /root || true
 }

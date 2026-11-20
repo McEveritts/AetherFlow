@@ -16,9 +16,9 @@ use crate::fs_security::{
     set_dir_mode, OwnershipMetadata,
 };
 use crate::health::{
-    poll_readiness_probe, sync_cli_entrypoints, verify_deployed_frontend_assets,
-    verify_isolated_systemd_lifecycle_authorized, HealthProber, LifecycleController,
-    ReqwestHealthProber, SystemdLifecycleController,
+    poll_readiness_probe, preflight_cli_entrypoints, sync_cli_entrypoints,
+    verify_deployed_frontend_assets, verify_isolated_systemd_lifecycle_authorized, HealthProber,
+    LifecycleController, ReqwestHealthProber, SystemdLifecycleController,
 };
 use crate::lock::{RecoveryState, ReleaseLockGuard, ReleasePhase};
 use crate::snapshot::{
@@ -205,6 +205,8 @@ where
     artifact_provider: A,
     lifecycle: L,
     health_prober: H,
+    #[cfg(test)]
+    fail_next_post_swap_cli_sync: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ReleaseEngine<GithubHttpArtifactProvider, SystemdLifecycleController, ReqwestHealthProber> {
@@ -216,6 +218,10 @@ impl ReleaseEngine<GithubHttpArtifactProvider, SystemdLifecycleController, Reqwe
             artifact_provider: GithubHttpArtifactProvider::default(),
             lifecycle: SystemdLifecycleController,
             health_prober: ReqwestHealthProber,
+            #[cfg(test)]
+            fail_next_post_swap_cli_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
         }
     }
 }
@@ -238,7 +244,17 @@ where
             artifact_provider,
             lifecycle,
             health_prober,
+            #[cfg(test)]
+            fail_next_post_swap_cli_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_next_post_swap_cli_sync_failure(&self) {
+        self.fail_next_post_swap_cli_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn config(&self) -> &ReleaseConfig {
@@ -658,13 +674,27 @@ where
         recovery.snapshot_path = snapshot.backup_path.clone();
         recovery.save(&cfg.releases_dir)?;
 
+        if let Err(err) = preflight_cli_entrypoints(cfg, &release_dir) {
+            recovery.phase = ReleasePhase::Failed;
+            recovery.last_error = Some(err.to_string());
+            let _ = recovery.save(&cfg.releases_dir);
+            append_jsonl_log(&cfg.log_file, "ERROR", &err.to_string());
+            return Err(err);
+        }
+
         let prior_previous_release = read_previous_release(&cfg.releases_dir).ok();
         let current_before_swap = read_current_link_target(&cfg.current_link);
         recovery.previous_release = current_before_swap
             .clone()
             .or_else(|| prior_previous_release.clone());
         recovery.phase = ReleasePhase::Stage2SymlinkSwap;
-        recovery.save(&cfg.releases_dir)?;
+        if let Err(err) = recovery.save(&cfg.releases_dir) {
+            recovery.phase = ReleasePhase::Failed;
+            recovery.last_error = Some(err.to_string());
+            let _ = recovery.save(&cfg.releases_dir);
+            append_jsonl_log(&cfg.log_file, "ERROR", &err.to_string());
+            return Err(err);
+        }
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
@@ -677,27 +707,24 @@ where
             &release_dir,
             &epoch_id,
         ) {
-            Ok(prev) => {
-                sync_cli_entrypoints(cfg, &epoch_id)?;
-                if let Some(ref p) = prev {
-                    append_jsonl_log(
-                        &cfg.log_file,
-                        "INFO",
-                        &format!("Previous release recorded: {}", p.display()),
-                    );
-                }
-                append_jsonl_log(
-                    &cfg.log_file,
-                    "INFO",
-                    &format!(
-                        "Symlink updated atomically: {} -> {}",
-                        cfg.current_link.display(),
-                        release_dir.display()
-                    ),
-                );
-                prev
-            }
+            Ok(prev) => prev,
             Err(err) => {
+                let swapped_to_candidate = read_current_link_target(&cfg.current_link)
+                    .map(|target| {
+                        canonicalize_preserve_normal(&target)
+                            == canonicalize_preserve_normal(&release_dir)
+                    })
+                    .unwrap_or(false);
+                if swapped_to_candidate {
+                    return Err(self.rollback_after_post_swap_failure(
+                        cfg,
+                        opts.dry_run,
+                        &release_dir,
+                        prior_previous_release.as_deref(),
+                        &mut recovery,
+                        err,
+                    ));
+                }
                 recovery.phase = ReleasePhase::Failed;
                 recovery.last_error = Some(err.to_string());
                 let _ = recovery.save(&cfg.releases_dir);
@@ -705,75 +732,76 @@ where
                 return Err(err);
             }
         };
-        recovery.previous_release = previous_release.clone();
-        recovery.save(&cfg.releases_dir)?;
 
-        recovery.phase = ReleasePhase::Stage3HealthProbe;
-        recovery.save(&cfg.releases_dir)?;
-        append_jsonl_log(
-            &cfg.log_file,
-            "INFO",
-            "=== STAGE 3: Systemd Restart & Deep Readiness Probe ===",
-        );
-
-        let health_status = if opts.dry_run {
+        let post_swap_res: ReleaseResult<Option<String>> = (|| {
+            #[cfg(test)]
+            if self
+                .fail_next_post_swap_cli_sync
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ReleaseError::SymlinkSwap {
+                    link: cfg.cli_bin_dir.join("af"),
+                    target: cfg.current_link.join("af"),
+                    reason: "injected post-swap CLI sync failure".to_string(),
+                });
+            }
+            sync_cli_entrypoints(cfg, &epoch_id)?;
+            if let Some(ref p) = previous_release {
+                append_jsonl_log(
+                    &cfg.log_file,
+                    "INFO",
+                    &format!("Previous release recorded: {}", p.display()),
+                );
+            }
             append_jsonl_log(
                 &cfg.log_file,
                 "INFO",
-                "[DRY-RUN] Skipping systemctl restart and health probe.",
+                &format!(
+                    "Symlink updated atomically: {} -> {}",
+                    cfg.current_link.display(),
+                    release_dir.display()
+                ),
             );
-            None
-        } else {
-            match self.stage_3_restart_and_probe(cfg) {
-                Ok(status) => {
-                    append_jsonl_log(
-                        &cfg.log_file,
-                        "INFO",
-                        &format!("Health probe PASSED (status={})", status),
-                    );
-                    Some(status)
-                }
-                Err(probe_err) => {
-                    append_jsonl_log(&cfg.log_file, "ERROR", &probe_err.to_string());
-                    recovery.phase = ReleasePhase::Stage4Rollback;
-                    recovery.last_error = Some(probe_err.to_string());
-                    let _ = recovery.save(&cfg.releases_dir);
+            recovery.previous_release = previous_release.clone();
+            recovery.save(&cfg.releases_dir)?;
 
-                    match self.run_rollback_locked(cfg, opts.dry_run, Some(&release_dir)) {
-                        Ok(rb_report) => {
-                            if let Some(ref prior_prev) = prior_previous_release {
-                                if prior_prev.is_dir()
-                                    && canonicalize_preserve_normal(prior_prev)
-                                        != canonicalize_preserve_normal(&rb_report.reverted_to)
-                                {
-                                    let _ = write_previous_release(&cfg.releases_dir, prior_prev);
-                                }
-                            }
-                            let db_restored = rb_report
-                                .restore_report
-                                .as_ref()
-                                .map(|r| r.restored_from_snapshot)
-                                .unwrap_or(false);
-                            return Err(ReleaseError::RolledBackAfterProbeFailure {
-                                probe_error: probe_err.to_string(),
-                                reverted_to: rb_report.reverted_to,
-                                db_restored,
-                            });
-                        }
-                        Err(rb_err) => {
-                            recovery.phase = ReleasePhase::Stage4Rollback;
-                            recovery.last_error = Some(format!(
-                                "probe failed ({}) and rollback failed: {}",
-                                probe_err, rb_err
-                            ));
-                            let _ = recovery.save(&cfg.releases_dir);
-                            return Err(ReleaseError::Rollback(format!(
-                                "probe failed ({}) and rollback also failed: {}",
-                                probe_err, rb_err
-                            )));
-                        }
-                    }
-                }
+            recovery.phase = ReleasePhase::Stage3HealthProbe;
+            recovery.save(&cfg.releases_dir)?;
+            append_jsonl_log(
+                &cfg.log_file,
+                "INFO",
+                "=== STAGE 3: Systemd Restart & Deep Readiness Probe ===",
+            );
+
+            if opts.dry_run {
+                append_jsonl_log(
+                    &cfg.log_file,
+                    "INFO",
+                    "[DRY-RUN] Skipping systemctl restart and health probe.",
+                );
+                Ok(None)
+            } else {
+                let status = self.stage_3_restart_and_probe(cfg)?;
+                append_jsonl_log(
+                    &cfg.log_file,
+                    "INFO",
+                    &format!("Health probe PASSED (status={})", status),
+                );
+                Ok(Some(status))
+            }
+        })();
+
+        let health_status = match post_swap_res {
+            Ok(status) => status,
+            Err(post_err) => {
+                return Err(self.rollback_after_post_swap_failure(
+                    cfg,
+                    opts.dry_run,
+                    &release_dir,
+                    prior_previous_release.as_deref(),
+                    &mut recovery,
+                    post_err,
+                ));
             }
         };
 
@@ -917,6 +945,56 @@ where
         Ok(target_tag)
     }
 
+    fn rollback_after_post_swap_failure(
+        &self,
+        cfg: &ReleaseConfig,
+        dry_run: bool,
+        release_dir: &Path,
+        prior_previous_release: Option<&Path>,
+        recovery: &mut RecoveryState,
+        post_err: ReleaseError,
+    ) -> ReleaseError {
+        append_jsonl_log(&cfg.log_file, "ERROR", &post_err.to_string());
+        recovery.phase = ReleasePhase::Stage4Rollback;
+        recovery.last_error = Some(post_err.to_string());
+        let _ = recovery.save(&cfg.releases_dir);
+
+        match self.run_rollback_locked(cfg, dry_run, Some(release_dir)) {
+            Ok(rb_report) => {
+                if let Some(prior_prev) = prior_previous_release {
+                    if prior_prev.is_dir()
+                        && canonicalize_preserve_normal(prior_prev)
+                            != canonicalize_preserve_normal(&rb_report.reverted_to)
+                    {
+                        let _ = write_previous_release(&cfg.releases_dir, prior_prev);
+                    }
+                }
+                let db_restored = rb_report
+                    .restore_report
+                    .as_ref()
+                    .map(|r| r.restored_from_snapshot)
+                    .unwrap_or(false);
+                ReleaseError::RolledBackAfterProbeFailure {
+                    probe_error: post_err.to_string(),
+                    reverted_to: rb_report.reverted_to,
+                    db_restored,
+                }
+            }
+            Err(rb_err) => {
+                recovery.phase = ReleasePhase::Stage4Rollback;
+                recovery.last_error = Some(format!(
+                    "post-swap step failed ({}) and rollback failed: {}",
+                    post_err, rb_err
+                ));
+                let _ = recovery.save(&cfg.releases_dir);
+                ReleaseError::Rollback(format!(
+                    "post-swap step failed ({}) and rollback also failed: {}",
+                    post_err, rb_err
+                ))
+            }
+        }
+    }
+
     fn stage_3_restart_and_probe(&self, cfg: &ReleaseConfig) -> ReleaseResult<String> {
         self.lifecycle.restart_systemd_units(cfg)?;
         let status = poll_readiness_probe(
@@ -989,7 +1067,17 @@ where
             &previous_target,
             &format!("rollback.{}", epoch_id),
         )?;
-        sync_cli_entrypoints(cfg, &epoch_id)?;
+        let cli_sync_res = sync_cli_entrypoints(cfg, &epoch_id);
+        if let Err(ref cli_err) = cli_sync_res {
+            append_jsonl_log(
+                &cfg.log_file,
+                "ERROR",
+                &format!(
+                    "Failed to re-sync CLI entrypoint during rollback: {}",
+                    cli_err
+                ),
+            );
+        }
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
@@ -1113,6 +1201,13 @@ where
                 let _ = recovery.save(&cfg.releases_dir);
                 return Err(err);
             }
+        }
+
+        if let Err(cli_err) = cli_sync_res {
+            recovery.phase = ReleasePhase::Failed;
+            recovery.last_error = Some(cli_err.to_string());
+            let _ = recovery.save(&cfg.releases_dir);
+            return Err(cli_err);
         }
 
         append_jsonl_log(

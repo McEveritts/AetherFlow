@@ -2380,4 +2380,138 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         fs::write(empty_wasm.join("web/dist/app.wasm"), b"").unwrap();
         assert!(verify_deployed_frontend_assets(&empty_wasm).is_err());
     }
+
+    #[test]
+    fn cli_preflight_blocks_swap_and_post_swap_cli_failure_triggers_unified_rollback() {
+        let sb = TempSandbox::new("post-swap-cli-rollback");
+        let mut cfg = ReleaseConfig::for_root(sb.path());
+        cfg.health_retries = 2;
+        cfg.health_interval = Duration::from_millis(1);
+
+        let tar_v1 = sb.path().join("release-v1.tar.gz");
+        let (_, manifest_v1) = build_synthetic_release_tarball(
+            &tar_v1,
+            &cfg.artifact_name,
+            &[
+                ("aetherflow-api", b"api-v1", EntryType::Regular),
+                ("af", b"cli-v1", EntryType::Regular),
+                (".version", b"v4.0.0\n", EntryType::Regular),
+                ("web/dist/index.html", b"index-v1", EntryType::Regular),
+                ("web/dist/app.wasm", b"wasm-v1", EntryType::Regular),
+            ],
+        );
+        let provider_v1 = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0".to_string()),
+            archive_source: tar_v1,
+            manifest_content: manifest_v1,
+        };
+        let prober_v1 = MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 200,
+            body: r#"{"status":"ready"}"#.to_string(),
+        })]);
+        let engine_v1 = ReleaseEngine::new(
+            cfg.clone(),
+            provider_v1,
+            MockLifecycle::default(),
+            prober_v1,
+        );
+        let opts = ReleaseOptions::default();
+        let deploy_v1 = match engine_v1.execute(&opts).unwrap() {
+            ReleaseOutcome::Deploy(r) => r,
+            _ => panic!("expected deploy v1"),
+        };
+        let af_link = cfg.cli_bin_dir.join("af");
+        assert!(
+            fs::symlink_metadata(&af_link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "deploy v1 must create CLI symlink"
+        );
+        assert_eq!(
+            fs::read(&af_link).unwrap(),
+            b"cli-v1",
+            "CLI symlink must resolve to v1 binary"
+        );
+
+        // 1. Pre-swap CLI preflight failure when cli_bin_dir is obstructed leaves `current` on v1
+        let tar_v2 = sb.path().join("release-v2.tar.gz");
+        let (_, manifest_v2) = build_synthetic_release_tarball(
+            &tar_v2,
+            &cfg.artifact_name,
+            &[
+                ("aetherflow-api", b"api-v2", EntryType::Regular),
+                ("af", b"cli-v2", EntryType::Regular),
+                (".version", b"v4.0.1\n", EntryType::Regular),
+                ("web/dist/index.html", b"index-v2", EntryType::Regular),
+                ("web/dist/app.wasm", b"wasm-v2", EntryType::Regular),
+            ],
+        );
+        let provider_v2 = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.1".to_string()),
+            archive_source: tar_v2,
+            manifest_content: manifest_v2,
+        };
+
+        let mut preflight_cfg = cfg.clone();
+        let blocked_bin = sb.path().join("blocked-cli-bin");
+        fs::write(&blocked_bin, b"not-a-directory").unwrap();
+        preflight_cfg.cli_bin_dir = blocked_bin;
+        let preflight_engine = ReleaseEngine::new(
+            preflight_cfg,
+            provider_v2.clone(),
+            MockLifecycle::default(),
+            MockHealthProber::new(vec![]),
+        );
+        let preflight_err = preflight_engine.execute(&opts).unwrap_err();
+        assert_eq!(
+            read_current_link_target(&cfg.current_link).unwrap(),
+            canonicalize_preserve_normal(&deploy_v1.release_dir),
+            "CLI preflight failure must abort BEFORE swapping current symlink: {preflight_err}"
+        );
+
+        // 2. Post-swap CLI sync failure routes through unified rollback, reverting current and CLI link
+        let rollback_prober = MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 200,
+            body: r#"{"status":"ready"}"#.to_string(),
+        })]);
+        let rollback_lifecycle = MockLifecycle::default();
+        let engine_v2 = ReleaseEngine::new(
+            cfg.clone(),
+            provider_v2,
+            rollback_lifecycle.clone(),
+            rollback_prober,
+        );
+        engine_v2.arm_next_post_swap_cli_sync_failure();
+        let err = engine_v2.execute(&opts).unwrap_err();
+        match err {
+            ReleaseError::RolledBackAfterProbeFailure {
+                probe_error,
+                reverted_to,
+                ..
+            } => {
+                assert!(probe_error.contains("injected post-swap CLI sync failure"));
+                assert_eq!(
+                    canonicalize_preserve_normal(&reverted_to),
+                    canonicalize_preserve_normal(&deploy_v1.release_dir)
+                );
+            }
+            other => panic!("expected RolledBackAfterProbeFailure, got {other:?}"),
+        }
+        assert_eq!(
+            read_current_link_target(&cfg.current_link).unwrap(),
+            canonicalize_preserve_normal(&deploy_v1.release_dir)
+        );
+        assert_eq!(fs::read(&af_link).unwrap(), b"cli-v1");
+        let recovery = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
+        assert_eq!(recovery.phase, ReleasePhase::Complete);
+        assert!(recovery
+            .last_error
+            .unwrap()
+            .contains("injected post-swap CLI sync failure"));
+        assert!(rollback_lifecycle
+            .recorded_calls()
+            .iter()
+            .any(|c| c == "restart_units"));
+    }
 }

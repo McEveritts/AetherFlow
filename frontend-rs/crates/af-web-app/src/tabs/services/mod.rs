@@ -1,10 +1,12 @@
 //! Service inventory and guarded administrator controls.
 mod helpers;
+mod launch;
 mod logs;
 mod restart;
 
 use self::helpers::*;
 pub(crate) use self::helpers::{external_access_target, launch_url_with_host, safe_release_url};
+pub(crate) use self::launch::launch_app;
 pub(crate) use self::logs::ServiceLogsModal;
 use self::restart::{CoreRestartPhase, CoreRestartTracker};
 use crate::state::{app, run_resource_read, ApiResource, ResourceReads, TabId};
@@ -896,10 +898,14 @@ fn ServiceCard(
                     launch
                         .get()
                         .map(|url| {
+                            let destination = url.clone();
                             view! {
                                 <a
                                     class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs max-w-full break-all"
                                     href=url
+                                    on:click=move |event| info.with_untracked(|service| {
+                                        launch_app(context, event, service, &destination);
+                                    })
                                     target="_blank"
                                     rel="noopener noreferrer"
                                 >

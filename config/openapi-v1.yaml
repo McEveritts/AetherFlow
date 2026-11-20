@@ -443,6 +443,45 @@ paths:
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
+  /admin/apps/launch:
+    post:
+      tags:
+        - Operator
+      summary: Prepare a protected app launch
+      description: Requires an active administrator dashboard session and same-origin CSRF verification. Issues a 30-second, single-use ticket for an eligible managed HTTPS app. An empty object indicates that the app should open directly.
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app, destination]
+              properties:
+                app:
+                  type: string
+                destination:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: Launch instructions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
   /admin/backup/download/{filename}:
     parameters:
       - in: path
@@ -2608,12 +2647,18 @@ paths:
       - in: path
         name: provider
         required: true
+        description: Streaming media provider identifier (`jellyfin`, `emby`, or `plex`)
         schema:
           type: string
+          enum:
+            - jellyfin
+            - emby
+            - plex
     put:
       tags:
         - Streaming
       summary: Update streaming servers
+      description: Configures and persists connection credentials for `jellyfin`, `emby`, or `plex` streaming servers.
       responses:
         '200':
           description: OK
@@ -2621,52 +2666,94 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '500':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
+              type: object
+              required:
+                - url
+              properties:
+                name:
+                  type: string
+                url:
+                  type: string
+                apiKey:
+                  type: string
+                enabled:
+                  type: boolean
   /admin/streaming/servers/{provider}/sync:
     parameters:
       - in: path
         name: provider
         required: true
+        description: Streaming media provider identifier (`jellyfin` is supported; `emby` returns `501 Not Implemented`; other providers return `400 Bad Request`)
         schema:
           type: string
     post:
       tags:
         - Streaming
       summary: Execute streaming servers sync
+      description: Executes a bounded summary and metadata synchronization batch for `jellyfin`. Returns `501 Not Implemented` for `emby` and `400 Bad Request` for other unsupported providers.
       responses:
         '200':
-          description: OK
+          description: Bounded summary synchronization batch result
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: object
+                required:
+                  - message
+                  - imported
+                  - complete
+                  - has_more
+                  - remaining_sources
+                properties:
+                  message:
+                    type: string
+                  imported:
+                    type: integer
+                    minimum: 0
+                  complete:
+                    type: boolean
+                    description: True when all summary sources have been fully swept
+                  has_more:
+                    type: boolean
+                    description: True when additional items remain and another sync call will resume from the saved checkpoint
+                  remaining_sources:
+                    type: integer
+                    minimum: 0
+                    description: Number of uncompleted summary checkpoint sources remaining
+                  next_offset:
+                    type: integer
+                    nullable: true
+                    minimum: 0
+                    description: Next pagination offset within the active summary source when `has_more` is true
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '501':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GenericObject'
   /admin/streaming/sessions/{sessionId}/command:
     parameters:
       - in: path
@@ -5340,14 +5427,24 @@ paths:
     get:
       tags:
         - Auth
-      summary: Get auth verify
+      summary: Verify perimeter gateway administrator session
+      description: Validates an active, unrevoked administrator session for perimeter SSO gateways and returns `X-Aetherflow-User` and `Remote-User` identity headers with an empty body.
       responses:
         '200':
-          description: OK
-          content:
-            application/json:
+          description: Active administrator session verified
+          headers:
+            X-Aetherflow-User:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: string
+            Remote-User:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
   /public/csrf-token:
     get:
       tags:

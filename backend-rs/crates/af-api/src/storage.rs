@@ -1170,13 +1170,8 @@ async fn authorize_backup_password(
             if auth_ts <= 0 || now.saturating_sub(auth_ts) > 300 || auth_ts > now + 60 {
                 return Ok(false);
             }
-            let fresh_session: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND (CASE WHEN typeof(expires_at) = 'integer' THEN expires_at ELSE unixepoch(expires_at, 'auto') END) > ?3)",
-                    params![session, uid, now],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
+            let fresh_session =
+                af_db::has_unexpired_active_session(&conn, &session, uid, now).unwrap_or(false);
             if fresh_session {
                 refund_backup_reauth_attempt(uid, reserved_id);
             }
@@ -2122,48 +2117,65 @@ pub(crate) fn finalize_assembled_backup_upload(
 }
 
 pub async fn get_optimal_backup_window() -> Response {
-    let Ok(conn) = af_db::get_conn() else {
-        return Json(serde_json::json!({ "mode": "manual", "running": false })).into_response();
-    };
-    let (mode, window_json, next_run): (String, String, String) = conn
-        .query_row(
-            "SELECT COALESCE(backup_schedule_mode, 'manual'), COALESCE(backup_optimal_window, ''), COALESCE(backup_next_run_at, '') FROM settings WHERE id = 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap_or_else(|_| ("manual".to_string(), String::new(), String::new()));
-
-    let mut payload = serde_json::json!({
-        "mode": mode,
-        "running": mode == "smart",
-    });
-    if !window_json.is_empty() {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&window_json) {
-            payload["optimal_window"] = val;
-        }
-    } else if mode == "smart" {
-        payload["optimal_window"] = serde_json::json!({
-            "hour": 4,
-            "day_of_week": "Sunday",
-            "confidence": 0.92,
-            "reason": "Lowest historical CPU and streaming session load between 03:30 and 05:00 UTC"
+    let payload = tokio::task::spawn_blocking(|| {
+        let conn = af_db::get_read_conn().ok()?;
+        let (mode, next_run): (String, String) = conn
+            .query_row(
+                "SELECT COALESCE(backup_schedule_mode, 'manual'), COALESCE(backup_next_run_at, '') FROM settings WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_else(|_| ("manual".to_string(), String::new()));
+        let analysis = af_services::workers::analyze_optimal_backup_window(&conn);
+        let mut payload = serde_json::json!({
+            "mode": mode,
+            "running": mode == "smart",
+            "optimal_window": analysis,
         });
-    }
-    if !next_run.is_empty() {
-        payload["next_backup_at"] = serde_json::Value::String(next_run);
-    }
+        if !next_run.is_empty() {
+            payload["next_backup_at"] = serde_json::Value::String(next_run);
+        }
+        Some(payload)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| serde_json::json!({ "mode": "manual", "running": false }));
     Json(payload).into_response()
 }
 
 pub async fn set_backup_schedule(Json(req): Json<serde_json::Value>) -> Response {
-    let mode = req.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-    if mode != "manual" && mode != "smart" {
+    let Some(mode @ ("manual" | "smart")) = req.get("mode").and_then(|v| v.as_str()) else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
             "Mode must be 'manual' or 'smart'",
         );
-    }
+    };
+    let mode = mode.to_owned();
+    tokio::task::spawn_blocking(move || set_backup_schedule_blocking(&mode))
+        .await
+        .unwrap_or_else(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to persist backup schedule",
+            )
+        })
+}
+
+fn set_backup_schedule_blocking(mode: &str) -> Response {
+    af_services::workers::ensure_smart_backup_columns();
+    let analysis = {
+        let Ok(conn) = af_db::get_read_conn() else {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database unavailable",
+            );
+        };
+        af_services::workers::analyze_optimal_backup_window(&conn)
+    };
     let Ok(conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2171,19 +2183,45 @@ pub async fn set_backup_schedule(Json(req): Json<serde_json::Value>) -> Response
             "Database unavailable",
         );
     };
-    let next_run = if mode == "smart" {
-        (Utc::now() + Duration::hours(24)).to_rfc3339()
+    let (next_run, window_json, smart_enabled) = if mode == "smart" {
+        let aligned =
+            af_services::workers::compute_next_optimal_backup_at(Utc::now(), analysis.optimal_hour)
+                .to_rfc3339();
+        let wjson = serde_json::to_string(&analysis).unwrap_or_default();
+        (aligned, wjson, "true")
     } else {
-        String::new()
+        (String::new(), String::new(), "false")
     };
-    let _ = conn.execute(
-        "UPDATE settings SET backup_schedule_mode = ?1, backup_next_run_at = ?2 WHERE id = 1",
-        params![mode, next_run],
-    );
+    if !matches!(
+        conn.execute(
+            "UPDATE settings
+         SET backup_schedule_mode = ?1,
+             backup_next_run_at = ?2,
+             backup_optimal_window = CASE WHEN ?3 != '' THEN ?3 ELSE backup_optimal_window END,
+             smart_backup_enabled = ?4,
+             smart_backup_hour = ?5
+         WHERE id = 1",
+            params![
+                mode,
+                next_run,
+                window_json,
+                smart_enabled,
+                analysis.optimal_hour as i64
+            ],
+        ),
+        Ok(1)
+    ) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to persist backup schedule",
+        );
+    }
     Json(serde_json::json!({
         "message": "Backup schedule mode updated",
         "mode": mode,
         "running": mode == "smart",
+        "optimal_window": analysis,
         "next_backup_at": next_run,
     }))
     .into_response()
@@ -4169,17 +4207,111 @@ fn deployment_ingress_config(
     config
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeploySnapshotPrior {
+    /// Confirmed absent prior to deploy (`symlink_metadata` returned `NotFound`).
+    ConfirmedAbsent,
+    /// Regular file captured with prior contents and POSIX permission mode.
+    RegularFile { bytes: Vec<u8>, mode: u32 },
+    /// Symbolic link captured with its target path.
+    Symlink { target: std::path::PathBuf },
+    /// Path existed or could not be confirmed absent (e.g., `EACCES` on a 0600 config file).
+    /// Must never be deleted or overwritten by unprivileged rollback.
+    Unreadable { reason: String },
+}
+
 #[derive(Clone, Debug)]
 struct DeployFileSnapshot {
     path: std::path::PathBuf,
-    prior: Option<(Vec<u8>, u32)>,
+    prior: DeploySnapshotPrior,
 }
 
-fn read_regular_file_nofollow(path: &std::path::Path) -> Option<(Vec<u8>, u32)> {
-    let lmeta = std::fs::symlink_metadata(path).ok()?;
-    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
-        return None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeployStage {
+    BeforeHostMutation,
+    HostConfigMutated { target_port: i32 },
+    IngressPersisted { target_port: i32 },
+}
+
+#[derive(Clone, Debug)]
+struct DeployRestoreFailure {
+    path: std::path::PathBuf,
+    was_confirmed_absent: bool,
+    error: String,
+}
+
+#[derive(Debug, Default)]
+struct RestoreFilesOutcome {
+    apache_restored: bool,
+    systemd_unit_restored: bool,
+    apache_failures: Vec<DeployRestoreFailure>,
+    native_failures: Vec<DeployRestoreFailure>,
+    unreadable_apache: Vec<(std::path::PathBuf, String)>,
+    unreadable_native: Vec<(std::path::PathBuf, String)>,
+    systemd_units_touched: Vec<std::path::PathBuf>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DeployRollbackReport {
+    apache_restored: bool,
+    systemd_unit_restored: bool,
+    unrestored_paths: Vec<String>,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+    fully_reverted: bool,
+}
+
+impl DeployRollbackReport {
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.unrestored_paths.is_empty() {
+            parts.push(format!(
+                "unrestored paths: {}",
+                self.unrestored_paths.join(", ")
+            ));
+        }
+        if !self.errors.is_empty() {
+            parts.push(self.errors.join("; "));
+        }
+        if !self.warnings.is_empty() {
+            parts.push(format!("warnings: {}", self.warnings.join("; ")));
+        }
+        if parts.is_empty() {
+            "rollback status unknown".to_string()
+        } else {
+            parts.join(" | ")
+        }
     }
+}
+
+/// Captures a pre-deploy snapshot while distinguishing confirmed `NotFound`
+/// from permission/metadata/read errors (`EACCES`, non-regular files, TOCTOU races).
+fn read_deploy_snapshot(path: &StdPath) -> DeploySnapshotPrior {
+    let lmeta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return DeploySnapshotPrior::ConfirmedAbsent;
+        }
+        Err(err) => {
+            return DeploySnapshotPrior::Unreadable {
+                reason: format!("metadata lookup failed: {err}"),
+            };
+        }
+    };
+    if lmeta.file_type().is_symlink() {
+        return match std::fs::read_link(path) {
+            Ok(target) => DeploySnapshotPrior::Symlink { target },
+            Err(err) => DeploySnapshotPrior::Unreadable {
+                reason: format!("read_link failed: {err}"),
+            },
+        };
+    }
+    if !lmeta.is_file() {
+        return DeploySnapshotPrior::Unreadable {
+            reason: "non-regular file".to_string(),
+        };
+    }
+
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -4187,16 +4319,34 @@ fn read_regular_file_nofollow(path: &std::path::Path) -> Option<(Vec<u8>, u32)> 
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
-    let mut file = opts.open(path).ok()?;
-    let fmeta = file.metadata().ok()?;
+    let mut file = match opts.open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            return DeploySnapshotPrior::Unreadable {
+                reason: format!("open failed: {err}"),
+            };
+        }
+    };
+    let fmeta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(err) => {
+            return DeploySnapshotPrior::Unreadable {
+                reason: format!("fstat failed: {err}"),
+            };
+        }
+    };
     if !fmeta.is_file() {
-        return None;
+        return DeploySnapshotPrior::Unreadable {
+            reason: "non-regular file after open".to_string(),
+        };
     }
     #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if lmeta.dev() != fmeta.dev() || lmeta.ino() != fmeta.ino() {
-            return None;
+            return DeploySnapshotPrior::Unreadable {
+                reason: "file identity changed during snapshot".to_string(),
+            };
         }
         fmeta.permissions().mode() & 0o777
     };
@@ -4204,8 +4354,15 @@ fn read_regular_file_nofollow(path: &std::path::Path) -> Option<(Vec<u8>, u32)> 
     let mode = 0o600u32;
 
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
-    Some((bytes, if mode == 0 { 0o600 } else { mode }))
+    if let Err(err) = std::io::Read::read_to_end(&mut file, &mut bytes) {
+        return DeploySnapshotPrior::Unreadable {
+            reason: format!("read failed: {err}"),
+        };
+    }
+    DeploySnapshotPrior::RegularFile {
+        bytes,
+        mode: if mode == 0 { 0o600 } else { mode },
+    }
 }
 
 fn write_atomic_nofollow_mode(
@@ -4278,16 +4435,95 @@ fn write_atomic_nofollow_mode(
     Ok(())
 }
 
+#[cfg(unix)]
+fn restore_symlink_nofollow(path: &StdPath, target: &StdPath) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "missing parent directory",
+        ));
+    };
+    if let Ok(pmeta) = std::fs::symlink_metadata(parent) {
+        if pmeta.file_type().is_symlink() || !pmeta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing symlink parent directory",
+            ));
+        }
+    } else {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(existing) = std::fs::symlink_metadata(path) {
+        if existing.is_dir() && !existing.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to replace directory with symlink",
+            ));
+        }
+    }
+    let fname = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("deploy");
+    let tmp_path = parent.join(format!(
+        ".{fname}.restore.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::os::unix::fs::symlink(target, &tmp_path)?;
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_symlink_nofollow(_path: &StdPath, _target: &StdPath) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink restoration unsupported on this platform",
+    ))
+}
+
 fn snapshot_deploy_files(bp: &af_services::AppBlueprint) -> Vec<DeployFileSnapshot> {
     let mut snapshots = Vec::new();
-    let cfg_path = af_services::mutators::resolve_config_path(&bp.config_file_path);
-    if !cfg_path.as_os_str().is_empty() {
-        let prior = read_regular_file_nofollow(&cfg_path);
-        snapshots.push(DeployFileSnapshot {
-            path: cfg_path,
-            prior,
-        });
+    let mut seen = std::collections::HashSet::new();
+    let mut push_rel = |rel: &str| {
+        if rel.trim().is_empty() {
+            return;
+        }
+        let resolved = af_services::mutators::resolve_config_path(rel);
+        if !resolved.as_os_str().is_empty() && seen.insert(resolved.clone()) {
+            let prior = read_deploy_snapshot(&resolved);
+            snapshots.push(DeployFileSnapshot {
+                path: resolved,
+                prior,
+            });
+        }
+    };
+
+    push_rel(&bp.config_file_path);
+    for native_path in
+        af_runner::blueprint::native_app_spec(&bp.app_name, &bp.config_file_path).config_paths
+    {
+        push_rel(&native_path);
     }
+    match bp.app_name.as_str() {
+        "transmission" => {
+            push_rel("/var/lib/transmission-daemon/info/settings.json");
+            push_rel("/var/lib/transmission-daemon/.config/transmission-daemon/settings.json");
+        }
+        "overseerr" | "jellyseerr" => {
+            push_rel(&format!("/var/lib/{}/config/settings.json", bp.app_name));
+            push_rel(&format!("/var/lib/{}/settings.json", bp.app_name));
+        }
+        "listenarr" => {
+            push_rel("/var/lib/listenarr/config.xml");
+            push_rel("/var/lib/listenarr/config/config.xml");
+        }
+        _ => {}
+    }
+
     for vhost_rel in [
         format!(
             "/etc/apache2/sites-available/aetherflow-app-{}.conf",
@@ -4305,34 +4541,543 @@ fn snapshot_deploy_files(bp: &af_services::AppBlueprint) -> Vec<DeployFileSnapsh
             "/etc/apache2/sites-enabled/aetherflow-ext-{}.conf",
             bp.app_name
         ),
+        format!(
+            "/etc/apache2/sites-available/aetherflow-ext-{}-le-ssl.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-enabled/aetherflow-ext-{}-le-ssl.conf",
+            bp.app_name
+        ),
+        format!("/etc/apache2/sites-available/{}.conf", bp.app_name),
+        format!("/etc/apache2/sites-enabled/{}.conf", bp.app_name),
     ] {
-        let resolved = af_services::mutators::resolve_config_path(&vhost_rel);
-        if !resolved.as_os_str().is_empty() {
-            let prior = read_regular_file_nofollow(&resolved);
-            snapshots.push(DeployFileSnapshot {
-                path: resolved,
-                prior,
-            });
-        }
+        push_rel(&vhost_rel);
     }
     snapshots
 }
 
-fn restore_deploy_files(snapshots: &[DeployFileSnapshot]) {
+fn is_apache2_deploy_path(path: &StdPath) -> bool {
+    let apache_root = af_services::mutators::resolve_config_path("/etc/apache2");
+    (!apache_root.as_os_str().is_empty() && path.starts_with(&apache_root))
+        || path.starts_with("/etc/apache2")
+        || path.to_string_lossy().contains("/etc/apache2/")
+}
+
+fn is_systemd_unit_deploy_path(path: &StdPath) -> bool {
+    let unit_root = af_services::mutators::resolve_config_path("/etc/systemd/system");
+    let in_systemd_dir = (!unit_root.as_os_str().is_empty() && path.starts_with(&unit_root))
+        || path.starts_with("/etc/systemd/system")
+        || path.to_string_lossy().contains("/etc/systemd/system/");
+    in_systemd_dir
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("service"))
+}
+
+fn record_restored_path(outcome: &mut RestoreFilesOutcome, path: &StdPath) {
+    if is_apache2_deploy_path(path) {
+        outcome.apache_restored = true;
+    }
+    if is_systemd_unit_deploy_path(path) {
+        outcome.systemd_unit_restored = true;
+        outcome.systemd_units_touched.push(path.to_path_buf());
+    }
+}
+
+fn record_restore_failure(
+    outcome: &mut RestoreFilesOutcome,
+    path: &StdPath,
+    was_confirmed_absent: bool,
+    error: String,
+) {
+    let failure = DeployRestoreFailure {
+        path: path.to_path_buf(),
+        was_confirmed_absent,
+        error,
+    };
+    if is_apache2_deploy_path(path) {
+        outcome.apache_failures.push(failure);
+    } else {
+        outcome.native_failures.push(failure);
+    }
+}
+
+fn restore_deploy_files(snapshots: &[DeployFileSnapshot]) -> RestoreFilesOutcome {
+    let mut outcome = RestoreFilesOutcome::default();
     for snap in snapshots {
         match &snap.prior {
-            Some((bytes, mode)) => {
-                let _ = write_atomic_nofollow_mode(&snap.path, bytes, *mode);
+            DeploySnapshotPrior::RegularFile { bytes, mode } => {
+                let unchanged = match read_deploy_snapshot(&snap.path) {
+                    DeploySnapshotPrior::RegularFile {
+                        bytes: cur_bytes,
+                        mode: cur_mode,
+                    } => &cur_bytes == bytes && cur_mode == *mode,
+                    _ => false,
+                };
+                if unchanged {
+                    continue;
+                }
+                match write_atomic_nofollow_mode(&snap.path, bytes, *mode) {
+                    Ok(()) => record_restored_path(&mut outcome, &snap.path),
+                    Err(err) => record_restore_failure(
+                        &mut outcome,
+                        &snap.path,
+                        false,
+                        format!("failed to restore {}: {err}", snap.path.display()),
+                    ),
+                }
             }
-            None => {
-                if let Ok(meta) = std::fs::symlink_metadata(&snap.path) {
-                    if !meta.file_type().is_symlink() && meta.is_file() {
-                        let _ = std::fs::remove_file(&snap.path);
+            DeploySnapshotPrior::Symlink { target } => {
+                let unchanged = match std::fs::symlink_metadata(&snap.path) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        std::fs::read_link(&snap.path).ok().as_ref() == Some(target)
                     }
+                    _ => false,
+                };
+                if unchanged {
+                    continue;
+                }
+                match restore_symlink_nofollow(&snap.path, target) {
+                    Ok(()) => record_restored_path(&mut outcome, &snap.path),
+                    Err(err) => record_restore_failure(
+                        &mut outcome,
+                        &snap.path,
+                        false,
+                        format!("failed to restore symlink {}: {err}", snap.path.display()),
+                    ),
+                }
+            }
+            DeploySnapshotPrior::ConfirmedAbsent => match std::fs::symlink_metadata(&snap.path) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => record_restore_failure(
+                    &mut outcome,
+                    &snap.path,
+                    true,
+                    format!(
+                        "failed to verify absence of {} during rollback: {err}",
+                        snap.path.display()
+                    ),
+                ),
+                Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => {
+                    match std::fs::remove_file(&snap.path) {
+                        Ok(()) => record_restored_path(&mut outcome, &snap.path),
+                        Err(err) => record_restore_failure(
+                            &mut outcome,
+                            &snap.path,
+                            true,
+                            format!("failed to remove new file {}: {err}", snap.path.display()),
+                        ),
+                    }
+                }
+                Ok(_) => record_restore_failure(
+                    &mut outcome,
+                    &snap.path,
+                    true,
+                    format!(
+                        "refusing to remove non-regular path {} created during deploy",
+                        snap.path.display()
+                    ),
+                ),
+            },
+            DeploySnapshotPrior::Unreadable { reason } => {
+                // Never delete or overwrite a file that existed (or could not be confirmed
+                // absent) before deploy; record it for privileged fallback / operator report.
+                if is_apache2_deploy_path(&snap.path) {
+                    outcome
+                        .unreadable_apache
+                        .push((snap.path.clone(), reason.clone()));
+                } else {
+                    outcome
+                        .unreadable_native
+                        .push((snap.path.clone(), reason.clone()));
                 }
             }
         }
     }
+    outcome
+}
+
+fn push_unique_string(target: &mut Vec<String>, item: String) {
+    if !target.contains(&item) {
+        target.push(item);
+    }
+}
+
+async fn reload_systemd_units_after_rollback(
+    touched_units: &[std::path::PathBuf],
+    is_real_host: bool,
+) -> Result<(), String> {
+    if touched_units.is_empty() || !is_real_host {
+        return Ok(());
+    }
+    if unsafe { libc::geteuid() } == 0 {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new("systemctl")
+                .arg("daemon-reload")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| "systemctl daemon-reload timed out after 15s".to_string())?
+        .map_err(|err| format!("failed to execute systemctl daemon-reload: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "systemctl daemon-reload failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        return Ok(());
+    }
+    let unit_list = touched_units
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "reverted systemd unit(s) [{unit_list}] require 'systemctl daemon-reload', which cannot be executed by unprivileged af-api (runner /v1/systemctl does not expose daemon-reload)"
+    ))
+}
+
+async fn rollback_deploy_files_inner(
+    snapshots: &[DeployFileSnapshot],
+    bp: Option<&af_services::AppBlueprint>,
+    prior_ingress: Option<&af_models::AppIngressConfig>,
+    mutated_target_port: Option<i32>,
+    host_mutation_attempted: bool,
+    is_real_host: bool,
+) -> DeployRollbackReport {
+    if !host_mutation_attempted {
+        return DeployRollbackReport {
+            fully_reverted: true,
+            ..Default::default()
+        };
+    }
+
+    let outcome = restore_deploy_files(snapshots);
+    let mut report = DeployRollbackReport {
+        apache_restored: outcome.apache_restored,
+        systemd_unit_restored: outcome.systemd_unit_restored,
+        fully_reverted: true,
+        ..Default::default()
+    };
+    let mut apache_reloaded_by_runner = false;
+    let apache_live_runner = af_services::mutators::resolve_config_path("/etc/apache2")
+        == StdPath::new("/etc/apache2")
+        && af_runner::is_runner_available();
+
+    if !outcome.apache_failures.is_empty() || !outcome.unreadable_apache.is_empty() {
+        let mut fallback_handled = false;
+        if let (Some(bp), Some(target_port)) = (bp, mutated_target_port.filter(|p| *p > 0)) {
+            if apache_live_runner {
+                if let Some(prior) = prior_ingress.filter(|cfg| cfg.listen_port > 0) {
+                    let internal_domain = (!bp.internal_domain.trim().is_empty())
+                        .then(|| bp.internal_domain.trim().to_ascii_lowercase());
+                    let base_domain = af_services::resolve_base_domain();
+                    let public_domain = {
+                        let candidate = prior.public_domain.trim().to_ascii_lowercase();
+                        if !candidate.is_empty() {
+                            Some(candidate)
+                        } else {
+                            let fallback =
+                                af_services::format_app_public_domain(&bp.app_name, &base_domain);
+                            (!fallback.is_empty()).then_some(fallback)
+                        }
+                    };
+                    let req = af_models::RunnerApacheVhostRequest {
+                        app_name: bp.app_name.clone(),
+                        listen_port: prior.listen_port,
+                        internal_domain,
+                        public_domain,
+                        external_access_enabled: prior.external_access_enabled,
+                        tls_enabled: prior.tls_enabled,
+                        remove_only: false,
+                        reload_apache: true,
+                    };
+                    match af_runner::sync_apache_vhost_via_runner(&req).await {
+                        Ok(_) => {
+                            fallback_handled = true;
+                            apache_reloaded_by_runner = true;
+                            report.apache_restored = true;
+                            if !outcome.unreadable_apache.is_empty() {
+                                report.warnings.push(format!(
+                                    "unreadable Apache vhost(s) re-synchronized to prior port {} via runner /v1/ingress/vhost",
+                                    prior.listen_port
+                                ));
+                            }
+                        }
+                        Err(err) => {
+                            report.fully_reverted = false;
+                            report.errors.push(format!(
+                                "privileged Apache vhost rollback to port {} failed (after deploy target port {target_port}): {err}",
+                                prior.listen_port
+                            ));
+                        }
+                    }
+                } else if prior_ingress.is_none()
+                    && outcome.unreadable_apache.is_empty()
+                    && outcome
+                        .apache_failures
+                        .iter()
+                        .all(|f| f.was_confirmed_absent)
+                {
+                    let req = af_models::RunnerApacheVhostRequest {
+                        app_name: bp.app_name.clone(),
+                        remove_only: true,
+                        reload_apache: true,
+                        ..Default::default()
+                    };
+                    match af_runner::sync_apache_vhost_via_runner(&req).await {
+                        Ok(_) => {
+                            fallback_handled = true;
+                            apache_reloaded_by_runner = true;
+                            report.apache_restored = true;
+                        }
+                        Err(err) => {
+                            report.fully_reverted = false;
+                            report.errors.push(format!(
+                                "privileged Apache vhost removal via runner failed: {err}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if !fallback_handled {
+            report.fully_reverted = false;
+            for failure in &outcome.apache_failures {
+                push_unique_string(
+                    &mut report.unrestored_paths,
+                    failure.path.display().to_string(),
+                );
+                report.errors.push(failure.error.clone());
+            }
+            for (path, reason) in &outcome.unreadable_apache {
+                push_unique_string(&mut report.unrestored_paths, path.display().to_string());
+                report.errors.push(format!(
+                    "prior Apache vhost {} could not be read before deploy ({reason}); preserved untouched without removal",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    if report.apache_restored && !apache_reloaded_by_runner {
+        if let Err(err) = af_services::runner_systemctl("reload", "apache2").await {
+            tracing::warn!(
+                error = %err,
+                "deploy rollback restored Apache vhost files but reloading apache2 failed"
+            );
+            report.fully_reverted = false;
+            report.errors.push(format!(
+                "restored Apache vhost files, but reloading apache2 failed: {err}"
+            ));
+        }
+    }
+
+    let mut runner_reloaded_systemd = false;
+    if !outcome.native_failures.is_empty() || !outcome.unreadable_native.is_empty() {
+        let mut fallback_attempted = false;
+        let mut fallback_succeeded = false;
+        if let (Some(bp), Some(prior), Some(target_port)) = (
+            bp,
+            prior_ingress.filter(|cfg| cfg.listen_port > 0),
+            mutated_target_port.filter(|p| *p > 0),
+        ) {
+            if prior.listen_port != target_port
+                && !af_runner::blueprint::has_config_root()
+                && af_runner::is_runner_available()
+            {
+                fallback_attempted = true;
+                let req = af_models::RunnerBlueprintApplyRequest {
+                    app_name: bp.app_name.clone(),
+                    listen_port: prior.listen_port,
+                    lifecycle_job_id: String::new(),
+                };
+                match af_runner::dispatch_blueprint_apply(&req).await {
+                    Ok(_) => {
+                        fallback_succeeded = true;
+                        let touched_systemd = outcome
+                            .native_failures
+                            .iter()
+                            .any(|f| is_systemd_unit_deploy_path(&f.path))
+                            || outcome
+                                .unreadable_native
+                                .iter()
+                                .any(|(p, _)| is_systemd_unit_deploy_path(p));
+                        if touched_systemd {
+                            runner_reloaded_systemd = true;
+                            report.systemd_unit_restored = true;
+                        }
+                        for failure in &outcome.native_failures {
+                            let verified = snapshots
+                                .iter()
+                                .find(|s| s.path == failure.path)
+                                .is_some_and(|snap| match &snap.prior {
+                                    DeploySnapshotPrior::RegularFile { .. }
+                                    | DeploySnapshotPrior::Symlink { .. }
+                                    | DeploySnapshotPrior::ConfirmedAbsent => {
+                                        read_deploy_snapshot(&failure.path) == snap.prior
+                                    }
+                                    DeploySnapshotPrior::Unreadable { .. } => false,
+                                });
+                            if !verified {
+                                report.fully_reverted = false;
+                                push_unique_string(
+                                    &mut report.unrestored_paths,
+                                    failure.path.display().to_string(),
+                                );
+                                report.errors.push(format!(
+                                    "{}; privileged blueprint fallback did not restore exact prior contents",
+                                    failure.error
+                                ));
+                            }
+                        }
+                        for (path, _) in &outcome.unreadable_native {
+                            report.warnings.push(format!(
+                                "unreadable prior file {} was preserved and re-applied to prior port {} via runner /v1/blueprint/apply (non-port fields cannot be byte-verified without runner snapshot)",
+                                path.display(),
+                                prior.listen_port
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        report.fully_reverted = false;
+                        report.errors.push(format!(
+                            "privileged blueprint rollback to port {} via runner failed: {err}",
+                            prior.listen_port
+                        ));
+                    }
+                }
+            }
+        }
+        if !fallback_attempted || !fallback_succeeded {
+            report.fully_reverted = false;
+            for failure in &outcome.native_failures {
+                push_unique_string(
+                    &mut report.unrestored_paths,
+                    failure.path.display().to_string(),
+                );
+                report.errors.push(failure.error.clone());
+            }
+            for (path, reason) in &outcome.unreadable_native {
+                push_unique_string(&mut report.unrestored_paths, path.display().to_string());
+                report.errors.push(format!(
+                    "prior file {} could not be read before deploy ({reason}); preserved untouched without removal and cannot be auto-reverted by unprivileged API",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    if !outcome.systemd_units_touched.is_empty() && !runner_reloaded_systemd {
+        if let Err(err) =
+            reload_systemd_units_after_rollback(&outcome.systemd_units_touched, is_real_host).await
+        {
+            report.fully_reverted = false;
+            report.errors.push(err);
+        }
+    }
+
+    report
+}
+
+async fn rollback_deploy_files_with_context(
+    snapshots: &[DeployFileSnapshot],
+    bp: Option<&af_services::AppBlueprint>,
+    prior_ingress: Option<&af_models::AppIngressConfig>,
+    mutated_target_port: Option<i32>,
+    host_mutation_attempted: bool,
+) -> DeployRollbackReport {
+    let is_real_host = !af_runner::blueprint::has_config_root() && cfg!(target_os = "linux");
+    rollback_deploy_files_inner(
+        snapshots,
+        bp,
+        prior_ingress,
+        mutated_target_port,
+        host_mutation_attempted,
+        is_real_host,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn rollback_deploy_files(snapshots: &[DeployFileSnapshot]) -> bool {
+    let report = rollback_deploy_files_with_context(snapshots, None, None, None, true).await;
+    report.apache_restored && report.fully_reverted
+}
+
+async fn finalize_failed_deploy_rollback(
+    bp: &af_services::AppBlueprint,
+    service_unit: &str,
+    transmission_stopped: bool,
+    stage: DeployStage,
+    prior_ingress: Option<&af_models::AppIngressConfig>,
+    file_snapshots: &[DeployFileSnapshot],
+) -> DeployRollbackReport {
+    let (host_mutation_attempted, mutated_target_port) = match stage {
+        DeployStage::BeforeHostMutation => (false, None),
+        DeployStage::HostConfigMutated { target_port }
+        | DeployStage::IngressPersisted { target_port } => (true, Some(target_port)),
+    };
+
+    let mut report = rollback_deploy_files_with_context(
+        file_snapshots,
+        Some(bp),
+        prior_ingress,
+        mutated_target_port,
+        host_mutation_attempted,
+    )
+    .await;
+
+    if transmission_stopped {
+        if report.fully_reverted {
+            if let Err(start_err) = af_services::control_service(service_unit, "start").await {
+                report.fully_reverted = false;
+                report.errors.push(format!(
+                    "failed to restart {service_unit} after rollback: {start_err}"
+                ));
+            }
+        } else {
+            report.errors.push(format!(
+                "{service_unit} was not restarted because configuration rollback did not complete cleanly"
+            ));
+        }
+    }
+
+    if matches!(stage, DeployStage::IngressPersisted { .. }) {
+        if report.fully_reverted {
+            let db_revert = match prior_ingress {
+                Some(prior) => af_db::set_app_ingress_config(prior),
+                None => af_db::delete_app_ingress_config(&bp.app_name),
+            };
+            if let Err(db_err) = db_revert {
+                report.fully_reverted = false;
+                report.errors.push(format!(
+                    "host state reverted, but failed to revert SQLite ingress configuration: {db_err}"
+                ));
+            }
+        } else {
+            report.errors.push(
+                "SQLite ingress configuration was NOT reverted because host rollback failed; keeping persisted ingress in sync with host state".to_string(),
+            );
+        }
+    } else if host_mutation_attempted && !report.fully_reverted {
+        report.warnings.push(
+            "SQLite ingress was not modified before failure, but host files may remain partially mutated".to_string(),
+        );
+    }
+
+    report
+}
+
+fn is_transmission_deploy_unit(app_name: &str, service_unit: &str) -> bool {
+    let unit_clean = service_unit.trim().trim_end_matches(".service");
+    app_name.eq_ignore_ascii_case("transmission")
+        || unit_clean.eq_ignore_ascii_case("transmission-daemon")
+        || unit_clean.eq_ignore_ascii_case("transmission")
 }
 
 pub async fn handle_deploy_process(
@@ -4378,10 +5123,29 @@ pub async fn handle_deploy_process(
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         let _lifecycle_guard = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
-        let prior_ingress = af_db::get_app_ingress_config(&bp_clone.app_name)
-            .ok()
-            .flatten();
+        let prior_ingress = match af_db::get_app_ingress_config(&bp_clone.app_name) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                let sanitized = af_common::redact::redact_secrets(&format!("{err:#}"));
+                send_step(format!(
+                    "[ERROR] Deployment aborted before mutation: failed to read prior ingress state: {sanitized}"
+                ));
+                cleanup_deploy_channel(&bp_clone.app_name).await;
+                return;
+            }
+        };
         let file_snapshots = snapshot_deploy_files(&bp_clone);
+
+        let service_unit = if bp_clone.service_name.trim().is_empty() {
+            bp_clone.app_name.clone()
+        } else {
+            bp_clone.service_name.clone()
+        };
+        let transmission_safe_lifecycle =
+            is_transmission_deploy_unit(&bp_clone.app_name, &service_unit);
+
+        let mut stage = DeployStage::BeforeHostMutation;
+        let mut transmission_stopped = false;
 
         let configuration =
             af_services::mutators::with_blueprint_mutation(&bp_clone.app_name, async {
@@ -4404,10 +5168,23 @@ pub async fn handle_deploy_process(
                 }
                 let target_port = allocate_or_verify_deploy_port(&bp_clone);
                 if target_port > 0 {
+                    if transmission_safe_lifecycle {
+                        // Stop transmission-daemon BEFORE mutating settings.json so its SIGTERM
+                        // exit handler flushes prior state first and never overwrites our changes!
+                        send_step(format!(
+                            "[STEP 2] Stopping {} prior to safe settings.json mutation...",
+                            service_unit
+                        ));
+                        transmission_stopped =
+                            af_services::control_service(&service_unit, "stop")
+                                .await
+                                .is_ok();
+                    }
                     send_step(format!(
                         "[STEP 2] Applying blueprint configuration for {} on port {}...",
                         bp_clone.app_name, target_port
                     ));
+                    stage = DeployStage::HostConfigMutated { target_port };
                     af_services::mutators::apply_blueprint_app_config(
                         &bp_clone.app_name,
                         target_port,
@@ -4429,6 +5206,7 @@ pub async fn handle_deploy_process(
                     af_db::set_app_ingress_config(&ingress_cfg).map_err(|error| {
                         anyhow::anyhow!("Failed to persist ingress configuration: {}", error)
                     })?;
+                    stage = DeployStage::IngressPersisted { target_port };
                 } else {
                     send_step(format!(
                         "[STEP 2] Portless service blueprint {} confirmed (port=0); skipping port mutation...",
@@ -4440,30 +5218,22 @@ pub async fn handle_deploy_process(
                     ));
                 }
 
-                // Step 4: Restart the managed service inside PACKAGE_LIFECYCLE_MUTEX & blueprint mutation
-                let service_unit = if bp_clone.service_name.trim().is_empty() {
-                    bp_clone.app_name.clone()
+                // Step 4: Start (for pre-stopped transmission-daemon) or Restart the managed service
+                let lifecycle_action = if transmission_safe_lifecycle && target_port > 0 {
+                    "start"
                 } else {
-                    bp_clone.service_name.clone()
+                    "restart"
                 };
                 send_step(format!(
-                    "[STEP 4] Restarting managed service {}...",
-                    service_unit
+                    "[STEP 4] Executing '{}' on managed service {}...",
+                    lifecycle_action, service_unit
                 ));
                 if let Err(restart_error) =
-                    af_services::control_service(&service_unit, "restart").await
+                    af_services::control_service(&service_unit, lifecycle_action).await
                 {
-                    restore_deploy_files(&file_snapshots);
-                    match &prior_ingress {
-                        Some(prior) => {
-                            let _ = af_db::set_app_ingress_config(prior);
-                        }
-                        None => {
-                            let _ = af_db::delete_app_ingress_config(&bp_clone.app_name);
-                        }
-                    }
                     return Err(anyhow::anyhow!(
-                        "Managed service restart failed for {}: {}",
+                        "Managed service {} failed for {}: {}",
+                        lifecycle_action,
                         service_unit,
                         restart_error
                     ));
@@ -4477,19 +5247,40 @@ pub async fn handle_deploy_process(
                 send_step(deployment_restart_status(Ok(())));
             }
             Err(error) => {
-                restore_deploy_files(&file_snapshots);
-                match &prior_ingress {
-                    Some(prior) => {
-                        let _ = af_db::set_app_ingress_config(prior);
-                    }
-                    None => {
-                        let _ = af_db::delete_app_ingress_config(&bp_clone.app_name);
-                    }
-                }
+                let rollback_report = finalize_failed_deploy_rollback(
+                    &bp_clone,
+                    &service_unit,
+                    transmission_stopped,
+                    stage,
+                    prior_ingress.as_ref(),
+                    &file_snapshots,
+                )
+                .await;
                 let sanitized = af_common::redact::redact_secrets(&format!("{error:#}"));
-                send_step(format!(
-                    "[ROLLBACK] Deployment configuration rejected: {sanitized}"
-                ));
+                if rollback_report.fully_reverted {
+                    if rollback_report.warnings.is_empty() {
+                        send_step(format!(
+                            "[ROLLBACK] Deployment configuration rejected and rolled back cleanly: {sanitized}"
+                        ));
+                    } else {
+                        let warns = af_common::redact::redact_secrets(
+                            &rollback_report.warnings.join("; "),
+                        );
+                        send_step(format!(
+                            "[ROLLBACK] Deployment configuration rejected and rolled back ({warns}): {sanitized}"
+                        ));
+                    }
+                } else {
+                    let details = af_common::redact::redact_secrets(&rollback_report.summary());
+                    tracing::error!(
+                        app = %bp_clone.app_name,
+                        rollback_details = %details,
+                        "deploy rollback incomplete or failed"
+                    );
+                    send_step(format!(
+                        "[ROLLBACK] Rollback INCOMPLETE after deployment failure ({sanitized}): {details}"
+                    ));
+                }
                 send_step(format!(
                     "[ERROR] Deployment configuration rejected: {sanitized}"
                 ));
@@ -5295,5 +6086,553 @@ mod updater_tests {
         if let Ok(mut state) = BACKUP_REAUTH.lock() {
             state.attempts.remove(&user_id);
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_deploy_rollback_reloads_apache_transmission_lifecycle_and_smart_backup_window() {
+        let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp_dir = std::env::temp_dir().join(format!("af-storage-p4-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let db_file = tmp_dir.join("storage_p4.sqlite");
+        let keys = ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|&k| (k, std::env::var_os(k))).collect();
+        for &k in &keys {
+            std::env::set_var(k, &db_file);
+        }
+        af_db::init_db().unwrap();
+
+        // 1. Smart Backup with <24 samples returns heuristic_default (confidence=0.35, optimal_hour=3)
+        let win_resp = get_optimal_backup_window().await;
+        let win_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(win_resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(win_body["optimal_window"]["source"], "heuristic_default");
+        assert_eq!(win_body["optimal_window"]["optimal_hour"], 3);
+        assert_eq!(win_body["optimal_window"]["confidence"], 0.35);
+
+        // Seed >=24 samples across 24 UTC hours with lowest load at 04:00 UTC
+        {
+            let conn = af_db::get_conn().unwrap();
+            for h in 0..24 {
+                let (cpu, mem_used) = if h == 4 { (3.0, 1.5) } else { (72.0, 13.0) };
+                conn.execute(
+                    "INSERT INTO metrics_history (timestamp, cpu_avg, mem_used_gb, mem_total_gb) VALUES (?1, ?2, ?3, 16.0)",
+                    params![format!("2026-11-19T{h:02}:20:00Z"), cpu, mem_used],
+                )
+                .unwrap();
+            }
+        }
+
+        let sched_resp = set_backup_schedule(Json(serde_json::json!({ "mode": "smart" }))).await;
+        assert_eq!(sched_resp.status(), StatusCode::OK);
+        let sched_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(sched_resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sched_body["optimal_window"]["source"], "metrics_history");
+        assert_eq!(sched_body["optimal_window"]["optimal_hour"], 4);
+        use chrono::Timelike;
+        let next_str = sched_body["next_backup_at"].as_str().unwrap();
+        let next_dt = chrono::DateTime::parse_from_rfc3339(next_str)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(next_dt.hour(), 4);
+        assert_eq!(next_dt.minute(), 0);
+        assert_eq!(next_dt.second(), 0);
+        assert!(next_dt >= Utc::now() + chrono::Duration::minutes(55));
+
+        // 2. Transmission safe deploy guard
+        assert!(is_transmission_deploy_unit(
+            "transmission",
+            "transmission-daemon"
+        ));
+        assert!(!is_transmission_deploy_unit("sonarr", "sonarr"));
+
+        // 3. Apache vhost rollback invokes runner_systemctl("reload", "apache2")
+        #[cfg(unix)]
+        {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let sock_path = tmp_dir.join("runner.sock");
+            let prev_sock = std::env::var_os("AETHERFLOW_RUNNER_SOCK");
+            let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+            let cfg_root = tmp_dir.join("cfg_root");
+            let vhost_dir = cfg_root.join("etc/apache2/sites-enabled");
+            fs::create_dir_all(&vhost_dir).unwrap();
+            std::env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+            std::env::set_var("AETHERFLOW_CONFIG_ROOT", &cfg_root);
+
+            let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            let srv = tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut req_buf = vec![0u8; 4096];
+                    let n = stream.read(&mut req_buf).await.unwrap_or(0);
+                    let _ = reload_tx.send(String::from_utf8_lossy(&req_buf[..n]).into_owned());
+                    let body = r#"{"success":true,"output":"reloaded","error":""}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            });
+
+            let vhost_file = vhost_dir.join("aetherflow-app-overseerr.conf");
+            let snaps = vec![DeployFileSnapshot {
+                path: vhost_file.clone(),
+                prior: DeploySnapshotPrior::RegularFile {
+                    bytes: b"<VirtualHost *:80>prior</VirtualHost>\n".to_vec(),
+                    mode: 0o644,
+                },
+            }];
+            fs::write(&vhost_file, b"<VirtualHost *:80>broken</VirtualHost>\n").unwrap();
+
+            assert!(rollback_deploy_files(&snaps).await);
+            assert_eq!(
+                fs::read(&vhost_file).unwrap(),
+                b"<VirtualHost *:80>prior</VirtualHost>\n"
+            );
+            let received =
+                tokio::time::timeout(std::time::Duration::from_secs(3), reload_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(received.contains("POST /v1/systemctl"));
+            assert!(received.contains(r#""action":"reload""#));
+            assert!(received.contains(r#""service":"apache2""#));
+            srv.abort();
+
+            match prev_sock {
+                Some(v) => std::env::set_var("AETHERFLOW_RUNNER_SOCK", v),
+                None => std::env::remove_var("AETHERFLOW_RUNNER_SOCK"),
+            }
+            match prev_cfg_root {
+                Some(v) => std::env::set_var("AETHERFLOW_CONFIG_ROOT", v),
+                None => std::env::remove_var("AETHERFLOW_CONFIG_ROOT"),
+            }
+        }
+
+        for (k, val) in saved {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_deploy_snapshot_distinguishes_absent_from_eacces_and_preserves_unreadable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp_dir =
+            std::env::temp_dir().join(format!("af-deploy-l02-snap-{}", uuid::Uuid::new_v4()));
+        let cfg_root = tmp_dir.join("cfg_root");
+        let app_dir = cfg_root.join("var/lib/sonarr");
+        let avail_dir = cfg_root.join("etc/apache2/sites-available");
+        let enabled_dir = cfg_root.join("etc/apache2/sites-enabled");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::create_dir_all(&avail_dir).unwrap();
+        fs::create_dir_all(&enabled_dir).unwrap();
+
+        let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+        std::env::set_var("AETHERFLOW_CONFIG_ROOT", &cfg_root);
+
+        let absent_path = avail_dir.join("aetherflow-app-sonarr.conf");
+        let secret_unreadable_path = app_dir.join("config.xml");
+        let creds_path = app_dir.join("credentials.xml");
+        let symlink_path = enabled_dir.join("aetherflow-app-sonarr.conf");
+
+        fs::write(&secret_unreadable_path, b"<Config><ApiKey>top-secret</ApiKey></Config>\n")
+            .unwrap();
+        fs::set_permissions(&secret_unreadable_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        fs::write(&creds_path, b"<Config><Port>8989</Port><ApiKey>keep</ApiKey></Config>\n")
+            .unwrap();
+        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        std::os::unix::fs::symlink("../sites-available/aetherflow-app-sonarr.conf", &symlink_path)
+            .unwrap();
+
+        // Snapshot before deploy: absent vs EACCES vs regular 0600 vs symlink.
+        assert_eq!(
+            read_deploy_snapshot(&absent_path),
+            DeploySnapshotPrior::ConfirmedAbsent
+        );
+        let unreadable_snap = read_deploy_snapshot(&secret_unreadable_path);
+        assert!(
+            matches!(unreadable_snap, DeploySnapshotPrior::Unreadable { .. }),
+            "EACCES file must be Unreadable, got {unreadable_snap:?}"
+        );
+        assert_eq!(
+            read_deploy_snapshot(&creds_path),
+            DeploySnapshotPrior::RegularFile {
+                bytes: b"<Config><Port>8989</Port><ApiKey>keep</ApiKey></Config>\n".to_vec(),
+                mode: 0o600,
+            }
+        );
+        assert_eq!(
+            read_deploy_snapshot(&symlink_path),
+            DeploySnapshotPrior::Symlink {
+                target: std::path::PathBuf::from("../sites-available/aetherflow-app-sonarr.conf"),
+            }
+        );
+
+        let snaps = vec![
+            DeployFileSnapshot {
+                path: absent_path.clone(),
+                prior: read_deploy_snapshot(&absent_path),
+            },
+            DeployFileSnapshot {
+                path: secret_unreadable_path.clone(),
+                prior: unreadable_snap,
+            },
+            DeployFileSnapshot {
+                path: creds_path.clone(),
+                prior: read_deploy_snapshot(&creds_path),
+            },
+            DeployFileSnapshot {
+                path: symlink_path.clone(),
+                prior: read_deploy_snapshot(&symlink_path),
+            },
+        ];
+
+        // Simulate deploy mutating files: creating the previously absent vhost, overwriting creds,
+        // replacing symlink with regular file.
+        fs::write(&absent_path, b"<VirtualHost *:80>new</VirtualHost>\n").unwrap();
+        fs::write(&creds_path, b"<Config><Port>18989</Port></Config>\n").unwrap();
+        fs::remove_file(&symlink_path).unwrap();
+        fs::write(&symlink_path, b"<VirtualHost *:80>wrong</VirtualHost>\n").unwrap();
+
+        // Rollback when host mutation happened must preserve the unreadable 0600/0000 file,
+        // remove the newly created ConfirmedAbsent file, restore 0600 credentials and symlink,
+        // and truthfully report incomplete rollback for the unreadable file.
+        let report =
+            rollback_deploy_files_inner(&snaps, None, None, Some(18989), true, false).await;
+        assert!(
+            !report.fully_reverted,
+            "unreadable pre-deploy file must prevent claiming clean rollback"
+        );
+        assert!(
+            report
+                .unrestored_paths
+                .iter()
+                .any(|p| p == &secret_unreadable_path.display().to_string()),
+            "unreadable path must be reported: {:?}",
+            report.unrestored_paths
+        );
+
+        // Critical: unreadable file was NEVER deleted despite writable parent dir!
+        assert!(secret_unreadable_path.exists());
+        fs::set_permissions(&secret_unreadable_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            fs::read(&secret_unreadable_path).unwrap(),
+            b"<Config><ApiKey>top-secret</ApiKey></Config>\n"
+        );
+
+        // ConfirmedAbsent file was removed, 0600 credentials & symlink restored.
+        assert!(!absent_path.exists());
+        assert_eq!(
+            fs::read(&creds_path).unwrap(),
+            b"<Config><Port>8989</Port><ApiKey>keep</ApiKey></Config>\n"
+        );
+        assert_eq!(
+            fs::metadata(&creds_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(fs::symlink_metadata(&symlink_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&symlink_path).unwrap(),
+            std::path::PathBuf::from("../sites-available/aetherflow-app-sonarr.conf")
+        );
+
+        // Pre-mutation failure (e.g. STEP 1 DNS error) leaves unreadable snapshot untouched and clean.
+        fs::set_permissions(&secret_unreadable_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let pre_mut_report =
+            rollback_deploy_files_inner(&snaps, None, None, None, false, false).await;
+        assert!(pre_mut_report.fully_reverted);
+        fs::set_permissions(&secret_unreadable_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        match prev_cfg_root {
+            Some(v) => std::env::set_var("AETHERFLOW_CONFIG_ROOT", v),
+            None => std::env::remove_var("AETHERFLOW_CONFIG_ROOT"),
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_deploy_rollback_surfaces_write_failures_and_keeps_ingress_consistent() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp_dir =
+            std::env::temp_dir().join(format!("af-deploy-l02-ing-{}", uuid::Uuid::new_v4()));
+        let cfg_root = tmp_dir.join("cfg_root");
+        let vhost_dir = cfg_root.join("etc/apache2/sites-available");
+        let sonarr_dir = cfg_root.join("var/lib/sonarr");
+        fs::create_dir_all(&vhost_dir).unwrap();
+        fs::create_dir_all(&sonarr_dir).unwrap();
+
+        let db_file = tmp_dir.join("deploy_l02.sqlite");
+        let keys = ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|&k| (k, std::env::var_os(k))).collect();
+        for &k in &keys {
+            std::env::set_var(k, &db_file);
+        }
+        af_db::init_db().unwrap();
+
+        let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+        let prev_sock = std::env::var_os("AETHERFLOW_RUNNER_SOCK");
+        std::env::set_var("AETHERFLOW_CONFIG_ROOT", &cfg_root);
+        let missing_sock = tmp_dir.join("missing-runner.sock");
+        std::env::set_var("AETHERFLOW_RUNNER_SOCK", &missing_sock);
+
+        let bp = af_services::get_blueprint("sonarr").expect("sonarr blueprint");
+        let prior_ingress = af_models::AppIngressConfig {
+            app_name: "sonarr".to_string(),
+            listen_port: 8989,
+            public_domain: "sonarr.example.test".to_string(),
+            external_access_enabled: false,
+            tls_enabled: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        af_db::set_app_ingress_config(&prior_ingress).unwrap();
+
+        let vhost_file = vhost_dir.join("aetherflow-app-sonarr.conf");
+        let cfg_file = sonarr_dir.join("config.xml");
+        fs::write(&vhost_file, b"<VirtualHost *:80>8989</VirtualHost>\n").unwrap();
+        fs::write(&cfg_file, b"<Config><Port>8989</Port></Config>\n").unwrap();
+        let snaps = snapshot_deploy_files(&bp);
+
+        // Simulate STEP 2 writing port 18989 and STEP 3 persisting 18989 to SQLite, then
+        // make parent directory read-only (0o555) so rollback write_atomic_nofollow_mode fails (EACCES).
+        fs::write(&vhost_file, b"<VirtualHost *:80>18989</VirtualHost>\n").unwrap();
+        fs::write(&cfg_file, b"<Config><Port>18989</Port></Config>\n").unwrap();
+        let new_ingress = deployment_ingress_config("sonarr", 18989, Some(prior_ingress.clone()));
+        af_db::set_app_ingress_config(&new_ingress).unwrap();
+
+        fs::set_permissions(&vhost_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&sonarr_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Direct rollback_deploy_files must return false (NOT ignore EACCES or mark apache_restored).
+        assert!(!rollback_deploy_files(&snaps).await);
+
+        let report = finalize_failed_deploy_rollback(
+            &bp,
+            "sonarr",
+            false,
+            DeployStage::IngressPersisted { target_port: 18989 },
+            Some(&prior_ingress),
+            &snaps,
+        )
+        .await;
+        assert!(!report.fully_reverted);
+        assert!(!report.apache_restored);
+        assert!(report
+            .unrestored_paths
+            .iter()
+            .any(|p| p == &vhost_file.display().to_string()));
+        assert!(report
+            .unrestored_paths
+            .iter()
+            .any(|p| p == &cfg_file.display().to_string()));
+        // SQLite ingress MUST remain at 18989 to match un-reverted disk state!
+        assert_eq!(
+            af_db::get_app_ingress_config("sonarr")
+                .unwrap()
+                .unwrap()
+                .listen_port,
+            18989
+        );
+
+        // Also verify transmission_stopped=true does NOT start transmission-daemon when rollback fails.
+        let tx_report = finalize_failed_deploy_rollback(
+            &bp,
+            "transmission-daemon",
+            true,
+            DeployStage::IngressPersisted { target_port: 18989 },
+            Some(&prior_ingress),
+            &snaps,
+        )
+        .await;
+        assert!(!tx_report.fully_reverted);
+        assert!(tx_report
+            .errors
+            .iter()
+            .any(|e| e.contains("was not restarted because configuration rollback did not complete")));
+
+        // Restore directory permissions; now verify apache reload failure still marks fully_reverted=false
+        // and keeps SQLite at 18989, whereas successful reload reverts SQLite to 8989.
+        fs::set_permissions(&vhost_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&sonarr_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sock_path = tmp_dir.join("runner.sock");
+        std::env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let srv = tokio::spawn(async move {
+            // 1st request: fail apache2 reload; 2nd request: succeed apache2 reload.
+            for success in [false, true] {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut req_buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut req_buf).await;
+                    let body = if success {
+                        r#"{"success":true,"output":"reloaded","error":""}"#
+                    } else {
+                        r#"{"success":false,"output":"","error":"apache2 reload failed"}"#
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let fail_reload_report = finalize_failed_deploy_rollback(
+            &bp,
+            "sonarr",
+            false,
+            DeployStage::IngressPersisted { target_port: 18989 },
+            Some(&prior_ingress),
+            &snaps,
+        )
+        .await;
+        assert!(!fail_reload_report.fully_reverted);
+        assert_eq!(
+            af_db::get_app_ingress_config("sonarr")
+                .unwrap()
+                .unwrap()
+                .listen_port,
+            18989
+        );
+
+        // Re-mutate files and run successful rollback + apache2 reload -> SQLite reverts to 8989!
+        fs::write(&vhost_file, b"<VirtualHost *:80>18989</VirtualHost>\n").unwrap();
+        fs::write(&cfg_file, b"<Config><Port>18989</Port></Config>\n").unwrap();
+        let ok_report = finalize_failed_deploy_rollback(
+            &bp,
+            "sonarr",
+            false,
+            DeployStage::IngressPersisted { target_port: 18989 },
+            Some(&prior_ingress),
+            &snaps,
+        )
+        .await;
+        assert!(ok_report.fully_reverted, "errors={:?}", ok_report.errors);
+        assert_eq!(
+            af_db::get_app_ingress_config("sonarr")
+                .unwrap()
+                .unwrap()
+                .listen_port,
+            8989
+        );
+        assert_eq!(
+            fs::read(&cfg_file).unwrap(),
+            b"<Config><Port>8989</Port></Config>\n"
+        );
+        srv.abort();
+
+        match prev_sock {
+            Some(v) => std::env::set_var("AETHERFLOW_RUNNER_SOCK", v),
+            None => std::env::remove_var("AETHERFLOW_RUNNER_SOCK"),
+        }
+        match prev_cfg_root {
+            Some(v) => std::env::set_var("AETHERFLOW_CONFIG_ROOT", v),
+            None => std::env::remove_var("AETHERFLOW_CONFIG_ROOT"),
+        }
+        for (k, val) in saved {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_deploy_rollback_systemd_unit_reverts_and_reports_unprivileged_daemon_reload() {
+        let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp_dir =
+            std::env::temp_dir().join(format!("af-deploy-l02-unit-{}", uuid::Uuid::new_v4()));
+        let cfg_root = tmp_dir.join("cfg_root");
+        let unit_dir = cfg_root.join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+
+        let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+        std::env::set_var("AETHERFLOW_CONFIG_ROOT", &cfg_root);
+
+        let bp = af_services::get_blueprint("listenarr").expect("listenarr blueprint");
+        let unit_path = unit_dir.join("listenarr.service");
+        let prior_unit = b"[Service]\nEnvironment=ASPNETCORE_URLS=http://127.0.0.1:5050\n";
+        fs::write(&unit_path, prior_unit).unwrap();
+
+        let snaps = snapshot_deploy_files(&bp);
+        fs::write(
+            &unit_path,
+            b"[Service]\nEnvironment=ASPNETCORE_URLS=http://127.0.0.1:15050\n",
+        )
+        .unwrap();
+
+        // In fixture mode (is_real_host=false), unit file is reverted without calling host systemctl.
+        let fixture_report =
+            rollback_deploy_files_inner(&snaps, Some(&bp), None, Some(15050), true, false).await;
+        assert!(fixture_report.fully_reverted);
+        assert!(fixture_report.systemd_unit_restored);
+        assert_eq!(fs::read(&unit_path).unwrap(), prior_unit);
+
+        // When simulating real-host non-root execution without runner /v1/blueprint/apply fallback,
+        // reverting a .service unit must surface the missing daemon-reload integration gap.
+        if unsafe { libc::geteuid() } != 0 {
+            fs::write(
+                &unit_path,
+                b"[Service]\nEnvironment=ASPNETCORE_URLS=http://127.0.0.1:15050\n",
+            )
+            .unwrap();
+            let real_host_report =
+                rollback_deploy_files_inner(&snaps, Some(&bp), None, Some(15050), true, true).await;
+            assert!(real_host_report.systemd_unit_restored);
+            assert!(!real_host_report.fully_reverted);
+            assert!(real_host_report
+                .errors
+                .iter()
+                .any(|e| e.contains("systemctl daemon-reload")));
+        }
+
+        match prev_cfg_root {
+            Some(v) => std::env::set_var("AETHERFLOW_CONFIG_ROOT", v),
+            None => std::env::remove_var("AETHERFLOW_CONFIG_ROOT"),
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }

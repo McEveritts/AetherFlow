@@ -17,6 +17,16 @@ else
 fi
 export LOCK_DIR="${LOCK_DIR:-/install}"
 export AF_REQUIRE_DOWNLOAD_SHA256="${AF_REQUIRE_DOWNLOAD_SHA256:-1}"
+declare -ag AF_PENDING_VERSION_PATHS=() AF_PENDING_VERSION_VALUES=() AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=()
+
+af_github_curl() {
+    local _gh_token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -n "$_gh_token" && "$_gh_token" != *$'\n'* && "$_gh_token" != *$'\r'* && "$_gh_token" != *'"'* && "$_gh_token" != *'\\'* ]]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$_gh_token" | curl -K - "$@"
+    else
+        curl "$@"
+    fi
+}
 
 af_prepare_logfile_path() {
     local target="${1:-${LOGFILE:-/var/log/aetherflow/install.log}}"
@@ -492,14 +502,16 @@ queue_app_version() {
             cp -p --remove-destination -- "$snapshot" "$staged/.af-version" || return 1
         fi
     fi
-    declare -ag AF_PENDING_VERSION_PATHS AF_PENDING_VERSION_VALUES
+    [[ -v AF_PENDING_VERSION_PATHS ]] || declare -ag AF_PENDING_VERSION_PATHS=()
+    [[ -v AF_PENDING_VERSION_VALUES ]] || declare -ag AF_PENDING_VERSION_VALUES=()
     AF_PENDING_VERSION_PATHS+=("$1")
     AF_PENDING_VERSION_VALUES+=("$2")
 }
 
 commit_app_versions() {
     local index
-    declare -ag AF_PENDING_VERSION_PATHS AF_PENDING_VERSION_VALUES
+    [[ -v AF_PENDING_VERSION_PATHS ]] || declare -ag AF_PENDING_VERSION_PATHS=()
+    [[ -v AF_PENDING_VERSION_VALUES ]] || declare -ag AF_PENDING_VERSION_VALUES=()
     if [[ -n "${AF_TARGET_VERSION:-}" ]] && (( ${#AF_PENDING_VERSION_VALUES[@]} > 0 )); then
         local clean_target="${AF_TARGET_VERSION#release-}"
         clean_target="${clean_target#Release-}"
@@ -832,6 +844,8 @@ PYEOF
 apt-get() {
     local package argument selected=false present=false
     local -a additional=()
+    [[ -v AF_APT_TRANSACTION_PACKAGES ]] || declare -ag AF_APT_TRANSACTION_PACKAGES=()
+    [[ -v AF_APT_REINSTALL_PACKAGES ]] || declare -ag AF_APT_REINSTALL_PACKAGES=()
     if [[ "${1:-}" == install ]]; then
         for package in "${AF_APT_TRANSACTION_PACKAGES[@]}"; do
             for argument in "${@:2}"; do
@@ -1322,21 +1336,21 @@ verify_download_sha256() {
         release_repository="${release_repository%%/releases/download/*}"
         release_tag="${source_url#*/releases/download/}"
         release_tag="${release_tag%%/*}"
-        release_metadata="$(af_logged_stderr curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/$release_repository/releases/tags/$release_tag")" || release_metadata=""
+        release_metadata="$(af_logged_stderr af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/$release_repository/releases/tags/$release_tag")" || release_metadata=""
     fi
     if [[ -n "$release_metadata" && -n "$source_url" ]]; then
         local release_digest
-        if ! release_digest="$(AF_RELEASE_JSON="$release_metadata" python3 - "$source_url" "$basename_url" <<'PYDIGEST'
-import json, os, sys
-release = json.loads(os.environ['AF_RELEASE_JSON'])
-for asset in release.get('assets', []):
-    if asset.get('browser_download_url') == sys.argv[1] or asset.get('name') == sys.argv[2]:
-        digest = asset.get('digest')
+        if ! release_digest="$(python3 -c '
+import json, sys
+release = json.load(sys.stdin)
+for asset in release.get("assets", []):
+    if asset.get("browser_download_url") == sys.argv[1] or asset.get("name") == sys.argv[2]:
+        digest = asset.get("digest")
         if digest:
-            if not digest.startswith('sha256:'):
-                raise ValueError('Unsupported release asset digest')
-            print(digest.removeprefix('sha256:'))
-PYDIGEST
+            if not digest.startswith("sha256:"):
+                raise ValueError("Unsupported release asset digest")
+            print(digest.removeprefix("sha256:"))
+' "$source_url" "$basename_url" <<< "$release_metadata"
         )"; then
             print_error "Invalid release checksum metadata for $source_url"
             return 1
@@ -1358,14 +1372,14 @@ PYDIGEST
             "$base_dir/checksums.txt" "$base_dir/sha256sums.txt" "$base_dir/SHA256SUMS" "$base_dir/SHA256SUMS.txt"
             "$base_dir/${stem}_checksums.txt")
         if [[ -n "$release_metadata" ]]; then
-            release_manifests="$(AF_RELEASE_JSON="$release_metadata" python3 - "$base_dir/" <<'PYMANIFESTS'
-import json, os, sys
-for asset in json.loads(os.environ['AF_RELEASE_JSON']).get('assets', []):
-    name = str(asset.get('name', '')).lower()
-    url = asset.get('browser_download_url', '')
-    if ('checksum' in name or 'sha256' in name) and isinstance(url, str) and url.startswith(sys.argv[1]) and '\n' not in url:
+            release_manifests="$(python3 -c '
+import json, sys
+for asset in json.load(sys.stdin).get("assets", []):
+    name = str(asset.get("name", "")).lower()
+    url = asset.get("browser_download_url", "")
+    if ("checksum" in name or "sha256" in name) and isinstance(url, str) and url.startswith(sys.argv[1]) and "\n" not in url:
         print(url)
-PYMANIFESTS
+' "$base_dir/" <<< "$release_metadata"
             )" || return 1
             while IFS= read -r checksum_url; do
                 [[ -z "$checksum_url" ]] || checksum_urls+=("$checksum_url")
@@ -1435,6 +1449,34 @@ download_file() {
         print_error "Refusing unverified download from $source_url"
         return 1
     fi
+}
+
+download_servarr_archive() {
+    local repo="$1" version="${2#v}" arch="$3" destination="$4"
+    local +x RELEASE_JSON=""
+    local title="${repo##*/}" tag="v$version" prefix asset url resolved
+    prefix="https://github.com/$repo/releases/download/$tag/"
+    asset="$title.master.$version.linux-core-$arch.tar.gz"
+    url="$prefix$asset"
+
+    if RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/$repo/releases/tags/$tag")" && [[ -n "$RELEASE_JSON" ]]; then
+        if resolved="$(python3 -c '
+import json, sys
+
+prefix, preferred, alternate = sys.argv[1:]
+assets = {asset.get("name"): asset.get("browser_download_url")
+          for asset in json.load(sys.stdin).get("assets", [])}
+for name in (preferred, alternate):
+    if assets.get(name) == prefix + name:
+        print(prefix + name)
+        break
+' "$prefix" "$asset" "$title.master.$version.linux-$arch.tar.gz" <<< "$RELEASE_JSON")" && [[ -n "$resolved" ]]; then
+            url="$resolved"
+        else
+            RELEASE_JSON=""
+        fi
+    fi
+    download_file "$url" "$destination"
 }
 
 install_apt_signing_key() (
@@ -2236,6 +2278,7 @@ stage_app_archive() {
     AF_ARCHIVE_DESTINATION="$destination"
     AF_ARCHIVE_STATE_PATHS=()
     AF_ARCHIVE_ROLLBACK_RESTART_UNITS=()
+    AF_ARCHIVE_ROLLBACK_HOOK=""
     for entry in "$state" "${7:-}"; do
         [[ -n "$entry" ]] || continue
         [[ ! -L "$entry" ]] || return 1
@@ -2449,6 +2492,9 @@ rollback_app_archive_update() {
         fi
         af_logged systemctl daemon-reload || restored=false
     fi
+    if [[ "$restored" == true && -n "${AF_ARCHIVE_ROLLBACK_HOOK:-}" ]] && declare -F "$AF_ARCHIVE_ROLLBACK_HOOK" >/dev/null 2>&1; then
+        "$AF_ARCHIVE_ROLLBACK_HOOK" || restored=false
+    fi
     if [[ "$restored" == true ]]; then
         for entry in "${AF_ARCHIVE_ROLLBACK_RESTART_UNITS[@]}"; do
             af_logged systemctl restart "$entry" || restored=false
@@ -2587,6 +2633,340 @@ check_dns_port_53_available() {
         fi
     fi
     return 0
+}
+
+af_backup_resolv_conf_state() {
+    local app_name="$1"
+    local backup_dir="${2:-}"
+    [[ -n "$backup_dir" ]] || backup_dir="/etc/aetherflow/dns-backup"
+    local resolv_path="${3:-}"
+    [[ -n "$resolv_path" ]] || resolv_path="/etc/resolv.conf"
+    [[ "$app_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    python3 - "$app_name" "$backup_dir" "$resolv_path" <<'PYEOF'
+import json, os, pathlib, secrets, stat, sys
+
+app_name, backup_dir_str, resolv_str = sys.argv[1:4]
+backup_dir = pathlib.PurePath(backup_dir_str)
+resolv_path = pathlib.PurePath(resolv_str)
+for label, p in (("backup_dir", backup_dir), ("resolv_path", resolv_path)):
+    if not p.is_absolute() or ".." in p.parts or not p.name:
+        raise ValueError(f"Invalid {label}: {p}")
+
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+
+def open_dir_nofollow(path: pathlib.PurePath, create_mode=None):
+    fd = os.open("/", os.O_RDONLY | o_directory | o_cloexec)
+    try:
+        for idx, comp in enumerate(path.parts[1:]):
+            try:
+                child = os.open(comp, os.O_RDONLY | o_directory | o_nofollow | o_cloexec, dir_fd=fd)
+            except FileNotFoundError:
+                if create_mode is None:
+                    raise
+                mode = 0o750 if idx < len(path.parts[1:]) - 1 else create_mode
+                os.mkdir(comp, mode, dir_fd=fd)
+                child = os.open(comp, os.O_RDONLY | o_directory | o_nofollow | o_cloexec, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+bdir_fd = open_dir_nofollow(backup_dir, create_mode=0o700)
+try:
+    os.fchmod(bdir_fd, 0o700)
+    state_name = f"{app_name}-resolv.conf.state"
+    bak_name = f"{app_name}-resolv.conf.bak"
+    try:
+        st_existing = os.lstat(state_name, dir_fd=bdir_fd)
+    except FileNotFoundError:
+        st_existing = None
+    if st_existing is not None:
+        if stat.S_ISLNK(st_existing.st_mode) or not stat.S_ISREG(st_existing.st_mode):
+            raise ValueError(f"Unsafe existing DNS state file: {backup_dir / state_name}")
+        raise SystemExit(0)
+
+    rdir_fd = open_dir_nofollow(resolv_path.parent, create_mode=None)
+    try:
+        try:
+            rst = os.lstat(resolv_path.name, dir_fd=rdir_fd)
+        except FileNotFoundError:
+            state = {"kind": "absent"}
+        else:
+            if stat.S_ISLNK(rst.st_mode):
+                target = os.readlink(resolv_path.name, dir_fd=rdir_fd)
+                state = {"kind": "symlink", "target": target}
+            elif stat.S_ISREG(rst.st_mode):
+                rfd = os.open(resolv_path.name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=rdir_fd)
+                try:
+                    data = os.pread(rfd, 1048576, 0)
+                finally:
+                    os.close(rfd)
+                tmp_bak = f".{bak_name}.{secrets.token_hex(6)}"
+                bfd = os.open(tmp_bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | o_cloexec, 0o600, dir_fd=bdir_fd)
+                try:
+                    os.fchmod(bfd, 0o600)
+                    os.write(bfd, data)
+                    os.fsync(bfd)
+                finally:
+                    os.close(bfd)
+                os.replace(tmp_bak, bak_name, src_dir_fd=bdir_fd, dst_dir_fd=bdir_fd)
+                state = {"kind": "file", "mode": stat.S_IMODE(rst.st_mode)}
+            else:
+                raise ValueError(f"Unsupported /etc/resolv.conf file type: {resolv_path}")
+    finally:
+        os.close(rdir_fd)
+
+    tmp_state = f".{state_name}.{secrets.token_hex(6)}"
+    sfd = os.open(tmp_state, os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | o_cloexec, 0o600, dir_fd=bdir_fd)
+    try:
+        os.fchmod(sfd, 0o600)
+        os.write(sfd, (json.dumps(state, sort_keys=True) + "\n").encode("utf-8"))
+        os.fsync(sfd)
+    finally:
+        os.close(sfd)
+    os.replace(tmp_state, state_name, src_dir_fd=bdir_fd, dst_dir_fd=bdir_fd)
+finally:
+    os.close(bdir_fd)
+PYEOF
+}
+
+af_write_resolv_conf_nameserver() {
+    local nameserver="${1:-127.0.0.1}"
+    local resolv_path="${2:-}"
+    [[ -n "$resolv_path" ]] || resolv_path="/etc/resolv.conf"
+    python3 - "$nameserver" "$resolv_path" <<'PYEOF'
+import os, pathlib, secrets, stat, sys
+
+nameserver, resolv_str = sys.argv[1:3]
+resolv_path = pathlib.PurePath(resolv_str)
+if not resolv_path.is_absolute() or ".." in resolv_path.parts or not resolv_path.name:
+    raise ValueError(f"Invalid resolv_path: {resolv_path}")
+
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+
+fd = os.open("/", os.O_RDONLY | o_directory | o_cloexec)
+try:
+    for comp in resolv_path.parent.parts[1:]:
+        child = os.open(comp, os.O_RDONLY | o_directory | o_nofollow | o_cloexec, dir_fd=fd)
+        os.close(fd)
+        fd = child
+    preserved_lines = []
+    try:
+        with open(resolv_str, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped.startswith(("search ", "domain ", "options ")):
+                    preserved_lines.append(stripped)
+    except FileNotFoundError:
+        pass
+    content = "".join(line + "\n" for line in preserved_lines) + f"nameserver {nameserver}\n"
+    tmp_name = f".{resolv_path.name}.af-new.{secrets.token_hex(6)}"
+    tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | o_cloexec, 0o644, dir_fd=fd)
+    try:
+        os.fchmod(tfd, 0o644)
+        os.write(tfd, content.encode("utf-8"))
+        os.fsync(tfd)
+    finally:
+        os.close(tfd)
+    os.replace(tmp_name, resolv_path.name, src_dir_fd=fd, dst_dir_fd=fd)
+finally:
+    os.close(fd)
+PYEOF
+}
+
+af_restore_resolv_conf_state() {
+    local app_name="$1"
+    local dropin_removed="${2:-false}"
+    local backup_dir="${3:-}"
+    [[ -n "$backup_dir" ]] || backup_dir="/etc/aetherflow/dns-backup"
+    local resolv_path="${4:-}"
+    [[ -n "$resolv_path" ]] || resolv_path="/etc/resolv.conf"
+    local stub_target="${5:-}"
+    [[ -n "$stub_target" ]] || stub_target="/run/systemd/resolve/stub-resolv.conf"
+    [[ "$app_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    local resolved_active="false"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        resolved_active="true"
+    fi
+    python3 - "$app_name" "$dropin_removed" "$backup_dir" "$resolv_path" "$stub_target" "$resolved_active" <<'PYEOF'
+import json, os, pathlib, secrets, stat, sys
+
+app_name, dropin_removed, backup_dir_str, resolv_str, stub_target, resolved_active = sys.argv[1:7]
+backup_dir = pathlib.PurePath(backup_dir_str)
+resolv_path = pathlib.PurePath(resolv_str)
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+
+def open_dir_nofollow(path: pathlib.PurePath):
+    fd = os.open("/", os.O_RDONLY | o_directory | o_cloexec)
+    try:
+        for comp in path.parts[1:]:
+            child = os.open(comp, os.O_RDONLY | o_directory | o_nofollow | o_cloexec, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+rdir_fd = open_dir_nofollow(resolv_path.parent)
+try:
+    bdir_fd = None
+    try:
+        bdir_fd = open_dir_nofollow(backup_dir)
+    except FileNotFoundError:
+        bdir_fd = None
+
+    state_name = f"{app_name}-resolv.conf.state"
+    bak_name = f"{app_name}-resolv.conf.bak"
+    restored_from_state = False
+
+    if bdir_fd is not None:
+        try:
+            try:
+                st_state = os.lstat(state_name, dir_fd=bdir_fd)
+            except FileNotFoundError:
+                st_state = None
+            if st_state is not None:
+                if stat.S_ISLNK(st_state.st_mode) or not stat.S_ISREG(st_state.st_mode):
+                    raise ValueError(f"Unsafe DNS backup state file: {backup_dir / state_name}")
+                sfd = os.open(state_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=bdir_fd)
+                try:
+                    state = json.loads(os.pread(sfd, 65536, 0).decode("utf-8"))
+                finally:
+                    os.close(sfd)
+                kind = state.get("kind")
+                if kind == "symlink":
+                    target = str(state.get("target") or "")
+                    if not target or "\n" in target or "\x00" in target:
+                        raise ValueError("Invalid saved resolv.conf symlink target")
+                    tmp_link = f".{resolv_path.name}.af-restore.{secrets.token_hex(6)}"
+                    os.symlink(target, tmp_link, dir_fd=rdir_fd)
+                    try:
+                        os.replace(tmp_link, resolv_path.name, src_dir_fd=rdir_fd, dst_dir_fd=rdir_fd)
+                    except BaseException:
+                        try:
+                            os.unlink(tmp_link, dir_fd=rdir_fd)
+                        except OSError:
+                            pass
+                        raise
+                elif kind == "file":
+                    st_bak = os.lstat(bak_name, dir_fd=bdir_fd)
+                    if stat.S_ISLNK(st_bak.st_mode) or not stat.S_ISREG(st_bak.st_mode):
+                        raise ValueError(f"Unsafe DNS backup file: {backup_dir / bak_name}")
+                    bfd = os.open(bak_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=bdir_fd)
+                    try:
+                        data = os.pread(bfd, 1048576, 0)
+                    finally:
+                        os.close(bfd)
+                    mode = int(state.get("mode") or 0o644) & 0o644
+                    if (mode & 0o444) == 0:
+                        mode = 0o644
+                    tmp_file = f".{resolv_path.name}.af-restore.{secrets.token_hex(6)}"
+                    tfd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | o_cloexec, mode, dir_fd=rdir_fd)
+                    try:
+                        os.fchmod(tfd, mode)
+                        os.write(tfd, data)
+                        os.fsync(tfd)
+                    finally:
+                        os.close(tfd)
+                    os.replace(tmp_file, resolv_path.name, src_dir_fd=rdir_fd, dst_dir_fd=rdir_fd)
+                elif kind == "absent":
+                    try:
+                        os.unlink(resolv_path.name, dir_fd=rdir_fd)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    raise ValueError(f"Unsupported saved resolv.conf state kind: {kind!r}")
+
+                for fname in (state_name, bak_name):
+                    try:
+                        os.unlink(fname, dir_fd=bdir_fd)
+                    except FileNotFoundError:
+                        pass
+                restored_from_state = True
+        finally:
+            os.close(bdir_fd)
+
+    if not restored_from_state and (dropin_removed == "true" or resolved_active == "true") and os.path.exists(stub_target):
+        should_restore_stub = False
+        try:
+            rst = os.lstat(resolv_path.name, dir_fd=rdir_fd)
+        except FileNotFoundError:
+            should_restore_stub = (dropin_removed == "true")
+        else:
+            if stat.S_ISLNK(rst.st_mode):
+                cur_target = os.readlink(resolv_path.name, dir_fd=rdir_fd)
+                if cur_target.endswith("/resolv.conf") and "systemd/resolve" in cur_target:
+                    should_restore_stub = True
+            elif stat.S_ISREG(rst.st_mode):
+                rfd = os.open(resolv_path.name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=rdir_fd)
+                try:
+                    lines = [ln.strip() for ln in os.pread(rfd, 65536, 0).decode("utf-8", errors="replace").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+                finally:
+                    os.close(rfd)
+                ns = [ln.split()[1] for ln in lines if ln.startswith("nameserver ") and len(ln.split()) >= 2]
+                if ns == ["127.0.0.1"] or (dropin_removed == "true" and ns == ["127.0.0.53"]):
+                    should_restore_stub = True
+        if should_restore_stub:
+            tmp_link = f".{resolv_path.name}.af-restore.{secrets.token_hex(6)}"
+            os.symlink(stub_target, tmp_link, dir_fd=rdir_fd)
+            try:
+                os.replace(tmp_link, resolv_path.name, src_dir_fd=rdir_fd, dst_dir_fd=rdir_fd)
+            except BaseException:
+                try:
+                    os.unlink(tmp_link, dir_fd=rdir_fd)
+                except OSError:
+                    pass
+                raise
+finally:
+    os.close(rdir_fd)
+PYEOF
+}
+
+af_verify_local_dns_lookup() {
+    local dns_port="${1:-53}"
+    local max_attempts="${2:-15}"
+    python3 - "$dns_port" "$max_attempts" <<'PYEOF'
+import os, socket, struct, sys, time
+
+port = int(sys.argv[1])
+attempts = max(1, int(sys.argv[2]))
+question = b"\x09localhost\x00" + struct.pack(">HH", 1, 1)
+
+last_err = None
+for _ in range(attempts):
+    txid = struct.unpack(">H", os.urandom(2))[0]
+    header = struct.pack(">HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+    packet = header + question
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(2.0)
+    try:
+        sock.connect(("127.0.0.1", port))
+        sock.send(packet)
+        resp = sock.recv(512)
+        if len(resp) >= 12:
+            resp_id, flags, questions, answers, _, _ = struct.unpack(">HHHHHH", resp[:12])
+            if (resp_id == txid and flags & 0x8000 and not flags & 0x020F
+                    and questions == 1 and answers > 0 and resp[12:12 + len(question)] == question):
+                raise SystemExit(0)
+        last_err = "malformed DNS response"
+    except OSError as exc:
+        last_err = str(exc)
+    finally:
+        sock.close()
+    time.sleep(1)
+
+print(f"Local DNS lookup probe failed against 127.0.0.1:{port}: {last_err}", file=sys.stderr)
+raise SystemExit(1)
+PYEOF
 }
 
 lock_path() {
@@ -4430,13 +4810,7 @@ github_latest_tag() {
         return 0
     fi
 
-    local auth_header=()
-    local token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
-    if [[ -n "$token" ]]; then
-        auth_header=(-H "Authorization: Bearer $token")
-    fi
-
-    eff_url="$(curl --proto '=https' --proto-redir '=https' -fsSL "${auth_header[@]}" -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
+    eff_url="$(curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
     if [[ "$eff_url" == *"/releases/tag/"* ]]; then
         tag="${eff_url##*/releases/tag/}"
         tag="${tag%%\?*}"
@@ -4444,7 +4818,7 @@ github_latest_tag() {
     fi
 
     if [[ -z "$tag" ]]; then
-        tag="$(curl --proto '=https' --proto-redir '=https' -fsSL "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+        tag="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
             | grep -oP '"tag_name":\s*"\K[^"]+' | head -n1 || true)"
     fi
 
@@ -4612,6 +4986,11 @@ quiesce_services_for_rollback() {
         stop_status=0
         af_logged systemctl stop -- "$unit" || stop_status=$?
         if [[ "$stop_status" -ne 0 ]]; then
+            local _unit_load_state=""
+            _unit_load_state="$(systemctl show --property=LoadState -- "$unit" 2>/dev/null || true)"
+            if [[ "$stop_status" -eq 5 && "$_unit_load_state" == "LoadState=not-found" ]] && systemd_unit_inactive "$unit"; then
+                continue
+            fi
             print_error "Incomplete rollback: failed to stop $unit; recovery backup preserved at $backup"
             failed=true
             continue

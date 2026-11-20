@@ -2289,5 +2289,14 @@
     "verifying": "Code wird geprüft…"
   },
   "Playback method breakdown": "Aufschlüsselung der Wiedergabeart",
-  "Media format distribution": "Medienformat-Verteilung"
+  "Media format distribution": "Medienformat-Verteilung",
+  "Pipeline service & queue telemetry": "Pipeline-Dienste- und Warteschlangen-Telemetrie",
+  "Installed download clients": "Installierte Download-Clients",
+  "Installed automation apps": "Installierte Automatisierungs-Apps",
+  "Transcode queue": "Transkodierungs-Warteschlange",
+  "None installed": "Keine installiert",
+  "{active} active / {installed} installed": "{active} aktiv / {installed} installiert",
+  "Loading": "Wird geladen",
+  "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.": "{count} Eintragszusammenfassungen in diesem begrenzten Stapel synchronisiert. Weitere Einträge verbleiben; klicken Sie erneut auf Synchronisieren, um vom gespeicherten Prüfpunkt fortzufahren. Dies sind keine bestätigten Wiedergabeereignisse.",
+  "({remaining} remaining sources)": "({remaining} verbleibende Quellen)"
 }

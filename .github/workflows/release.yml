@@ -306,8 +306,8 @@ jobs:
       - name: Verify Updater Survives Its Caller Restart
         working-directory: backend-rs
         run: |
-          test_binary=$(cargo test -p af-runner --lib --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
-          sudo "$test_binary" self_update::tests::updater_survives_caller_restart --ignored --exact --nocapture
+          test_binary=$(cargo test -p af-runner --lib --locked --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
+          sudo "$test_binary" tests::updater_survives_caller_restart --ignored --exact --nocapture
 
       - name: Stage External WASM Frontend Assets
         run: bash scripts/build_wasm_frontend.sh --stage

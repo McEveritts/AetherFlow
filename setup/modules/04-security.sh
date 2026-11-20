@@ -140,7 +140,31 @@ function _denyhosts() {
 		\cp -f "${local_setup}templates/trackers.template" /etc/trackers
 		\cp -f "${local_setup}templates/denypublic.template" /etc/cron.daily/denypublic
 		chmod +x /etc/cron.daily/denypublic
-		cat "${local_setup}templates/hostsTrackers.template" >>/etc/hosts
+		local hosts_file="${AF_HOSTS_FILE:-/etc/hosts}"
+		if [[ -L "${hosts_file}" ]]; then
+			echo "[ERROR] Refusing symlinked hosts file: ${hosts_file}" >>"${OUTTO}" 2>&1
+			return 1
+		fi
+		local hosts_dir
+		hosts_dir="$(dirname "${hosts_file}")"
+		local tmp_hosts
+		tmp_hosts="$(mktemp "${hosts_dir}/.hosts.af.XXXXXX")" || return 1
+		if [[ -f "${hosts_file}" ]]; then
+			awk '
+				/^# BEGIN AETHERFLOW TRACKER BLOCK$/ { in_block=1; next }
+				/^# END AETHERFLOW TRACKER BLOCK$/ { in_block=0; next }
+				!in_block { print }
+			' "${hosts_file}" > "${tmp_hosts}" || { rm -f "${tmp_hosts}"; return 1; }
+		fi
+		{
+			printf '# BEGIN AETHERFLOW TRACKER BLOCK\n'
+			sed '$a\' "${local_setup}templates/hostsTrackers.template"
+			printf '# END AETHERFLOW TRACKER BLOCK\n'
+		} >> "${tmp_hosts}" || { rm -f "${tmp_hosts}"; return 1; }
+		if ! chmod 0644 "${tmp_hosts}" || ! mv -fT -- "${tmp_hosts}" "${hosts_file}"; then
+			rm -f -- "${tmp_hosts}"
+			return 1
+		fi
 		_save_config denyhosts "yes"
 		;;
 
@@ -186,7 +210,7 @@ function _apachesudo() {
 
 # function to configure apache
 function _apacheconf() {
-	\cp -f ${local_setup}templates/aliases-seedbox.conf.template /etc/apache2/sites-enabled/aliases-seedbox.conf
+	\cp -f "${local_setup}templates/aliases-seedbox.conf.template" /etc/apache2/sites-enabled/aliases-seedbox.conf
 	sed -i "s/USERNAME/${username}/g" /etc/apache2/sites-enabled/aliases-seedbox.conf
 	a2enmod auth_digest >>"${OUTTO}" 2>&1
 	a2enmod ssl >>"${OUTTO}" 2>&1
@@ -198,11 +222,14 @@ function _apacheconf() {
 	if [[ -f /etc/apache2/sites-enabled/000-default.conf ]]; then
 		mv /etc/apache2/sites-enabled/000-default.conf /etc/apache2/ >>"${OUTTO}" 2>&1
 	fi
-	\cp -f ${local_setup}templates/default-ssl.conf.template /etc/apache2/sites-enabled/default-ssl.conf
+	\cp -f "${local_setup}templates/default-ssl.conf.template" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/USERNAME/${username}/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/\"REALM\"/\"${REALM}\"/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/HTPASSWD/\/etc\/htpasswd/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/PORT/${PORT}/g" /etc/apache2/sites-enabled/default-ssl.conf
+	if [[ ! -s /etc/apache2/AetherFlow/htpasswd && -n "${username:-}" && -n "${passwd:-}" ]] && type _write_apache_htpasswd_files &>/dev/null; then
+		_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM:-Welcome to AetherFlow}" || true
+	fi
 	install -d -m 0755 /var/www/aetherflow-default
 	if [[ -L /srv/aetherflow && "$(readlink /srv/aetherflow 2>/dev/null)" == "/opt/AetherFlow" ]]; then
 		rm -f /srv/aetherflow

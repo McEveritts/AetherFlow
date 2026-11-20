@@ -34,6 +34,7 @@ log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Stopping and removing librespeed.service..."
 
 purge_systemd_unit "librespeed.socket" "librespeed"
+safe_rm_rf /etc/aetherflow/librespeed
 
 report_progress 65 "Removing LibreSpeed application directory and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then

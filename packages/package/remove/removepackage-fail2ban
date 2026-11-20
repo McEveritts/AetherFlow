@@ -39,7 +39,6 @@ purge_systemd_unit "fail2ban"
 
 report_progress 55 "Purging fail2ban APT package..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq fail2ban
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 
 report_progress 85 "Removing Fail2ban configuration and state directories..."
 safe_rm_rf /run/fail2ban

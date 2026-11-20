@@ -1090,7 +1090,7 @@ pub async fn activity_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1116,7 +1116,7 @@ pub async fn concurrency_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1142,7 +1142,7 @@ pub async fn patterns_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1168,7 +1168,7 @@ pub async fn drilldown_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1194,7 +1194,7 @@ pub async fn drilldown_users_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1220,7 +1220,7 @@ pub async fn drilldown_clients_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1246,7 +1246,7 @@ pub async fn drilldown_items_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1272,7 +1272,7 @@ pub async fn drilldown_libraries_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",
@@ -1304,7 +1304,7 @@ pub async fn drilldown_genres_handler(
 ) -> Response {
     let now = Utc::now().timestamp();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",

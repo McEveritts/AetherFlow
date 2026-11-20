@@ -774,7 +774,7 @@ fn build_read_pool(db_path: &str) -> anyhow::Result<Pool<SqliteConnectionManager
             )
         });
     Ok(Pool::builder()
-        .max_size(4)
+        .max_size(8)
         .min_idle(Some(1))
         .connection_timeout(Duration::from_secs(2))
         .build(manager)?)
@@ -949,6 +949,11 @@ pub fn init_db() -> anyhow::Result<()> {
             name TEXT NOT NULL,
             redirect_uris TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (
+            app_name TEXT PRIMARY KEY,
+            config_json TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS oidc_auth_codes (
@@ -1622,6 +1627,10 @@ fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
         [],
     )?;
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mediaflow_file_path ON mediaflow_queue(file_path)",
+        [],
+    )?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_family ON oidc_refresh_tokens(family_id)",
         [],
     )?;
@@ -1887,24 +1896,45 @@ pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
 pub const PRUNE_METRICS_HISTORY_SQL: &str =
     "DELETE FROM metrics_history WHERE julianday(timestamp) < julianday('now', '-90 days')";
 
+pub fn has_unexpired_active_session(
+    conn: &Connection,
+    jti: &str,
+    user_id: i64,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND unixepoch(expires_at, 'auto') > ?3)",
+        params![jti, user_id, now],
+        |row| row.get(0),
+    )
+}
+
+pub fn prune_expired_active_sessions(conn: &Connection, now: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM active_sessions WHERE unixepoch(expires_at, 'auto') <= ?1",
+        params![now],
+    )
+}
+
 pub fn prune_expired_data() {
     let Ok(conn) = get_conn() else {
         return;
     };
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
     let param_queries = [
         // Retain used = 1 authorization-code tombstones until expires_at for RFC 6749 §4.1.2 reuse detection.
         "DELETE FROM oidc_auth_codes WHERE expires_at < ?1",
         "DELETE FROM oidc_device_codes WHERE expires_at < ?1",
         "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1",
-        "DELETE FROM active_sessions WHERE expires_at < ?1",
     ];
     for query_sql in param_queries {
-        let _ = conn.execute(query_sql, params![now]);
+        let _ = conn.execute(query_sql, params![now_rfc3339]);
     }
+    let _ = prune_expired_active_sessions(&conn, now.timestamp());
     let _ = conn.execute(
         "DELETE FROM mfa_challenges WHERE expires_at <= ?1",
-        params![Utc::now().timestamp()],
+        params![now.timestamp()],
     );
 
     let static_queries = [
@@ -3049,7 +3079,7 @@ pub(crate) mod tests {
         assert!(reader
             .execute("INSERT INTO example VALUES (3)", [])
             .is_err());
-        assert_eq!(readers.max_size(), 4);
+        assert_eq!(readers.max_size(), 8);
         writer.execute_batch("ROLLBACK;").unwrap();
         drop(reader);
         drop(readers);

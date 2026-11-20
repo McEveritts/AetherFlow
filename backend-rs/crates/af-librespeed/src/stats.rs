@@ -1,3 +1,7 @@
+// Share the comparison implementation without introducing a workspace dependency.
+#[path = "../../af-models/src/constant_time.rs"]
+mod af_models;
+
 use crate::config::Config;
 use crate::db::{TelemetryRecord, TelemetryVault};
 use crate::redact::{
@@ -71,7 +75,7 @@ impl StatsAuth {
         }
         let expected_tag = compute_hmac(&self.auth_key, configured.as_bytes());
         let actual_tag = compute_hmac(&self.auth_key, candidate.as_bytes());
-        constant_time_eq(&expected_tag, &actual_tag)
+        af_models::constant_time_eq(&expected_tag, &actual_tag)
     }
 
     pub fn check_login_allowed(&self, ip: &str, now_unix: i64) -> bool {
@@ -175,7 +179,7 @@ impl StatsAuth {
             return false;
         };
         let expected_sig = compute_hmac(&self.session_key, exp_str.as_bytes());
-        constant_time_eq(&sig_bytes, &expected_sig)
+        af_models::constant_time_eq(&sig_bytes, &expected_sig)
     }
 }
 
@@ -217,17 +221,6 @@ fn compute_hmac(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&result);
     out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 const TELEMETRY_WINDOW_SECS: i64 = 60;

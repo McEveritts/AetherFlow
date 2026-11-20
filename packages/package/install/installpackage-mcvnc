@@ -108,7 +108,7 @@ if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
 else
     TAG="$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
     if [[ -z "$TAG" ]]; then
-        TAG="$(curl -fsSL "https://api.github.com/repos/${MCVNC_REPO}/tags" 2>/dev/null | jq -r '.[].name' 2>/dev/null | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
+        TAG="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/${MCVNC_REPO}/tags" 2>/dev/null | jq -r '.[].name' 2>/dev/null | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
     fi
     if [[ -z "$TAG" ]]; then
         TAG="v0.11.0"

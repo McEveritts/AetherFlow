@@ -583,6 +583,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "wait_for_service_ready",
             "verify_download_sha256",
             "download_file",
+            "download_servarr_archive",
             "git_checkout_version",
             "verify_deb_installed",
             "safe_rm_rf",
@@ -883,6 +884,18 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
         self.assertIn("redact_ip_addresses=true", toml_after)
         self.assertIn("enable_id_obfuscation=true", toml_after)
         self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', toml_after)
+
+        public_toml = self.root / "etc/aetherflow/librespeed/settings.toml"
+        self.assertTrue(public_toml.is_file())
+        self.assertEqual(public_toml.parent.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(public_toml.stat().st_mode & 0o777, 0o644)
+        pub_text = public_toml.read_text()
+        self.assertIn("listen_port = 8999", pub_text)
+        self.assertIn("enable_tls = true", pub_text)
+        self.assertIn('tls_cert_file = "/etc/ssl/mycert.pem"', pub_text)
+        self.assertNotIn("custom-stats-password", pub_text)
+        self.assertNotIn("trusted_proxy_secret", pub_text)
+        self.assertNotIn("/etc/ssl/mykey.pem", pub_text)
 
     def test_kasmvnc_update_preserves_custom_yaml(self):
         yaml_file = self.root / "var/lib/kasmvnc/.vnc/kasmvnc.yaml"
@@ -3915,6 +3928,12 @@ done
                 "category": "[REDACTED]",
                 "summary": "[REDACTED]",
             })
+
+    def test_flaresolverr_arm64_uses_verified_git_clone_instead_of_unverified_archive_tarball(self):
+        script_text = (ROOT / "packages/package/install/installpackage-flaresolverr").read_text()
+        self.assertNotIn("/archive/refs/tags/", script_text)
+        tx_text = (ROOT / "packages/package/install/installpackage-transmission").read_text()
+        self.assertNotIn("/archive/refs/tags/", tx_text)
 
 
 if __name__ == "__main__":

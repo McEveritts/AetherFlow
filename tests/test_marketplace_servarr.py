@@ -109,6 +109,8 @@ class ArchiveFixture(unittest.TestCase):
         python.write_text('''#!/usr/bin/python3
 import os, pathlib, subprocess, sys
 source = sys.stdin.read()
+if 'Local DNS lookup probe failed' in source:
+    raise SystemExit(int(os.environ.get('MOCK_DNS_EXIT', '0')))
 if os.environ.get('TEST_LEGACY_TARFILE'):
     source = "import tarfile; del tarfile.data_filter\\n" + source
 if 'Identity/Wizard' not in source and 'auth/createAdmin' not in source:
@@ -133,7 +135,7 @@ log_warn() { printf '%s\\n' "$*" >> "$LOGFILE"; }
 print_error() { printf '%s\\n' "$*" >&2; }
 print_warn() { printf '%s\\n' "$*" >&2; }
 report_progress() { printf '%s\\n' "$*" >> "$TEST_ROOT/progress"; }
-github_latest_tag() { printf 'fixture-2.0\\n'; }
+github_latest_tag() { printf '%s\\n' "${AF_TARGET_VERSION:-fixture-2.0}"; }
 seed_servarr_master_user() { printf '%s\\n' "$*" >> "$TEST_ROOT/credentials-seed"; }
 write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
@@ -316,6 +318,8 @@ class ServarrLifecycleTests(ArchiveFixture):
                     expected = f'arch={asset}'
                     if package in ('sonarr', 'ombi'):
                         expected = f'linux-{asset}'
+                    elif package in ('radarr', 'lidarr', 'prowlarr'):
+                        expected = f'linux-core-{asset}'
                     elif package in ('adguardhome', 'navidrome', 'librespeed'):
                         expected = {'amd64': 'linux_amd64', 'arm64': 'linux_arm64', 'armhf': 'linux_armv7'}[architecture]
                     elif package == 'jackett':
@@ -468,6 +472,135 @@ class QuiLifecycleTests(ArchiveFixture):
         self.assert_success(self.run_script('qui', 'remove', DELETE_DATA='true'))
         self.assertFalse(self.database_path('qui').exists())
         self.assertFalse(list((self.root / 'usr/local/bin').glob('qui.af-backup.??????')))
+
+
+class GitHubReleaseDigestAndDnsHandoffTests(ArchiveFixture):
+    def test_radarr_lidarr_prowlarr_resolve_github_releases_and_verify_digest_with_auth_token(self):
+        repo_map = {
+            'radarr': ('Radarr/Radarr', 'Radarr'),
+            'lidarr': ('Lidarr/Lidarr', 'Lidarr'),
+            'prowlarr': ('Prowlarr/Prowlarr', 'Prowlarr'),
+        }
+        for package, (repo, title) in repo_map.items():
+            with self.subTest(package=package):
+                self.setUp()
+                self.prepare(package)
+                archive_bytes = (self.root / 'release.tar.gz').read_bytes()
+                archive_digest = hashlib.sha256(archive_bytes).hexdigest()
+                target_ver = '9.8.7.6543'
+                asset_name = f'{title}.master.{target_ver}.linux-core-x64.tar.gz'
+                asset_url = f'https://github.com/{repo}/releases/download/v{target_ver}/{asset_name}'
+                release_json = {
+                    'tag_name': f'v{target_ver}',
+                    'body': 'release notes ' * 12_000,
+                    'assets': [{
+                        'name': asset_name,
+                        'browser_download_url': asset_url,
+                        'digest': f'sha256:{archive_digest}',
+                    }],
+                }
+                (self.root / 'release-api.json').write_text(json.dumps(release_json))
+                curl_mock = self.root / 'bin/curl'
+                curl_mock.write_text('''#!/usr/bin/python3
+import json, os, pathlib, shutil, sys
+root = pathlib.Path(os.environ['TEST_ROOT'])
+args = sys.argv[1:]
+with (root / 'commands.jsonl').open('a') as fh:
+    fh.write(json.dumps(['curl', *args]) + '\\n')
+url = next((a for a in args if a.startswith('http')), '')
+if 'api.github.com/repos/' in url:
+    (root / 'curl-config').write_text(sys.stdin.read() if '-K' in args else '')
+    print((root / 'release-api.json').read_text())
+elif '-o' in args:
+    out = pathlib.Path(args[args.index('-o') + 1])
+    shutil.copyfile(root / 'release.tar.gz', out)
+else:
+    print('{"status":"OK"}')
+''')
+                curl_mock.chmod(0o755)
+                result = self.run_script(
+                    package,
+                    AF_TARGET_VERSION=target_ver,
+                    AF_GITHUB_TOKEN='ghp_test_token_123',
+                    AF_DOWNLOAD_SHA256=archive_digest,
+                )
+                self.assert_success(result)
+                commands = [json.loads(line) for line in (self.root / 'commands.jsonl').read_text().splitlines()]
+                api_calls = [c for c in commands if c[0] == 'curl' and any('api.github.com' in a for a in c)]
+                self.assertTrue(api_calls)
+                self.assertIn('-K', api_calls[0])
+                self.assertIn('Authorization: Bearer ghp_test_token_123', (self.root / 'curl-config').read_text())
+                self.assertFalse(any('ghp_test_token_123' in a for c in commands for a in c))
+                dl_calls = [c for c in commands if c[0] == 'curl' and any(asset_url == a for a in c)]
+                self.assertTrue(dl_calls, commands)
+                self.assertFalse(any('servarr.com' in a for c in commands for a in c))
+
+    def test_verify_download_sha256_uses_github_token_and_rejects_mismatched_digest(self):
+        payload = self.file('tmp/sample.tar.gz', 'fixture-tarball-payload')
+        digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+        curl_mock = self.root / 'bin/curl'
+        curl_mock.write_text('''#!/usr/bin/python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['TEST_ROOT'])
+args = sys.argv[1:]
+with (root / 'api-calls.jsonl').open('a') as fh:
+    fh.write(json.dumps(args) + '\\n')
+(root / 'curl-config').write_text(sys.stdin.read() if '-K' in args else '')
+print(os.environ['MOCK_RELEASE_JSON'])
+''')
+        curl_mock.chmod(0o755)
+        common_sh = self.root / 'opt/AetherFlow/packages/common.sh'
+        url = 'https://github.com/Radarr/Radarr/releases/download/v7.0.3.10918/Radarr.master.7.0.3.10918.linux-core-x64.tar.gz'
+        good_json = json.dumps({'assets': [{'name': 'Radarr.master.7.0.3.10918.linux-core-x64.tar.gz', 'browser_download_url': url, 'digest': f'sha256:{digest}'}]})
+        bad_json = json.dumps({'assets': [{'name': 'Radarr.master.7.0.3.10918.linux-core-x64.tar.gz', 'browser_download_url': url, 'digest': 'sha256:' + ('0' * 64)}]})
+        ok = subprocess.run(
+            ['bash', '-c', f'source "{common_sh}"; verify_download_sha256 "{payload}" radarr "{url}"'],
+            env={**os.environ, 'PATH': f'{self.root}/bin:{os.environ["PATH"]}', 'TEST_ROOT': str(self.root),
+                 'LOGFILE': str(self.root / 'var/log/aetherflow/test.log'),
+                 'AF_GITHUB_TOKEN': 'tok-abc', 'MOCK_RELEASE_JSON': good_json},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        calls = [json.loads(line) for line in (self.root / 'api-calls.jsonl').read_text().splitlines()]
+        self.assertIn('-K', calls[0])
+        self.assertFalse(any('tok-abc' in a for c in calls for a in c))
+        self.assertIn('Authorization: Bearer tok-abc', (self.root / 'curl-config').read_text())
+
+        bad = subprocess.run(
+            ['bash', '-c', f'source "{common_sh}"; verify_download_sha256 "{payload}" radarr "{url}"'],
+            env={**os.environ, 'PATH': f'{self.root}/bin:{os.environ["PATH"]}', 'TEST_ROOT': str(self.root),
+                 'LOGFILE': str(self.root / 'var/log/aetherflow/test.log'),
+                 'AF_GITHUB_TOKEN': 'tok-abc', 'MOCK_RELEASE_JSON': bad_json},
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(bad.returncode, 0)
+
+    def test_adguardhome_dns_handoff_and_failed_probe_rollback(self):
+        self.prepare('adguardhome')
+        self.file('etc/systemd/resolved.conf', '[Resolve]\n')
+        stub_dir = self.root / 'run/systemd/resolve'
+        stub_dir.mkdir(parents=True, exist_ok=True)
+        (stub_dir / 'stub-resolv.conf').write_text('nameserver 127.0.0.53\n')
+        (stub_dir / 'resolv.conf').write_text('nameserver 1.1.1.1\n')
+        resolv_conf = self.root / 'etc/resolv.conf'
+        resolv_conf.symlink_to('../run/systemd/resolve/stub-resolv.conf')
+
+        failed = self.run_script('adguardhome', MOCK_DNS_EXIT='1')
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue(resolv_conf.is_symlink())
+        self.assertEqual(os.readlink(resolv_conf), '../run/systemd/resolve/stub-resolv.conf')
+        self.assertFalse((self.root / 'etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf').exists())
+        self.assertFalse((self.root / 'etc/aetherflow/dns-backup/adguardhome-resolv.conf.state').exists())
+        self.assertFalse((self.root / 'install/.adguardhome.lock').exists())
+
+        ok = self.run_script('adguardhome', MOCK_DNS_EXIT='0')
+        self.assert_success(ok)
+        self.assertFalse(resolv_conf.is_symlink())
+        self.assertEqual(resolv_conf.read_text(), 'nameserver 127.0.0.1\n')
+        state_file = self.root / 'etc/aetherflow/dns-backup/adguardhome-resolv.conf.state'
+        self.assertTrue(state_file.is_file())
+        self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(state_file.read_text()), {'kind': 'symlink', 'target': '../run/systemd/resolve/stub-resolv.conf'})
 
 
 if __name__ == '__main__':

@@ -41,7 +41,7 @@ pub(super) fn session_artwork_url(
         return None;
     }
     let provider = session.provider.trim().to_ascii_lowercase();
-    if !matches!(provider.as_str(), "jellyfin" | "emby") {
+    if !matches!(provider.as_str(), "jellyfin" | "emby" | "plex") {
         return None;
     }
     let resolved_server_id = if !session.server_id.trim().is_empty() {
@@ -70,7 +70,10 @@ pub(super) fn session_artwork_url(
 
 pub(super) fn has_connected_live_provider(servers: &[ProviderStatus]) -> bool {
     servers.iter().any(|server| {
-        matches!(server.provider.as_str(), "jellyfin" | "emby") && server.status == "connected"
+        matches!(
+            server.provider.trim().to_ascii_lowercase().as_str(),
+            "jellyfin" | "emby" | "plex"
+        ) && server.status == "connected"
     })
 }
 
@@ -952,6 +955,18 @@ mod tests {
         assert_eq!(session_artwork_url(&session, &servers), None);
 
         session.has_artwork = true;
+        session.provider = "plex".into();
+        let plex_servers = vec![ProviderStatus {
+            provider: "plex".into(),
+            server_id: "srv-plex-1".into(),
+            status: "connected".into(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            session_artwork_url(&session, &plex_servers).as_deref(),
+            Some("/api/v1/auth/streaming/artwork/ok-1?provider=plex&serverId=srv-plex-1")
+        );
+
         session.provider = "demo".into();
         assert_eq!(session_artwork_url(&session, &servers), None);
     }
@@ -973,12 +988,18 @@ mod tests {
             status: "connected".into(),
             ..Default::default()
         }];
+        let plex_connected = vec![ProviderStatus {
+            provider: "plex".into(),
+            status: "connected".into(),
+            ..Default::default()
+        }];
 
         assert!(!demo_controls_visible(false, &unconfigured, false));
         assert!(!demo_controls_visible(false, &unconfigured, true));
         assert!(demo_controls_visible(true, &unconfigured, false));
         assert!(!demo_controls_visible(true, &connected, false));
         assert!(!demo_controls_visible(true, &emby_connected, false));
+        assert!(!demo_controls_visible(true, &plex_connected, false));
         assert!(demo_controls_visible(true, &connected, true));
 
         assert!(!demo_action_confirmed("seed", ""));
@@ -1015,6 +1036,10 @@ mod tests {
         );
         assert!(
             demo_submission_block_reason(true, true, false, &emby_connected, false, "seed")
+                .is_some()
+        );
+        assert!(
+            demo_submission_block_reason(true, true, false, &plex_connected, false, "seed")
                 .is_some()
         );
         assert!(

@@ -39,7 +39,6 @@ purge_systemd_unit "emby-server"
 
 report_progress 50 "Purging emby-server package..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq emby-server || af_logged dpkg "--$APT_REMOVE_ACTION" emby-server
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 
 report_progress 80 "Removing Emby binaries, data directories, and user account..."
 safe_rm_rf /opt/emby-server

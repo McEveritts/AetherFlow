@@ -452,6 +452,8 @@ elif command in ('python3', 'python'):
         if failure == 'migration': sys.exit(75)
     elif '-' in arguments:
         program = sys.stdin.read()
+        if 'Local DNS lookup probe failed' in program:
+            sys.exit(0)
         if failure == 'bootstrap-python' and ('urllib.request' in program or 'import requests' in program):
             sys.exit(79)
         if 'urllib.request' not in program and 'import requests' not in program:
@@ -604,6 +606,8 @@ elif command == 'node':
     elif any('thelounge' in entry for entry in arguments) and '-v' in arguments: print(version)
 elif command in ('sudo', 'runuser', 'su'):
     program = sys.stdin.read()
+    if command == 'runuser' and 'psql' in arguments and 'SELECT (SELECT count(*) FROM pg_database' in program:
+        print('0')
     if app == 'seedcross' and 'operator_settings = importlib.import_module' in program:
         assert command == 'su' and arguments[:3] == ['-s', '/bin/bash', 'seedcross']
         sys.exit(subprocess.run(['/usr/bin/python3', '-c', program], cwd=root / 'opt/seedcross').returncode)
@@ -2816,6 +2820,11 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
                         self.assertIn(value, (True, False))
                     elif key == "rpc-whitelist":
                         self.assertIn("127.0.0.1", str(value))
+                    elif key == "rpc-host-whitelist":
+                        self.assertEqual(
+                            set(value.split(",")),
+                            {"transmission.fixture.example", "transmission.aether.local", "localhost", "127.0.0.1"},
+                        )
                     else:
                         self.fail(f"unexpected transmission setting {key}={value!r}")
 
@@ -3737,6 +3746,9 @@ if target.exists():
             "pyload": ("var/lib/pyload/settings/pyload.cfg", ('ip host : "IP address" = 127.0.0.1',)),
             "scrutiny": ("etc/scrutiny/scrutiny.yaml", ('host: "127.0.0.1"',)),
             "paperless-ngx": ("etc/paperless.conf", ("PAPERLESS_BIND_ADDR=127.0.0.1", "PAPERLESS_ALLOWED_HOSTS=localhost,127.0.0.1,[::1]")),
+            "netdata": ("etc/netdata/netdata.conf", ("bind to = 127.0.0.1",)),
+            "autoscan": ("etc/autoscan/config.yml", ("host:\n  - 127.0.0.1",)),
+            "unmanic": ("etc/systemd/system/unmanic.service", ("--address 127.0.0.1",)),
         }
         for app, (relative, settings) in cases.items():
             with self.subTest(app=app), InstallerFixture(app) as fixture:
@@ -3752,7 +3764,7 @@ if target.exists():
                 if unit_policy:
                     unit, listener = unit_policy
                     self.assertIn(listener.format(host="127.0.0.1"), (fixture.root / unit).read_text())
-                if app not in ("adguardhome", "n8n", "flaresolverr"):
+                if app not in ("adguardhome", "n8n", "flaresolverr", "netdata", "unmanic"):
                     operator_settings = [setting.replace("127.0.0.1", "192.0.2.45").replace("=true", "=false").replace("= 0", "= 4") for setting in settings]
                     text = config.read_text()
                     for before, after in zip(settings, operator_settings):
@@ -4433,6 +4445,30 @@ if command == 'systemctl':
             refused = self.shell(fixture, 'mountpoint() { return 0; }; safe_rm_rf "$AF_FIXTURE_ROOT/opt/bazarr"')
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(sentinel.read_text(), 'mounted-data\n')
+
+    def test_transmission_rpc_host_whitelist_and_organizr_least_privilege_permissions(self):
+        with InstallerFixture('transmission') as fixture:
+            result = fixture.run()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            cfg = json.loads((fixture.root / 'var/lib/transmission-daemon/.config/transmission-daemon/settings.json').read_text())
+            self.assertTrue(cfg['rpc-host-whitelist-enabled'])
+            hosts = cfg['rpc-host-whitelist'].split(',')
+            self.assertIn('transmission.aether.local', hosts)
+            self.assertIn('transmission.fixture.example', hosts)
+            self.assertIn('localhost', hosts)
+            self.assertIn('127.0.0.1', hosts)
+
+        with InstallerFixture('organizr') as fixture:
+            cfg = fixture.file('var/www/organizr/api/config/config.php', '<?php\n')
+            db = fixture.file('var/www/organizr/api/db/organizr.db', 'sqlite-fixture')
+            result = fixture.run()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((fixture.root / 'var/www/organizr').stat().st_mode & 0o777, 0o750)
+            self.assertEqual((fixture.root / 'var/www/organizr/index.php').stat().st_mode & 0o777, 0o640)
+            self.assertEqual(cfg.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(cfg.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(db.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(db.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

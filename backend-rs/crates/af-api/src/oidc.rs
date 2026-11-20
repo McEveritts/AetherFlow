@@ -3096,7 +3096,7 @@ fn google_login_location(headers: &HeaderMap, parameter: &str, value: &str) -> S
 
 fn clear_google_cookies(response: &mut Response) {
     for name in ["oauth2_state", "oauth2_return_to"] {
-        let cookie = build_set_cookie(name, "", -1, "Lax", secure_cookie_enabled(), true);
+        let cookie = build_set_cookie(name, "", 0, "Lax", secure_cookie_enabled(), true);
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
@@ -3104,10 +3104,7 @@ fn clear_google_cookies(response: &mut Response) {
 }
 
 fn google_login_error(headers: &HeaderMap, error: &str) -> Response {
-    let mut response =
-        Redirect::temporary(&google_login_location(headers, "error", error)).into_response();
-    clear_google_cookies(&mut response);
-    response
+    Redirect::temporary(&google_login_location(headers, "error", error)).into_response()
 }
 
 pub async fn google_login(Query(q): Query<HashMap<String, String>>) -> Response {
@@ -3178,6 +3175,19 @@ pub async fn google_callback(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    let mut response = complete_google_callback(headers, q).await;
+    clear_google_cookies(&mut response);
+    response
+}
+
+fn valid_google_state(state: &str, cookie_state: &str) -> bool {
+    // google_login generates cryptographic randomness and encodes it as hex.
+    state.len() >= 16
+        && state.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && af_models::constant_time_eq(state.as_bytes(), cookie_state.as_bytes())
+}
+
+async fn complete_google_callback(headers: HeaderMap, q: HashMap<String, String>) -> Response {
     if let Some(err_param) = q.get("error") {
         if !err_param.is_empty() {
             return google_login_error(&headers, err_param);
@@ -3187,7 +3197,7 @@ pub async fn google_callback(
     let code = q.get("code").cloned().unwrap_or_default();
     let state = q.get("state").cloned().unwrap_or_default();
     let cookie_state = extract_cookie(&headers, "oauth2_state").unwrap_or_default();
-    if state.is_empty() || state != cookie_state {
+    if !valid_google_state(&state, &cookie_state) {
         return google_login_error(&headers, "invalid_state");
     }
 
@@ -3454,7 +3464,7 @@ fn complete_google_login(headers: &HeaderMap, info: &serde_json::Value) -> Respo
         Ok(GoogleLoginDecision::SessionIssued(token))
     })();
 
-    let mut response = match outcome {
+    match outcome {
         Ok(GoogleLoginDecision::MfaChallenge(challenge)) => {
             Redirect::temporary(&google_login_location(headers, "mfa", &challenge)).into_response()
         }
@@ -3468,9 +3478,7 @@ fn complete_google_login(headers: &HeaderMap, info: &serde_json::Value) -> Respo
         Ok(GoogleLoginDecision::NotAuthorized) => google_login_error(headers, "not_authorized"),
         Err(e) if e.to_string() == "jwt_failed" => google_login_error(headers, "jwt_failed"),
         Err(_) => google_login_error(headers, "db_error"),
-    };
-    clear_google_cookies(&mut response);
-    response
+    }
 }
 
 #[cfg(test)]
@@ -3525,11 +3533,30 @@ mod hardening_tests {
                 .count(),
             2
         );
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|cookie| {
+                let cookie = cookie.to_str().unwrap();
+                cookie.starts_with("oauth2_state=;") && cookie.contains("Max-Age=0")
+            }));
         let response = google_callback(headers, Query(HashMap::new())).await;
         assert!(response.headers()[header::LOCATION]
             .to_str()
             .unwrap()
             .starts_with("/login?error=invalid_state&return_to="));
+    }
+
+    #[test]
+    fn google_state_requires_sufficient_hex_and_exact_cookie_match() {
+        let state = "257bfead502df61a";
+        assert!(valid_google_state(state, state));
+        for invalid in ["", "abcd", "257bfead502df61", "257bfead502df61g"] {
+            assert!(!valid_google_state(invalid, invalid));
+        }
+        assert!(!valid_google_state(state, "257bfead502df61b"));
+        assert!(!valid_google_state(state, ""));
     }
 
     fn google_database() -> rusqlite::Connection {

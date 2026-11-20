@@ -4,9 +4,11 @@ AetherFlow v4.0.0 implements defense-in-depth across authentication, encryption 
 
 ## Authentication & Perimeter SSO
 
-1. **Mandatory TOTP 2FA**: Enforced for administrator accounts (`af-api::auth`) with hashed recovery codes.
+1. **TOTP and recovery codes**. The API enforces TOTP for enrolled administrator accounts and stores recovery codes as hashes.
 2. **Hardened JWT Sessions**: `HttpOnly`, `Secure` HS256 session cookies (`aetherflow_session`) backed by SQLite `revoked_tokens` and `active_sessions` verification, paired with CSRF token/origin validation on all state-mutating endpoints.
-3. **Perimeter Gateway (True SSO)**: The streaming Subdomain Gateway and `/api/v1/public/auth/verify` validate session tokens, check JWT revocation and session bindings, and inject verified `X-Aetherflow-User` identity headers into downstream applications while stripping untrusted client-supplied headers.
+3. **Perimeter Gateway & External Subdomain Authentication**:
+   - `/api/v1/public/auth/verify` enforces active, unrevoked administrator sessions (validating JWT signature, SQLite token revocation, `sessions_revoked_after`, client fingerprint, and active admin role while rejecting plugin-scoped tokens) and injects verified `X-Aetherflow-User` identity headers into downstream applications while stripping untrusted client-supplied headers.
+   - The Rust gateway requires an active administrator session or rate-limited Basic authentication for protected external applications. Administrators enrolled in TOTP use a verified session. The runner routes uncustomized managed vhosts for McVNC, Scrutiny, Prometheus, FlareSolverr, Threadfin, Unmanic, Netdata, and Autoscan through that gateway when it has a valid loopback address. ruTorrent and protected vhosts that use Apache for authentication retain the `/etc/apache2/AetherFlow/htpasswd` policy. Applications with native logins authenticate upstream.
 4. **Plugin-Scoped RBAC**: Third-party plugins receive bounded tokens (`POST /api/v1/admin/plugins/:id/token` and `0600` rotating `AETHERFLOW_PLUGIN_TOKEN_FILE`) restricted to domain-matched `api_scopes` declared in `plugin.manifest.json`, with `/api/v1/admin/*` and `/api/v1/ingress/*` default-denied.
 
 ---
@@ -25,7 +27,7 @@ AetherFlow v4.0.0 implements defense-in-depth across authentication, encryption 
 Rather than granting the web API unrestricted `sudo` or disabling `ProtectSystem=strict`, AetherFlow splits execution into two systemd units compiled from the same Rust workspace (`backend-rs`):
 
 1. **`aetherflow-api.service` (Unprivileged Web Control Plane — `af-api`)**:
-   - Runs as `User=aetherflow` with `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectControlGroups=yes`, `ProtectKernelTunables=yes`, `RestrictSUIDSGID=yes`, and `MemoryMax=512M`.
+   - Runs as `User=aetherflow` with `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectControlGroups=yes`, `ProtectKernelTunables=yes`, `RestrictSUIDSGID=yes`, `DevicePolicy=closed` (`/dev/dri` and `/dev/nvidia*` device allowlists), `UMask=0027`, and `LimitNOFILE=65535`.
 2. **`aetherflow-runner.service` (Root UNIX Socket Helper — `af-runner`)**:
    - Runs `/opt/AetherFlow/current/aetherflow-api runner` and listens exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`), verifying caller `SO_PEERCRED` and `/proc/<pid>/exe` against trusted control-plane/CLI binaries (blocking plugin processes and scripting interpreters).
    - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (12 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), blueprint/ingress mutations, WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.

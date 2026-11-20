@@ -161,7 +161,110 @@ chown -hRP adguardhome:adguardhome /opt/AdGuardHome
 set_config_file_mode 0600 /opt/AdGuardHome/AdGuardHome.yaml
 af_logged setcap 'cap_net_bind_service=+ep' /opt/AdGuardHome/AdGuardHome || true
 
+AGH_DNS_PRE_SNAPSHOT=""
+AGH_DNS_HANDOFF_NEEDED=false
+rollback_adguardhome_dns() {
+    if [[ -n "${AGH_DNS_PRE_SNAPSHOT:-}" && -d "$AGH_DNS_PRE_SNAPSHOT" ]]; then
+        python3 - "$AGH_DNS_PRE_SNAPSHOT" <<'PYEOF'
+import json, os, pathlib, secrets, shutil, stat, sys
+
+snap = pathlib.Path(sys.argv[1])
+resolv_str = "/etc/resolv.conf"
+backup_dir = pathlib.Path("/etc/aetherflow/dns-backup")
+meta_path = snap / "meta.json"
+if not meta_path.is_file():
+    raise SystemExit(0)
+meta = json.loads(meta_path.read_text(encoding="utf-8"))
+kind = meta.get("resolv_kind")
+rdir = os.path.dirname(resolv_str)
+rname = os.path.basename(resolv_str)
+if kind == "symlink":
+    tmp = os.path.join(rdir, f".{rname}.af-rb.{secrets.token_hex(6)}")
+    os.symlink(meta["resolv_target"], tmp)
+    os.replace(tmp, resolv_str)
+elif kind == "file" and (snap / "resolv.conf").is_file():
+    tmp = os.path.join(rdir, f".{rname}.af-rb.{secrets.token_hex(6)}")
+    mode = int(meta.get("resolv_mode") or 0o644) & 0o644
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        os.fchmod(fd, mode)
+        os.write(fd, (snap / "resolv.conf").read_bytes())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, resolv_str)
+elif kind == "absent":
+    try:
+        os.unlink(resolv_str)
+    except FileNotFoundError:
+        pass
+
+for name in ("adguardhome-resolv.conf.state", "adguardhome-resolv.conf.bak"):
+    dest = backup_dir / name
+    saved = snap / name
+    if saved.is_file():
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(saved, dest)
+        os.chmod(dest, 0o600)
+    else:
+        try:
+            dest.unlink()
+        except FileNotFoundError:
+            pass
+PYEOF
+    fi
+}
+
 if [[ "$DNS_PORT" == "53" ]]; then
+AGH_DNS_PRE_SNAPSHOT="${AF_ARCHIVE_BACKUP}/dns-pre-run"
+mkdir -p -m 0700 "$AGH_DNS_PRE_SNAPSHOT"
+python3 - "$AGH_DNS_PRE_SNAPSHOT" <<'PYEOF'
+import json, os, pathlib, shutil, stat, sys
+
+snap = pathlib.Path(sys.argv[1])
+resolv_str = "/etc/resolv.conf"
+backup_dir = pathlib.Path("/etc/aetherflow/dns-backup")
+meta = {"resolv_kind": "absent"}
+try:
+    st = os.lstat(resolv_str)
+except FileNotFoundError:
+    pass
+else:
+    if stat.S_ISLNK(st.st_mode):
+        meta = {"resolv_kind": "symlink", "resolv_target": os.readlink(resolv_str)}
+    elif stat.S_ISREG(st.st_mode):
+        shutil.copyfile(resolv_str, snap / "resolv.conf")
+        meta = {"resolv_kind": "file", "resolv_mode": stat.S_IMODE(st.st_mode)}
+(snap / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+for name in ("adguardhome-resolv.conf.state", "adguardhome-resolv.conf.bak"):
+    src = backup_dir / name
+    if src.is_file() and not src.is_symlink():
+        shutil.copy2(src, snap / name)
+PYEOF
+AF_ARCHIVE_ROLLBACK_HOOK="rollback_adguardhome_dns"
+af_backup_resolv_conf_state "adguardhome"
+
+AGH_RESOLV_USES_STUB="$(python3 - <<'PYEOF'
+import os, stat
+resolv_str = "/etc/resolv.conf"
+try:
+    st = os.lstat(resolv_str)
+except FileNotFoundError:
+    print("false")
+else:
+    if stat.S_ISLNK(st.st_mode):
+        target = os.readlink(resolv_str)
+        print("true" if "stub-resolv.conf" in target else "false")
+    elif stat.S_ISREG(st.st_mode):
+        with open(resolv_str, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [ln.strip() for ln in fh if ln.strip() and not ln.strip().startswith("#")]
+        ns = [ln.split()[1] for ln in lines if ln.startswith("nameserver ") and len(ln.split()) >= 2]
+        print("true" if ns == ["127.0.0.53"] else "false")
+    else:
+        print("false")
+PYEOF
+)"
+
 AGH_RESOLVED_CHANGED="$(safe_config_python /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf <<'PYEOF'
 import re, sys
 with ManagedConfig(sys.argv[1], create_parents=False) as config:
@@ -177,7 +280,15 @@ PYEOF
 )"
 if [[ "$AGH_RESOLVED_CHANGED" == changed ]]; then
     AF_ARCHIVE_ROLLBACK_RESTART_UNITS+=(systemd-resolved)
+    if [[ "$AGH_RESOLV_USES_STUB" == "true" ]]; then
+        AGH_DNS_HANDOFF_NEEDED=true
+        if [[ -e /run/systemd/resolve/resolv.conf ]]; then
+            ln -sfnT /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        fi
+    fi
     af_logged systemctl restart systemd-resolved
+elif [[ "$AGH_RESOLV_USES_STUB" == "true" && -f /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf ]]; then
+    AGH_DNS_HANDOFF_NEEDED=true
 fi
 fi
 
@@ -211,6 +322,12 @@ af_logged systemctl enable --now adguardhome
 systemctl is-active --quiet adguardhome
 
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
+if [[ "$DNS_PORT" == "53" ]]; then
+    af_verify_local_dns_lookup "$DNS_PORT"
+    if [[ "$AGH_DNS_HANDOFF_NEEDED" == "true" ]]; then
+        af_write_resolv_conf_nameserver "127.0.0.1" "/etc/resolv.conf"
+    fi
+fi
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

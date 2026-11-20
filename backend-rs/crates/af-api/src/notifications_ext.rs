@@ -2,7 +2,7 @@ use crate::auth::{api_error, generate_recovery_codes, store_recovery_codes, Auth
 use crate::ws::{broadcast_ws_message, extract_client_ip};
 use af_db::PendingAction;
 use axum::extract::{Extension, Path};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::Utc;
 use once_cell::sync::Lazy;
@@ -32,7 +32,7 @@ pub struct CreateRuleReq {
     pub condition_type: String,
     #[serde(default)]
     pub condition_value: String,
-    #[serde(default)]
+    #[serde(default = "default_rule_level")]
     pub level: String,
 }
 
@@ -250,31 +250,53 @@ pub async fn get_pending_action(Path(id): Path<i64>) -> Response {
 // 3–5. Notification Rules CRUD (`/notifications/rules`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn default_rule_level() -> String {
+    "warning".into()
+}
+
+fn normalize_rule_level(level: &str) -> Result<String, &'static str> {
+    let level = level.trim().to_ascii_lowercase();
+    match level.as_str() {
+        "info" | "warning" | "critical" => Ok(level),
+        _ => Err("Invalid level. Allowed levels are info, warning, and critical"),
+    }
+}
+
+fn percentage_threshold(value: &str) -> Result<f64, &'static str> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|threshold| (0.0..=100.0).contains(threshold))
+        .ok_or("condition_value must be a finite percentage between 0 and 100")
+}
+
+fn validate_rule_condition(condition_type: &str, value: &str) -> Result<(), &'static str> {
+    match condition_type {
+        "disk_usage" | "cpu_usage" | "memory_usage" => percentage_threshold(value).map(|_| ()),
+        // This condition identifies a service by name.
+        "service_down" if !value.is_empty() && value.len() <= 128 => Ok(()),
+        "service_down" => Err("condition_value must identify a service"),
+        _ => Err("Invalid condition_type. Allowed types are disk_usage, cpu_usage, memory_usage, and service_down"),
+    }
+}
+
+fn rule_validation_error(message: &str) -> Response {
+    api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", message)
+}
+
 pub async fn create_notification_rule(Json(req): Json<CreateRuleReq>) -> Response {
-    if req.name.trim().is_empty()
-        || req.condition_type.trim().is_empty()
-        || req.condition_value.trim().is_empty()
-    {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "name, condition_type, and condition_value are required",
-        );
+    if req.name.trim().is_empty() || req.name.trim().len() > 128 {
+        return rule_validation_error("Rule name must be between 1 and 128 characters");
     }
-
-    let valid_types = ["disk_usage", "cpu_usage", "memory_usage", "service_down"];
-    if !valid_types.contains(&req.condition_type.as_str()) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Invalid condition_type. Allowed: disk_usage, cpu_usage, memory_usage, service_down",
-        );
+    let condition_type = req.condition_type.trim();
+    let value = req.condition_value.trim();
+    if let Err(message) = validate_rule_condition(condition_type, value) {
+        return rule_validation_error(message);
     }
-
-    let level = if req.level.trim().is_empty() {
-        "warning".to_string()
-    } else {
-        req.level.trim().to_string()
+    let level = match normalize_rule_level(&req.level) {
+        Ok(level) => level,
+        Err(message) => return rule_validation_error(message),
     };
 
     let Ok(conn) = af_db::get_conn() else {
@@ -288,7 +310,7 @@ pub async fn create_notification_rule(Json(req): Json<CreateRuleReq>) -> Respons
     if conn
         .execute(
             "INSERT INTO notification_rules (name, condition_type, condition_value, level) VALUES (?1, ?2, ?3, ?4)",
-            params![req.name.trim(), req.condition_type, req.condition_value.trim(), level],
+            params![req.name.trim(), condition_type, value, level],
         )
         .is_err()
     {
@@ -329,42 +351,20 @@ pub async fn update_notification_rule(
         bind_params.push(Box::new(trimmed.to_string()));
         set_clauses.push(format!("name = ?{}", bind_params.len()));
     }
-    if let Some(ref ct) = req.condition_type {
-        let trimmed = ct.trim();
-        let valid_types = ["disk_usage", "cpu_usage", "memory_usage", "service_down"];
-        if !valid_types.contains(&trimmed) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                "Invalid condition_type. Allowed: disk_usage, cpu_usage, memory_usage, service_down",
-            );
-        }
-        bind_params.push(Box::new(trimmed.to_string()));
+    if let Some(ref condition_type) = req.condition_type {
+        bind_params.push(Box::new(condition_type.trim().to_string()));
         set_clauses.push(format!("condition_type = ?{}", bind_params.len()));
     }
-    if let Some(ref cv) = req.condition_value {
-        let trimmed = cv.trim();
-        if trimmed.is_empty() || trimmed.len() > 128 {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                "condition_value must be non-empty",
-            );
-        }
-        bind_params.push(Box::new(trimmed.to_string()));
+    if let Some(ref value) = req.condition_value {
+        bind_params.push(Box::new(value.trim().to_string()));
         set_clauses.push(format!("condition_value = ?{}", bind_params.len()));
     }
-    if let Some(ref lvl) = req.level {
-        let trimmed = lvl.trim();
-        let valid_levels = ["info", "warning", "critical", "error"];
-        if !valid_levels.contains(&trimmed) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                "Invalid level. Allowed: info, warning, critical, error",
-            );
-        }
-        bind_params.push(Box::new(trimmed.to_string()));
+    if let Some(ref level) = req.level {
+        let level = match normalize_rule_level(level) {
+            Ok(level) => level,
+            Err(message) => return rule_validation_error(message),
+        };
+        bind_params.push(Box::new(level));
         set_clauses.push(format!("level = ?{}", bind_params.len()));
     }
     if let Some(enabled) = req.enabled {
@@ -380,13 +380,39 @@ pub async fn update_notification_rule(
         );
     }
 
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to update rule",
-        );
+    let Ok(mut conn) = af_db::get_conn() else {
+        return rule_update_failed();
     };
+    let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        return rule_update_failed();
+    };
+    if req.condition_type.is_some() || req.condition_value.is_some() {
+        let current = tx.query_row(
+            "SELECT condition_type, condition_value FROM notification_rules WHERE id = ?1",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (current_type, current_value) = match current {
+            Ok(condition) => condition,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Rule not found");
+            }
+            Err(_) => return rule_update_failed(),
+        };
+        let condition_type = req
+            .condition_type
+            .as_deref()
+            .unwrap_or(&current_type)
+            .trim();
+        let value = req
+            .condition_value
+            .as_deref()
+            .unwrap_or(&current_value)
+            .trim();
+        if let Err(message) = validate_rule_condition(condition_type, value) {
+            return rule_validation_error(message);
+        }
+    }
 
     bind_params.push(Box::new(id));
     let query = format!(
@@ -396,15 +422,21 @@ pub async fn update_notification_rule(
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = bind_params.iter().map(|b| b.as_ref()).collect();
-    match conn.execute(&query, param_refs.as_slice()) {
+    match tx.execute(&query, param_refs.as_slice()) {
         Ok(0) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Rule not found"),
-        Ok(_) => Json(serde_json::json!({ "message": "Rule updated" })).into_response(),
-        Err(_) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to update rule",
-        ),
+        Ok(_) if tx.commit().is_ok() => {
+            Json(serde_json::json!({ "message": "Rule updated" })).into_response()
+        }
+        _ => rule_update_failed(),
     }
+}
+
+fn rule_update_failed() -> Response {
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+        "Failed to update rule",
+    )
 }
 
 pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {
@@ -431,6 +463,33 @@ pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {
 // 6–8. Notification Channels CRUD & Test (`/notifications/channels`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+const WEBHOOK_HEADER_FIELDS: [&str; 2] = ["headers", "custom_headers"];
+
+fn parse_custom_webhook_header(
+    name: &str,
+    value: &serde_json::Value,
+) -> Option<(HeaderName, HeaderValue)> {
+    let name = HeaderName::from_bytes(name.trim().as_bytes()).ok()?;
+    if matches!(
+        name.as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "upgrade"
+            | "te"
+            | "trailer"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "proxy-connection"
+    ) {
+        return None;
+    }
+    let value = HeaderValue::from_str(value.as_str()?.trim()).ok()?;
+    Some((name, value))
+}
+
 fn validate_notification_channel_config(
     channel_type: &str,
     cfg: &serde_json::Value,
@@ -438,6 +497,19 @@ fn validate_notification_channel_config(
     let Some(obj) = cfg.as_object() else {
         return Err("Channel config must be a JSON object".to_string());
     };
+    for field in WEBHOOK_HEADER_FIELDS {
+        if let Some(value) = obj.get(field) {
+            let headers = value
+                .as_object()
+                .ok_or("Custom webhook headers must be an object")?;
+            if headers
+                .iter()
+                .any(|(name, value)| parse_custom_webhook_header(name, value).is_none())
+            {
+                return Err("Custom webhook header is invalid or forbidden".into());
+            }
+        }
+    }
     let url_str = obj
         .get("url")
         .or_else(|| obj.get("webhook_url"))
@@ -515,7 +587,7 @@ pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> R
     };
 
     if let Err(msg) = validate_notification_channel_config(&req.channel_type, &parsed_cfg) {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", &msg);
+        return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", &msg);
     }
 
     let (encrypted_cfg, _) =
@@ -565,7 +637,7 @@ pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> R
 }
 
 pub async fn test_notification_channel(Path(id): Path<i64>) -> Response {
-    let channel_opt = af_db::get_conn().ok().and_then(|conn| {
+    let channel_opt = af_db::get_read_conn().ok().and_then(|conn| {
         conn.query_row(
             "SELECT id, name, type, config, enabled, COALESCE(CAST(created_at AS TEXT), '') \
              FROM notification_channels WHERE id = ?1",
@@ -1046,16 +1118,11 @@ pub async fn dispatch_to_channel(
         }
     };
     let mut post_req = client.post(target).json(&payload);
-    for hdr_map_key in ["headers", "custom_headers"] {
-        if let Some(hdrs) = cfg.get(hdr_map_key).and_then(|v| v.as_object()) {
-            for (k, v) in hdrs {
-                if let Some(val_str) = v.as_str() {
-                    if let (Ok(hn), Ok(hv)) = (
-                        reqwest::header::HeaderName::from_bytes(k.trim().as_bytes()),
-                        reqwest::header::HeaderValue::from_str(val_str.trim()),
-                    ) {
-                        post_req = post_req.header(hn, hv);
-                    }
+    for field in WEBHOOK_HEADER_FIELDS {
+        if let Some(headers) = cfg.get(field).and_then(|value| value.as_object()) {
+            for (name, value) in headers {
+                if let Some((name, value)) = parse_custom_webhook_header(name, value) {
+                    post_req = post_req.header(name, value);
                 }
             }
         }
@@ -1110,7 +1177,7 @@ fn broadcast_triggered_notification(notification: &af_services::Notification) {
 
 async fn evaluate_active_rules_once() {
     let (rules, channels) = {
-        let Ok(conn) = af_db::get_conn() else {
+        let Ok(conn) = af_db::get_read_conn() else {
             return;
         };
 
@@ -1190,7 +1257,9 @@ async fn evaluate_active_rules_once() {
 
         match rule.condition_type.as_str() {
             "disk_usage" => {
-                let threshold = rule.condition_value.trim().parse::<f64>().unwrap_or(0.0);
+                let Ok(threshold) = percentage_threshold(&rule.condition_value) else {
+                    continue;
+                };
                 for disk in &metrics.disks {
                     if disk.used_pct >= threshold {
                         triggered = true;
@@ -1203,14 +1272,18 @@ async fn evaluate_active_rules_once() {
                 }
             }
             "cpu_usage" => {
-                let threshold = rule.condition_value.trim().parse::<f64>().unwrap_or(0.0);
+                let Ok(threshold) = percentage_threshold(&rule.condition_value) else {
+                    continue;
+                };
                 if metrics.cpu_usage >= threshold {
                     triggered = true;
                     message = format!("CPU usage is at {:.1}%", metrics.cpu_usage);
                 }
             }
             "memory_usage" => {
-                let threshold = rule.condition_value.trim().parse::<f64>().unwrap_or(0.0);
+                let Ok(threshold) = percentage_threshold(&rule.condition_value) else {
+                    continue;
+                };
                 if let Some(&total) = metrics.memory.get("total") {
                     if total > 0.0 {
                         let used = metrics.memory.get("used").copied().unwrap_or(0.0);
@@ -1306,6 +1379,119 @@ fn service_down_confirmed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn notification_rule_create_and_partial_update_validate_the_resulting_rule() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+
+        for value in ["85%", "> 90", "NaN", "inf", "-1", "101"] {
+            let response = create_notification_rule(Json(CreateRuleReq {
+                name: "Test".into(),
+                condition_type: "disk_usage".into(),
+                condition_value: value.into(),
+                level: "warning".into(),
+            }))
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{value}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(std::str::from_utf8(&body)
+                .unwrap()
+                .contains("VALIDATION_ERROR"));
+        }
+        let response = create_notification_rule(Json(CreateRuleReq {
+            name: "Test".into(),
+            condition_type: "service_down".into(),
+            condition_value: "netdata".into(),
+            level: " CrItIcAl ".into(),
+        }))
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let conn = af_db::get_read_conn().unwrap();
+        let (id, level): (i64, String) = conn
+            .query_row(
+                "SELECT id, level FROM notification_rules WHERE name = 'Test'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(level, "critical");
+        drop(conn);
+
+        let response = update_notification_rule(
+            Path(id),
+            Json(UpdateRuleReq {
+                condition_type: Some("memory_usage".into()),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = update_notification_rule(
+            Path(id),
+            Json(UpdateRuleReq {
+                condition_type: Some("memory_usage".into()),
+                condition_value: Some("100".into()),
+                level: Some("INFO".into()),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = update_notification_rule(
+            Path(id),
+            Json(UpdateRuleReq {
+                level: Some("error".into()),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn forbidden_webhook_headers_are_rejected_and_cannot_be_parsed_for_dispatch() {
+        for name in [
+            "Host",
+            "Content-LENGTH",
+            "Transfer-Encoding",
+            "Connection",
+            "Keep-Alive",
+            "Upgrade",
+            "TE",
+            "Trailer",
+            "Proxy-Authorization",
+            "Proxy-Authenticate",
+            "Proxy-Connection",
+        ] {
+            let value = serde_json::json!("invalid override");
+            assert!(
+                parse_custom_webhook_header(name, &value).is_none(),
+                "{name}"
+            );
+            for field in WEBHOOK_HEADER_FIELDS {
+                let config = serde_json::json!({
+                    "url": "https://example.test/hook",
+                    (field): {(name): value},
+                });
+                assert!(
+                    validate_notification_channel_config("webhook", &config).is_err(),
+                    "{field}.{name}"
+                );
+            }
+        }
+        let config = serde_json::json!({
+            "url": "https://example.test/hook",
+            "headers": {"Authorization": "Bearer test", "X-Event": "alarm"}
+        });
+        assert!(validate_notification_channel_config("webhook", &config).is_ok());
+        assert!(parse_custom_webhook_header("X-Event", &serde_json::json!("alert")).is_some());
+    }
 
     #[test]
     fn service_down_rule_skips_unknown_then_resumes_on_known_state() {

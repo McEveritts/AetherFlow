@@ -58,7 +58,7 @@ report_progress 35 "Downloading Radarr (${RADARR_ARCH})..."
 RADARR_VERSION="$(github_latest_tag "Radarr/Radarr" "5.16.3.9541")"
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/radarr-XXXXXX.tar.gz")
-af_logged download_file "https://radarr.servarr.com/v1/update/master/updatefile?version=${RADARR_VERSION#v}&os=linux&runtime=netcore&arch=${RADARR_ARCH}" "$TMP_TAR"
+af_logged download_servarr_archive "Radarr/Radarr" "$RADARR_VERSION" "$RADARR_ARCH" "$TMP_TAR"
 
 report_progress 65 "Extracting Radarr to /opt/Radarr..."
 stage_app_archive "$TMP_TAR" "/opt/Radarr" "Radarr" "/var/lib/radarr" "${PACKAGE_NAME}"
@@ -137,7 +137,7 @@ af_logged systemctl enable --now radarr
 af_logged systemctl restart radarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
-seed_servarr_master_user "radarr" ${APP_PORT} "v3"
+seed_servarr_master_user "radarr" "${APP_PORT}" "v3"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

@@ -1121,7 +1121,16 @@ pub async fn test_streaming_server(Json(req): Json<TestStreamingServerReq>) -> R
 // 3. POST /streaming/servers/:provider/sync
 // ──────────────────────────────────────────────────────────────────────────────
 
-pub async fn sync_jellyfin_watch_history() -> anyhow::Result<usize> {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct JellyfinSummarySyncOutcome {
+    pub imported: usize,
+    pub complete: bool,
+    pub has_more: bool,
+    pub remaining_sources: usize,
+    pub next_offset: Option<usize>,
+}
+
+pub async fn sync_jellyfin_watch_history() -> anyhow::Result<JellyfinSummarySyncOutcome> {
     let _flight = SUMMARY_SWEEP_LOCK
         .try_lock()
         .map_err(|_| anyhow::anyhow!("Jellyfin summary sync is already running"))?;
@@ -1130,7 +1139,7 @@ pub async fn sync_jellyfin_watch_history() -> anyhow::Result<usize> {
 
 static SUMMARY_SWEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
+async fn sync_jellyfin_summary_batch() -> anyhow::Result<JellyfinSummarySyncOutcome> {
     let (server_name, server_url, api_key, enabled) = get_stored_jellyfin_config();
     if !enabled || api_key.is_empty() {
         anyhow::bail!("Jellyfin API key is not configured");
@@ -1168,159 +1177,187 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
     let filters = ["IsPlayed", "IsResumable"];
     let mut remaining_pages = 8usize;
 
-    for u in users {
-        if u.id.trim().is_empty() {
-            continue;
-        }
-        let encoded_uid = urlencoding::encode(u.id.trim());
-        for filter in filters {
-            let checkpoint_source = format!("summary:{}:{filter}", u.id);
-            let completed = af_db::get_conn()?.query_row("SELECT checkpoint='-1' FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source=?2", params![server_id, checkpoint_source], |row| row.get::<_, bool>(0)).unwrap_or(false);
-            if completed {
+    let mut pending_sources: Vec<(JellyfinUserRaw, &'static str, String)> = Vec::new();
+    {
+        let conn = af_db::get_conn()?;
+        for u in users {
+            if u.id.trim().is_empty() {
                 continue;
             }
-            let mut start_index = af_db::get_conn()?.query_row("SELECT checkpoint FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source=?2", params![server_id, checkpoint_source], |row| row.get::<_, String>(0)).ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
-            loop {
-                if remaining_pages == 0 {
-                    return Ok(imported);
+            for filter in filters {
+                let checkpoint_source = format!("summary:{}:{filter}", u.id);
+                let completed = conn
+                    .query_row(
+                        "SELECT checkpoint='-1' FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source=?2",
+                        params![server_id, checkpoint_source],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false);
+                if !completed {
+                    pending_sources.push((u.clone(), filter, checkpoint_source));
                 }
-                remaining_pages -= 1;
-                let (_, current_url, current_key, current_enabled) = get_stored_jellyfin_config();
-                if !current_enabled || current_url != server_url || current_key != api_key {
-                    anyhow::bail!("Summary source changed or disabled");
-                }
-                let items_url = format!(
-                    "{}/Users/{}/Items?Recursive=true&Filters={}&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=DatePlayed&SortOrder=Descending&Limit={}&StartIndex={}",
-                    clean_url, encoded_uid, filter, page_size, start_index
-                );
-                let (items_body, i_code, _) = do_jellyfin_request(
-                    reqwest::Method::GET,
-                    &items_url,
-                    &api_key,
-                    None,
-                    Duration::from_secs(15),
-                    MAX_UPSTREAM_PAYLOAD_SIZE,
-                )
-                .await?;
+            }
+        }
+    }
 
-                if i_code != StatusCode::OK {
-                    anyhow::bail!("Jellyfin history request returned HTTP {}", i_code.as_u16());
-                }
+    let total_pending = pending_sources.len();
+    for (idx, (u, filter, checkpoint_source)) in pending_sources.into_iter().enumerate() {
+        let encoded_uid = urlencoding::encode(u.id.trim());
+        let mut start_index = af_db::get_conn()?
+            .query_row(
+                "SELECT checkpoint FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source=?2",
+                params![server_id, checkpoint_source],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        loop {
+            if remaining_pages == 0 {
+                let remaining_sources = total_pending.saturating_sub(idx);
+                return Ok(JellyfinSummarySyncOutcome {
+                    imported,
+                    complete: false,
+                    has_more: true,
+                    remaining_sources,
+                    next_offset: Some(start_index),
+                });
+            }
+            remaining_pages -= 1;
+            let (_, current_url, current_key, current_enabled) = get_stored_jellyfin_config();
+            if !current_enabled || current_url != server_url || current_key != api_key {
+                anyhow::bail!("Summary source changed or disabled");
+            }
+            let items_url = format!(
+                "{}/Users/{}/Items?Recursive=true&Filters={}&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=SortName,Id&SortOrder=Ascending&Limit={}&StartIndex={}",
+                clean_url, encoded_uid, filter, page_size, start_index
+            );
+            let (items_body, i_code, _) = do_jellyfin_request(
+                reqwest::Method::GET,
+                &items_url,
+                &api_key,
+                None,
+                Duration::from_secs(15),
+                MAX_UPSTREAM_PAYLOAD_SIZE,
+            )
+            .await?;
 
-                let payload = serde_json::from_slice::<JellyfinItemsEnvelope>(&items_body)?;
-                if payload.items.is_empty() {
-                    af_db::get_conn()?.execute("INSERT INTO streaming_import_checkpoints(provider,server_id,source,checkpoint,updated_at) VALUES('jellyfin',?1,?2,'-1',CURRENT_TIMESTAMP) ON CONFLICT(provider,server_id,source) DO UPDATE SET checkpoint='-1',updated_at=CURRENT_TIMESTAMP", params![server_id, checkpoint_source])?;
-                    break;
-                }
+            if i_code != StatusCode::OK {
+                anyhow::bail!("Jellyfin history request returned HTTP {}", i_code.as_u16());
+            }
 
-                let batch_len = payload.items.len();
-                {
-                    let mut conn = af_db::get_conn()?;
-                    let tx =
-                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                    for item in payload.items {
-                        let dur_secs = (item.run_time_ticks / JELLYFIN_TICKS_PER_SECOND).max(0);
-                        let mut v_codec = String::new();
-                        let mut a_codec = String::new();
-                        let mut a_ch = 0i32;
-                        let mut w = item.width.max(0);
-                        let mut h = item.height.max(0);
-                        let mut stream_bitrate = 0i64;
+            let payload = serde_json::from_slice::<JellyfinItemsEnvelope>(&items_body)?;
+            if payload.items.is_empty() {
+                af_db::get_conn()?.execute("INSERT INTO streaming_import_checkpoints(provider,server_id,source,checkpoint,updated_at) VALUES('jellyfin',?1,?2,'-1',CURRENT_TIMESTAMP) ON CONFLICT(provider,server_id,source) DO UPDATE SET checkpoint='-1',updated_at=CURRENT_TIMESTAMP", params![server_id, checkpoint_source])?;
+                break;
+            }
 
-                        for ms in &item.media_streams {
-                            if ms.stream_type == "Video" {
-                                if v_codec.is_empty() && !ms.codec.is_empty() {
-                                    v_codec = ms.codec.to_uppercase();
-                                }
-                                if ms.width > 0 {
-                                    w = ms.width;
-                                }
-                                if ms.height > 0 {
-                                    h = ms.height;
-                                }
-                                if ms.bit_rate > 0 {
-                                    stream_bitrate += ms.bit_rate;
-                                }
-                            } else if ms.stream_type == "Audio" {
-                                if a_codec.is_empty() && !ms.codec.is_empty() {
-                                    a_codec = ms.codec.to_uppercase();
-                                }
-                                if a_ch <= 0 && ms.channels > 0 {
-                                    a_ch = ms.channels;
-                                }
-                                if ms.bit_rate > 0 {
-                                    stream_bitrate += ms.bit_rate;
-                                }
+            let batch_len = payload.items.len();
+            {
+                let mut conn = af_db::get_conn()?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                for item in payload.items {
+                    let dur_secs = (item.run_time_ticks / JELLYFIN_TICKS_PER_SECOND).max(0);
+                    let mut v_codec = String::new();
+                    let mut a_codec = String::new();
+                    let mut a_ch = 0i32;
+                    let mut w = item.width.max(0);
+                    let mut h = item.height.max(0);
+                    let mut stream_bitrate = 0i64;
+
+                    for ms in &item.media_streams {
+                        if ms.stream_type == "Video" {
+                            if v_codec.is_empty() && !ms.codec.is_empty() {
+                                v_codec = ms.codec.to_uppercase();
+                            }
+                            if ms.width > 0 {
+                                w = ms.width;
+                            }
+                            if ms.height > 0 {
+                                h = ms.height;
+                            }
+                            if ms.bit_rate > 0 {
+                                stream_bitrate += ms.bit_rate;
+                            }
+                        } else if ms.stream_type == "Audio" {
+                            if a_codec.is_empty() && !ms.codec.is_empty() {
+                                a_codec = ms.codec.to_uppercase();
+                            }
+                            if a_ch <= 0 && ms.channels > 0 {
+                                a_ch = ms.channels;
+                            }
+                            if ms.bit_rate > 0 {
+                                stream_bitrate += ms.bit_rate;
                             }
                         }
+                    }
 
-                        let mut bitrate = item.bitrate.max(0);
-                        if bitrate <= 0 {
-                            bitrate = stream_bitrate.max(0);
-                        }
+                    let mut bitrate = item.bitrate.max(0);
+                    if bitrate <= 0 {
+                        bitrate = stream_bitrate.max(0);
+                    }
 
-                        let mut watched_secs = 0i64;
-                        let mut completion_pct = 0.0f64;
-                        let mut played_at = String::new();
-                        let mut has_played_date = 0i32;
+                    let mut watched_secs = 0i64;
+                    let mut completion_pct = 0.0f64;
+                    let mut played_at = String::new();
+                    let mut has_played_date = 0i32;
 
-                        if let Some(ref ud) = item.user_data {
-                            if ud.played {
-                                completion_pct = 100.0;
-                                if dur_secs > 0 {
-                                    watched_secs = dur_secs;
-                                }
-                            } else if ud.playback_position_ticks > 0 {
-                                let pos_secs =
-                                    (ud.playback_position_ticks / JELLYFIN_TICKS_PER_SECOND).max(0);
-                                watched_secs = if dur_secs > 0 {
-                                    pos_secs.min(dur_secs)
-                                } else {
-                                    pos_secs
-                                };
-                                if dur_secs > 0 {
-                                    completion_pct = (((watched_secs as f64 / dur_secs as f64)
-                                        * 1000.0)
-                                        .round()
+                    if let Some(ref ud) = item.user_data {
+                        if ud.played {
+                            completion_pct = 100.0;
+                            if dur_secs > 0 {
+                                watched_secs = dur_secs;
+                            }
+                        } else if ud.playback_position_ticks > 0 {
+                            let pos_secs =
+                                (ud.playback_position_ticks / JELLYFIN_TICKS_PER_SECOND).max(0);
+                            watched_secs = if dur_secs > 0 {
+                                pos_secs.min(dur_secs)
+                            } else {
+                                pos_secs
+                            };
+                            if dur_secs > 0 {
+                                completion_pct =
+                                    (((watched_secs as f64 / dur_secs as f64) * 1000.0).round()
                                         / 10.0)
                                         .min(100.0);
-                                } else if ud.played_percentage > 0.0 {
-                                    completion_pct =
-                                        ((ud.played_percentage * 10.0).round() / 10.0).min(100.0);
-                                }
-                            } else if ud.played_percentage > 0.0 && ud.played_percentage <= 100.0 {
+                            } else if ud.played_percentage > 0.0 {
                                 completion_pct =
                                     ((ud.played_percentage * 10.0).round() / 10.0).min(100.0);
-                                if dur_secs > 0 {
-                                    watched_secs = ((dur_secs as f64) * (completion_pct / 100.0))
-                                        .round()
-                                        as i64;
-                                }
                             }
-
-                            let raw_date = ud.last_played_date.trim();
-                            if !raw_date.is_empty() {
-                                if let Ok(dt) = DateTime::parse_from_rfc3339(raw_date) {
-                                    played_at = dt
-                                        .with_timezone(&Utc)
-                                        .format("%Y-%m-%d %H:%M:%S")
-                                        .to_string();
-                                    has_played_date = 1;
-                                }
+                        } else if ud.played_percentage > 0.0 && ud.played_percentage <= 100.0 {
+                            completion_pct =
+                                ((ud.played_percentage * 10.0).round() / 10.0).min(100.0);
+                            if dur_secs > 0 {
+                                watched_secs =
+                                    ((dur_secs as f64) * (completion_pct / 100.0)).round() as i64;
                             }
                         }
 
-                        // Actual transfer bytes and play method/device/IP are not reported by
-                        // Jellyfin's /Users/{id}/Items endpoint; keep them empty/zero rather
-                        // than fabricating measurements.
-                        let data_used = 0i64;
-                        let session_key = format!(
-                            "jellyfin:summary:{}:{}:{}",
-                            urlencoding::encode(&instance_identity),
-                            urlencoding::encode(&u.id),
-                            urlencoding::encode(&item.id)
-                        );
-                        let rows = tx.execute(
+                        let raw_date = ud.last_played_date.trim();
+                        if !raw_date.is_empty() {
+                            if let Ok(dt) = DateTime::parse_from_rfc3339(raw_date) {
+                                played_at = dt
+                                    .with_timezone(&Utc)
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string();
+                                has_played_date = 1;
+                            }
+                        }
+                    }
+
+                    // Actual transfer bytes and play method/device/IP are not reported by
+                    // Jellyfin's /Users/{id}/Items endpoint; keep them empty/zero rather
+                    // than fabricating measurements.
+                    let data_used = 0i64;
+                    let session_key = format!(
+                        "jellyfin:summary:{}:{}:{}",
+                        urlencoding::encode(&instance_identity),
+                        urlencoding::encode(&u.id),
+                        urlencoding::encode(&item.id)
+                    );
+                    let rows = tx.execute(
                                 r#"
                                 INSERT INTO streaming_history (
                                     session_key, provider, server_name, user_id, user_name,
@@ -1403,34 +1440,39 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
                                     server_id,
                                 ],
                             )?;
-                        if rows > 0 {
-                            imported += 1;
-                        }
+                    if rows > 0 {
+                        imported += 1;
                     }
-                    let stored_key: String = tx.query_row("SELECT api_key FROM streaming_servers WHERE provider='jellyfin' AND enabled=1 AND url=?1 AND server_id=?2", params![server_url, server_id], |row| row.get(0))?;
-                    let current_key = if stored_key.starts_with("enc:v1:") {
-                        af_db::decrypt_key(&stored_key)?
-                    } else {
-                        stored_key
-                    };
-                    if current_key != api_key {
-                        anyhow::bail!("Summary source changed before persistence");
-                    }
-                    tx.execute("INSERT INTO streaming_import_checkpoints(provider,server_id,source,checkpoint,updated_at) VALUES('jellyfin',?1,?2,?3,CURRENT_TIMESTAMP) ON CONFLICT(provider,server_id,source) DO UPDATE SET checkpoint=excluded.checkpoint,updated_at=excluded.updated_at", params![server_id, checkpoint_source, (start_index + batch_len).to_string()])?;
-                    tx.commit()?;
                 }
+                let stored_key: String = tx.query_row("SELECT api_key FROM streaming_servers WHERE provider='jellyfin' AND enabled=1 AND url=?1 AND server_id=?2", params![server_url, server_id], |row| row.get(0))?;
+                let current_key = if stored_key.starts_with("enc:v1:") {
+                    af_db::decrypt_key(&stored_key)?
+                } else {
+                    stored_key
+                };
+                if current_key != api_key {
+                    anyhow::bail!("Summary source changed before persistence");
+                }
+                tx.execute("INSERT INTO streaming_import_checkpoints(provider,server_id,source,checkpoint,updated_at) VALUES('jellyfin',?1,?2,?3,CURRENT_TIMESTAMP) ON CONFLICT(provider,server_id,source) DO UPDATE SET checkpoint=excluded.checkpoint,updated_at=excluded.updated_at", params![server_id, checkpoint_source, (start_index + batch_len).to_string()])?;
+                tx.commit()?;
+            }
 
-                start_index += batch_len;
-                if start_index >= payload.total_record_count || batch_len < page_size {
-                    af_db::get_conn()?.execute("UPDATE streaming_import_checkpoints SET checkpoint='-1',updated_at=CURRENT_TIMESTAMP WHERE provider='jellyfin' AND server_id=?1 AND source=?2", params![server_id, checkpoint_source])?;
-                    break;
-                }
+            start_index += batch_len;
+            if start_index >= payload.total_record_count || batch_len < page_size {
+                af_db::get_conn()?.execute("UPDATE streaming_import_checkpoints SET checkpoint='-1',updated_at=CURRENT_TIMESTAMP WHERE provider='jellyfin' AND server_id=?1 AND source=?2", params![server_id, checkpoint_source])?;
+                break;
             }
         }
     }
 
     af_db::get_conn()?.execute("DELETE FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source LIKE 'summary:%' AND checkpoint='-1'", [&server_id])?;
-    Ok(imported)
+    Ok(JellyfinSummarySyncOutcome {
+        imported,
+        complete: true,
+        has_more: false,
+        remaining_sources: 0,
+        next_offset: None,
+    })
 }
 
 pub async fn sync_streaming_server_history(
@@ -1450,8 +1492,8 @@ pub async fn sync_streaming_server_history(
         );
     }
 
-    let imported = match sync_jellyfin_watch_history().await {
-        Ok(count) => count,
+    let outcome = match sync_jellyfin_watch_history().await {
+        Ok(outcome) => outcome,
         Err(e) => {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -1472,14 +1514,24 @@ pub async fn sync_streaming_server_history(
         "streaming_history_sync",
         "streaming_server",
         "jellyfin",
-        &imported.to_string(),
+        &outcome.imported.to_string(),
         &ip,
         ua,
     );
 
+    let message = if outcome.has_more {
+        "Jellyfin watch history batch synchronized (more items remain; run sync again to continue)"
+    } else {
+        "Jellyfin watch history synchronized"
+    };
+
     Json(serde_json::json!({
-        "message": "Jellyfin watch history synchronized",
-        "imported": imported,
+        "message": message,
+        "imported": outcome.imported,
+        "complete": outcome.complete,
+        "has_more": outcome.has_more,
+        "remaining_sources": outcome.remaining_sources,
+        "next_offset": outcome.next_offset,
     }))
     .into_response()
 }
@@ -5078,7 +5130,7 @@ pub fn query_streaming_analytics(
         ..Default::default()
     };
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         let fallback_days = if resolved_window > 0 {
             resolved_window.min(3650) + 1
         } else {
@@ -5818,7 +5870,7 @@ pub async fn build_streaming_dashboard(
             }
         }
     } else if use_demo {
-        if let Ok(conn) = af_db::get_conn() {
+        let should_seed = if let Ok(conn) = af_db::get_read_conn() {
             let demo_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM streaming_history WHERE provider = 'demo'",
@@ -5826,10 +5878,20 @@ pub async fn build_streaming_dashboard(
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
-            drop(conn);
-            if demo_count == 0 {
-                let _ = seed_streaming_demo_data();
-            }
+            demo_count == 0
+        } else {
+            false
+        };
+        if should_seed {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                tokio::task::spawn_blocking(|| {
+                    if af_db::get_conn().is_ok() {
+                        let _ = seed_streaming_demo_data();
+                    }
+                }),
+            )
+            .await;
         }
         active_sessions = get_synthetic_demo_sessions();
         jf_status.status = "demo".to_string();
@@ -6936,10 +6998,14 @@ pub(crate) mod tests {
             .unwrap();
         }
 
-        let imported = sync_jellyfin_watch_history()
+        let outcome = sync_jellyfin_watch_history()
             .await
             .expect("sync watch history");
-        assert_eq!(imported, 2);
+        assert_eq!(outcome.imported, 2);
+        assert!(outcome.complete);
+        assert!(!outcome.has_more);
+        assert_eq!(outcome.remaining_sources, 0);
+        assert_eq!(outcome.next_offset, None);
 
         let conn = af_db::get_conn().expect("db conn");
         let (
@@ -7105,14 +7171,14 @@ pub(crate) mod tests {
             let conn = af_db::get_conn().unwrap();
             conn.execute("UPDATE streaming_history SET timestamp_certainty = 'unrecorded' WHERE item_id = 'item-known'", []).unwrap();
         }
-        assert_eq!(sync_jellyfin_watch_history().await.unwrap(), 1);
+        assert_eq!(sync_jellyfin_watch_history().await.unwrap().imported, 1);
         {
             let conn = af_db::get_conn().unwrap();
             let certainty: String = conn.query_row("SELECT timestamp_certainty FROM streaming_history WHERE item_id = 'item-known'", [], |row| row.get(0)).unwrap();
             assert_eq!(certainty, "last_played");
             conn.execute("UPDATE streaming_history SET provenance = 'legacy_unverified', item_name = 'Preserved legacy' WHERE item_id = 'item-known'", []).unwrap();
         }
-        assert_eq!(sync_jellyfin_watch_history().await.unwrap(), 0);
+        assert_eq!(sync_jellyfin_watch_history().await.unwrap().imported, 0);
         {
             let conn = af_db::get_conn().unwrap();
             let title: String = conn
@@ -8696,6 +8762,168 @@ pub(crate) mod tests {
         assert_eq!(persisted_prov, "plex");
         assert_eq!(persisted_title, "One Way Out");
         drop(conn);
+
+        server_handle.abort();
+        let _ = std::fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_jellyfin_summary_sync_partial_vs_completed_batches_and_deterministic_sort() {
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_path = init_isolated_streaming_db("jellyfin_summary_sync_paged");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen_sort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_sort_srv = std::sync::Arc::clone(&seen_sort);
+
+        let server_handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let seen_flag = std::sync::Arc::clone(&seen_sort_srv);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let body = if first_line.contains("/System/Info") {
+                        serde_json::json!({
+                            "Id": "jf-paged-srv",
+                            "ServerName": "Paged Jellyfin",
+                            "Version": "10.10.6",
+                            "OperatingSystem": "Linux"
+                        })
+                        .to_string()
+                    } else if first_line.contains("GET /Users ")
+                        || first_line.contains("GET /Users?")
+                    {
+                        serde_json::json!([
+                            { "Id": "u-1", "Name": "alice" },
+                            { "Id": "u-2", "Name": "bob" }
+                        ])
+                        .to_string()
+                    } else if first_line.contains("Filters=IsPlayed")
+                        && first_line.contains("/Users/u-1/Items")
+                    {
+                        if first_line.contains("SortBy=SortName,Id&SortOrder=Ascending") {
+                            seen_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let start_idx: usize = first_line
+                            .split("StartIndex=")
+                            .nth(1)
+                            .and_then(|s| s.split([' ', '&']).next())
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        let total = 950usize; // 10 pages of 100 -> exceeds 8-page batch budget!
+                        if start_idx >= total {
+                            serde_json::json!({ "TotalRecordCount": total, "Items": [] })
+                                .to_string()
+                        } else {
+                            let take = (total - start_idx).min(100);
+                            let items: Vec<serde_json::Value> = (start_idx..start_idx + take)
+                                .map(|i| {
+                                    serde_json::json!({
+                                        "Id": format!("item-{i:04}"),
+                                        "Name": format!("Movie {i:04}"),
+                                        "Type": "Movie",
+                                        "RunTimeTicks": 36_000_000_000i64,
+                                        "UserData": {
+                                            "Played": true,
+                                            "PlayedPercentage": 100.0,
+                                            "LastPlayedDate": "2026-10-20T20:00:00Z"
+                                        }
+                                    })
+                                })
+                                .collect();
+                            serde_json::json!({
+                                "TotalRecordCount": total,
+                                "Items": items
+                            })
+                            .to_string()
+                        }
+                    } else {
+                        serde_json::json!({ "TotalRecordCount": 0, "Items": [] }).to_string()
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            let enc_key = af_db::encrypt_key("paged-sync-token-1234").unwrap_or_default();
+            conn.execute(
+                "INSERT OR REPLACE INTO streaming_servers (provider, name, url, api_key, enabled) VALUES ('jellyfin', 'Paged Jellyfin', ?1, ?2, 1)",
+                params![format!("http://{}", addr), enc_key],
+            )
+            .unwrap();
+        }
+
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            jti: "jti-sync".to_string(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+
+        // First HTTP sync: consumes 8 pages (800 items), returns partial batch with has_more=true
+        let resp1 = sync_streaming_server_history(
+            Extension(admin.clone()),
+            Path("jellyfin".to_string()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp1.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(seen_sort.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(body1["imported"], 800);
+        assert_eq!(body1["complete"], false);
+        assert_eq!(body1["has_more"], true);
+        assert_eq!(body1["remaining_sources"], 4);
+        assert_eq!(body1["next_offset"], 800);
+        assert_eq!(
+            body1["message"],
+            "Jellyfin watch history batch synchronized (more items remain; run sync again to continue)"
+        );
+
+        // Second HTTP sync: finishes remaining 150 items + remaining empty sources, returns complete=true
+        let resp2 = sync_streaming_server_history(
+            Extension(admin),
+            Path("jellyfin".to_string()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body2["imported"], 150);
+        assert_eq!(body2["complete"], true);
+        assert_eq!(body2["has_more"], false);
+        assert_eq!(body2["remaining_sources"], 0);
+        assert!(body2["next_offset"].is_null());
+        assert_eq!(body2["message"], "Jellyfin watch history synchronized");
 
         server_handle.abort();
         let _ = std::fs::remove_dir_all(db_path.parent().unwrap());

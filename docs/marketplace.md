@@ -4,29 +4,30 @@ The AetherMarketplace is your portal to extending the capabilities of your bare-
 
 ## Key Features
 
-- **One-Click Deploy & In-Place Updates**: Automated installation, update checking, and configuration backed by 12 native declarative Rust recipes (`af-runner`) and idempotent `common.sh` installers.
+- **Install & Update**: `af-runner` uses the package's Bash installer by default. Twelve packages also support the [opt-in Rust package engine](v4-native-packages.md).
 - **Hyperspeed Feedback**: Real-time `[PROGRESS:<pct>]` installation telemetry streamed over WebSockets to circular progress indicators in the UI.
-- **Native Orchestration**: Every app runs as a native `systemd` service (`af-<app>.service`) with optional `af-systemd-sandbox` isolation and automatic `<app>.<baseDomain>` subdomain routing.
+- **Native Orchestration**: Packages can use their upstream systemd units, AetherFlow-managed units, or shared services such as Apache. HTTP applications can use the AetherFlow gateway.
 - **Safe Uninstallation & Rollbacks**: Transactional rollback journals and removal scripts that preserve application data by default unless `DELETE_DATA=true` is explicitly requested.
 
 ---
 
 ## Managed Application Library (77 Packages)
 
-AetherFlow manages 77 native services across multiple infrastructure domains.
+AetherFlow manages the following packages. The [catalog](../config/packages.json) supplies package IDs, service names, default ports, and web paths. The [automation metadata](../config/package_automation.json) supplies update sources and managed units.
 
-### Media & Downloaders
-- **Video & IPTV**: Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Tautulli, Overseerr, Jellyseerr, Maintainerr, Requestrr, FileBot, Unmanic.
-- **Experimental YouTube Frontends**: Piped and Invidious. See [native installation requirements and limitations](experimental-youtube.md).
-- **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Readarr *(retired upstream)*, Listenarr, Bazarr, Prowlarr, Notifiarr.
-- **Downloaders**: qBittorrent, Qui, Autobrr, Flood, SeedCross, pyLoad, Deluge, Transmission, Sabnzbd, NZBGet, rTorrent, ruTorrent.
+| Marketplace category | Applications |
+| --- | --- |
+| Media | Plex Media Server, Jellyfin, Emby, Sonarr, Radarr, Lidarr, Readarr (retired upstream), Prowlarr, Bazarr, Overseerr, Ombi, Maintainerr, Tautulli, Jackett, FlareSolverr, Navidrome, Threadfin, Jellyseerr, Unpackerr, Autoscan, Recyclarr, Audiobookshelf, Kavita, Calibre-Web, Dispatcharr, FileBot, Listenarr, Requestrr, Unmanic, Piped, Invidious |
+| Downloaders | qBittorrent, Deluge, Transmission, SABnzbd, NZBGet, Flood, Autobrr, Qui, rTorrent, ruTorrent, pyLoad, SeedCross |
+| Cloud | Nextcloud, Syncthing, File Browser, Rclone, MergerFS, Cloudplow, Paperless-ngx, Duplicati |
+| Network | WireGuard, Tailscale, Pi-hole, AdGuard Home, LibreSpeed, The Lounge, ZNC, Quassel |
+| Security | Fail2ban, Vaultwarden |
+| Monitoring | Grafana, Prometheus, Netdata, Uptime Kuma, Scrutiny |
+| Automation | Home Assistant, n8n |
+| Utilities | Palate, Organizr, Notifiarr, noVNC, KasmVNC, McVNC, XRDP, X2Go |
+| DevOps | Gitea |
 
-### System & Utilities
-- **Observability**: Netdata, Grafana, Prometheus, Uptime Kuma, Scrutiny.
-- **File & Backup Management**: Nextcloud, FileBrowser, Syncthing, Duplicati, Rclone, MergerFS, Cloudplow, Paperless-ngx.
-- **Security & Network**: Vaultwarden, Fail2Ban, WireGuard, Tailscale, Pi-hole, AdGuard Home, The Lounge, ZNC, Quassel.
-- **Core & Remote Desktop**: Gitea, Home Assistant, n8n, Organizr, noVNC, KasmVNC, McVNC, XRDP, X2Go.
-- **Recipes & Nutrition**: Palate, with meal planning, nutrition tracking, and Sage AI.
+Piped and Invidious are experimental and have [additional installation requirements](experimental-youtube.md).
 
 > [!NOTE]
 > The availability of certain applications depends on your host OS and architecture. AetherFlow performs a compatibility check before allowing an installation.
@@ -94,11 +95,8 @@ System-update receipts distinguish **launching** from **running**. A live launch
 
 ## System Integration
 
-When you install an app through AetherMarketplace:
-1. **User Creation**: A dedicated system user (e.g., `af-plex`) is often created.
-2. **Service Unit**: A systemd file is generated at `/etc/systemd/system/af-<appname>.service`.
-3. **Log Rotation**: Logs are automatically handled by `journald`.
+Marketplace install, reinstall, update, and uninstall use the [package API](API.md). The API allocates or reuses the port and submits a job to the privileged runner. Installers may create a dedicated service account and register one or more units. Readiness, lifecycle receipts, and ingress configuration determine when the UI reports the app ready. Install and removal logs appear in System Logs.
 
-> [!TIP]
-> You can manually control any marketplace app from the CLI using standard commands: `sudo systemctl restart af-plex`.
-> Prefer runner-mediated `af` controls while AetherFlow manages lifecycle work; raw administrator `systemctl` commands bypass its admission safeguards.
+**Open App** in Marketplace and Services uses the configured app address. On a managed public HTTPS route for Autoscan, FlareSolverr, McVNC, Netdata, Prometheus, Scrutiny, Threadfin, or Unmanic, an administrator's dashboard session authorizes a one-time launch. The browser exchanges the ticket on the app host for a host-scoped session cookie. Signing out or revoking the dashboard session also invalidates that cookie. ruTorrent continues to use its Apache authentication.
+
+Use the catalog's service name with [runner-mediated CLI controls](rust-admin-cli.md), for example `af service status plexmediaserver`. Packages that share a service, such as Nextcloud and ruTorrent on Apache, also share the effects of restarting that service.

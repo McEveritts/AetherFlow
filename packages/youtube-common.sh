@@ -177,12 +177,7 @@ youtube_asset() {
                 ;;
         esac
     fi
-    local auth_header=()
-    local token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
-    if [[ -n "$token" ]]; then
-        auth_header=(-H "Authorization: Bearer $token")
-    fi
-    metadata="$(curl --fail --silent --show-error --location "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/tags/${tag}" 2>/dev/null || true)"
+    metadata="$(af_github_curl --fail --silent --show-error --location "https://api.github.com/repos/${repo}/releases/tags/${tag}" 2>/dev/null || true)"
     if [[ -n "$metadata" ]]; then
         url="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' <<< "$metadata" 2>/dev/null || true)"
         digest="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest // empty' <<< "$metadata" 2>/dev/null || true)"
@@ -258,16 +253,44 @@ youtube_remove() {
     fi
     purge_systemd_unit "af-${app}" "$@" || return 1
     if [[ "${DELETE_DATA:-false}" == true ]]; then
-        if command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet postgresql.service 2>/dev/null || systemctl is-active --quiet postgresql 2>/dev/null; }; then
-            if ! af_logged runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL'
+        if command -v systemctl >/dev/null 2>&1; then
+            if ! systemctl is-active --quiet postgresql.service 2>/dev/null; then
+                if systemctl list-unit-files postgresql.service >/dev/null 2>&1 || [[ -e /lib/systemd/system/postgresql.service || -e /usr/lib/systemd/system/postgresql.service || -e /etc/systemd/system/postgresql.service ]] || command -v psql >/dev/null 2>&1 || id -u postgres >/dev/null 2>&1; then
+                    if ! af_logged systemctl start postgresql.service; then
+                        print_error "Failed to start PostgreSQL (postgresql.service) for ${app} database purge."
+                        return 1
+                    fi
+                fi
+            fi
+        fi
+        local pg_active=false
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet postgresql.service 2>/dev/null; then
+            pg_active=true
+        fi
+        if [[ "$pg_active" != true ]]; then
+            print_error "PostgreSQL service is not active; refusing ${app} purge while database/role teardown cannot run."
+            return 1
+        fi
+        if ! af_logged runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL'
 SELECT format('DROP DATABASE IF EXISTS %I', :'app') \gexec
 SELECT format('DROP ROLE IF EXISTS %I', :'app') \gexec
 SQL
-            then
-                print_warn "Failed to drop PostgreSQL database/role for ${app}; continuing data cleanup."
-            fi
-        else
-            print_warn "PostgreSQL service is not active; skipping database/role teardown for ${app}."
+        then
+            print_error "Failed to drop PostgreSQL database/role for ${app}."
+            return 1
+        fi
+        local remaining_pg=""
+        if ! remaining_pg="$(runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 -X -q -tA --set="app=$app" <<'SQL'
+SELECT (SELECT count(*) FROM pg_database WHERE datname = :'app') + (SELECT count(*) FROM pg_roles WHERE rolname = :'app');
+SQL
+        )"; then
+            print_error "Failed to verify PostgreSQL database/role removal for ${app}."
+            return 1
+        fi
+        remaining_pg="${remaining_pg//[[:space:]]/}"
+        if [[ "$remaining_pg" != "0" ]]; then
+            print_error "PostgreSQL database or role verification failed for ${app} (remaining=${remaining_pg:-empty})."
+            return 1
         fi
         safe_rm_rf "/opt/${app}" || return 1
         safe_rm_rf "/etc/${app}" || return 1

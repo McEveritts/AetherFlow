@@ -113,6 +113,7 @@ dependencies = [
  "af-models",
  "af-release",
  "af-runner",
+ "bcrypt",
  "chrono",
  "hex",
  "http-body-util",

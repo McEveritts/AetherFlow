@@ -537,7 +537,11 @@ async fn novnc_auth_downgrade() {
     assert!(!xvnc_unit.contains("-SecurityTypes None"));
     assert!(xvnc_unit.contains("-PasswordFile /var/lib/novnc/.vnc/passwd"));
     assert!(xvnc_unit.contains("-SecurityTypes VncAuth,TLSVnc"));
-    assert!(xvnc_unit.contains("ExecStartPost=/bin/sh /var/lib/novnc/.vnc/xstartup"));
+    assert!(!xvnc_unit.contains("ExecStartPost="));
+    let session_unit =
+        fs::read_to_string(root.join("etc/systemd/system/novnc-session.service")).unwrap();
+    assert!(session_unit.contains("ExecStart=/var/lib/novnc/.vnc/xstartup"));
+    assert!(session_unit.contains("DISPLAY=:1"));
 
     match prev_pass {
         Some(v) => env::set_var("MASTER_PASS", v),

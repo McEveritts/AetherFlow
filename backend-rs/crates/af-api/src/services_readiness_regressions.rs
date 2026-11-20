@@ -230,7 +230,7 @@ async fn unavailable_database_is_not_ready_and_has_a_request_deadline() {
         return;
     }
     let _fixture = Fixture::new();
-    let connections: Vec<_> = (0..4).map(|_| af_db::get_read_conn().unwrap()).collect();
+    let connections: Vec<_> = (0..8).map(|_| af_db::get_read_conn().unwrap()).collect();
     let started = Instant::now();
     let response = tokio::time::timeout(Duration::from_secs(3), authenticated_ready())
         .await

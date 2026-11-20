@@ -64,6 +64,7 @@ af_logged systemctl cat netdata.service
 
 report_progress 85 "Starting and enabling netdata.service on port ${APP_PORT}..."
 
+set_config_value "/etc/netdata/netdata.conf" ini "bind to" "${AF_BIND_ADDRESS:-127.0.0.1}" "web"
 set_config_value "/etc/netdata/netdata.conf" ini "default port" "$APP_PORT" "web"
 
 af_logged systemctl daemon-reload

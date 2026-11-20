@@ -34,8 +34,8 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
-validate_config_paths /opt/librespeed/settings.toml /opt/librespeed/.af-directory-check
-validate_config_paths /opt/librespeed/settings.toml
+validate_config_paths /opt/librespeed/settings.toml /opt/librespeed/.af-directory-check /etc/aetherflow/librespeed/settings.toml
+validate_config_paths /opt/librespeed/settings.toml /etc/aetherflow/librespeed/settings.toml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for LibreSpeed..."
 
@@ -117,7 +117,7 @@ else
         LS_VER_CLEAN="${LS_VERSION#v}"
     fi
     if [[ -z "${AF_FIXTURE_VERSION:-}" && "$LS_VER_CLEAN" =~ ^[0-3]\. ]]; then
-        V4_TAG="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/McEveritts/AetherFlow/releases?per_page=20" 2>/dev/null \
+        V4_TAG="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/McEveritts/AetherFlow/releases?per_page=20" 2>/dev/null \
             | sed -n 's/.*"tag_name":[[:space:]]*"\(v\([4-9]\|[1-9][0-9]\{1,\}\)\.[0-9]\{1,\}\.[0-9]\{1,\}[^"]*\)".*/\1/p' | head -n1 || true)"
         if [[ -n "$V4_TAG" ]]; then
             LS_VERSION="$V4_TAG"
@@ -170,7 +170,7 @@ else
         rm -f -- "$TMP_BUNDLE"
     fi
 fi
-stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "/etc/aetherflow/librespeed-proxy-token.conf" "${PACKAGE_NAME}" "." "" "preserve"
+stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "/etc/aetherflow/librespeed-proxy-token.conf" "${PACKAGE_NAME}" "." "/etc/aetherflow/librespeed/settings.toml" "preserve"
 rm -f -- "$TMP_TAR"
 
 if [[ -f /opt/librespeed/speedtest-backend && ! -L /opt/librespeed/speedtest-backend ]]; then
@@ -736,11 +736,13 @@ chown -h root:librespeed /opt/librespeed
 chmod 1770 /opt/librespeed
 chown -hRP root:librespeed /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/assets
 chmod 755 /opt/librespeed/speedtest-backend
-python3 - /opt/librespeed /etc/aetherflow/librespeed-proxy-token.conf <<'PYEOF'
-import grp, os, pwd, re, stat, subprocess, sys
+python3 - /opt/librespeed /etc/aetherflow/librespeed-proxy-token.conf /etc/aetherflow/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+import grp, json, os, pwd, re, stat, subprocess, sys
 
 state_dir = os.path.normpath(sys.argv[1])
 proxy_conf_path = os.path.normpath(sys.argv[2])
+public_settings_path = os.path.normpath(sys.argv[3])
+default_port = int(sys.argv[4])
 o_nofollow = getattr(os, "O_NOFOLLOW", 0)
 o_cloexec = getattr(os, "O_CLOEXEC", 0)
 o_directory = getattr(os, "O_DIRECTORY", 0)
@@ -985,6 +987,78 @@ try:
     except Exception:
         try:
             os.unlink(tmp_snippet)
+        except OSError:
+            pass
+        raise
+
+    pub_bind = _root_str_val(cfg_full_text, cfg_text, "bind_address") or "127.0.0.1"
+    pub_port = default_port
+    pub_tls = False
+    if _tomllib is not None:
+        try:
+            parsed_pub = _tomllib.loads(cfg_full_text)
+            pv = parsed_pub.get("listen_port")
+            if isinstance(pv, int) and not isinstance(pv, bool) and 1 <= pv <= 65535:
+                pub_port = pv
+            tv = parsed_pub.get("enable_tls")
+            if isinstance(tv, bool):
+                pub_tls = tv
+            elif isinstance(tv, str):
+                pub_tls = tv.strip().lower() == "true"
+        except Exception:
+            pass
+    else:
+        for line in cfg_text.splitlines():
+            s = line.split("#", 1)[0].strip()
+            if "=" in s:
+                k, v = [p.strip() for p in s.split("=", 1)]
+                if k == "listen_port" and v.isdecimal() and 1 <= int(v) <= 65535:
+                    pub_port = int(v)
+                elif k == "enable_tls":
+                    pub_tls = v.strip("\"'").strip().lower() == "true"
+    pub_cert = _root_str_val(cfg_full_text, cfg_text, "tls_cert_file")
+
+    public_dir = os.path.dirname(public_settings_path)
+    if not os.path.lexists(public_dir):
+        os.makedirs(public_dir, mode=0o755, exist_ok=True)
+    pub_dir_st = os.lstat(public_dir)
+    if stat.S_ISLNK(pub_dir_st.st_mode) or not stat.S_ISDIR(pub_dir_st.st_mode):
+        raise SystemExit(f"Refusing non-directory or symlinked public LibreSpeed config parent: {public_dir}")
+    os.chmod(public_dir, 0o755)
+    if is_root:
+        os.chown(public_dir, root_uid, root_uid)
+    if os.path.lexists(public_settings_path):
+        pub_ex_st = os.lstat(public_settings_path)
+        if not stat.S_ISREG(pub_ex_st.st_mode):
+            raise SystemExit(f"Refusing symlinked or non-regular public LibreSpeed settings.toml: {public_settings_path}")
+
+    public_body = (
+        "# Public non-secret LibreSpeed listener and TLS metadata (0644 root:root)\n"
+        f"bind_address = {json.dumps(pub_bind)}\n"
+        f"listen_port = {pub_port}\n"
+        f"enable_tls = {'true' if pub_tls else 'false'}\n"
+        f"tls_cert_file = {json.dumps(pub_cert)}\n"
+    ).encode("utf-8")
+    tmp_public = f"{public_settings_path}.tmp.{os.getpid()}"
+    if os.path.lexists(tmp_public):
+        os.unlink(tmp_public)
+    pfd = os.open(
+        tmp_public,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | o_cloexec,
+        0o644,
+    )
+    try:
+        os.fchmod(pfd, 0o644)
+        if is_root:
+            os.fchown(pfd, root_uid, root_uid)
+        with os.fdopen(pfd, "wb") as pfh:
+            pfh.write(public_body)
+            pfh.flush()
+            os.fsync(pfh.fileno())
+        os.replace(tmp_public, public_settings_path)
+    except Exception:
+        try:
+            os.unlink(tmp_public)
         except OSError:
             pass
         raise

@@ -39,7 +39,6 @@ purge_systemd_unit "plexmediaserver"
 
 report_progress 50 "Purging plexmediaserver APT package and repositories..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq plexmediaserver
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 rm -f /etc/apt/sources.list.d/plexmediaserver.list /etc/apt/keyrings/plex.gpg
 
 report_progress 80 "Removing Plex data, caches, and user account..."

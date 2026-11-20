@@ -23,6 +23,7 @@ pub fn MediaflowTab() -> impl IntoView {
     let busy = RwSignal::new(false);
     let syncing = RwSignal::new(None::<String>);
     let stream_requested = RwSignal::new(false);
+    let queue_summary = RwSignal::new(None::<super::contracts::MediaFlowQueueSummary>);
     let sync_results = RwSignal::new(std::collections::BTreeMap::<String, Value>::new());
     let sync = Callback::new(move |id: String| {
         if syncing.with_untracked(Option::is_some) || !context.is_admin() {
@@ -264,22 +265,14 @@ pub fn MediaflowTab() -> impl IntoView {
                     })
                     .collect_view()}
             </div>
-            <ObsCard title="Download and import telemetry">
-                <div class="grid sm:grid-cols-2 gap-4">
+            <ObsCard title="Pipeline service & queue telemetry">
+                <div class="grid sm:grid-cols-3 gap-4">
                     {[
-                        (
-                            &["qbittorrent", "sabnzbd", "nzbget", "transmission", "deluge"][..],
-                            "Active downloads",
-                            &["active_downloads", "activeDownloads"][..],
-                        ),
-                        (
-                            &["sonarr", "radarr", "lidarr"][..],
-                            "Import queue depth",
-                            &["queue_depth", "queueDepth"][..],
-                        ),
+                        ("Installed download clients", DOWNLOAD_CLIENT_IDS),
+                        ("Installed automation apps", AUTOMATION_APP_IDS),
                     ]
                         .into_iter()
-                        .map(|(ids, label, keys)| {
+                        .map(|(label, ids)| {
                             view! {
                                 <div>
                                     <p class="text-sm text-slate-400">
@@ -287,20 +280,19 @@ pub fn MediaflowTab() -> impl IntoView {
                                     </p>
                                     <p class="text-xl font-semibold">
                                         {move || {
-                                            let values = rows
-                                                .get()
-                                                .into_iter()
-                                                .filter(|s| {
-                                                    ids.contains(&text(s, "id").as_str()) && installed(s)
-                                                })
-                                                .filter_map(|s| {
-                                                    keys.iter().find_map(|key| s[*key].as_u64())
-                                                })
-                                                .collect::<Vec<_>>();
-                                            if values.is_empty() {
-                                                tt(context, "Not reported by service telemetry")
+                                            let (active, installed_count) =
+                                                pipeline_service_counts(&rows.get(), ids);
+                                            if installed_count == 0 {
+                                                tt(context, "None installed")
                                             } else {
-                                                values.iter().sum::<u64>().to_string()
+                                                tt_with(
+                                                    context,
+                                                    "{active} active / {installed} installed",
+                                                    &[
+                                                        ("active", &active.to_string()),
+                                                        ("installed", &installed_count.to_string()),
+                                                    ],
+                                                )
                                             }
                                         }}
                                     </p>
@@ -308,6 +300,31 @@ pub fn MediaflowTab() -> impl IntoView {
                             }
                         })
                         .collect_view()}
+                    <div>
+                        <p class="text-sm text-slate-400">
+                            {move || tt(context, "Transcode queue")}
+                        </p>
+                        <p class="text-xl font-semibold">
+                            {move || {
+                                if !context.is_admin() {
+                                    tt(context, "Common.adminRequired")
+                                } else if let Some(summary) = queue_summary.get() {
+                                    tt_with(
+                                        context,
+                                        "{queued} queued · {pending} pending approval · {processing} processing · {saved} saved",
+                                        &[
+                                            ("queued", &summary.queued.to_string()),
+                                            ("pending", &summary.pending.to_string()),
+                                            ("processing", &summary.processing.to_string()),
+                                            ("saved", &bytes(summary.saved_bytes)),
+                                        ],
+                                    )
+                                } else {
+                                    tt(context, "Loading")
+                                }
+                            }}
+                        </p>
+                    </div>
                 </div>
             </ObsCard>
             <Show
@@ -318,14 +335,18 @@ pub fn MediaflowTab() -> impl IntoView {
                     }
                 }
             >
-                <MediaflowQueue busy stream_requested />
+                <MediaflowQueue busy stream_requested queue_summary />
             </Show>
         </section>
     }
 }
 
 #[component]
-fn MediaflowQueue(busy: RwSignal<bool>, stream_requested: RwSignal<bool>) -> impl IntoView {
+fn MediaflowQueue(
+    busy: RwSignal<bool>,
+    stream_requested: RwSignal<bool>,
+    queue_summary: RwSignal<Option<super::contracts::MediaFlowQueueSummary>>,
+) -> impl IntoView {
     let context = app();
     let queue = use_api(Signal::derive(|| {
         "/api/v1/admin/mediaflow/queue".to_string()
@@ -419,6 +440,13 @@ fn MediaflowQueue(busy: RwSignal<bool>, stream_requested: RwSignal<bool>) -> imp
     on_cleanup(move || refresh.set_value(None));
     let rows = Memo::new(move |_| {
         super::contracts::grid_rows::<super::contracts::MediaFlowQueueRecord>(&queue.data.get())
+    });
+    Effect::new(move |_| {
+        if queue.data.with(|d| !d.is_null()) {
+            queue_summary.set(Some(super::contracts::MediaFlowQueueSummary::from_jobs(
+                &rows.get(),
+            )));
+        }
     });
     let candidate = RwSignal::new(None::<(i64, String, Value)>);
     let confirm = RwSignal::new(false);

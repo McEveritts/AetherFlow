@@ -75,9 +75,9 @@ esac
 report_progress 45 "Resolving latest Notifiarr release from GitHub..."
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     _target_clean="${AF_TARGET_VERSION#[vV]}"
-    RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/Notifiarr/notifiarr/releases/tags/v${_target_clean}" 2>/dev/null || curl -fsSL "https://api.github.com/repos/Notifiarr/notifiarr/releases/tags/${_target_clean}" 2>/dev/null || true)"
+    RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Notifiarr/notifiarr/releases/tags/v${_target_clean}" 2>/dev/null || af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Notifiarr/notifiarr/releases/tags/${_target_clean}" 2>/dev/null || true)"
 else
-    RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/Notifiarr/notifiarr/releases/latest 2>/dev/null || true)"
+    RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 https://api.github.com/repos/Notifiarr/notifiarr/releases/latest 2>/dev/null || true)"
 fi
 LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then

@@ -86,8 +86,29 @@ class CodebaseInspector:
         if not os.path.exists(full_path):
             return None
         try:
+            chunks = []
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                return f.read()
+                chunks.append(f.read())
+            if rel_path.endswith(".rs"):
+                sub_dirs = []
+                if os.path.basename(rel_path) == "lib.rs":
+                    src_dir = os.path.dirname(full_path)
+                    for entry in sorted(os.listdir(src_dir)):
+                        cand = os.path.join(src_dir, entry)
+                        if entry != "lib.rs" and entry.endswith(".rs") and os.path.isfile(cand):
+                            with open(cand, "r", encoding="utf-8", errors="replace") as sf:
+                                chunks.append(sf.read())
+                else:
+                    stem_dir = full_path[:-3]
+                    if os.path.isdir(stem_dir):
+                        sub_dirs.append(stem_dir)
+                for sd in sub_dirs:
+                    for root_d, _, files in os.walk(sd):
+                        for fn in sorted(files):
+                            if fn.endswith(".rs"):
+                                with open(os.path.join(root_d, fn), "r", encoding="utf-8", errors="replace") as sf:
+                                    chunks.append(sf.read())
+            return "\n".join(chunks)
         except Exception:
             return None
 

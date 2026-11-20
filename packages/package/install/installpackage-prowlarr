@@ -56,11 +56,9 @@ esac
 
 report_progress 35 "Downloading Prowlarr (${PROWLARR_ARCH})..."
 PROWLARR_VERSION="$(github_latest_tag "Prowlarr/Prowlarr" "1.28.2.4885")"
-PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?version=${PROWLARR_VERSION#v}&os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
-
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/prowlarr-XXXXXX.tar.gz")
-af_logged download_file "$PROWLARR_URL" "$TMP_TAR"
+af_logged download_servarr_archive "Prowlarr/Prowlarr" "$PROWLARR_VERSION" "$PROWLARR_ARCH" "$TMP_TAR"
 
 report_progress 65 "Extracting Prowlarr to /opt/Prowlarr..."
 stage_app_archive "$TMP_TAR" "/opt/Prowlarr" "Prowlarr" "/var/lib/prowlarr" "${PACKAGE_NAME}"
@@ -139,7 +137,7 @@ af_logged systemctl enable --now prowlarr
 af_logged systemctl restart prowlarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
-seed_servarr_master_user "prowlarr" ${APP_PORT} "v1"
+seed_servarr_master_user "prowlarr" "${APP_PORT}" "v1"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

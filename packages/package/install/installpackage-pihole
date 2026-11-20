@@ -49,12 +49,17 @@ RESOLVED_WAS_ACTIVE=0
 PIHOLE_WAS_ACTIVE=0
 if systemctl is-active --quiet pihole-FTL 2>/dev/null; then PIHOLE_WAS_ACTIVE=1; fi
 PRIOR_RESOLV_LINK=""
+PIHOLE_BACKUP_EXISTED=false
+if [[ -e /etc/aetherflow/dns-backup/pihole-resolv.conf.state ]]; then
+    PIHOLE_BACKUP_EXISTED=true
+fi
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then RESOLVED_WAS_ACTIVE=1; fi
 if [[ -L /etc/resolv.conf ]]; then
     PRIOR_RESOLV_LINK="$(readlink /etc/resolv.conf)"
 elif [[ -e /etc/resolv.conf ]]; then
     cp -a -- /etc/resolv.conf "$PIHOLE_BACKUP_DIR/resolv.conf"
 fi
+af_backup_resolv_conf_state "pihole"
 PIHOLE_STATE_PATHS=(/etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf)
 if [[ -d /etc/lighttpd ]]; then
     PIHOLE_STATE_PATHS+=(/etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf)
@@ -83,6 +88,9 @@ rollback_pihole() {
             safe_restore_path_from_backup "$PIHOLE_BACKUP_DIR/resolv.conf" /etc/resolv.conf || restore_failed=true
         else
             rm -f -- /etc/resolv.conf || restore_failed=true
+        fi
+        if [[ "$PIHOLE_BACKUP_EXISTED" != true ]]; then
+            rm -f -- /etc/aetherflow/dns-backup/pihole-resolv.conf.state /etc/aetherflow/dns-backup/pihole-resolv.conf.bak || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$PIHOLE_WAS_ACTIVE" -eq 1 ]]; then
             af_logged systemctl start pihole-FTL || restore_failed=true
@@ -201,6 +209,7 @@ af_logged systemctl daemon-reload
 af_logged systemctl enable --now pihole-FTL
 af_logged systemctl restart pihole-FTL
 systemctl is-active --quiet pihole-FTL
+af_verify_local_dns_lookup 53
 PIHOLE_VERSION="$(pihole-FTL -v | head -n1)"
 queue_app_version /etc/pihole/.af-version "${PIHOLE_VERSION#v}"
 

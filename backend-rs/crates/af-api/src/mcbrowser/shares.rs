@@ -438,27 +438,6 @@ pub fn ensure_shares_schema(conn: &Connection) -> Result<(), McBrowserError> {
 // Cryptographic & Constant-Time Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Constant-time byte comparison that never short-circuits on content mismatch.
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let len_diff = a.len() ^ b.len();
-    let max_len = a.len().max(b.len());
-    let mut diff: u8 = 0;
-    for i in 0..max_len {
-        let byte_a = if i < a.len() {
-            std::hint::black_box(a[i])
-        } else {
-            0
-        };
-        let byte_b = if i < b.len() {
-            std::hint::black_box(b[i])
-        } else {
-            0
-        };
-        diff |= byte_a ^ byte_b;
-    }
-    std::hint::black_box(len_diff) == 0 && std::hint::black_box(diff) == 0
-}
-
 pub fn generate_raw_share_token() -> String {
     let mut bytes = [0u8; SHARE_TOKEN_BYTES];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -503,7 +482,7 @@ pub fn verify_share_password_constant_time(password: &str, stored_hash: &str) ->
     {
         // Perform dummy work to avoid fast-return timing side-channels
         let dummy_pre = prehash_share_password("dummy-invalid-password");
-        let _ = std::hint::black_box(constant_time_eq(
+        let _ = std::hint::black_box(af_models::constant_time_eq(
             dummy_pre.as_bytes(),
             stored_hash.as_bytes(),
         ));
@@ -615,7 +594,7 @@ fn verify_scoped_unlock_token(
     if exp_unix <= now_unix {
         return false;
     }
-    if !constant_time_eq(token_share_id.as_bytes(), share.id.as_bytes()) {
+    if !af_models::constant_time_eq(token_share_id.as_bytes(), share.id.as_bytes()) {
         return false;
     }
 
@@ -634,7 +613,7 @@ fn verify_scoped_unlock_token(
     mac.update(nonce.as_bytes());
     let expected_sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
 
-    if !constant_time_eq(provided_sig.as_bytes(), expected_sig.as_bytes()) {
+    if !af_models::constant_time_eq(provided_sig.as_bytes(), expected_sig.as_bytes()) {
         return false;
     }
 
@@ -642,9 +621,12 @@ fn verify_scoped_unlock_token(
     if let Ok(mut map) = UNLOCK_SESSIONS.lock() {
         if let Some(entry) = map.get(trimmed) {
             if entry.expires_at_unix <= now_unix
-                || !constant_time_eq(entry.share_id.as_bytes(), share.id.as_bytes())
-                || !constant_time_eq(entry.token_hash.as_bytes(), share.token_hash.as_bytes())
-                || !constant_time_eq(entry.pw_digest.as_bytes(), pw_digest.as_bytes())
+                || !af_models::constant_time_eq(entry.share_id.as_bytes(), share.id.as_bytes())
+                || !af_models::constant_time_eq(
+                    entry.token_hash.as_bytes(),
+                    share.token_hash.as_bytes(),
+                )
+                || !af_models::constant_time_eq(entry.pw_digest.as_bytes(), pw_digest.as_bytes())
             {
                 map.remove(trimmed);
                 return false;
@@ -1484,6 +1466,12 @@ pub(crate) fn create_share_at(
             &shared.resolution_paths,
             &shared.resolved_path,
             allow_download,
+        )?;
+        super::policy::authorize_recursive_paths_with_conn(
+            conn,
+            auth_user,
+            super::policy::Permission::Share,
+            roots.iter().map(String::as_str),
         )?;
         let descendants = shared
             .fs

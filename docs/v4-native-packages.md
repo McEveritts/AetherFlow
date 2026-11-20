@@ -2,7 +2,7 @@
 
 ## Overview
 
-`backend-rs/crates/af-runner/src/package_executor.rs` implements the native Rust declarative package execution engine for AetherFlow v4 across 12 built-in recipes (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `novnc`, `x2go`, `prometheus`, `netdata`, `mergerfs`, `rclone`, `syncthing`), detailed below for the initial Backlog #10 targets (`fail2ban`, `quassel`, and `threadfin`).
+The [package executor](../backend-rs/crates/af-runner/src/package_executor.rs) supports 12 [built-in Rust recipes](../backend-rs/crates/af-runner/src/package_executor/declarative_recipes.rs) for `fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `novnc`, `x2go`, `prometheus`, `netdata`, `mergerfs`, `rclone`, and `syncthing`. Set `AETHERFLOW_ENABLE_RUST_PACKAGES=1` in the runner environment to opt in. Bash is the default for all packages, and `AETHERFLOW_FORCE_BASH_PACKAGES=1` takes precedence over the opt-in.
 
 Instead of invoking arbitrary `bash -c` or `sh -c` lifecycle scripts, the declarative engine executes strongly typed, validated `DeclarativeStep` operations with:
 

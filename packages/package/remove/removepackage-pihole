@@ -46,7 +46,13 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -f /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf
 fi
 rm -f /usr/local/bin/pihole /usr/bin/pihole-FTL /etc/dnsmasq.d/01-pihole.conf
-rm -f /etc/systemd/resolved.conf.d/pihole.conf
+PIHOLE_DROPIN_REMOVED=false
+if [[ -e /etc/systemd/resolved.conf.d/pihole.conf || -L /etc/systemd/resolved.conf.d/pihole.conf ]]; then
+    validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf
+    rm -f -- /etc/systemd/resolved.conf.d/pihole.conf
+    PIHOLE_DROPIN_REMOVED=true
+fi
+af_restore_resolv_conf_state "pihole" "$PIHOLE_DROPIN_REMOVED"
 
 report_progress 80 "Removing pihole user and reloading services..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then

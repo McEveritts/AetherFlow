@@ -527,10 +527,14 @@ pub(super) fn PackageCard(
                     {move || {
                         link.get()
                             .map(|url| {
+                                let destination = url.clone();
                                 view! {
                                     <a
                                         class="glass-button px-3 py-2 min-h-11 text-xs inline-flex items-center"
                                         href=url
+                                        on:click=move |event| package.with_untracked(|service| {
+                                            crate::tabs::services::launch_app(context, event, service, &destination);
+                                        })
                                         target="_blank"
                                         rel="noopener noreferrer"
                                     >

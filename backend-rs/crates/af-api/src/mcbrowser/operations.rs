@@ -14,6 +14,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
+#[cfg(test)]
 use flate2::read::GzDecoder;
 use flate2::write::{DeflateEncoder, GzEncoder};
 use flate2::Compression;
@@ -301,7 +302,7 @@ impl ArchiveTicketStore {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn prune_expired_at(&self, now: Instant) -> usize {
         let mut guard = match self.entries.lock() {
             Ok(g) => g,
@@ -311,7 +312,7 @@ impl ArchiveTicketStore {
         guard.len()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn active_len_at(&self, now: Instant) -> usize {
         self.prune_expired_at(now)
     }
@@ -453,18 +454,6 @@ pub enum ChecksumAlgorithm {
     Sha512,
 }
 
-impl ChecksumAlgorithm {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Md5 => "md5",
-            Self::Sha1 => "sha1",
-            Self::Sha256 => "sha256",
-            Self::Sha512 => "sha512",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
     Zip,
@@ -479,7 +468,7 @@ pub enum ArchiveFormat {
 }
 
 impl ArchiveFormat {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const ALL: [ArchiveFormat; 9] = [
         Self::Zip,
         Self::Tar,
@@ -509,7 +498,6 @@ impl ArchiveFormat {
         }
     }
 
-    #[allow(dead_code)]
     pub fn algo_id(self) -> &'static str {
         match self {
             Self::Zip => "zip",
@@ -1666,18 +1654,6 @@ fn open_planned_archive_file(item: &ArchivePlanItem) -> io::Result<ArchiveSource
     })
 }
 
-#[allow(dead_code)]
-pub fn collect_archive_plan_for_user(
-    bfs: &BrowserFs,
-    auth_user: &AuthUser,
-    selected_paths: &[String],
-) -> Result<Vec<ArchivePlanItem>, McBrowserError> {
-    let conn = af_db::get_conn().map_err(|_| {
-        McBrowserError::Internal("Database unavailable for archive authorization".to_string())
-    })?;
-    collect_archive_plan_for_user_with_conn(&conn, bfs, auth_user, selected_paths)
-}
-
 pub fn collect_archive_plan_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -1788,7 +1764,7 @@ pub fn write_archive_to_writer<W: Write>(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn decode_tar_archive_entries<R: Read>(
     format: ArchiveFormat,
     reader: R,
@@ -2375,7 +2351,7 @@ fn execute_put_content_with_loaded_target_conn(
     ))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn execute_put_content_for_pinned_target_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2408,7 +2384,7 @@ fn execute_put_content_for_pinned_target_conn(
     )
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_put_content_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2498,7 +2474,7 @@ fn open_authorized_file_for_put_content_with_conn(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_put_content_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2612,7 +2588,7 @@ fn validate_conflict_destination(
     validate_distinct_non_nested_paths(from_path, to_path, action_verb)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn copy_single_file_new_with_quota(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2664,86 +2640,6 @@ fn copy_single_file_new_with_quota(
             Err(map_fs_io_error(copy_err, "Failed to copy entry"))
         }
     }
-}
-
-#[allow(dead_code)]
-fn copy_single_file_overwrite_with_quota(
-    conn: &rusqlite::Connection,
-    bfs: &BrowserFs,
-    source_path: &str,
-    destination_path: &str,
-    user_id: i64,
-    accounting_complete: &mut bool,
-) -> Result<(), McBrowserError> {
-    let mut source_file = bfs
-        .open_file(source_path)
-        .map_err(|error| map_fs_io_error(error, "Failed to open source file for copy"))?;
-    let source_meta = source_file
-        .metadata()
-        .map_err(|error| map_fs_io_error(error, "Failed to inspect source file for copy"))?;
-    let source_size = source_meta.len();
-
-    let expected_target = bfs.open_file(destination_path).map_err(|error| {
-        map_fs_io_error(
-            error,
-            "Failed to open existing destination file for overwrite",
-        )
-    })?;
-    let target_meta = expected_target.metadata().map_err(|error| {
-        map_fs_io_error(
-            error,
-            "Failed to inspect existing destination file for overwrite",
-        )
-    })?;
-    let old_size = target_meta.len();
-
-    let additional_needed = source_size.saturating_sub(old_size);
-    load_active_quota_conn(conn, user_id, additional_needed)?;
-
-    let mut pending = bfs
-        .begin_replace(destination_path)
-        .map_err(|error| map_fs_io_error(error, "Failed to stage file copy overwrite"))?;
-    let staging_file = pending
-        .file()
-        .map_err(|error| map_fs_io_error(error, "Failed to access staging file for copy"))?;
-    check_fd_free_space(staging_file.as_raw_fd(), source_size.max(1))?;
-
-    let copied_bytes = io::copy(&mut source_file, &mut pending)
-        .map_err(|error| map_fs_io_error(error, "Failed to copy file content"))?;
-    pending
-        .flush()
-        .map_err(|error| map_fs_io_error(error, "Failed to flush copied file content"))?;
-
-    let actual_additional = copied_bytes.saturating_sub(old_size);
-    if actual_additional > 0 {
-        reserve_user_quota_atomic(conn, user_id, actual_additional)?;
-    }
-
-    if let Err(commit_err) = pending.commit_replace(&expected_target) {
-        if actual_additional > 0 {
-            release_user_quota_conn(conn, user_id, actual_additional).map_err(|_| {
-                McBrowserError::AccountingPending(
-                    "Copy was not published; quota cleanup requires reconciliation".to_string(),
-                )
-            })?;
-        }
-        return Err(match commit_err.kind() {
-            ErrorKind::AlreadyExists | ErrorKind::InvalidInput | ErrorKind::NotFound => {
-                McBrowserError::Conflict(
-                    "Destination file changed concurrently during copy overwrite".to_string(),
-                )
-            }
-            _ => map_fs_io_error(commit_err, "Failed to commit file copy overwrite"),
-        });
-    }
-
-    let released_bytes = old_size.saturating_sub(copied_bytes);
-    if released_bytes > 0 {
-        *accounting_complete &= release_user_quota_conn(conn, user_id, released_bytes).is_ok();
-    }
-    super::media::invalidate_thumbnail_cache(user_id, destination_path);
-
-    Ok(())
 }
 
 fn move_single_file_overwrite_with_quota(
@@ -3905,7 +3801,7 @@ fn execute_copy_core_with_accounting_conn(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_copy_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3924,7 +3820,7 @@ pub fn execute_copy_conn(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_copy_with_policy_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3944,7 +3840,7 @@ pub fn execute_copy_with_policy_conn(
     )
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn execute_copy_with_accounting_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3966,7 +3862,7 @@ fn execute_copy_with_accounting_conn(
     )
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_copy_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4007,26 +3903,6 @@ fn execute_copy_for_user_with_accounting_conn(
         user_id,
         accounting_complete,
         Some(auth_user),
-    )
-}
-
-#[allow(dead_code)]
-pub fn execute_rename_with_conn(
-    conn: &rusqlite::Connection,
-    bfs: &BrowserFs,
-    from_path: &str,
-    to_path: &str,
-    conflict_policy: OperationConflictPolicy,
-    user_id: i64,
-) -> Result<String, McBrowserError> {
-    execute_rename_with_accounting_conn(
-        conn,
-        bfs,
-        from_path,
-        to_path,
-        conflict_policy,
-        user_id,
-        &mut true,
     )
 }
 
@@ -4300,7 +4176,7 @@ fn authorize_symlink_target_if_internal(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_rename_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4350,6 +4226,12 @@ fn execute_rename_for_user_with_accounting_conn(
     }
 
     let source_descendants = if src_meta.kind == "directory" {
+        super::policy::authorize_recursive_paths_with_conn(
+            conn,
+            auth_user,
+            super::policy::Permission::Rename,
+            [normalized_from.as_str()],
+        )?;
         let descendants = bfs
             .walk(&normalized_from, MAX_SEARCH_ENTRIES)
             .map_err(|error| {
@@ -4484,7 +4366,6 @@ fn execute_rename_for_user_with_accounting_conn(
     )
 }
 
-#[allow(dead_code)]
 pub(super) async fn execute_rename_request(
     auth_user: AuthUser,
     req: RenameMoveRequest,
@@ -4560,7 +4441,7 @@ pub struct DeleteRecursiveOutcome {
     pub accounting_pending: bool,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn execute_delete_recursive_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4931,6 +4812,12 @@ async fn delete_recursive(
                 .metadata(&normalized_path)
                 .map_err(|e| map_fs_io_error(e, "Failed to inspect entry for deletion"))?;
             if meta.kind == "directory" {
+                super::policy::authorize_recursive_paths_with_conn(
+                    &conn,
+                    &user_for_task,
+                    super::policy::Permission::Delete,
+                    [normalized_path.as_str()],
+                )?;
                 let descendants = bfs
                     .walk(&normalized_path, MAX_SEARCH_ENTRIES)
                     .map_err(|e| map_fs_io_error(e, "Failed to inspect directory for deletion"))?;

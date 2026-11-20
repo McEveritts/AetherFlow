@@ -8,6 +8,30 @@ use af_web_core::draft::FormDraft;
 use leptos::prelude::*;
 use serde_json::json;
 use wasm_bindgen_futures::spawn_local;
+pub(super) fn supported_streaming_provider(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "jellyfin" => Some("jellyfin"),
+        "emby" => Some("emby"),
+        "plex" => Some("plex"),
+        _ => None,
+    }
+}
+
+pub(super) fn streaming_server_save_path(
+    provider: &str,
+    test: bool,
+) -> Result<(String, &'static str), String> {
+    let canonical = supported_streaming_provider(provider).ok_or_else(|| {
+        "Unsupported streaming provider; expected jellyfin, emby, or plex.".to_string()
+    })?;
+    let path = if test {
+        "/api/v1/admin/streaming/servers/test".to_string()
+    } else {
+        format!("/api/v1/admin/streaming/servers/{canonical}")
+    };
+    Ok((path, canonical))
+}
+
 #[component]
 pub(super) fn StreamingServerSettings(
     open: RwSignal<bool>,
@@ -37,12 +61,16 @@ pub(super) fn StreamingServerSettings(
             result.set(Some("A server URL is required.".into()));
             return;
         }
-        let path = if test {
-            body["provider"] = json!(provider.clone());
-            "/api/v1/admin/streaming/servers/test".to_string()
-        } else {
-            format!("/api/v1/admin/streaming/servers/{provider}")
+        let (path, canonical_provider) = match streaming_server_save_path(&provider, test) {
+            Ok(target) => target,
+            Err(message) => {
+                result.set(Some(message));
+                return;
+            }
         };
+        if test {
+            body["provider"] = json!(canonical_provider);
+        }
         busy.set(true);
         spawn_local(async move {
             let response = ApiClient
@@ -169,5 +197,37 @@ pub(super) fn StreamingServerSettings(
                 }}
             </div>
         </Modal>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_save_and_test_accept_jellyfin_emby_and_plex() {
+        for provider in ["jellyfin", "emby", "plex", " Plex "] {
+            let canonical = supported_streaming_provider(provider).expect("supported provider");
+            assert_eq!(
+                streaming_server_save_path(provider, false).unwrap(),
+                (
+                    format!("/api/v1/admin/streaming/servers/{canonical}"),
+                    canonical
+                )
+            );
+            assert_eq!(
+                streaming_server_save_path(provider, true).unwrap(),
+                (
+                    "/api/v1/admin/streaming/servers/test".to_string(),
+                    canonical
+                )
+            );
+        }
+
+        for invalid in ["", "demo", "../evil"] {
+            assert!(supported_streaming_provider(invalid).is_none());
+            assert!(streaming_server_save_path(invalid, false).is_err());
+            assert!(streaming_server_save_path(invalid, true).is_err());
+        }
     }
 }

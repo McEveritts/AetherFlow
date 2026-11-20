@@ -119,7 +119,7 @@ af_logged systemctl enable --now readarr
 af_logged systemctl restart readarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
-seed_servarr_master_user "readarr" ${APP_PORT} "v1"
+seed_servarr_master_user "readarr" "${APP_PORT}" "v1"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

@@ -1342,3 +1342,28 @@ async fn admin_get_user_policy_http_route_enforces_live_db_and_max_size_one_pool
         ]
     );
 }
+
+#[test]
+fn regex_deny_conservatively_blocks_recursive_directory_mutation() {
+    let expression = r"\.secret$";
+    let rules = [PathRule {
+        path: expression.into(),
+        allow: false,
+        regex: true,
+        regexp: Some(RuleExpression {
+            raw: expression.into(),
+        }),
+    }];
+
+    assert!(is_path_allowed_by_rules(&rules, "directory"));
+    assert!(!is_path_allowed_by_rules(
+        &rules,
+        "directory/nested/token.secret"
+    ));
+    for permission in [Permission::Delete, Permission::Rename, Permission::Share] {
+        assert!(matches!(
+            reject_regex_denied_descendants(&rules, permission, "directory"),
+            Err(McBrowserError::Forbidden(_))
+        ));
+    }
+}

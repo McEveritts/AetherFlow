@@ -129,12 +129,19 @@ fn read_config(conn: &Connection, app: &str) -> anyhow::Result<Option<AppIngress
 }
 
 pub fn get_retained_app_ingress_config(app: &str) -> anyhow::Result<Option<AppIngressConfig>> {
-    let conn = crate::get_conn()?;
+    let conn = crate::get_read_conn()?;
     read_retained_config(&conn, app)
 }
 
 fn read_retained_config(conn: &Connection, app: &str) -> anyhow::Result<Option<AppIngressConfig>> {
-    schema(conn)?;
+    let has_retained: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_app_ingress_configs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_retained {
+        return Ok(None);
+    }
     let raw: Option<String> = conn
         .query_row(
             "SELECT config_json FROM retained_app_ingress_configs WHERE app_name=?1",
@@ -382,6 +389,15 @@ pub fn get_reserved_ports_excluding(app: &str) -> anyhow::Result<BTreeSet<i32>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_lookup_accepts_a_database_without_a_retained_ingress_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "query_only", true).unwrap();
+        assert!(read_retained_config(&conn, "maintainerr")
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn shared_callbacks_archive_updates_and_restore_custom_ingress_with_real_schema() {

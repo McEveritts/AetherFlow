@@ -649,6 +649,45 @@ class VerifyProvenanceTests(unittest.TestCase):
                 expected_channel="stable",
             )
 
+    def test_setup_embedded_verifier_matches_verify_provenance_byte_for_byte(self) -> None:
+        setup_src = (REPO_ROOT / "setup" / "AetherFlow-Setup").read_text(encoding="utf-8")
+        verifier_src = VERIFIER_PATH.read_text(encoding="utf-8")
+        main_guard = '\nif __name__ == "__main__":\n    sys.exit(main())\n'
+        self.assertTrue(verifier_src.endswith(main_guard))
+        expected_core = verifier_src[: -len(main_guard)].rstrip("\n")
+
+        py_verifier = setup_src.split("<<'PYEOF'\n", 2)[1].split("\nPYEOF\n", 1)[0]
+        begin_marker = "# === BEGIN SYNCED deploy/verify-provenance.py ===\n"
+        end_marker = "\n# === END SYNCED deploy/verify-provenance.py ===\n"
+        self.assertIn(begin_marker, py_verifier)
+        self.assertIn(end_marker, py_verifier)
+        embedded_core = py_verifier.split(begin_marker, 1)[1].split(end_marker, 1)[0]
+        self.assertEqual(
+            embedded_core,
+            expected_core,
+            "Embedded Sigstore verifier in setup/AetherFlow-Setup drifted from deploy/verify-provenance.py",
+        )
+
+        # Also verify the embedded script passes end-to-end on the real bundle fixture
+        fixture = REPO_ROOT / "tests" / "fixtures" / "sigstore_bundle_nightly_109_1.json"
+        digest = "018a270e2833886b1c59e2f831912c794e2ed66dacf6c2249ab1390fc2d44b26"
+        res = subprocess.run(
+            [
+                "python3",
+                "-",
+                str(fixture),
+                "McEveritts/AetherFlow",
+                digest,
+                "aetherflow-linux-amd64.tar.gz",
+                "v4.0.0-nightly.109.1",
+                "nightly",
+            ],
+            input=py_verifier,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

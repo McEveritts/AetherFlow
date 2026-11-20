@@ -29,7 +29,7 @@ pub async fn get_admin_logs(
     if let Err(response) = crate::auth::require_admin(&user) {
         return *response;
     }
-    crate::intelligence::get_logs(query).await
+    get_logs(query).await
 }
 
 pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {

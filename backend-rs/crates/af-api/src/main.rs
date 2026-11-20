@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod app_launch;
 pub mod auth;
 pub mod embed;
 pub mod intelligence;
@@ -186,6 +187,44 @@ fn main() -> anyhow::Result<()> {
         .block_on(async_main())
 }
 
+#[cfg(target_os = "linux")]
+fn warn_if_mcbrowser_home_root_is_read_only() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(configured) = env::var("AF_MCBROWSER_ROOT") else {
+        return;
+    };
+    let Ok(root) = mcbrowser::resolve_configured_base_root(Some(&configured)) else {
+        return;
+    };
+    if !root.starts_with("/home") {
+        return;
+    }
+    // A root that has not been created yet will reside on its nearest existing
+    // ancestor's filesystem.
+    for ancestor in root
+        .ancestors()
+        .take_while(|path| path.starts_with("/home"))
+    {
+        let Ok(path) = CString::new(ancestor.as_os_str().as_bytes()) else {
+            return;
+        };
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } == 0 {
+            let stats = unsafe { stats.assume_init() };
+            if stats.f_flag & libc::ST_RDONLY != 0 {
+                tracing::warn!(
+                    code = "MCBROWSER_ROOT_READ_ONLY",
+                    root = %root.display(),
+                    "AF_MCBROWSER_ROOT is on a read-only /home mount. Set it to a writable service-owned directory or grant the service write access through its mount sandbox."
+                );
+            }
+            return;
+        }
+    }
+}
+
 async fn async_main() -> anyhow::Result<()> {
     let _ = af_runner::af_release::runtime::runtime_identity();
 
@@ -205,6 +244,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Fail closed if JWT_SECRET is missing or too short when starting the HTTP control plane
     auth::validate_startup_jwt_secret()?;
+    #[cfg(target_os = "linux")]
+    warn_if_mcbrowser_home_root_is_read_only();
 
     let disable_workers = env_flag_enabled("AETHERFLOW_DISABLE_BACKGROUND_WORKERS")
         || env_flag_enabled("AETHERFLOW_DISABLE_WORKERS")

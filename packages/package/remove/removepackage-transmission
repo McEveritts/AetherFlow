@@ -39,7 +39,6 @@ purge_systemd_unit "transmission-daemon" "transmission"
 
 report_progress 50 "Purging Transmission APT packages..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq transmission-daemon transmission-cli transmission-common
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 
 report_progress 80 "Removing Transmission configuration, state directories, and user account..."
 safe_rm_rf /usr/share/transmission

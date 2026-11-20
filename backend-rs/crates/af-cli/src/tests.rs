@@ -844,9 +844,10 @@ fn resumable_provisioning_persists_state_v2_supports_repair_and_overlays_configs
     assert!(state_raw.contains("makedirs\n"));
     assert!(state_raw.contains("harden_perms\n"));
     assert!(root.join("opt/AetherFlow/releases").is_dir());
-    assert!(root
+    assert!(root.join("etc/systemd/system").is_dir());
+    assert!(!root
         .join("etc/systemd/system/aetherflow-api.service.d/10-aetherflow-sandbox.conf")
-        .is_file());
+        .exists());
 
     #[cfg(unix)]
     {
@@ -1356,6 +1357,7 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     assert!(env_content.contains("JWT_SECRET="));
     assert!(env_content.contains("AF_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite"));
     assert!(env_content.contains("AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock"));
+    assert!(!env_content.contains("GIN_MODE="));
 
     // 10. Verify bbr network tuning config exists
     let sysctl_path = root.join("etc/sysctl.d/99-aetherflow-tune.conf");
@@ -2147,4 +2149,76 @@ passwd='legacy-plaintext'\n";
     assert_eq!(decoded.get("ANSIC").map(String::as_str), Some("tab\there"));
     assert_eq!(decoded.get("PLAIN").map(String::as_str), Some("simple"));
     assert!(!decoded.contains_key("passwd"));
+}
+
+#[test]
+fn provision_boot_removes_stale_api_sandbox_dropin_and_provisions_apache_htpasswd() {
+    let tmp = TempTestDir::new("provision-boot-apache");
+    let root = tmp.path().join("rootfs");
+    let dropin_dir = root.join("etc/systemd/system/aetherflow-api.service.d");
+    fs::create_dir_all(&dropin_dir).unwrap();
+    let stale_sandbox = dropin_dir.join("10-aetherflow-sandbox.conf");
+    let stale_sidecar = dropin_dir.join("10-aetherflow-sandbox.conf.aetherflow-sha256");
+    let hardening_dropin = dropin_dir.join("10-aetherflow-hardening.conf");
+    fs::write(&stale_sandbox, b"[Service]\nProtectProc=invisible\n").unwrap();
+    fs::write(&stale_sidecar, b"deadbeef\n").unwrap();
+    fs::write(&hardening_dropin, b"[Service]\nUMask=0027\n").unwrap();
+
+    // Configure /etc/apache2/AetherFlow and seed username + unencrypted .master.creds
+    let apache_af_dir = root.join("etc/apache2/AetherFlow");
+    fs::create_dir_all(&apache_af_dir).unwrap();
+    let var_lib = root.join("var/lib/aetherflow");
+    fs::create_dir_all(&var_lib).unwrap();
+    fs::write(
+        var_lib.join(".master.creds"),
+        br#"{"username":"operator","password":"SuperSecretPassword123!","ha1":"00"}"#,
+    )
+    .unwrap();
+
+    let root_str = root.to_string_lossy().to_string();
+    let transport = MockRunnerTransport::default();
+
+    let boot_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "provision",
+        "run",
+        "boot",
+        "harden_perms",
+        "--no-root-check",
+    ])
+    .unwrap();
+    let boot_env = execute_invocation(&boot_inv, &transport);
+    assert_eq!(boot_env.status, "ok", "{}", boot_env.message);
+
+    assert!(
+        !stale_sandbox.exists(),
+        "boot must remove stale 10-aetherflow-sandbox.conf for aetherflow-api.service"
+    );
+    assert!(
+        !stale_sidecar.exists(),
+        "boot must remove stale 10-aetherflow-sandbox.conf.aetherflow-sha256 sidecar"
+    );
+    assert!(
+        hardening_dropin.is_file(),
+        "boot must preserve 10-aetherflow-hardening.conf"
+    );
+
+    let htpasswd_path = apache_af_dir.join("htpasswd");
+    assert!(
+        htpasswd_path.is_file(),
+        "harden_perms must provision /etc/apache2/AetherFlow/htpasswd when configured"
+    );
+    let htpasswd_raw = fs::read_to_string(&htpasswd_path).unwrap();
+    assert!(
+        htpasswd_raw.starts_with("operator:$2y$"),
+        "expected operator:$2y$ bcrypt entry, got {htpasswd_raw:?}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&htpasswd_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "htpasswd must have 0640 permissions");
+    }
 }

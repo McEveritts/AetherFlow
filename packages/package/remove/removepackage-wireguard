@@ -39,7 +39,6 @@ purge_systemd_unit "wg-quick@wg0"
 
 report_progress 50 "Purging WireGuard APT packages..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq wireguard wireguard-tools
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 
 report_progress 80 "Removing WireGuard keys, configuration, and sysctl rules..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then

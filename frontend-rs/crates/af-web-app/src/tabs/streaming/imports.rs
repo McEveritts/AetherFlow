@@ -202,6 +202,39 @@ fn streaming_sync_path(provider: &str) -> String {
     format!("/api/v1/admin/streaming/servers/{safe_provider}/sync")
 }
 
+pub(super) fn format_summary_sync_feedback(locale: &str, data: &Value) -> String {
+    let count = recorded(locale, data, "imported");
+    let is_partial = data["has_more"] == Value::Bool(true)
+        || data["hasMore"] == Value::Bool(true)
+        || data["complete"] == Value::Bool(false);
+    if is_partial {
+        let mut message = af_web_core::i18n::translate_with(
+            locale,
+            "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.",
+            &[("count", &count)],
+        );
+        if let Some(remaining) = data["remaining_sources"]
+            .as_u64()
+            .or_else(|| data["remainingSources"].as_u64())
+            .filter(|&n| n > 0)
+        {
+            message.push(' ');
+            message.push_str(&af_web_core::i18n::translate_with(
+                locale,
+                "({remaining} remaining sources)",
+                &[("remaining", &remaining.to_string())],
+            ));
+        }
+        message
+    } else {
+        af_web_core::i18n::translate_with(
+            locale,
+            "Synchronized {count} item summaries and available metadata. These are not confirmed playback events.",
+            &[("count", &count)],
+        )
+    }
+}
+
 #[component]
 pub(super) fn HistoryEventImport(
     servers: Signal<Vec<ProviderStatus>>,
@@ -400,7 +433,10 @@ pub(super) fn HistoryEventImport(
             }
             match response {
                 Ok(data) => {
-                    result.set(Some(tt_with(context, "Synchronized {count} item summaries and available metadata. These are not confirmed playback events.", &[("count", &(recorded(&crate::tabs::l10n::locale(context), &data,"imported")).to_string())])));
+                    result.set(Some(format_summary_sync_feedback(
+                        &crate::tabs::l10n::locale(context),
+                        &data,
+                    )));
                     on_changed.run(());
                 }
                 Err(e) => result.set(Some(e.message)),
@@ -649,6 +685,48 @@ mod tests {
         assert_eq!(
             streaming_sync_path("../evil"),
             "/api/v1/admin/streaming/servers/jellyfin/sync"
+        );
+    }
+
+    #[test]
+    fn summary_sync_feedback_distinguishes_partial_batches_from_complete_sweeps() {
+        let partial = format_summary_sync_feedback(
+            "en",
+            &json!({
+                "imported": 800,
+                "complete": false,
+                "has_more": true,
+                "remaining_sources": 3
+            }),
+        );
+        assert!(partial.contains("800"));
+        assert!(partial.contains("bounded batch"));
+        assert!(partial.contains("resume from the saved checkpoint"));
+        assert!(partial.contains("3 remaining sources"));
+
+        let incomplete_only = format_summary_sync_feedback(
+            "en",
+            &json!({
+                "imported": 250,
+                "complete": false
+            }),
+        );
+        assert!(incomplete_only.contains("250"));
+        assert!(incomplete_only.contains("bounded batch"));
+        assert!(!incomplete_only.contains("remaining sources"));
+
+        let finished = format_summary_sync_feedback(
+            "en",
+            &json!({
+                "imported": 42,
+                "complete": true,
+                "has_more": false,
+                "remaining_sources": 0
+            }),
+        );
+        assert_eq!(
+            finished,
+            "Synchronized 42 item summaries and available metadata. These are not confirmed playback events."
         );
     }
 }

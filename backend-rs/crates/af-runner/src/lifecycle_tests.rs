@@ -1294,9 +1294,9 @@ async fn legacy_cancellation_after_output_eof_reaps_child_and_releases_locks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_output_overflow_is_failed_and_reaps_child_before_releasing_maintenance() {
+async fn legacy_output_overflow_is_truncated_and_reaps_child_before_releasing_maintenance() {
     use futures::StreamExt;
-    let test = "lifecycle_tests::legacy_output_overflow_is_failed_and_reaps_child_before_releasing_maintenance";
+    let test = "lifecycle_tests::legacy_output_overflow_is_truncated_and_reaps_child_before_releasing_maintenance";
     if subprocess(test) {
         return;
     }
@@ -1304,7 +1304,7 @@ async fn legacy_output_overflow_is_failed_and_reaps_child_before_releasing_maint
     let scripts = root.join("packages/package/install");
     fs::create_dir_all(&scripts).unwrap();
     let script = "installpackage-overflow-fixture";
-    executable(&scripts.join(script), &format!("#!/bin/bash\nexec python3 -c 'import os, time; open({:?}, \"w\").write(str(os.getpid())); os.write(1, b\"x\" * (2 * 1024 * 1024) + bytes([10])); time.sleep(30)'\n", root.join("pid").to_string_lossy()));
+    executable(&scripts.join(script), &format!("#!/bin/bash\nexec python3 -c 'import os; open({:?}, \"w\").write(str(os.getpid())); os.write(1, b\"x\" * (2 * 1024 * 1024) + bytes([13]) + b\"finished\\n\")'\n", root.join("pid").to_string_lossy()));
     env::set_current_dir(&root).unwrap();
     env::set_var("AETHERFLOW_PACKAGE_ENGINE", "legacy");
     let cfg = af_release::ReleaseConfig::for_root(&root);
@@ -1325,45 +1325,40 @@ async fn legacy_output_overflow_is_failed_and_reaps_child_before_releasing_maint
     };
     let stream = package_executor::execute_package_request_stream(request);
     tokio::pin!(stream);
-    let mut failed = false;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(line) = stream.next().await {
-            let line = line.unwrap();
-            assert!(
-                line.len() <= 64 * 1024,
-                "producer allocated/emitted an oversized record: {} bytes",
-                line.len()
-            );
-            if line.contains("__RUNNER_EXIT_ERROR__") {
-                assert!(line.contains("output record exceeds"), "{line}");
-                let pid: i32 = fs::read_to_string(root.join("pid"))
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                assert_eq!(
-                    unsafe { libc::kill(pid, 0) },
-                    -1,
-                    "required installer must be reaped before failure is exposed"
-                );
-                assert_eq!(
-                    std::io::Error::last_os_error().raw_os_error(),
-                    Some(libc::ESRCH)
-                );
-                assert!(
-                    af_release::ReleaseLockGuard::acquire(
-                        af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
-                        Duration::ZERO
-                    )
-                    .is_err(),
-                    "stream still owns maintenance while failure is emitted"
-                );
-                failed = true;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(failed, "oversized installer output must fail explicitly");
+    let lines = tokio::time::timeout(Duration::from_secs(5), stream.by_ref().collect::<Vec<_>>())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert!(lines.iter().all(|line| line.len() <= 64 * 1024 + 1));
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("__RUNNER_EXIT_ERROR__")),
+        "{:?}",
+        lines
+            .iter()
+            .filter(|line| line.contains("__RUNNER_EXIT_ERROR__"))
+            .collect::<Vec<_>>()
+    );
+    assert!(lines
+        .iter()
+        .any(|line| line == &format!("{}\n", "x".repeat(64 * 1024))));
+    assert!(lines.iter().any(|line| line == "finished\n"));
+    let pid: i32 = fs::read_to_string(root.join("pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "installer must be reaped"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
     let _ = stream;
     assert!(af_release::ReleaseLockGuard::acquire(
         af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),

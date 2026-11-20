@@ -138,7 +138,7 @@ af_logged systemctl enable --now sonarr
 af_logged systemctl restart sonarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
-seed_servarr_master_user "sonarr" ${APP_PORT} "v3"
+seed_servarr_master_user "sonarr" "${APP_PORT}" "v3"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

@@ -1,4 +1,6 @@
 pub mod app_metadata;
+mod constant_time;
+pub use constant_time::constant_time_eq;
 pub mod md5;
 pub mod secret_redaction;
 
@@ -454,6 +456,21 @@ pub struct PackageRunnerRequest {
     pub achieved_version: Option<String>,
 }
 
+/// Manages a privileged `af-runner` runtime/blueprint/receipt snapshot tied to
+/// an admitted `lifecycle_job_id` across API-coordinated certification and
+/// post-script finalization (`capture`, `restore`, or `discard`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PackageLifecycleSnapshotRequest {
+    pub action: String,
+    pub package_id: String,
+    pub lifecycle_job_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub units: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preserve_backup: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SelfUpdateRequest {
     #[serde(default)]
@@ -682,6 +699,8 @@ pub struct RunnerBlueprintApplyResponse {
     pub mutated_files: Vec<String>,
     pub sqlite_routes_injected: usize,
 }
+
+pub const APP_LAUNCH_EXCHANGE_PATH: &str = "/.well-known/aetherflow/app-launch";
 
 /// Validates the ASCII RFC 1123 labels used in ingress hostnames.
 pub fn valid_ingress_hostname(host: &str) -> bool {

@@ -2,7 +2,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def read_env_config():
@@ -138,7 +138,7 @@ class TelemetryInspectorHandler(BaseHTTPRequestHandler):
 
 def main():
     config = read_env_config()
-    server = HTTPServer((config["bind_addr"], config["port"]), TelemetryInspectorHandler)
+    server = ThreadingHTTPServer((config["bind_addr"], config["port"]), TelemetryInspectorHandler)
     server.serve_forever()
 
 

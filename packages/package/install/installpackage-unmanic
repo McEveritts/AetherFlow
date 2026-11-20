@@ -127,10 +127,12 @@ fi
 queue_app_version "${INSTALL_DIR}/.af-version" "${UNMANIC_VER}"
 
 report_progress 75 "Configuring ${APP_NAME} on port ${APP_PORT}..."
+BIND_ADDRESS="${AF_BIND_ADDRESS:-127.0.0.1}"
 SETTINGS_FILE="${DATA_DIR}/.unmanic/config/settings.json"
 if [[ ! -f "${SETTINGS_FILE}" ]]; then
     cat > "${SETTINGS_FILE}" <<EOF
 {
+  "ui_address": "${BIND_ADDRESS}",
   "ui_port": ${APP_PORT},
   "enable_inotify": false,
   "run_full_scan_on_start": false,
@@ -139,6 +141,7 @@ if [[ ! -f "${SETTINGS_FILE}" ]]; then
 EOF
 else
     set_config_value "$SETTINGS_FILE" json ui_port "$APP_PORT"
+    set_config_value "$SETTINGS_FILE" json ui_address "$BIND_ADDRESS"
 fi
 
 chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
@@ -157,7 +160,7 @@ Group=${APP_USER}
 WorkingDirectory=${DATA_DIR}
 Environment="HOME=${DATA_DIR}"
 Environment="PYTHONUNBUFFERED=1"
-ExecStart=${INSTALL_DIR}/.venv/bin/unmanic --port ${APP_PORT}
+ExecStart=${INSTALL_DIR}/.venv/bin/unmanic --address ${BIND_ADDRESS} --port ${APP_PORT}
 Restart=on-failure
 RestartSec=5
 

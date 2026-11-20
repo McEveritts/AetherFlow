@@ -868,7 +868,7 @@ async fn load_page_batch(
     export: bool,
 ) -> HistoryResult<HistoryPage> {
     tokio::task::spawn_blocking(move || {
-        let conn = af_db::get_conn().map_err(|_| HistoryError {
+        let conn = af_db::get_read_conn().map_err(|_| HistoryError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "history_unavailable",
             message: "History database is unavailable",

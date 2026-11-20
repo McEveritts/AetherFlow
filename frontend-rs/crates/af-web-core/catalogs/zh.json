@@ -2289,5 +2289,14 @@
     "verifying": "正在验证代码…"
   },
   "Playback method breakdown": "播放方式分布",
-  "Media format distribution": "媒体格式分布"
+  "Media format distribution": "媒体格式分布",
+  "Pipeline service & queue telemetry": "流水线服务与队列遥测",
+  "Installed download clients": "已安装的下载客户端",
+  "Installed automation apps": "已安装的自动化应用",
+  "Transcode queue": "转码队列",
+  "None installed": "未安装",
+  "{active} active / {installed} installed": "{active} 个运行中 / 已安装 {installed} 个",
+  "Loading": "加载中",
+  "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.": "已在此有界批次中同步 {count} 个条目摘要。仍有其余条目；再次点击同步即可从已保存的检查点继续。这些并非已确认的播放事件。",
+  "({remaining} remaining sources)": "（剩余 {remaining} 个来源）"
 }

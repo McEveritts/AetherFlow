@@ -39,7 +39,6 @@ purge_systemd_unit "jellyfin"
 
 report_progress 50 "Purging jellyfin APT packages and repository..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq "jellyfin*"
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 rm -f /etc/apt/sources.list.d/jellyfin.list /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg
 
 report_progress 80 "Removing Jellyfin state, caches, logs, and user account..."

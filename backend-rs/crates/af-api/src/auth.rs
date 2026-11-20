@@ -487,6 +487,7 @@ pub(crate) fn create_session_jwt_in_conn(
         &EncodingKey::from_secret(&jwt_secret_bytes()),
     )?;
 
+    af_db::prune_expired_active_sessions(conn, Utc::now().timestamp())?;
     // Track the full refresh window; otherwise a still-refreshable session disappears from revocation UI.
     let exp_rfc3339 = chrono::DateTime::from_timestamp((exp + 7200).min(absolute_exp), 0)
         .ok_or_else(|| anyhow::anyhow!("Invalid session expiry"))?
@@ -1156,20 +1157,6 @@ pub async fn admin_only_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-#[inline(never)]
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let a = std::hint::black_box(a);
-    let b = std::hint::black_box(b);
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&left, &right) in a.iter().zip(b) {
-        diff |= left ^ right;
-    }
-    std::hint::black_box(diff) == 0
-}
-
 fn is_production_or_release_env(val: &str) -> bool {
     let trimmed = val.trim();
     trimmed.eq_ignore_ascii_case("production") || trimmed.eq_ignore_ascii_case("release")
@@ -1232,7 +1219,7 @@ pub async fn csrf_middleware(req: Request, next: Next) -> Response {
     let cookie_token = extract_cookie(headers, "csrf_token").unwrap_or_default();
 
     if header_token.is_empty()
-        || !constant_time_eq(header_token.as_bytes(), cookie_token.as_bytes())
+        || !af_models::constant_time_eq(header_token.as_bytes(), cookie_token.as_bytes())
     {
         return (
             StatusCode::FORBIDDEN,
@@ -1447,18 +1434,6 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
     bcrypt::verify(password, password_hash).unwrap_or(false)
 }
 
-fn constant_time_secret_matches(candidate: &str, expected: &str) -> bool {
-    let cand_bytes = candidate.as_bytes();
-    let exp_bytes = expected.as_bytes();
-    let cand_hash = Sha256::digest(cand_bytes);
-    let exp_hash = Sha256::digest(exp_bytes);
-    let mut diff = usize::from(cand_bytes.len() != exp_bytes.len()) as u8;
-    for (&a, &b) in cand_hash.iter().zip(exp_hash.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0 && !cand_bytes.is_empty()
-}
-
 fn setup_bootstrap_token_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     for env_key in ["DATA_DIR", "AETHERFLOW_DATA_DIR"] {
@@ -1662,9 +1637,10 @@ fn setup_admin_blocking(
     if !is_direct_unproxied_loopback {
         let expected_tokens = configured_setup_bootstrap_tokens();
         let token_valid = match provided_setup_token {
-            Some(candidate) if !expected_tokens.is_empty() => expected_tokens
-                .iter()
-                .any(|exp| constant_time_secret_matches(candidate, exp)),
+            Some(candidate) if !expected_tokens.is_empty() => expected_tokens.iter().any(|exp| {
+                !candidate.is_empty()
+                    && af_models::constant_time_eq(candidate.as_bytes(), exp.as_bytes())
+            }),
             _ => false,
         };
         if !token_valid {
@@ -2164,6 +2140,7 @@ fn logout_blocking(req: Request) -> Response {
         let tx_res = (|| -> anyhow::Result<(String, Vec<String>)> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let res = revoke_session_family_in_tx(&tx, user_id, &session_jti, true)?;
+            af_db::prune_expired_active_sessions(&tx, Utc::now().timestamp())?;
             tx.commit()?;
             Ok(res)
         })();
@@ -2683,9 +2660,7 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
-        || !matches_client_fingerprint(&claims.cfp, &extract_client_ip(&headers), user_agent)
-    {
+    if !matches_client_fingerprint(&claims.cfp, &extract_client_ip(&headers), user_agent) {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
@@ -2723,11 +2698,26 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
                 .into_response();
         }
     };
-    if claims.ver < subj.sessions_revoked_after {
+    let active = is_session_active(&conn, &claims.jti, claims.user_id);
+    if claims.ver < subj.sessions_revoked_after
+        || !matches!(active, Ok(true))
+        || !matches!(
+            af_db::token_revocation_status_with_conn(&conn, &claims.jti),
+            Ok(false)
+        )
+    {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "Invalid or revoked session",
+        );
+    }
+
+    if subj.role != "admin" {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Administrator authentication required",
         );
     }
 
@@ -2739,6 +2729,14 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
     resp
 }
 
+fn is_session_active(
+    conn: &rusqlite::Connection,
+    jti: &str,
+    user_id: i64,
+) -> rusqlite::Result<bool> {
+    af_db::has_unexpired_active_session(conn, jti, user_id, Utc::now().timestamp())
+}
+
 pub async fn list_active_sessions(req: Request) -> Response {
     blocking_response(move || list_active_sessions_blocking(req)).await
 }
@@ -2747,20 +2745,16 @@ fn list_active_sessions_blocking(req: Request) -> Response {
     let Some(auth_user) = req.extensions().get::<AuthUser>().cloned() else {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
     };
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Database error",
         );
     };
-    let _ = conn.execute(
-        "DELETE FROM active_sessions WHERE expires_at < ?1",
-        params![Utc::now().to_rfc3339()],
-    );
     let mut stmt = match conn.prepare(
         "SELECT jti, ip_address, user_agent, COALESCE(CAST(expires_at AS TEXT), ''), COALESCE(CAST(last_active AS TEXT), '') \
-         FROM active_sessions WHERE user_id = ?1 ORDER BY last_active DESC",
+         FROM active_sessions WHERE user_id = ?1 AND unixepoch(expires_at, 'auto') > ?2 ORDER BY last_active DESC",
     ) {
         Ok(s) => s,
         Err(_) => {
@@ -2774,7 +2768,7 @@ fn list_active_sessions_blocking(req: Request) -> Response {
 
     let current_session_jti = resolve_current_session_jti(&auth_user.jti);
     let mut sessions = Vec::new();
-    if let Ok(rows) = stmt.query_map(params![auth_user.user_id], |r| {
+    if let Ok(rows) = stmt.query_map(params![auth_user.user_id, Utc::now().timestamp()], |r| {
         let full_jti: String = r.get(0)?;
         let is_current = full_jti == auth_user.jti || full_jti == current_session_jti;
         let masked = if full_jti.len() > 8 {
@@ -2888,7 +2882,7 @@ fn matching_totp_step(secret_b32: &str, code: &str, now_secs: u64) -> Option<i64
     for offset in [0i64, -30, 30] {
         let ts = (now_secs as i64 + offset).max(0) as u64;
         let expected = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &secret_bytes, ts);
-        if af_services::cluster_daemon::constant_time_eq(expected.as_bytes(), code.as_bytes()) {
+        if af_models::constant_time_eq(expected.as_bytes(), code.as_bytes()) {
             return Some((ts / 30) as i64);
         }
     }
@@ -3051,7 +3045,7 @@ fn match_recovery_code(
         {
             return hex::decode(salt).ok().is_some_and(|salt| {
                 salt.len() == 16
-                    && af_services::cluster_daemon::constant_time_eq(
+                    && af_models::constant_time_eq(
                         recovery_hash(&salt, compact).as_bytes(),
                         expected.as_bytes(),
                     )
@@ -3643,9 +3637,9 @@ mod tests {
 
     #[test]
     fn csrf_constant_time_equality_requires_all_bytes_and_equal_lengths() {
-        assert!(constant_time_eq(b"", b""));
-        assert!(constant_time_eq(b"csrf-token", b"csrf-token"));
-        assert!(constant_time_eq(&[0, 128, 255], &[0, 128, 255]));
+        assert!(af_models::constant_time_eq(b"", b""));
+        assert!(af_models::constant_time_eq(b"csrf-token", b"csrf-token"));
+        assert!(af_models::constant_time_eq(&[0, 128, 255], &[0, 128, 255]));
         for (a, b) in [
             (b"csrf-token".as_slice(), b"Csrf-token".as_slice()),
             (b"csrf-token".as_slice(), b"csrf-tokeN".as_slice()),
@@ -3654,8 +3648,8 @@ mod tests {
             (b"".as_slice(), b"csrf-token".as_slice()),
             (b"a\0b".as_slice(), b"a\0c".as_slice()),
         ] {
-            assert!(!constant_time_eq(a, b));
-            assert!(!constant_time_eq(b, a));
+            assert!(!af_models::constant_time_eq(a, b));
+            assert!(!af_models::constant_time_eq(b, a));
         }
     }
 
@@ -4434,6 +4428,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_auth_requires_a_live_admin_session() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (41, 'gateway-test', 'user')",
+            [],
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        let (token, claims) =
+            create_session_jwt_in_conn(&conn, 41, &headers, Utc::now().timestamp(), None, 0)
+                .unwrap();
+        headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={token}").parse().unwrap(),
+        );
+        drop(conn);
+
+        assert_eq!(
+            verify_proxy_auth(headers.clone()).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        af_db::get_conn()
+            .unwrap()
+            .execute("UPDATE users SET role = 'admin' WHERE id = 41", [])
+            .unwrap();
+        let response = verify_proxy_auth(headers.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["Remote-User"], "gateway-test");
+
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "UPDATE users SET sessions_revoked_after = 1 WHERE id = 41",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            verify_proxy_auth(headers.clone()).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let writer = af_db::get_conn().unwrap();
+        writer
+            .execute(
+                "UPDATE users SET sessions_revoked_after = 0 WHERE id = 41",
+                [],
+            )
+            .unwrap();
+        // Also reject a signed JWT when its backing session has been deleted,
+        // even if no revocation-cache entry exists.
+        writer
+            .execute("DELETE FROM active_sessions WHERE jti = ?1", [&claims.jti])
+            .unwrap();
+        drop(writer);
+        assert_eq!(
+            verify_proxy_auth(headers).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn list_active_sessions_excludes_expired_rows_without_pruning_them() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let writer = af_db::get_conn().unwrap();
+        writer
+            .execute(
+                "INSERT INTO users (id, username, role) VALUES (41, 'session-list-test', 'admin')",
+                [],
+            )
+            .unwrap();
+        let (_, claims) = create_session_jwt_in_conn(
+            &writer,
+            41,
+            &HeaderMap::new(),
+            Utc::now().timestamp(),
+            None,
+            0,
+        )
+        .unwrap();
+        writer.execute(
+            "INSERT INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at) VALUES ('expired', 41, '', '', '2000-01-01T00:00:00+00:00')",
+            [],
+        ).unwrap();
+        let now = Utc::now().timestamp();
+        writer
+            .execute(
+                "INSERT INTO active_sessions (jti, user_id, expires_at) VALUES ('legacy', 41, ?1), ('legacy-expired', 41, ?2)",
+                params![now + 3600, now - 3600],
+            )
+            .unwrap();
+        assert!(is_session_active(&writer, "legacy", 41).unwrap());
+        assert!(!is_session_active(&writer, "legacy-expired", 41).unwrap());
+        let mut request = Request::new(axum::body::Body::empty());
+        request.extensions_mut().insert(AuthUser {
+            user_id: 41,
+            username: "session-list-test".into(),
+            role: "admin".into(),
+            jti: claims.jti,
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        // Hold the only writer checkout to ensure the GET needs only a reader.
+        let response = list_active_sessions(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["count"], 2);
+        assert!(payload["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["is_current"] == true));
+        assert!(writer
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = 'expired')",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+        assert_eq!(
+            af_db::prune_expired_active_sessions(&writer, now).unwrap(),
+            2
+        );
+        assert!(is_session_active(&writer, "legacy", 41).unwrap());
+    }
+
+    #[tokio::test]
     async fn proxy_auth_rejects_revocation_and_fingerprint_mismatch() {
         use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
         if run_plugin_test_in_subprocess() {
@@ -4568,7 +4700,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plugin_jwt_is_rejected_and_live_plugin_scope_verification_enforced() {
+    fn legacy_plugin_jwt_is_rejected_by_both_token_decoders() {
         let scopes = vec![
             "/api/v1/public/marketplace".to_string(),
             "/api/v1/auth/system/metrics".to_string(),
@@ -4577,14 +4709,6 @@ mod tests {
         assert_eq!(claims.plugin_id, "sdk-template-rust");
         assert!(decode_session_claims(&token, false).is_err());
         assert!(crate::plugins::decode_and_verify_plugin_token(&token).is_err());
-        assert!(af_services::plugins::verify_plugin_route_scope(
-            &scopes,
-            "/api/v1/auth/system/metrics"
-        ));
-        assert!(!af_services::plugins::verify_plugin_route_scope(
-            &scopes,
-            "/api/v1/admin/users"
-        ));
     }
 
     #[test]

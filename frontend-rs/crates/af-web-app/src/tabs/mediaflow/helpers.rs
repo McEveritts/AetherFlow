@@ -62,19 +62,133 @@ pub(super) fn installed(service: &Value) -> bool {
         )
     })
 }
-pub(super) fn safe_launch_url(service: &Value) -> Option<String> {
-    ["web_ui_url", "webUiUrl", "public_url", "url"]
-        .iter()
-        .filter_map(|key| service[*key].as_str())
-        .find(|url| {
-            (url.starts_with('/') && !url.starts_with("//") && !url.contains('\\'))
-                || url::Url::parse(url).ok().is_some_and(|u| {
-                    matches!(u.scheme(), "http" | "https")
-                        && u.username().is_empty()
-                        && u.password().is_none()
-                })
+pub(super) const DOWNLOAD_CLIENT_IDS: &[&str] = &[
+    "qbittorrent",
+    "sabnzbd",
+    "nzbget",
+    "transmission",
+    "deluge",
+    "rtorrent",
+];
+
+pub(super) const AUTOMATION_APP_IDS: &[&str] = &[
+    "sonarr",
+    "radarr",
+    "lidarr",
+    "prowlarr",
+    "bazarr",
+    "overseerr",
+    "jellyseerr",
+];
+
+pub(super) fn pipeline_service_counts(rows: &[Value], ids: &[&str]) -> (usize, usize) {
+    let mut active = 0usize;
+    let mut installed_count = 0usize;
+    for service in rows {
+        let id = text(service, "id").to_ascii_lowercase();
+        if !ids.contains(&id.as_str()) || !installed(service) {
+            continue;
+        }
+        installed_count += 1;
+        let contract = crate::tabs::contracts::decode::<
+            crate::tabs::contracts::MediaFlowServiceContract,
+        >(service);
+        if matches!(
+            contract.status.to_ascii_lowercase().as_str(),
+            "running" | "active"
+        ) {
+            active += 1;
+        }
+    }
+    (active, installed_count)
+}
+
+fn is_safe_launch_url(url: &str) -> bool {
+    (url.starts_with('/') && !url.starts_with("//") && !url.contains('\\'))
+        || url::Url::parse(url).ok().is_some_and(|u| {
+            matches!(u.scheme(), "http" | "https")
+                && u.username().is_empty()
+                && u.password().is_none()
         })
-        .map(str::to_string)
+}
+
+fn valid_domain(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+}
+
+pub(super) fn safe_launch_url(service: &Value) -> Option<String> {
+    for key in ["launch_url", "launchUrl"] {
+        if let Some(raw) = service[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return is_safe_launch_url(raw).then(|| raw.to_string());
+        }
+    }
+    for key in ["web_ui_url", "webUiUrl", "public_url", "url"] {
+        if let Some(raw) = service[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return is_safe_launch_url(raw).then(|| raw.to_string());
+        }
+    }
+    let path = service["web_path"]
+        .as_str()
+        .or_else(|| service["webPath"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("/{}", s.trim_start_matches('/')))
+        .unwrap_or_default();
+    if service["external_access_enabled"] != false {
+        if let Some(public) = service["public_domain"]
+            .as_str()
+            .or_else(|| service["publicDomain"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if public.starts_with("http://") || public.starts_with("https://") {
+                if is_safe_launch_url(public) {
+                    return Some(public.to_string());
+                }
+            } else if valid_domain(public) {
+                let scheme = if service["tls_enabled"] == false {
+                    "http"
+                } else {
+                    "https"
+                };
+                return Some(format!("{scheme}://{public}{path}"));
+            }
+        }
+    }
+    for key in [
+        "local_domain",
+        "localDomain",
+        "internal_domain",
+        "internalDomain",
+    ] {
+        if let Some(local) = service[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if local.starts_with("http://") || local.starts_with("https://") {
+                if is_safe_launch_url(local) {
+                    return Some(local.to_string());
+                }
+            } else if valid_domain(local) {
+                return Some(format!("http://{local}{path}"));
+            }
+        }
+    }
+    None
 }
 pub(super) fn bytes(bytes: f64) -> String {
     if !bytes.is_finite() || bytes <= 0.0 {
@@ -83,4 +197,68 @@ pub(super) fn bytes(bytes: f64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
     let i = ((bytes.ln() / 1024f64.ln()).floor() as usize).min(units.len() - 1);
     format!("{:.1} {}", bytes / 1024f64.powi(i as i32), units[i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_launch_url_takes_precedence_over_domain_fallbacks() {
+        assert_eq!(
+            safe_launch_url(&json!({
+                "launch_url": "https://sonarr.example.com/sonarr",
+                "public_domain": "ignored.example.com",
+                "local_domain": "sonarr.aether.local"
+            })),
+            Some("https://sonarr.example.com/sonarr".into())
+        );
+        assert_eq!(
+            safe_launch_url(&json!({
+                "launchUrl": "http://localhost:8989/sonarr",
+                "public_domain": "ignored.example.com"
+            })),
+            Some("http://localhost:8989/sonarr".into())
+        );
+        assert_eq!(
+            safe_launch_url(&json!({
+                "launch_url": null,
+                "public_domain": "sonarr.example.com",
+                "external_access_enabled": true,
+                "tls_enabled": true,
+                "web_path": "sonarr"
+            })),
+            Some("https://sonarr.example.com/sonarr".into())
+        );
+        assert_eq!(
+            safe_launch_url(&json!({
+                "public_domain": "sonarr.example.com",
+                "external_access_enabled": false,
+                "local_domain": "sonarr.aether.local",
+                "web_path": "/sonarr"
+            })),
+            Some("http://sonarr.aether.local/sonarr".into())
+        );
+        assert_eq!(
+            safe_launch_url(&json!({
+                "launch_url": "javascript:alert(1)",
+                "public_domain": "sonarr.example.com"
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn pipeline_service_counts_tracks_installed_and_active_services() {
+        let rows = vec![
+            json!({"id": "qBittorrent", "status": "running", "installed": true}),
+            json!({"id": "sabnzbd", "status": "stopped", "installed": true}),
+            json!({"id": "deluge", "status": "available", "installed": false}),
+            json!({"id": "sonarr", "status": "active"}),
+            json!({"id": "radarr", "status": "running"}),
+            json!({"id": "bazarr", "status": "not_installed"}),
+        ];
+        assert_eq!(pipeline_service_counts(&rows, DOWNLOAD_CLIENT_IDS), (1, 2));
+        assert_eq!(pipeline_service_counts(&rows, AUTOMATION_APP_IDS), (2, 2));
+    }
 }

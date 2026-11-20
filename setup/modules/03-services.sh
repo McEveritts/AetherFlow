@@ -26,6 +26,5 @@ function _installftpd() {
 		*) return 0 ;;
 	esac
 	apt-get purge -y vsftpd pure-ftpd >>"${OUTTO}" 2>&1
-	apt-get autoremove >>"${OUTTO}" 2>&1
 	apt-get install -y vsftpd >>"${OUTTO}" 2>&1
 }

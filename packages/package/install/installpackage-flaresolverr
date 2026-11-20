@@ -55,39 +55,47 @@ cleanup() {
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
+        [[ "$status" -ne 0 ]] || status=1
         if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            quiesce_services_for_rollback flaresolverr || { restore_failed=true; exit 1; }
-            restore_app_state "$BACKUP_DIR" || exit 1
-        fi
-        if [[ "$APP_ACTIVATED" -eq 1 ]]; then
-            mv /opt/flaresolverr "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/flaresolverr
-        elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
-            rm -rf /opt/flaresolverr/.venv || restore_failed=true
-        fi
-        if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/flaresolverr 2>/dev/null || restore_failed=true
-        elif [[ "$VENV_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/venv" /opt/flaresolverr/.venv 2>/dev/null || restore_failed=true
-        fi
-        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
-            if [[ -f "$BACKUP_DIR/flaresolverr.service" ]]; then
-                safe_restore_path_from_backup "$BACKUP_DIR/flaresolverr.service" /etc/systemd/system/flaresolverr.service || restore_failed=true
+            if ! quiesce_services_for_rollback flaresolverr; then
+                restore_failed=true
             else
-                af_logged systemctl disable flaresolverr || restore_failed=true
-                rm -f /etc/systemd/system/flaresolverr.service || restore_failed=true
+                restore_app_state "$BACKUP_DIR" || restore_failed=true
             fi
-            af_logged systemctl daemon-reload || restore_failed=true
         fi
-        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
-            af_logged systemctl start flaresolverr || restore_failed=true
+        if [[ "$restore_failed" == false ]]; then
+            if [[ "$APP_ACTIVATED" -eq 1 ]]; then
+                mv /opt/flaresolverr "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/flaresolverr
+            elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
+                rm -rf /opt/flaresolverr/.venv || restore_failed=true
+            fi
+            if [[ "$APP_MOVED" -eq 1 ]]; then
+                mv "$BACKUP_DIR/app" /opt/flaresolverr 2>/dev/null || restore_failed=true
+            elif [[ "$VENV_MOVED" -eq 1 ]]; then
+                mv "$BACKUP_DIR/venv" /opt/flaresolverr/.venv 2>/dev/null || restore_failed=true
+            fi
+            if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+                if [[ -f "$BACKUP_DIR/flaresolverr.service" ]]; then
+                    safe_restore_path_from_backup "$BACKUP_DIR/flaresolverr.service" /etc/systemd/system/flaresolverr.service || restore_failed=true
+                else
+                    af_logged systemctl disable flaresolverr || restore_failed=true
+                    rm -f /etc/systemd/system/flaresolverr.service || restore_failed=true
+                fi
+                af_logged systemctl daemon-reload || restore_failed=true
+            fi
+            if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+                af_logged systemctl start flaresolverr || restore_failed=true
+            fi
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR" || restore_failed=true
+        rm -rf -- "$BUILD_DIR" || restore_failed=true
     fi
     if [[ "$restore_failed" == true ]]; then
         status=1
         print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
+    elif [[ -n "${BACKUP_DIR:-}" && -d "$BACKUP_DIR" ]]; then
+        rm -rf -- "$BACKUP_DIR" || true
     fi
     exit "$status"
 }
@@ -100,11 +108,11 @@ report_progress 10 "Installing Chromium and Xvfb dependencies for FlareSolverr..
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
-    curl tar ca-certificates xvfb xauth libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+    curl git tar ca-certificates xvfb xauth libnss3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
     libxrandr2 libgbm1 libasound2t64 fonts-liberation python3 python3-venv python3-pip || \
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
-    curl tar ca-certificates xvfb xauth libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+    curl git tar ca-certificates xvfb xauth libnss3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
     libxrandr2 libgbm1 libasound2 fonts-liberation python3 python3-venv python3-pip
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq chromium || \
@@ -127,7 +135,7 @@ report_progress 40 "Resolving latest FlareSolverr release..."
 FS_VERSION="$(github_latest_tag "FlareSolverr/FlareSolverr" "3.3.21")"
 FS_URL=""
 if [[ "$FS_ARCH" == "linux_x64" ]]; then
-    FS_URL="https://github.com/FlareSolverr/FlareSolverr/releases/download/v${FS_VERSION}/flaresolverr_linux_x64.tar.gz"
+    FS_URL="https://github.com/FlareSolverr/FlareSolverr/releases/download/v${FS_VERSION#v}/flaresolverr_linux_x64.tar.gz"
 fi
 
 report_progress 60 "Downloading and staging FlareSolverr ${FS_VERSION}..."
@@ -147,10 +155,18 @@ if [[ -n "$FS_URL" ]]; then
     tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR"
     rm -f "$TMP_TAR"
 else
-    TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/flaresolverr-src-XXXXXX.tar.gz")
-    af_logged download_file "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" "$TMP_TAR"
-    af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
-    rm -f "$TMP_TAR"
+    FS_REPO="https://github.com/FlareSolverr/FlareSolverr.git"
+    FS_TAG="v${FS_VERSION#v}"
+    if ! git ls-remote --exit-code --tags "$FS_REPO" "refs/tags/${FS_TAG}" >/dev/null 2>&1; then
+        if git ls-remote --exit-code --tags "$FS_REPO" "refs/tags/${FS_VERSION#v}" >/dev/null 2>&1; then
+            FS_TAG="${FS_VERSION#v}"
+        else
+            print_error "Upstream tag refs/tags/${FS_TAG} not found in FlareSolverr/FlareSolverr"
+            exit 1
+        fi
+    fi
+    af_logged git clone --branch "$FS_TAG" --depth 1 "$FS_REPO" "$BUILD_DIR"
+    git -C "$BUILD_DIR" rev-parse --verify HEAD >/dev/null 2>&1 || { log_error "Failed to verify cloned FlareSolverr source tree"; exit 1; }
     mkdir -p /opt/flaresolverr
     if [[ -e /opt/flaresolverr/.venv || -L /opt/flaresolverr/.venv ]]; then
         if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then

@@ -1,4 +1,7 @@
 use crate::auth::{api_error, decode_session_claims, resolve_raw_token, AuthUser};
+use af_runner::package_executor::{
+    requires_external_app_auth as external_proxy_requires_auth, GATEWAY_APP_HEADER,
+};
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::Request;
@@ -6,6 +9,7 @@ use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use once_cell::sync::Lazy;
+use rusqlite::OptionalExtension;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, SocketAddr};
@@ -71,6 +75,7 @@ fn strip_host_port_and_dot(raw_host: &str) -> String {
 }
 
 const PROXY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+static PROXY_AUTH_BLOCKING_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 static PROXY_RESOLVE_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
 
 async fn resolve_proxy_work<T: Send + 'static>(
@@ -175,13 +180,9 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
         return AppHostResolution::ControlPlane;
     }
 
-    if (!base_domain.is_empty()
-        && clean_host
-            .strip_suffix(&format!(".{base_domain}"))
-            .is_some_and(|label| label.contains('.')))
-        || clean_host
-            .strip_suffix(".aether.local")
-            .is_some_and(|label| label.contains('.'))
+    if clean_host
+        .strip_suffix(".aether.local")
+        .is_some_and(|label| label.contains('.'))
     {
         return AppHostResolution::ControlPlane;
     }
@@ -196,6 +197,16 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
         let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
         !pub_dom.is_empty() && pub_dom == clean_host
     });
+    // A nested public hostname must be configured explicitly. Only a
+    // single-label subdomain of the base domain participates in inference.
+    if matched_public_cfg.is_none()
+        && !base_domain.is_empty()
+        && clean_host
+            .strip_suffix(&format!(".{base_domain}"))
+            .is_some_and(|label| label.contains('.'))
+    {
+        return AppHostResolution::ControlPlane;
+    }
     if let Some(cfg) = matched_public_cfg {
         if !cfg.external_access_enabled {
             return AppHostResolution::DisabledExternalApp(cfg.app_name.clone());
@@ -373,6 +384,7 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
 static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         // Bound connection setup without limiting long-lived media response bodies.
         .connect_timeout(Duration::from_secs(10))
         .build()
@@ -592,7 +604,17 @@ fn resolve_optional_authenticated_user(
     headers: &axum::http::HeaderMap,
     peer: Option<IpAddr>,
 ) -> Option<crate::auth::ActiveSubject> {
-    let token = resolve_raw_token(headers)?;
+    let token = resolve_raw_token(headers).or_else(|| {
+        let (scheme, _) = headers
+            .get(header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .split_once(' ')?;
+        if !scheme.eq_ignore_ascii_case("basic") {
+            return None;
+        }
+        crate::ws::extract_cookie(headers, "aetherflow_session")
+    })?;
     let claims = decode_session_claims(&token, false).ok()?;
     if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
         return None;
@@ -621,17 +643,6 @@ fn resolve_optional_authenticated_user(
         .then_some(subject)
 }
 
-fn external_proxy_requires_auth(app: &str) -> bool {
-    matches!(
-        app,
-        "mcvnc" | "scrutiny" | "prometheus" | "flaresolverr" | "threadfin" | "rutorrent"
-    )
-}
-
-fn has_operator_role(role: &str) -> bool {
-    matches!(role, "admin" | "operator")
-}
-
 fn verify_proxy_basic_credentials(headers: &axum::http::HeaderMap) -> Option<String> {
     use base64::Engine;
     let (scheme, encoded) = headers
@@ -649,52 +660,85 @@ fn verify_proxy_basic_credentials(headers: &axum::http::HeaderMap) -> Option<Str
     if username.is_empty() || password.is_empty() {
         return None;
     }
+    let conn = af_db::get_read_conn().ok()?;
+    let user: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT id, COALESCE(password_hash, ''), COALESCE(totp_enabled, 0) FROM users WHERE username = ?1",
+            [username],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .ok()?;
+    if user
+        .as_ref()
+        .is_some_and(|(_, _, totp_enabled)| *totp_enabled != 0)
+    {
+        return None;
+    }
+    let admin = user.and_then(|(user_id, hash, _)| {
+        let subject = crate::auth::load_active_human_subject(&conn, user_id).ok()?;
+        (subject.role == "admin").then_some((subject.username, hash))
+    });
+    drop(conn);
+
     let (master_user, master_password, _) = af_services::mutators::load_master_credentials();
     if username == master_user
         && !master_password.is_empty()
-        && af_services::cluster_daemon::constant_time_eq(
-            password.as_bytes(),
-            master_password.as_bytes(),
-        )
+        && af_models::constant_time_eq(password.as_bytes(), master_password.as_bytes())
     {
         return Some(master_user);
     }
-    let conn = af_db::get_read_conn().ok()?;
-    let (user_id, hash): (i64, String) = conn
-        .query_row(
-            "SELECT id, COALESCE(password_hash, '') FROM users WHERE username = ?1",
-            [username],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok()?;
-    let subject = crate::auth::load_active_human_subject(&conn, user_id).ok()?;
-    drop(conn);
-    (has_operator_role(&subject.role) && crate::auth::verify_password(password, &hash))
-        .then_some(subject.username)
+    let (username, hash) = admin?;
+    crate::auth::verify_password(password, &hash).then_some(username)
 }
 
 fn librespeed_tls_client() -> Result<Option<reqwest::Client>, String> {
     let override_path =
         env::var_os("AETHERFLOW_LIBRESPEED_SETTINGS_PATH").filter(|path| !path.is_empty());
-    let path = override_path.map(PathBuf::from).unwrap_or_else(|| {
-        let primary = Path::new("/etc/aetherflow/librespeed/settings.toml");
-        match std::fs::symlink_metadata(primary) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                PathBuf::from("/opt/librespeed/settings.toml")
+    let path = if let Some(path) = override_path {
+        PathBuf::from(path)
+    } else {
+        let mut selected = None;
+        for candidate in [
+            "/etc/aetherflow/librespeed/upstream-tls.toml",
+            "/etc/aetherflow/librespeed/settings.toml",
+            "/opt/librespeed/settings.toml",
+        ] {
+            match std::fs::symlink_metadata(candidate) {
+                Ok(_) => {
+                    selected = Some(PathBuf::from(candidate));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("Cannot inspect LibreSpeed TLS settings at {candidate}: {error}. Grant the API service read access to the settings and search access to its parent directories.")),
             }
-            _ => primary.to_path_buf(),
         }
-    });
-    let settings =
-        af_runner::package_executor::try_librespeed_runner_settings_tls_config(&path, None)
-            .ok_or_else(|| "Could not read LibreSpeed TLS settings".to_string())?;
+        let Some(path) = selected else {
+            return Ok(None);
+        };
+        path
+    };
+    for ancestor in path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+            format!("Cannot inspect LibreSpeed TLS settings path {}: {error}. Check that the settings exist and that the API service can access the path.", ancestor.display())
+        })?;
+        if metadata.file_type().is_symlink() || (ancestor == path && !metadata.is_file()) {
+            return Err(format!("LibreSpeed TLS settings must be a regular file reached without symlinks. Check {}.", ancestor.display()));
+        }
+    }
+    let settings = af_runner::package_executor::try_librespeed_runner_settings_tls_config(&path, None)
+        .ok_or_else(|| format!("Cannot read LibreSpeed TLS settings at {}. Grant the API service read access to the settings and search access to its parent directories.", path.display()))?;
     if !settings.enabled {
         return Ok(None);
     }
-    let cert_path = settings
-        .ca_cert_file
-        .ok_or_else(|| "Missing LibreSpeed upstream certificate".to_string())?;
-    let pem = std::fs::read(cert_path).map_err(|error| error.to_string())?;
+    let cert_path = settings.ca_cert_file.ok_or_else(|| {
+        format!(
+            "Missing or invalid LibreSpeed upstream certificate. Check tls_cert_file in {}.",
+            path.display()
+        )
+    })?;
+    let pem = std::fs::read(&cert_path)
+        .map_err(|error| format!("Cannot read LibreSpeed upstream certificate at {cert_path}: {error}. Grant the API service read access."))?;
     // In the Rustls backend, a PEM file with no certificate blocks can
     // otherwise construct a client with an empty trust store.
     if reqwest::Certificate::from_pem_bundle(&pem)
@@ -747,8 +791,58 @@ fn is_hop_by_hop_header(name: &str) -> bool {
     )
 }
 
+fn managed_app_route_unavailable() -> Response {
+    api_error(
+        StatusCode::MISDIRECTED_REQUEST,
+        "APP_ROUTE_UNAVAILABLE",
+        "This host does not have the configured external application route",
+    )
+}
+
+fn strip_gateway_session_cookies(headers: &mut axum::http::HeaderMap, protected: bool) {
+    if !protected
+        && crate::ws::extract_cookie(headers, crate::app_launch::APP_SESSION_COOKIE).is_none()
+    {
+        return;
+    }
+    let cookies: Vec<_> = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| {
+            let value = value.to_str().ok()?;
+            let cookies = value
+                .split(';')
+                .map(str::trim)
+                .filter(|cookie| {
+                    !cookie.is_empty()
+                        && !cookie.split_once('=').is_some_and(|(name, _)| {
+                            let name = name.trim();
+                            name == crate::app_launch::APP_SESSION_COOKIE
+                                || (protected && name == "aetherflow_session")
+                        })
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            if cookies.is_empty() {
+                return None;
+            }
+            HeaderValue::from_str(&cookies).ok()
+        })
+        .collect();
+    headers.remove(header::COOKIE);
+    for cookie in cookies {
+        headers.append(header::COOKIE, cookie);
+    }
+}
+
 pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Response {
+    // Apache uses this header to require an application route. It cannot grant
+    // access or select an upstream. The incoming Host still drives resolution.
+    let managed_app = req.headers().get(GATEWAY_APP_HEADER);
     if req.uri().path().starts_with("/.well-known/acme-challenge/") {
+        if managed_app.is_some() {
+            return managed_app_route_unavailable();
+        }
         return next.run(req).await;
     }
 
@@ -756,6 +850,9 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
+    if managed_app.is_some() && !peer_ip_opt.is_some_and(|peer| peer.to_canonical().is_loopback()) {
+        return managed_app_route_unavailable();
+    }
     let trust_forwarded = peer_ip_opt.is_some_and(is_trusted_proxy_ip);
 
     let raw_host = req
@@ -768,13 +865,14 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     let clean_host = strip_host_port_and_dot(&raw_host);
 
     let is_internal_aether_local = clean_host.ends_with(".aether.local");
-    if local_control_plane_host(&clean_host) {
-        return next.run(req).await;
-    }
     // Known control-plane authorities need no DB or auth work.
-    if explicit_control_plane_host(&raw_host, &clean_host)
+    if local_control_plane_host(&clean_host)
+        || (managed_app.is_none() && explicit_control_plane_host(&raw_host, &clean_host))
         || af_db::maybe_cached_control_plane_host(&clean_host)
     {
+        if managed_app.is_some() {
+            return managed_app_route_unavailable();
+        }
         return next.run(req).await;
     }
     if is_internal_aether_local && !local_domain_client_allowed(req.headers(), peer_ip_opt) {
@@ -800,29 +898,75 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 "External access is not enabled for this application subdomain",
             );
         }
+        AppHostResolution::ControlPlane if managed_app.is_some() => {
+            return managed_app_route_unavailable();
+        }
         AppHostResolution::ControlPlane => return next.run(req).await,
     };
+    let requires_auth = !is_internal_aether_local && external_proxy_requires_auth(&app_name);
+    if managed_app.is_some_and(|expected| {
+        !requires_auth
+            || expected.as_bytes() != app_name.as_bytes()
+            || !(1..=65535).contains(&target_port)
+    }) {
+        return managed_app_route_unavailable();
+    }
     if !(1..=65535).contains(&target_port) {
         return next.run(req).await;
     }
 
-    let requires_auth = !is_internal_aether_local && external_proxy_requires_auth(&app_name);
+    let app_origin =
+        crate::app_launch::managed_origin(req.headers(), &raw_host, managed_app.is_some());
+    if req.uri().path() == af_models::APP_LAUNCH_EXCHANGE_PATH {
+        return crate::app_launch::redeem(req, app_name, app_origin).await;
+    }
+
     let headers = req.headers().clone();
-    let authenticated_user =
-        resolve_proxy_work(move || resolve_optional_authenticated_user(&headers, peer_ip_opt))
-            .await
-            .flatten()
-            .filter(|user| !requires_auth || has_operator_role(&user.role))
-            .map(|user| user.username);
-    let authenticated_user = if requires_auth && authenticated_user.is_none() {
+    let auth_app = app_name.clone();
+    let authenticated_user = resolve_proxy_work(move || {
+        app_origin
+            .and_then(|origin| crate::app_launch::authenticated_admin(&headers, &auth_app, &origin))
+            .or_else(|| {
+                resolve_optional_authenticated_user(&headers, peer_ip_opt)
+                    .filter(|user| !requires_auth || user.role == "admin")
+                    .map(|user| user.username)
+            })
+    })
+    .await
+    .flatten();
+    let authenticated_user = if requires_auth
+        && authenticated_user.is_none()
+        && req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_once(' '))
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("basic"))
+    {
+        let ip = peer_ip_opt.map_or_else(
+            || "127.0.0.1".to_string(),
+            |peer| crate::ws::extract_client_ip_for_peer(req.headers(), Some(peer)),
+        );
+        let Some(attempt) = PROXY_BASIC_AUTH_LIMITER.reserve(&ip) else {
+            return rate_limited_response();
+        };
         let headers = req.headers().clone();
-        tokio::time::timeout(
-            PROXY_RESOLVE_TIMEOUT,
-            crate::auth::blocking_auth_work(move || verify_proxy_basic_credentials(&headers)),
-        )
+        tokio::time::timeout(PROXY_RESOLVE_TIMEOUT, async move {
+            let permit = PROXY_AUTH_BLOCKING_LIMIT.acquire().await.ok()?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let user = verify_proxy_basic_credentials(&headers);
+                if user.is_some() {
+                    PROXY_BASIC_AUTH_LIMITER.refund(&ip, attempt);
+                }
+                user
+            })
+            .await
+            .ok()
+            .flatten()
+        })
         .await
         .ok()
-        .and_then(Result::ok)
         .flatten()
     } else {
         authenticated_user
@@ -831,7 +975,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         let mut response = api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "Administrator or operator authentication required",
+            "Administrator authentication required",
         );
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
@@ -886,6 +1030,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     if requires_auth {
         incoming_headers.remove(header::AUTHORIZATION);
     }
+    strip_gateway_session_cookies(&mut incoming_headers, requires_auth);
 
     if is_ws_upgrade {
         if use_tls {
@@ -1560,6 +1705,10 @@ impl SlidingWindowLimiter {
     }
 
     fn allow(&self, ip: &str) -> bool {
+        self.reserve(ip).is_some()
+    }
+
+    fn reserve(&self, ip: &str) -> Option<Instant> {
         let mut guard = self
             .visitors
             .lock()
@@ -1585,23 +1734,63 @@ impl SlidingWindowLimiter {
         let previous = entry.last().copied();
         entry.retain(|&t| now.duration_since(t) < self.window);
         if entry.len() >= self.limit {
-            return false;
+            return None;
         }
         if let Some(previous) = previous {
             oldest_first.remove(&(previous, ip.to_string()));
         }
         entry.push(now);
         oldest_first.insert((now, ip.to_string()));
-        true
+        Some(now)
+    }
+
+    fn refund(&self, ip: &str, attempt: Instant) {
+        let mut guard = self
+            .visitors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let RateLimitVisitors {
+            timestamps,
+            oldest_first,
+        } = &mut *guard;
+        let Some(entry) = timestamps.get_mut(ip) else {
+            return;
+        };
+        let Ok(index) = entry.binary_search(&attempt) else {
+            return;
+        };
+        let previous = *entry.last().expect("matched reservation exists");
+        entry.remove(index);
+        oldest_first.remove(&(previous, ip.to_owned()));
+        if let Some(&newest) = entry.last() {
+            oldest_first.insert((newest, ip.to_owned()));
+        } else {
+            timestamps.remove(ip);
+        }
     }
 }
 
+static PROXY_BASIC_AUTH_LIMITER: Lazy<SlidingWindowLimiter> =
+    Lazy::new(|| SlidingWindowLimiter::new(20, Duration::from_secs(60)));
 static AUTH_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(10, Duration::from_secs(60)));
 static OIDC_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(20, Duration::from_secs(60)));
 static AI_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(20, Duration::from_secs(60)));
+
+#[test]
+fn proxy_rate_limit_refunds_verified_credentials_without_refunding_failures() {
+    let limiter = SlidingWindowLimiter::new(2, Duration::from_secs(60));
+    assert!(limiter.allow("fixture-client"));
+    for _ in 0..30 {
+        let verified = limiter.reserve("fixture-client").unwrap();
+        assert!(!limiter.allow("fixture-client"));
+        limiter.refund("fixture-client", verified);
+    }
+    assert!(limiter.allow("fixture-client"));
+    assert!(!limiter.allow("fixture-client"));
+}
 
 fn rate_limit_disabled() -> bool {
     env::var("AF_DISABLE_RATELIMIT")
@@ -1764,6 +1953,524 @@ mod tests {
     use chrono::Utc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn external_auth_covers_newly_protected_apps() {
+        for app in ["unmanic", "netdata", "autoscan"] {
+            assert!(external_proxy_requires_auth(app));
+        }
+    }
+
+    #[tokio::test]
+    async fn external_proxy_limits_invalid_basic_auth_attempts_per_ip() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use tower::ServiceExt;
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        env::set_var("AETHERFLOW_BASE_DOMAIN", "proxy-auth.test");
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "netdata".into(),
+            public_domain: "netdata.proxy-auth.test".into(),
+            external_access_enabled: true,
+            listen_port: 19999,
+            ..Default::default()
+        })
+        .unwrap();
+        let app = Router::new()
+            .fallback(any(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum::middleware::from_fn(app_subdomain_proxy_middleware));
+        for (ip, attempts) in [("198.51.100.1:1010", 21), ("198.51.100.2:1010", 1)] {
+            for attempt in 0..attempts {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/")
+                            .header(header::HOST, "netdata.proxy-auth.test")
+                            .header(header::AUTHORIZATION, "Basic aW52YWxpZDpjcmVkZW50aWFscw==")
+                            .extension(ConnectInfo(ip.parse::<SocketAddr>().unwrap()))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                if attempt == 20 {
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    let body = axum::body::to_bytes(response.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    assert!(std::str::from_utf8(&body).unwrap().contains("RATE_LIMITED"));
+                } else {
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_apache_proxy_routes_http_and_websocket_after_admin_authentication() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use base64::Engine;
+        use tower::ServiceExt;
+
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let root = ensure_shared_test_db().parent().unwrap();
+        env::set_var("AETHERFLOW_CONFIG_ROOT", root);
+        env::set_var("AETHERFLOW_MASTER_CREDS_FILE", root.join("no-master-file"));
+        env::set_var("AETHERFLOW_BASE_DOMAIN", "proxy-auth.test");
+        let host = "metrics.apps.proxy-auth.test";
+        let upstream_port = spawn_strict_kestrel_mock_upstream().await;
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "prometheus".into(),
+            public_domain: host.into(),
+            external_access_enabled: true,
+            listen_port: upstream_port.into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, role, password_hash) VALUES ('managed-admin', 'admin', ?1)",
+            [bcrypt::hash("fixture-password", 4).unwrap()],
+        )
+        .unwrap();
+        drop(conn);
+        let basic =
+            base64::engine::general_purpose::STANDARD.encode("managed-admin:fixture-password");
+        let app = Router::new()
+            .fallback(any(|| async { "dashboard fixture" }))
+            .layer(axum::middleware::from_fn(app_subdomain_proxy_middleware));
+
+        for (authority, marker, peer, expected) in [
+            (
+                "localhost",
+                "prometheus",
+                "127.0.0.1:3000",
+                StatusCode::MISDIRECTED_REQUEST,
+            ),
+            (
+                host,
+                "mcvnc",
+                "127.0.0.1:3000",
+                StatusCode::MISDIRECTED_REQUEST,
+            ),
+            (
+                host,
+                "prometheus",
+                "192.0.2.1:3000",
+                StatusCode::MISDIRECTED_REQUEST,
+            ),
+            (
+                host,
+                "prometheus",
+                "127.0.0.1:3000",
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/")
+                        .header(header::HOST, authority)
+                        .header(GATEWAY_APP_HEADER, marker)
+                        .header(header::UPGRADE, "websocket")
+                        .header(header::CONNECTION, "Upgrade")
+                        .extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{authority} {marker} {peer}");
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{gateway}/metrics?format=raw"))
+            .header(header::HOST, host)
+            .header(GATEWAY_APP_HEADER, "prometheus")
+            .header(header::AUTHORIZATION, format!("Basic {basic}"))
+            .header(
+                header::COOKIE,
+                "aetherflow_session=fixture; app_cookie=keep",
+            )
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-for", "192.0.2.7")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let observed: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(observed["requestLine"], "GET /metrics?format=raw HTTP/1.1");
+        assert_eq!(observed["host"], host);
+        let headers = &observed["headers"];
+        assert_eq!(headers["x-forwarded-proto"][0], "https");
+        assert_eq!(headers["x-forwarded-for"][0], "192.0.2.7");
+        assert_eq!(headers["x-aetherflow-user"][0], "managed-admin");
+        assert_eq!(headers["cookie"][0], "app_cookie=keep");
+        assert!(headers.get("authorization").is_none());
+        assert!(headers.get(GATEWAY_APP_HEADER).is_none());
+
+        let mut socket = tokio::net::TcpStream::connect(gateway).await.unwrap();
+        let handshake = format!(
+            "GET /socket HTTP/1.1\r\nHost: {host}\r\n{GATEWAY_APP_HEADER}: prometheus\r\nAuthorization: Basic {basic}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        socket.write_all(handshake.as_bytes()).await.unwrap();
+        let mut response = [0; 1024];
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response[..read].starts_with(b"HTTP/1.1 101 Switching Protocols"));
+    }
+
+    #[tokio::test]
+    async fn proxy_basic_rejects_totp_admin_but_mfa_session_is_accepted() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use base64::Engine;
+        use tower::ServiceExt;
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let fixture_root = ensure_shared_test_db().parent().unwrap();
+        env::set_var("AETHERFLOW_CONFIG_ROOT", fixture_root);
+        env::set_var(
+            "AETHERFLOW_MASTER_CREDS_FILE",
+            fixture_root.join("missing-master-file"),
+        );
+        let password = "test-proxy-admin-password";
+        let secret = "JBSWY3DPEHPK3PXP";
+        let writer = af_db::get_conn().unwrap();
+        writer
+            .execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_enabled, totp_secret)
+            VALUES (93, 'proxy-mfa', 'admin', ?1, 1, ?2)",
+                rusqlite::params![bcrypt::hash(password, 4).unwrap(), secret],
+            )
+            .unwrap();
+
+        let master = af_db::encrypt_key(
+            &serde_json::json!({
+                "username": "proxy-mfa",
+                "password": password,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        writer
+            .execute(
+                "INSERT INTO system_config (key, value) VALUES ('master_credentials', ?1)",
+                [&master],
+            )
+            .unwrap();
+        drop(writer);
+        assert_eq!(
+            af_services::mutators::load_master_credentials().0,
+            "proxy-mfa"
+        );
+
+        let mut basic = axum::http::HeaderMap::new();
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("proxy-mfa:{password}"));
+        basic.insert(
+            header::AUTHORIZATION,
+            format!("Basic {encoded}").parse().unwrap(),
+        );
+        assert_eq!(verify_proxy_basic_credentials(&basic), None);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("app-launch-browser"),
+        );
+        let login = crate::auth::local_login(
+            headers.clone(),
+            Json(crate::auth::CredentialsRequest {
+                username: "proxy-mfa".into(),
+                password: password.into(),
+                setup_token: None,
+            }),
+        )
+        .await;
+        let body = axum::body::to_bytes(login.into_body(), 4096).await.unwrap();
+        let challenge: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(challenge["requires_mfa"], true);
+        let secret = data_encoding::BASE32_NOPAD
+            .decode(secret.as_bytes())
+            .unwrap();
+        let code = totp_lite::totp_custom::<totp_lite::Sha1>(
+            30,
+            6,
+            &secret,
+            Utc::now().timestamp() as u64,
+        );
+        let mfa = crate::auth::mfa_login_verify(
+            headers,
+            Json(crate::auth::MfaVerifyRequest {
+                mfa_token: challenge["mfa_token"].as_str().unwrap().into(),
+                code,
+            }),
+        )
+        .await;
+        assert_eq!(mfa.status(), StatusCode::OK);
+        let cookie = mfa.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        basic.insert(header::COOKIE, cookie.parse().unwrap());
+        basic.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("app-launch-browser"),
+        );
+        let principal = resolve_optional_authenticated_user(&basic, None).unwrap();
+        assert_eq!(principal.role, "admin");
+        assert_eq!(principal.username, "proxy-mfa");
+
+        let upstream_port = spawn_strict_kestrel_mock_upstream().await;
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "netdata".into(),
+            public_domain: "metrics.proxy-mfa.test".into(),
+            external_access_enabled: true,
+            tls_enabled: true,
+            listen_port: upstream_port.into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let app = crate::routes::build_router()
+            .layer(axum::middleware::from_fn(app_subdomain_proxy_middleware));
+        for (session, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some(cookie), StatusCode::OK),
+        ] {
+            let mut request = Request::builder()
+                .uri("/")
+                .header(header::USER_AGENT, "app-launch-browser")
+                .header(header::HOST, "metrics.proxy-mfa.test")
+                .header(GATEWAY_APP_HEADER, "netdata")
+                .header(header::AUTHORIZATION, &basic[header::AUTHORIZATION])
+                .extension(ConnectInfo(
+                    "127.0.0.1:10443".parse::<SocketAddr>().unwrap(),
+                ));
+            if let Some(session) = session {
+                request = request.header(header::COOKIE, session);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+
+        let host = "metrics.proxy-mfa.test";
+        let origin = "http://localhost";
+        let destination = format!("https://{host}/graph?view=all");
+        let launch_request = |destination: &str, csrf: bool| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/admin/apps/launch")
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, origin)
+                .header(header::USER_AGENT, "app-launch-browser")
+                .header(header::COOKIE, format!("{cookie}; csrf_token=launch-csrf"))
+                .header(header::CONTENT_TYPE, "application/json");
+            if csrf {
+                req = req.header("x-csrf-token", "launch-csrf");
+            }
+            req.body(Body::from(
+                serde_json::json!({ "app": "netdata", "destination": destination }).to_string(),
+            ))
+            .unwrap()
+        };
+        let read_json = |response: Response| async move {
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let dir = fixture_root.join("etc/apache2/sites-enabled");
+        std::fs::create_dir_all(&dir).unwrap();
+        let vhost = dir.join("aetherflow-ext-netdata.conf");
+        std::fs::write(
+            &vhost,
+            format!(
+                "<VirtualHost *:443>
+ServerName {host}
+</VirtualHost>
+"
+            ),
+        )
+        .unwrap();
+        let legacy = app
+            .clone()
+            .oneshot(launch_request(&destination, true))
+            .await
+            .unwrap();
+        assert_eq!(read_json(legacy).await, serde_json::json!({}));
+        std::fs::write(
+            &vhost,
+            format!(
+                "<VirtualHost *:443>
+ServerName {host}
+RequestHeader set {GATEWAY_APP_HEADER} netdata
+</VirtualHost>
+"
+            ),
+        )
+        .unwrap();
+
+        let no_csrf = app
+            .clone()
+            .oneshot(launch_request(&destination, false))
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+        let wrong_destination = app
+            .clone()
+            .oneshot(launch_request("https://other.proxy-mfa.test/", true))
+            .await
+            .unwrap();
+        assert_eq!(read_json(wrong_destination).await, serde_json::json!({}));
+
+        let issue = || async {
+            let response = app
+                .clone()
+                .oneshot(launch_request(&destination, true))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "private, no-store"
+            );
+            read_json(response).await["ticket"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let exchange = |ticket: &str, dashboard: &str, managed: bool| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(af_models::APP_LAUNCH_EXCHANGE_PATH)
+                .header(header::HOST, host)
+                .header("x-forwarded-proto", "https")
+                .header(header::ORIGIN, dashboard)
+                .header(header::USER_AGENT, "app-launch-browser")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .extension(ConnectInfo(
+                    "127.0.0.1:10443".parse::<SocketAddr>().unwrap(),
+                ));
+            if managed {
+                builder = builder.header(GATEWAY_APP_HEADER, "netdata");
+            }
+            builder
+                .body(Body::from(format!("ticket={ticket}")))
+                .unwrap()
+        };
+
+        let ticket = issue().await;
+        for (dashboard, managed, expected) in [
+            ("https://unexpected.test", true, StatusCode::UNAUTHORIZED),
+            (origin, false, StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(exchange(&ticket, dashboard, managed))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let (first, second) = tokio::join!(
+            app.clone().oneshot(exchange(&ticket, origin, true)),
+            app.clone().oneshot(exchange(&ticket, origin, true)),
+        );
+        let (mut first, mut second) = (first.unwrap(), second.unwrap());
+        if second.status() == StatusCode::SEE_OTHER {
+            std::mem::swap(&mut first, &mut second);
+        }
+        assert_eq!(first.status(), StatusCode::SEE_OTHER);
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(first.headers()[header::LOCATION], destination);
+        assert_eq!(first.headers()[header::CACHE_CONTROL], "private, no-store");
+        let set_cookie = first.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set_cookie.starts_with("__Host-aetherflow_app="));
+        assert!(set_cookie.contains("; Secure; HttpOnly"));
+        assert!(!set_cookie.contains("Domain="));
+        assert!(!set_cookie.contains(cookie));
+        let app_cookie = set_cookie.split(';').next().unwrap();
+        let request_app = || {
+            Request::builder()
+                .uri("/graph?view=all")
+                .header(header::HOST, host)
+                .header(header::USER_AGENT, "app-launch-browser")
+                .header(header::COOKIE, format!("{app_cookie}; native=keep"))
+                .header(GATEWAY_APP_HEADER, "netdata")
+                .header("x-forwarded-proto", "https")
+                .extension(ConnectInfo(
+                    "127.0.0.1:10443".parse::<SocketAddr>().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let proxied = app.clone().oneshot(request_app()).await.unwrap();
+        let observed = read_json(proxied).await;
+        assert_eq!(observed["headers"]["cookie"][0], "native=keep");
+        assert_eq!(observed["headers"]["x-aetherflow-user"][0], "proxy-mfa");
+        assert_eq!(observed["requestLine"], "GET /graph?view=all HTTP/1.1");
+
+        let pending = issue().await;
+        let db = af_db::get_conn().unwrap();
+        db.execute("UPDATE users SET role = 'user' WHERE id = 93", [])
+            .unwrap();
+        let denied = app.clone().oneshot(request_app()).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let denied = app
+            .clone()
+            .oneshot(launch_request(&destination, true))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let denied = app
+            .clone()
+            .oneshot(exchange(&pending, origin, true))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        db.execute("UPDATE users SET role = 'admin' WHERE id = 93", [])
+            .unwrap();
+        let pending = issue().await;
+        db.execute("DELETE FROM active_sessions WHERE user_id = 93", [])
+            .unwrap();
+        let denied = app
+            .clone()
+            .oneshot(exchange(&pending, origin, true))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let denied = app.oneshot(request_app()).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
 
     /// Spawns a strict raw HTTP/1.1 mock upstream that behaves like Jellyfin/Kestrel:
     /// - Rejects any request with `!= 1` `Host:` header lines with `400 Bad Request`

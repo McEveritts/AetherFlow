@@ -1616,6 +1616,7 @@
   "invidious": {
     "update_source": "git",
     "require_download_sha256": true,
+    "update_repo": "iv-org/invidious",
     "update_repo_url": "https://github.com/iv-org/invidious.git",
     "version_command": [
       "bash",

@@ -1072,7 +1072,6 @@ fn configure_unprivileged_command(
     cmd: &mut Command,
     manifest: &ValidatedPluginManifest,
     port: u16,
-    scoped_token: &str,
 ) {
     cmd.env_clear();
     let safe_path = env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
@@ -1092,8 +1091,7 @@ fn configure_unprivileged_command(
         .env("PLUGIN_BIND_ADDR", "127.0.0.1")
         .env("PLUGIN_PORT", port.to_string())
         .env("PORT", port.to_string())
-        .env("AETHERFLOW_API_BASE_URL", api_base)
-        .env("AETHERFLOW_PLUGIN_TOKEN", scoped_token);
+        .env("AETHERFLOW_API_BASE_URL", api_base);
 
     #[cfg(unix)]
     {
@@ -1278,9 +1276,8 @@ pub async fn start_plugin_instance(
             write_runtime_token(&token_file, &token).map_err(|error| error.to_string())?;
             let mut cmd = Command::new(&program);
             cmd.args(&args);
-            configure_unprivileged_command(&mut cmd, manifest, port, "");
-            cmd.env_remove("AETHERFLOW_PLUGIN_TOKEN")
-                .env("AETHERFLOW_PLUGIN_TOKEN_FILE", &token_file);
+            configure_unprivileged_command(&mut cmd, manifest, port);
+            cmd.env("AETHERFLOW_PLUGIN_TOKEN_FILE", &token_file);
             let child = cmd.spawn().map_err(|error| {
                 let _ = fs::remove_file(&token_file);
                 format!("Failed to spawn plugin binary: {error}")
@@ -1394,12 +1391,16 @@ async fn run_plugin_stop_hook(manifest: &ValidatedPluginManifest, port: u16) {
     if !hook_path.is_file() {
         return;
     }
-    let scoped_token = mint_scoped_plugin_token(manifest, Some(60))
-        .map(|(t, _)| t)
-        .unwrap_or_default();
     let mut cmd = Command::new("/bin/bash");
     cmd.arg(&hook_path);
-    configure_unprivileged_command(&mut cmd, manifest, port, &scoped_token);
+    configure_unprivileged_command(&mut cmd, manifest, port);
+    let token_file = ACTIVE_PROCESSES
+        .lock()
+        .ok()
+        .and_then(|processes| processes.get(&manifest.id)?.token_file.clone());
+    if let Some(path) = token_file.filter(|path| path.is_file()) {
+        cmd.env("AETHERFLOW_PLUGIN_TOKEN_FILE", path);
+    }
     if let Ok(mut child) = cmd.spawn() {
         let pgid = child.id().and_then(|id| i32::try_from(id).ok());
         if tokio::time::timeout(Duration::from_secs(5), child.wait())
@@ -2676,7 +2677,21 @@ pub(crate) mod tests {
         let plugin_id = format!("pgid-test-{}", uuid::Uuid::new_v4());
         let tmp = env::temp_dir().join(&plugin_id);
         fs::create_dir_all(&tmp).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
         let pid_file = tmp.join("grandchild.pid");
+        let token_file = tmp.join("runtime.token");
+        write_runtime_token(&token_file, "file-only-test-token").unwrap();
+        fs::write(
+            tmp.join("stop.sh"),
+            r#"
+            test -z "${AETHERFLOW_PLUGIN_TOKEN+x}" || exit 1
+            test "$AETHERFLOW_PLUGIN_TOKEN_FILE" = "$PWD/runtime.token" || exit 2
+            test -f "$AETHERFLOW_PLUGIN_TOKEN_FILE" || exit 3
+            touch stop-hook-verified
+        "#,
+        )
+        .unwrap();
 
         let manifest = ValidatedPluginManifest {
             id: plugin_id.clone(),
@@ -2689,7 +2704,10 @@ pub(crate) mod tests {
             author: String::new(),
             permissions: Vec::new(),
             granted_scopes: Vec::new(),
-            lifecycle_hooks: PluginLifecycleHooks::default(),
+            lifecycle_hooks: PluginLifecycleHooks {
+                on_stop: "stop.sh".into(),
+                ..Default::default()
+            },
             backend: PluginBackendSpec::default(),
             frontend: PluginFrontendSpec::default(),
             plugin_dir: tmp.clone(),
@@ -2698,7 +2716,7 @@ pub(crate) mod tests {
         let script = format!("sleep 30 & echo $! > {:?}; wait", pid_file);
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(&script);
-        configure_unprivileged_command(&mut cmd, &manifest, 21111, "test-token");
+        configure_unprivileged_command(&mut cmd, &manifest, 21111);
         let child = cmd.spawn().unwrap();
         let pgid = child.id().and_then(|id| i32::try_from(id).ok());
         {
@@ -2709,7 +2727,7 @@ pub(crate) mod tests {
                     child,
                     port: 21111,
                     pgid,
-                    token_file: None,
+                    token_file: Some(token_file.clone()),
                     runtime_id: None,
                     monitor: None,
                 },
@@ -2728,7 +2746,10 @@ pub(crate) mod tests {
         }
         assert!(gc_pid > 0, "grandchild pid should be recorded");
 
+        run_plugin_stop_hook(&manifest, 21111).await;
+        assert!(tmp.join("stop-hook-verified").is_file());
         stop_running_process(&plugin_id).await;
+        assert!(!token_file.exists());
         for _ in 0..20 {
             let alive = unsafe { libc::kill(gc_pid, 0) == 0 };
             if !alive {

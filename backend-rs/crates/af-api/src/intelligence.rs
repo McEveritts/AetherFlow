@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path as StdPath, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 
 #[cfg(test)]
@@ -808,6 +807,32 @@ pub struct ProviderSettings {
     pub local_provider: String,
     pub local_model: String,
     pub system_prompt: String,
+}
+
+fn select_gemini_model_from_setting(raw_ai_model: Option<&str>) -> String {
+    if let Some(m) = raw_ai_model.map(str::trim).filter(|s| !s.is_empty()) {
+        if m.starts_with("gemini-")
+            && m.len() <= 128
+            && !is_forbidden_model_alias(m)
+            && m.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return m.to_string();
+        }
+    }
+    "gemini-2.5-flash".to_string()
+}
+
+fn resolve_configured_gemini_model() -> String {
+    let configured = af_db::get_read_conn().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT COALESCE(ai_model, '') FROM settings WHERE id = 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    });
+    select_gemini_model_from_setting(configured.as_deref())
 }
 
 pub fn resolve_provider_settings() -> ProviderSettings {
@@ -3023,6 +3048,7 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
 
     let ps = resolve_provider_settings();
     let has_gemini_key = !ps.gemini_api_key.is_empty();
+    let configured_gemini_model = resolve_configured_gemini_model();
     let explicit_cursor = req
         .get("cursor")
         .and_then(|v| v.as_str())
@@ -3136,6 +3162,7 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
     if has_gemini_key && !media_files.is_empty() {
         scan_guard.keep_scanning = true;
         let api_key = ps.gemini_api_key.clone();
+        let gemini_model = configured_gemini_model;
         tokio::spawn(async move {
             let _async_guard = EnricherScanGuard {
                 keep_scanning: false,
@@ -3158,7 +3185,7 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                     filenames.join("\n")
                 );
                 if let Ok(resp_text) =
-                    call_gemini_api(&api_key, "gemini-2.0-flash", "", &[], &prompt).await
+                    call_gemini_api(&api_key, &gemini_model, "", &[], &prompt).await
                 {
                     let cleaned = clean_json_fence(&resp_text);
                     if let Ok(parsed_arr) = serde_json::from_str::<Vec<serde_json::Value>>(&cleaned)
@@ -3322,38 +3349,18 @@ pub async fn bandwidth_analyze() -> Response {
     };
     let live_streaming = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        crate::streaming_ext::build_streaming_dashboard("7", "all", "all", true),
+        crate::streaming_ext::build_streaming_dashboard("30", "all", "all", false),
     )
     .await
     .ok();
-    let fallback_streaming = if live_streaming
-        .as_ref()
-        .is_none_or(|d| d.live_summary.active_streams == 0)
-    {
-        Some(af_services::get_streaming_dashboard(7, true))
-    } else {
-        None
-    };
     let active_streams = live_streaming
         .as_ref()
         .map(|d| d.live_summary.active_streams)
-        .unwrap_or(0)
-        .max(
-            fallback_streaming
-                .as_ref()
-                .map(|d| d.live_summary.active_streams)
-                .unwrap_or(0),
-        );
+        .unwrap_or(0);
     let active_transcodes = live_streaming
         .as_ref()
         .map(|d| d.live_summary.transcode_count)
-        .unwrap_or(0)
-        .max(
-            fallback_streaming
-                .as_ref()
-                .map(|d| d.live_summary.transcode_count)
-                .unwrap_or(0),
-        );
+        .unwrap_or(0);
 
     let mem_used = m.memory.get("used").copied().unwrap_or(0.0);
     let mem_total = m.memory.get("total").copied().unwrap_or(0.0);
@@ -3485,16 +3492,15 @@ fn load_master_torrent_credentials() -> Option<(String, String)> {
     Some((user, pw))
 }
 
-fn load_transmission_rpc_credentials() -> Option<(String, String)> {
-    if let Some(creds) = load_master_torrent_credentials() {
-        return Some(creds);
-    }
-    for raw_path in [
-        "/etc/transmission-daemon/settings.json",
-        "/var/lib/transmission-daemon/info/settings.json",
-    ] {
-        let path = resolve_torrent_runtime_path(raw_path);
-        if let Ok(contents) = std::fs::read_to_string(&path) {
+const TRANSMISSION_SETTINGS_CANDIDATES: [&str; 3] = [
+    "/etc/transmission-daemon/settings.json",
+    "/var/lib/transmission-daemon/info/settings.json",
+    "/var/lib/transmission-daemon/.config/transmission-daemon/settings.json",
+];
+
+fn load_transmission_rpc_credentials_from_paths(paths: &[PathBuf]) -> Option<(String, String)> {
+    for path in paths {
+        if let Ok(contents) = std::fs::read_to_string(path) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) {
                 let user = val
                     .get("rpc-username")
@@ -3517,6 +3523,17 @@ fn load_transmission_rpc_credentials() -> Option<(String, String)> {
     None
 }
 
+fn load_transmission_rpc_credentials() -> Option<(String, String)> {
+    if let Some(creds) = load_master_torrent_credentials() {
+        return Some(creds);
+    }
+    let resolved: Vec<PathBuf> = TRANSMISSION_SETTINGS_CANDIDATES
+        .iter()
+        .map(|raw| resolve_torrent_runtime_path(raw))
+        .collect();
+    load_transmission_rpc_credentials_from_paths(&resolved)
+}
+
 fn resolve_torrent_client_port(client_name: &str, default_port: i32) -> i32 {
     if let Ok(Some(cfg)) = af_db::get_app_ingress_config(client_name) {
         if (1..=65535).contains(&cfg.listen_port) {
@@ -3535,23 +3552,36 @@ fn resolve_torrent_client_port(client_name: &str, default_port: i32) -> i32 {
     default_port
 }
 
+#[derive(Clone, Debug)]
+struct TorrentRpcApplyError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    mutated: bool,
+    outcome_unknown: bool,
+    partial_apply: bool,
+    rollback_verified: Option<bool>,
+}
+
 async fn apply_transmission_bandwidth_to_url(
     rpc_url: &str,
     upload_kbps: i64,
     download_kbps: i64,
     creds: Option<&(String, String)>,
-) -> Result<String, (StatusCode, &'static str, &'static str)> {
+) -> Result<String, TorrentRpcApplyError> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to construct HTTP client",
-            )
+        .map_err(|_| TorrentRpcApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR",
+            message: "Failed to construct HTTP client".to_string(),
+            mutated: false,
+            outcome_unknown: false,
+            partial_apply: false,
+            rollback_verified: None,
         })?;
 
     let down_enabled = download_kbps > 0;
@@ -3581,12 +3611,22 @@ async fn apply_transmission_bandwidth_to_url(
         req.send()
     };
 
-    let mut resp = send_rpc(None).await.map_err(|_| {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "GATEWAY_TIMEOUT",
-            "Torrent daemon RPC timeout or unreachable",
-        )
+    let mut resp = send_rpc(None).await.map_err(|err| {
+        let sent_ambiguous = !err.is_connect();
+        TorrentRpcApplyError {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "GATEWAY_TIMEOUT",
+            message: if sent_ambiguous {
+                "Transmission RPC timed out or reset after sending session-set; outcome is unknown"
+                    .to_string()
+            } else {
+                "Torrent daemon RPC timeout or unreachable".to_string()
+            },
+            mutated: sent_ambiguous,
+            outcome_unknown: sent_ambiguous,
+            partial_apply: false,
+            rollback_verified: None,
+        }
     })?;
 
     if resp.status() == reqwest::StatusCode::CONFLICT {
@@ -3597,42 +3637,77 @@ async fn apply_transmission_bandwidth_to_url(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .ok_or((
-                StatusCode::BAD_GATEWAY,
-                "BAD_GATEWAY",
-                "Transmission 409 response missing X-Transmission-Session-Id header",
-            ))?;
-        resp = send_rpc(Some(&session_id)).await.map_err(|_| {
-            (
-                StatusCode::GATEWAY_TIMEOUT,
-                "GATEWAY_TIMEOUT",
-                "Torrent daemon RPC timeout or unreachable",
-            )
+            .ok_or_else(|| TorrentRpcApplyError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "BAD_GATEWAY",
+                message: "Transmission 409 response missing X-Transmission-Session-Id header"
+                    .to_string(),
+                mutated: false,
+                outcome_unknown: false,
+                partial_apply: false,
+                rollback_verified: None,
+            })?;
+        resp = send_rpc(Some(&session_id)).await.map_err(|err| {
+            let sent_ambiguous = !err.is_connect();
+            TorrentRpcApplyError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "GATEWAY_TIMEOUT",
+                message: if sent_ambiguous {
+                    "Transmission RPC timed out or reset after sending session-set; outcome is unknown".to_string()
+                } else {
+                    "Torrent daemon RPC timeout or unreachable".to_string()
+                },
+                mutated: sent_ambiguous,
+                outcome_unknown: sent_ambiguous,
+                partial_apply: false,
+                rollback_verified: None,
+            }
         })?;
     }
 
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
     if status != reqwest::StatusCode::OK {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "Torrent daemon rejected RPC request",
-        ));
+        return Err(TorrentRpcApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "Torrent daemon rejected RPC request".to_string(),
+            mutated: false,
+            outcome_unknown: false,
+            partial_apply: false,
+            rollback_verified: None,
+        });
     }
-    let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "Transmission RPC returned malformed JSON",
-        )
+    let text = resp.text().await.map_err(|_| TorrentRpcApplyError {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        code: "GATEWAY_TIMEOUT",
+        message: "Transmission RPC connection reset while reading response; outcome is unknown"
+            .to_string(),
+        mutated: true,
+        outcome_unknown: true,
+        partial_apply: false,
+        rollback_verified: None,
     })?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| TorrentRpcApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "Transmission RPC returned malformed JSON after mutation; outcome is unknown"
+                .to_string(),
+            mutated: true,
+            outcome_unknown: true,
+            partial_apply: false,
+            rollback_verified: None,
+        })?;
     if parsed.get("result").and_then(|v| v.as_str()) != Some("success") {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "Transmission RPC did not report result == \"success\"",
-        ));
+        return Err(TorrentRpcApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "Transmission RPC did not report result == \"success\"".to_string(),
+            mutated: false,
+            outcome_unknown: false,
+            partial_apply: false,
+            rollback_verified: None,
+        });
     }
     Ok(text)
 }
@@ -3658,6 +3733,7 @@ struct QbittorrentApplyError {
     code: &'static str,
     message: String,
     mutated: bool,
+    outcome_unknown: bool,
     partial_apply: bool,
     rollback_verified: Option<bool>,
 }
@@ -3698,6 +3774,51 @@ async fn read_qbittorrent_limit_bytes(
         .filter(|&v| v >= 0)
 }
 
+async fn rollback_and_verify_qbittorrent_limits(
+    client: &reqwest::Client,
+    base: &str,
+    referer: &str,
+    cookie_header: Option<&str>,
+    prior_down_bytes: i64,
+    prior_up_bytes: i64,
+) -> bool {
+    let down_str = prior_down_bytes.to_string();
+    let up_str = prior_up_bytes.to_string();
+
+    let mut rb_down = client
+        .post(format!("{base}/api/v2/transfer/setDownloadLimit"))
+        .header(reqwest::header::ORIGIN, base)
+        .header(reqwest::header::REFERER, referer)
+        .form(&[("limit", down_str.as_str())]);
+    if let Some(cookie) = cookie_header {
+        rb_down = rb_down.header(reqwest::header::COOKIE, cookie);
+    }
+    let rb_down_ok = matches!(rb_down.send().await, Ok(r) if r.status().is_success());
+
+    let mut rb_up = client
+        .post(format!("{base}/api/v2/transfer/setUploadLimit"))
+        .header(reqwest::header::ORIGIN, base)
+        .header(reqwest::header::REFERER, referer)
+        .form(&[("limit", up_str.as_str())]);
+    if let Some(cookie) = cookie_header {
+        rb_up = rb_up.header(reqwest::header::COOKIE, cookie);
+    }
+    let _ = rb_up.send().await;
+
+    let read_down = read_qbittorrent_limit_bytes(
+        client,
+        base,
+        "/api/v2/transfer/downloadLimit",
+        cookie_header,
+    )
+    .await;
+    let read_up =
+        read_qbittorrent_limit_bytes(client, base, "/api/v2/transfer/uploadLimit", cookie_header)
+            .await;
+
+    rb_down_ok && read_down == Some(prior_down_bytes) && read_up == Some(prior_up_bytes)
+}
+
 async fn apply_qbittorrent_bandwidth_inner(
     base_url: &str,
     upload_kbps: i64,
@@ -3718,6 +3839,7 @@ async fn apply_qbittorrent_bandwidth_inner(
             code: "INTERNAL_ERROR",
             message: "Failed to construct HTTP client".to_string(),
             mutated: false,
+            outcome_unknown: false,
             partial_apply: false,
             rollback_verified: None,
         })?;
@@ -3737,6 +3859,7 @@ async fn apply_qbittorrent_bandwidth_inner(
                 code: "GATEWAY_TIMEOUT",
                 message: "qBittorrent WebUI timeout or unreachable".to_string(),
                 mutated: false,
+                outcome_unknown: false,
                 partial_apply: false,
                 rollback_verified: None,
             })?;
@@ -3749,6 +3872,7 @@ async fn apply_qbittorrent_bandwidth_inner(
                 code: "BAD_GATEWAY",
                 message: "qBittorrent WebUI authentication failed".to_string(),
                 mutated: false,
+                outcome_unknown: false,
                 partial_apply: false,
                 rollback_verified: None,
             });
@@ -3769,11 +3893,12 @@ async fn apply_qbittorrent_bandwidth_inner(
             code: "BAD_GATEWAY",
             message: "Failed to read prior qBittorrent downloadLimit before mutation".to_string(),
             mutated: false,
+            outcome_unknown: false,
             partial_apply: false,
             rollback_verified: None,
         });
     };
-    let Some(_prior_up_bytes) = read_qbittorrent_limit_bytes(
+    let Some(prior_up_bytes) = read_qbittorrent_limit_bytes(
         &client,
         base,
         "/api/v2/transfer/uploadLimit",
@@ -3786,6 +3911,7 @@ async fn apply_qbittorrent_bandwidth_inner(
             code: "BAD_GATEWAY",
             message: "Failed to read prior qBittorrent uploadLimit before mutation".to_string(),
             mutated: false,
+            outcome_unknown: false,
             partial_apply: false,
             rollback_verified: None,
         });
@@ -3810,20 +3936,56 @@ async fn apply_qbittorrent_bandwidth_inner(
     if let Some(ref cookie) = cookie_header {
         down_req = down_req.header(reqwest::header::COOKIE, cookie);
     }
-    let down_resp = down_req.send().await.map_err(|_| QbittorrentApplyError {
-        status: StatusCode::GATEWAY_TIMEOUT,
-        code: "GATEWAY_TIMEOUT",
-        message: "qBittorrent WebUI timeout or unreachable".to_string(),
-        mutated: false,
-        partial_apply: false,
-        rollback_verified: None,
-    })?;
+    let down_resp = match down_req.send().await {
+        Ok(resp) => resp,
+        Err(err) if err.is_connect() => {
+            return Err(QbittorrentApplyError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "GATEWAY_TIMEOUT",
+                message: "qBittorrent WebUI unreachable".to_string(),
+                mutated: false,
+                outcome_unknown: false,
+                partial_apply: false,
+                rollback_verified: None,
+            });
+        }
+        Err(_) => {
+            let rb_verified = rollback_and_verify_qbittorrent_limits(
+                &client,
+                base,
+                &referer,
+                cookie_header.as_deref(),
+                prior_down_bytes,
+                prior_up_bytes,
+            )
+            .await;
+            let detail = if rb_verified {
+                format!(
+                    "qBittorrent WebUI timed out or reset during setDownloadLimit (rollback_verified=true: verified downloadLimit={prior_down_bytes} B/s, uploadLimit={prior_up_bytes} B/s)"
+                )
+            } else {
+                format!(
+                    "qBittorrent WebUI timed out or reset during setDownloadLimit (outcome_unknown=true, rollback_verified=false: failed to verify downloadLimit={prior_down_bytes} B/s and uploadLimit={prior_up_bytes} B/s)"
+                )
+            };
+            return Err(QbittorrentApplyError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "GATEWAY_TIMEOUT",
+                message: detail,
+                mutated: true,
+                outcome_unknown: !rb_verified,
+                partial_apply: !rb_verified,
+                rollback_verified: Some(rb_verified),
+            });
+        }
+    };
     if !down_resp.status().is_success() {
         return Err(QbittorrentApplyError {
             status: StatusCode::BAD_GATEWAY,
             code: "BAD_GATEWAY",
             message: "qBittorrent rejected setDownloadLimit".to_string(),
             mutated: false,
+            outcome_unknown: false,
             partial_apply: false,
             rollback_verified: None,
         });
@@ -3852,31 +4014,22 @@ async fn apply_qbittorrent_bandwidth_inner(
     };
 
     if let Err((status, code, base_msg)) = up_outcome {
-        let rollback_limit = prior_down_bytes.to_string();
-        let mut rb_req = client
-            .post(format!("{base}/api/v2/transfer/setDownloadLimit"))
-            .header(reqwest::header::ORIGIN, base)
-            .header(reqwest::header::REFERER, &referer)
-            .form(&[("limit", rollback_limit.as_str())]);
-        if let Some(ref cookie) = cookie_header {
-            rb_req = rb_req.header(reqwest::header::COOKIE, cookie);
-        }
-        let rb_post_ok = matches!(rb_req.send().await, Ok(r) if r.status().is_success());
-        let read_back = read_qbittorrent_limit_bytes(
+        let rb_verified = rollback_and_verify_qbittorrent_limits(
             &client,
             base,
-            "/api/v2/transfer/downloadLimit",
+            &referer,
             cookie_header.as_deref(),
+            prior_down_bytes,
+            prior_up_bytes,
         )
         .await;
-        let rb_verified = rb_post_ok && read_back == Some(prior_down_bytes);
         let detail = if rb_verified {
             format!(
-                "{base_msg} (rollback_verified=true: restored downloadLimit to {prior_down_bytes} B/s)"
+                "{base_msg} (rollback_verified=true: restored downloadLimit to {prior_down_bytes} B/s and uploadLimit to {prior_up_bytes} B/s)"
             )
         } else {
             format!(
-                "{base_msg} (partial_apply=true, rollback_verified=false: failed to verify restoration of downloadLimit to {prior_down_bytes} B/s)"
+                "{base_msg} (partial_apply=true, outcome_unknown=true, rollback_verified=false: failed to verify restoration of downloadLimit={prior_down_bytes} B/s and uploadLimit={prior_up_bytes} B/s)"
             )
         };
         return Err(QbittorrentApplyError {
@@ -3884,6 +4037,7 @@ async fn apply_qbittorrent_bandwidth_inner(
             code,
             message: detail,
             mutated: true,
+            outcome_unknown: !rb_verified,
             partial_apply: !rb_verified,
             rollback_verified: Some(rb_verified),
         });
@@ -3897,18 +4051,20 @@ async fn apply_deluge_bandwidth_to_url(
     upload_kbps: i64,
     download_kbps: i64,
     password: Option<&str>,
-) -> Result<String, (StatusCode, &'static str, &'static str)> {
+) -> Result<String, TorrentRpcApplyError> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to construct HTTP client",
-            )
+        .map_err(|_| TorrentRpcApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR",
+            message: "Failed to construct HTTP client".to_string(),
+            mutated: false,
+            outcome_unknown: false,
+            partial_apply: false,
+            rollback_verified: None,
         })?;
 
     let mut cookie_header: Option<String> = None;
@@ -3922,38 +4078,51 @@ async fn apply_deluge_bandwidth_to_url(
             }))
             .send()
             .await
-            .map_err(|_| {
-                (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "GATEWAY_TIMEOUT",
-                    "Deluge WebUI timeout or unreachable",
-                )
+            .map_err(|_| TorrentRpcApplyError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "GATEWAY_TIMEOUT",
+                message: "Deluge WebUI timeout or unreachable".to_string(),
+                mutated: false,
+                outcome_unknown: false,
+                partial_apply: false,
+                rollback_verified: None,
             })?;
         let login_status = login_resp.status();
         cookie_header = extract_cookie_header(login_resp.headers());
         let login_text = login_resp.text().await.unwrap_or_default();
         if !login_status.is_success() {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                "BAD_GATEWAY",
-                "Deluge WebUI authentication failed",
-            ));
+            return Err(TorrentRpcApplyError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "BAD_GATEWAY",
+                message: "Deluge WebUI authentication failed".to_string(),
+                mutated: false,
+                outcome_unknown: false,
+                partial_apply: false,
+                rollback_verified: None,
+            });
         }
-        let login_json: serde_json::Value = serde_json::from_str(&login_text).map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "BAD_GATEWAY",
-                "Deluge auth.login returned malformed JSON-RPC response",
-            )
-        })?;
+        let login_json: serde_json::Value =
+            serde_json::from_str(&login_text).map_err(|_| TorrentRpcApplyError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "BAD_GATEWAY",
+                message: "Deluge auth.login returned malformed JSON-RPC response".to_string(),
+                mutated: false,
+                outcome_unknown: false,
+                partial_apply: false,
+                rollback_verified: None,
+            })?;
         let login_err_null = login_json.get("error").is_none_or(|e| e.is_null());
         let login_ok = login_json.get("result").and_then(|v| v.as_bool()) == Some(true);
         if !login_err_null || !login_ok {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                "BAD_GATEWAY",
-                "Deluge WebUI authentication rejected credentials",
-            ));
+            return Err(TorrentRpcApplyError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "BAD_GATEWAY",
+                message: "Deluge WebUI authentication rejected credentials".to_string(),
+                mutated: false,
+                outcome_unknown: false,
+                partial_apply: false,
+                rollback_verified: None,
+            });
         }
     }
 
@@ -3978,35 +4147,67 @@ async fn apply_deluge_bandwidth_to_url(
     if let Some(ref cookie) = cookie_header {
         set_req = set_req.header(reqwest::header::COOKIE, cookie);
     }
-    let set_resp = set_req.send().await.map_err(|_| {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "GATEWAY_TIMEOUT",
-            "Deluge WebUI timeout or unreachable",
-        )
+    let set_resp = set_req.send().await.map_err(|err| {
+        let sent_ambiguous = !err.is_connect();
+        TorrentRpcApplyError {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "GATEWAY_TIMEOUT",
+            message: if sent_ambiguous {
+                "Deluge WebUI timed out or reset after sending core.set_config; outcome is unknown"
+                    .to_string()
+            } else {
+                "Deluge WebUI timeout or unreachable".to_string()
+            },
+            mutated: sent_ambiguous,
+            outcome_unknown: sent_ambiguous,
+            partial_apply: false,
+            rollback_verified: None,
+        }
     })?;
     let status = set_resp.status();
-    let text = set_resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "Deluge WebUI rejected RPC request",
-        ));
+        return Err(TorrentRpcApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "Deluge WebUI rejected RPC request".to_string(),
+            mutated: false,
+            outcome_unknown: false,
+            partial_apply: false,
+            rollback_verified: None,
+        });
     }
-    let set_json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "Deluge core.set_config returned malformed JSON-RPC response",
-        )
+    let text = set_resp.text().await.map_err(|_| TorrentRpcApplyError {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        code: "GATEWAY_TIMEOUT",
+        message:
+            "Deluge WebUI connection reset while reading core.set_config response; outcome is unknown"
+                .to_string(),
+        mutated: true,
+        outcome_unknown: true,
+        partial_apply: false,
+        rollback_verified: None,
     })?;
+    let set_json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| TorrentRpcApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "Deluge core.set_config returned malformed JSON-RPC response after mutation"
+                .to_string(),
+            mutated: true,
+            outcome_unknown: true,
+            partial_apply: false,
+            rollback_verified: None,
+        })?;
     if !set_json.get("error").is_none_or(|e| e.is_null()) {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "Deluge core.set_config returned a JSON-RPC error",
-        ));
+        return Err(TorrentRpcApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "Deluge core.set_config returned a JSON-RPC error".to_string(),
+            mutated: false,
+            outcome_unknown: false,
+            partial_apply: false,
+            rollback_verified: None,
+        });
     }
     Ok(text)
 }
@@ -4079,18 +4280,18 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
         }
     };
 
-    let mut last_err: (StatusCode, &'static str, String, bool, Option<bool>) = (
-        StatusCode::GATEWAY_TIMEOUT,
-        "GATEWAY_TIMEOUT",
-        "Torrent daemon RPC timeout or unreachable".to_string(),
-        false,
-        None,
-    );
-
-    type BandwidthCandidateErr = (StatusCode, &'static str, String, bool, bool, Option<bool>);
+    let mut last_err = TorrentRpcApplyError {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        code: "GATEWAY_TIMEOUT",
+        message: "Torrent daemon RPC timeout or unreachable".to_string(),
+        mutated: false,
+        outcome_unknown: false,
+        partial_apply: false,
+        rollback_verified: None,
+    };
 
     for client_name in candidates {
-        let outcome: Result<String, BandwidthCandidateErr> = match client_name {
+        let outcome: Result<String, TorrentRpcApplyError> = match client_name {
             "transmission" => {
                 let port = resolve_torrent_client_port("transmission", 9091);
                 let creds = load_transmission_rpc_credentials();
@@ -4102,7 +4303,6 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
                     creds.as_ref(),
                 )
                 .await
-                .map_err(|(s, c, m)| (s, c, m.to_string(), false, false, None))
             }
             "qbittorrent" => {
                 let port = resolve_torrent_client_port("qbittorrent", 8180);
@@ -4110,15 +4310,14 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
                 let url = format!("http://127.0.0.1:{port}");
                 apply_qbittorrent_bandwidth_inner(&url, upload_kbps, download_kbps, creds.as_ref())
                     .await
-                    .map_err(|e| {
-                        (
-                            e.status,
-                            e.code,
-                            e.message,
-                            e.mutated,
-                            e.partial_apply,
-                            e.rollback_verified,
-                        )
+                    .map_err(|e| TorrentRpcApplyError {
+                        status: e.status,
+                        code: e.code,
+                        message: e.message,
+                        mutated: e.mutated,
+                        outcome_unknown: e.outcome_unknown,
+                        partial_apply: e.partial_apply,
+                        rollback_verified: e.rollback_verified,
                     })
             }
             "deluge" => {
@@ -4126,9 +4325,7 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
                 let creds = load_master_torrent_credentials();
                 let pw = creds.as_ref().map(|(_, p)| p.as_str());
                 let url = format!("http://127.0.0.1:{port}/json");
-                apply_deluge_bandwidth_to_url(&url, upload_kbps, download_kbps, pw)
-                    .await
-                    .map_err(|(s, c, m)| (s, c, m.to_string(), false, false, None))
+                apply_deluge_bandwidth_to_url(&url, upload_kbps, download_kbps, pw).await
             }
             _ => continue,
         };
@@ -4147,31 +4344,34 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
                 }))
                 .into_response();
             }
-            Err((status, code, msg, mutated, partial_apply, rollback_verified)) => {
-                last_err = (status, code, msg, partial_apply, rollback_verified);
-                if mutated {
+            Err(err) => {
+                let stop_fallback = err.mutated || err.outcome_unknown;
+                last_err = err;
+                if stop_fallback {
+                    // Never fall through in auto mode to mutate a second client while the first client's state is mutated or uncertain!
                     break;
                 }
             }
         }
     }
 
-    if last_err.3 || last_err.4.is_some() {
+    if last_err.outcome_unknown || last_err.partial_apply || last_err.rollback_verified.is_some() {
         return (
-            last_err.0,
+            last_err.status,
             Json(serde_json::json!({
                 "error": {
-                    "code": last_err.1,
-                    "message": last_err.2,
-                    "partial_apply": last_err.3,
-                    "rollback_verified": last_err.4,
+                    "code": last_err.code,
+                    "message": last_err.message,
+                    "outcome_unknown": last_err.outcome_unknown,
+                    "partial_apply": last_err.partial_apply,
+                    "rollback_verified": last_err.rollback_verified,
                 }
             })),
         )
             .into_response();
     }
 
-    api_error(last_err.0, last_err.1, last_err.2)
+    api_error(last_err.status, last_err.code, last_err.message)
 }
 
 fn compute_linear_slope(values: &[f64]) -> f64 {
@@ -4761,12 +4961,16 @@ pub async fn get_mediaflow_queue() -> Response {
 
 static MEDIAFLOW_VIDEO_EXTS: &[&str] = &[".mkv", ".mp4", ".avi", ".mov", ".ts", ".m2ts"];
 
-fn probe_video_codec_and_size(file_path: &StdPath) -> (String, i64) {
-    let fallback_size = std::fs::metadata(file_path)
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
+const MEDIAFLOW_FFPROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-    if let Ok(out) = Command::new("ffprobe")
+async fn run_ffprobe_json_bounded(
+    ffprobe_bin: &str,
+    file_path: &StdPath,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let mut child = tokio::process::Command::new(ffprobe_bin)
         .args([
             "-v",
             "quiet",
@@ -4776,37 +4980,70 @@ fn probe_video_codec_and_size(file_path: &StdPath) -> (String, i64) {
             "-show_streams",
         ])
         .arg(file_path)
-        .output()
-    {
-        if out.status.success() {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                let mut v_codec = String::new();
-                if let Some(streams) = val.get("streams").and_then(|v| v.as_array()) {
-                    for s in streams {
-                        if s.get("codec_type").and_then(|v| v.as_str()) == Some("video") {
-                            v_codec = s
-                                .get("codec_name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_lowercase();
-                            break;
-                        }
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+
+    let mut stdout_pipe = child.stdout.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout_pipe {
+            let _ = out.take(2 * 1024 * 1024).read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) if status.success() => stdout_task.await.ok(),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            stdout_task.abort();
+            None
+        }
+    }
+}
+
+async fn probe_video_codec_and_size_with_timeout(
+    ffprobe_bin: &str,
+    file_path: &StdPath,
+    timeout: std::time::Duration,
+) -> (String, i64) {
+    let fallback_size = std::fs::metadata(file_path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+
+    if let Some(stdout) = run_ffprobe_json_bounded(ffprobe_bin, file_path, timeout).await {
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&stdout) {
+            let mut v_codec = String::new();
+            if let Some(streams) = val.get("streams").and_then(|v| v.as_array()) {
+                for s in streams {
+                    if s.get("codec_type").and_then(|v| v.as_str()) == Some("video") {
+                        v_codec = s
+                            .get("codec_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        break;
                     }
                 }
-                let size = val
-                    .pointer("/format/size")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .filter(|&sz| sz > 0)
-                    .unwrap_or(fallback_size);
-                if !v_codec.is_empty() {
-                    return (v_codec, size);
-                }
+            }
+            let size = val
+                .pointer("/format/size")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&sz| sz > 0)
+                .unwrap_or(fallback_size);
+            if !v_codec.is_empty() {
+                return (v_codec, size);
             }
         }
     }
 
-    // Fallback when ffprobe is not installed or fails: infer from filename
+    // Fallback when ffprobe is not installed, fails, or times out: infer from filename
     let fname_lower = file_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -4829,6 +5066,10 @@ fn probe_video_codec_and_size(file_path: &StdPath) -> (String, i64) {
     };
 
     (codec, fallback_size)
+}
+
+async fn probe_video_codec_and_size(file_path: &StdPath) -> (String, i64) {
+    probe_video_codec_and_size_with_timeout("ffprobe", file_path, MEDIAFLOW_FFPROBE_TIMEOUT).await
 }
 
 fn mediaflow_library_roots() -> Vec<PathBuf> {
@@ -4916,51 +5157,78 @@ fn collect_mediaflow_files(
     out.extend(outcome.files);
 }
 
-fn scan_directory_for_mediaflow(
+async fn scan_directory_for_mediaflow(
     root_dir: &StdPath,
     explicit_cursor: Option<&str>,
     reset_cursor: bool,
 ) -> anyhow::Result<PagedScanOutcome> {
-    let prepared = prepare_auto_continuing_scan(
-        root_dir,
-        explicit_cursor,
-        reset_cursor,
-        &MEDIAFLOW_SCAN_CURSORS,
-        MAX_SCAN_FILES,
-        MAX_SCAN_DEPTH,
-        true,
-        is_mediaflow_extension,
-    );
+    let root_owned = root_dir.to_path_buf();
+    let cursor_owned = explicit_cursor.map(str::to_owned);
+    let (prepared, candidates) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let prepared = prepare_auto_continuing_scan(
+            &root_owned,
+            cursor_owned.as_deref(),
+            reset_cursor,
+            &MEDIAFLOW_SCAN_CURSORS,
+            MAX_SCAN_FILES,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        let mut candidates = Vec::new();
+        if !prepared.outcome.files.is_empty() {
+            let conn = af_db::get_read_conn()?;
+            for files in prepared.outcome.files.chunks(500) {
+                let names: Vec<_> = files.iter().map(|path| path.to_string_lossy()).collect();
+                let placeholders = vec!["?"; names.len()].join(", ");
+                let mut query = conn.prepare(&format!(
+                    "SELECT file_path FROM mediaflow_queue WHERE file_path IN ({placeholders})"
+                ))?;
+                let known = query
+                    .query_map(
+                        rusqlite::params_from_iter(names.iter().map(|name| name.as_ref())),
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+                for (path, name) in files.iter().zip(names) {
+                    if name.contains(".mediaflow_trash") || known.contains(name.as_ref()) {
+                        continue;
+                    }
+                    let metadata = std::fs::symlink_metadata(path)?;
+                    if metadata.file_type().is_file()
+                        && path.canonicalize()?.starts_with(&root_owned)
+                    {
+                        candidates.push((name.into_owned(), path.clone()));
+                    }
+                }
+            }
+        }
+        Ok((prepared, candidates))
+    })
+    .await??;
 
-    for path in &prepared.outcome.files {
-        let path_str = path.to_string_lossy().to_string();
-        if path_str.contains(".mediaflow_trash") {
-            continue;
-        }
-        let exists: i64 = {
-            let conn = af_db::get_conn()?;
-            conn.query_row(
-                "SELECT COUNT(*) FROM mediaflow_queue WHERE file_path = ?1",
-                params![path_str],
-                |r| r.get(0),
-            )?
-        };
-        if exists > 0 {
-            continue;
-        }
-
-        let metadata = std::fs::symlink_metadata(path)?;
-        if !metadata.file_type().is_file() || !path.canonicalize()?.starts_with(root_dir) {
-            continue;
-        }
-        let (codec, size) = probe_video_codec_and_size(path);
+    let mut pending = Vec::new();
+    for (name, path) in candidates {
+        let (codec, size) = probe_video_codec_and_size(&path).await;
         if codec != "hevc" && codec != "av1" {
-            let conn = af_db::get_conn()?;
-            conn.execute(
-                "INSERT INTO mediaflow_queue (file_path, original_codec, original_size, status) SELECT ?1, ?2, ?3, 'PENDING_APPROVAL' WHERE NOT EXISTS (SELECT 1 FROM mediaflow_queue WHERE file_path = ?1)",
-                params![path_str, codec, size],
-            )?;
+            pending.push((name, codec, size));
         }
+    }
+    if !pending.is_empty() {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut conn = af_db::get_conn()?;
+            let tx = conn.transaction()?;
+            let mut insert = tx.prepare(
+                "INSERT INTO mediaflow_queue (file_path, original_codec, original_size, status) SELECT ?1, ?2, ?3, 'PENDING_APPROVAL' WHERE NOT EXISTS (SELECT 1 FROM mediaflow_queue WHERE file_path = ?1)",
+            )?;
+            for (name, codec, size) in pending {
+                insert.execute(params![name, codec, size])?;
+            }
+            drop(insert);
+            tx.commit()?;
+            Ok(())
+        })
+        .await??;
     }
 
     commit_auto_continuing_scan(&MEDIAFLOW_SCAN_CURSORS, &prepared);
@@ -5045,19 +5313,17 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         );
     }
     tokio::spawn(async move {
+        let _guard = MediaflowScanGuard;
         let dir_for_scan = dir_buf.clone();
-        let scan_res = tokio::task::spawn_blocking(move || {
-            let _guard = MediaflowScanGuard;
-            scan_directory_for_mediaflow(
-                &dir_for_scan,
-                explicit_cursor_for_task.as_deref(),
-                reset_cursor,
-            )
-        })
+        let scan_res = scan_directory_for_mediaflow(
+            &dir_for_scan,
+            explicit_cursor_for_task.as_deref(),
+            reset_cursor,
+        )
         .await;
 
         let terminal_payload = match scan_res {
-            Ok(Ok(outcome)) => {
+            Ok(outcome) => {
                 if outcome.truncated {
                     tracing::info!(
                         directory = %dir_buf.display(),
@@ -5073,20 +5339,12 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
                     "truncated": outcome.truncated,
                 })
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 tracing::error!(%error, directory = %dir_buf.display(), "MediaFlow scan failed");
                 serde_json::json!({
                     "status": "failed",
                     "progress": 100,
                     "message": "MediaFlow scan failed",
-                })
-            }
-            Err(error) => {
-                tracing::error!(%error, "MediaFlow scan task panicked");
-                serde_json::json!({
-                    "status": "failed",
-                    "progress": 100,
-                    "message": "MediaFlow scan task failed",
                 })
             }
         };
@@ -5474,10 +5732,6 @@ pub(crate) fn infer_log_level(line: &str) -> &'static str {
 
 pub(crate) const AUDIT_LOG_FALLBACK_SQL: &str =
     "SELECT COALESCE(CAST(created_at AS TEXT), ''), COALESCE(action, 'event'), COALESCE(target_type, 'system'), COALESCE(detail, '') FROM admin_audit_log ORDER BY id DESC LIMIT ?1";
-
-pub async fn get_logs(query: Query<HashMap<String, String>>) -> Response {
-    crate::service_logs::get_logs(query).await
-}
 
 pub(crate) fn filter_log_entries(
     raw_entries: Vec<serde_json::Value>,
@@ -6953,5 +7207,194 @@ mod tests {
             .status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn p4_bandwidth_unknown_outcome_qbit_dual_rollback_transmission_config_ffprobe_timeout_and_gemini_model(
+    ) {
+        // 1. Transmission .config/transmission-daemon/settings.json candidate discovery
+        assert!(TRANSMISSION_SETTINGS_CANDIDATES
+            .contains(&"/var/lib/transmission-daemon/.config/transmission-daemon/settings.json"));
+        let tmp_dir = std::env::temp_dir().join(format!("af-intel-p4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tr_cfg = tmp_dir.join("settings.json");
+        std::fs::write(
+            &tr_cfg,
+            r#"{"rpc-username":"tr-user","rpc-password":"tr-plain-secret"}"#,
+        )
+        .unwrap();
+        let loaded_creds =
+            load_transmission_rpc_credentials_from_paths(&[tmp_dir.join("missing.json"), tr_cfg]);
+        assert_eq!(
+            loaded_creds,
+            Some(("tr-user".to_string(), "tr-plain-secret".to_string()))
+        );
+
+        // 2. Ambiguous transport drop AFTER sending mutation sets outcome_unknown=true & mutated=true (blocking auto fallback!)
+        let drop_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let drop_addr = drop_listener.local_addr().unwrap();
+        let drop_srv = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = drop_listener.accept().await {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf).await;
+                // Abruptly close socket after receiving POST session-set without sending response!
+                drop(stream);
+            }
+        });
+        let tr_ambig = apply_transmission_bandwidth_to_url(
+            &format!("http://{drop_addr}/transmission/rpc"),
+            1000,
+            2000,
+            None,
+        )
+        .await
+        .expect_err("dropped post-send RPC must fail");
+        assert!(tr_ambig.mutated);
+        assert!(tr_ambig.outcome_unknown);
+        drop_srv.abort();
+
+        // Conversely, unlistening port (connection refused before send) marks mutated=false & outcome_unknown=false
+        let probe_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_port = probe_l.local_addr().unwrap().port();
+        drop(probe_l);
+        let tr_refused = apply_transmission_bandwidth_to_url(
+            &format!("http://127.0.0.1:{unused_port}/transmission/rpc"),
+            1000,
+            2000,
+            None,
+        )
+        .await
+        .expect_err("connection refused must fail");
+        assert!(!tr_refused.mutated);
+        assert!(!tr_refused.outcome_unknown);
+
+        // 3. qBittorrent rollback restores AND verifies BOTH downloadLimit and uploadLimit when setUploadLimit mutates then drops!
+        let live_down = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(512_000));
+        let live_up = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(256_000));
+        let up_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ld_get = std::sync::Arc::clone(&live_down);
+        let ld_set = std::sync::Arc::clone(&live_down);
+        let lu_get = std::sync::Arc::clone(&live_up);
+        let lu_set = std::sync::Arc::clone(&live_up);
+        let uc = std::sync::Arc::clone(&up_calls);
+
+        let qb_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let qb_addr = qb_listener.local_addr().unwrap();
+        let qb_srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = qb_listener.accept().await else {
+                    break;
+                };
+                let ld_get = std::sync::Arc::clone(&ld_get);
+                let ld_set = std::sync::Arc::clone(&ld_set);
+                let lu_get = std::sync::Arc::clone(&lu_get);
+                let lu_set = std::sync::Arc::clone(&lu_set);
+                let uc = std::sync::Arc::clone(&uc);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let raw = String::from_utf8_lossy(&buf[..n]);
+                    let first = raw.lines().next().unwrap_or("");
+                    let body_part = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+                    if first.contains("GET /api/v2/transfer/downloadLimit") {
+                        let b = ld_get.load(std::sync::atomic::Ordering::SeqCst).to_string();
+                        let r = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            b.len(),
+                            b
+                        );
+                        let _ = s.write_all(r.as_bytes()).await;
+                    } else if first.contains("GET /api/v2/transfer/uploadLimit") {
+                        let b = lu_get.load(std::sync::atomic::Ordering::SeqCst).to_string();
+                        let r = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            b.len(),
+                            b
+                        );
+                        let _ = s.write_all(r.as_bytes()).await;
+                    } else if first.contains("POST /api/v2/transfer/setDownloadLimit") {
+                        if let Some(v) = body_part
+                            .trim()
+                            .strip_prefix("limit=")
+                            .and_then(|x| x.parse::<i64>().ok())
+                        {
+                            ld_set.store(v, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let _ = s
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                    } else if first.contains("POST /api/v2/transfer/setUploadLimit") {
+                        if let Some(v) = body_part
+                            .trim()
+                            .strip_prefix("limit=")
+                            .and_then(|x| x.parse::<i64>().ok())
+                        {
+                            lu_set.store(v, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        if uc.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            // Mutated uploadLimit on server, then reset connection!
+                            drop(s);
+                        } else {
+                            let _ = s
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                                .await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let qb_err =
+            apply_qbittorrent_bandwidth_inner(&format!("http://{qb_addr}"), 1000, 2000, None)
+                .await
+                .expect_err("reset on first setUploadLimit must error and trigger dual rollback");
+        assert!(qb_err.mutated);
+        assert_eq!(qb_err.rollback_verified, Some(true));
+        assert!(!qb_err.outcome_unknown);
+        assert_eq!(live_down.load(std::sync::atomic::Ordering::SeqCst), 512_000);
+        assert_eq!(live_up.load(std::sync::atomic::Ordering::SeqCst), 256_000);
+        qb_srv.abort();
+
+        // 4. Configured Gemini model selection vs fallback to gemini-2.5-flash
+        assert_eq!(
+            select_gemini_model_from_setting(Some("gemini-2.5-pro")),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(select_gemini_model_from_setting(None), "gemini-2.5-flash");
+        assert_eq!(
+            select_gemini_model_from_setting(Some("")),
+            "gemini-2.5-flash"
+        );
+        assert_eq!(
+            select_gemini_model_from_setting(Some("gpt-4o")),
+            "gemini-2.5-flash"
+        );
+
+        // 5. Bounded async ffprobe timeout kills hung child cleanly and falls back without wedging
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hung_ffprobe = tmp_dir.join("hung_ffprobe.sh");
+            std::fs::write(&hung_ffprobe, "#!/bin/sh\nsleep 30\n").unwrap();
+            std::fs::set_permissions(&hung_ffprobe, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let sample_video = tmp_dir.join("stalled_nfs_hevc.mkv");
+            std::fs::write(&sample_video, b"video-bytes").unwrap();
+
+            let started = std::time::Instant::now();
+            let (codec, size) = probe_video_codec_and_size_with_timeout(
+                hung_ffprobe.to_str().unwrap(),
+                &sample_video,
+                std::time::Duration::from_millis(120),
+            )
+            .await;
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            assert_eq!(codec, "hevc");
+            assert_eq!(size, 11);
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

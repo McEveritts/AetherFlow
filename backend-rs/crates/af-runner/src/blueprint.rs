@@ -173,12 +173,14 @@ pub fn write_file_atomic_mode(
     }
     validate_no_symlink_parents(file_path, true)?;
     let target = normalized_mutation_path(file_path).map_err(|err| err.to_string())?;
-    crate::replace_confined_file(&target, content, None, force_mode, false, false).map_err(|err| {
-        format!(
-            "atomic config write to {} failed: {err}",
-            file_path.display()
-        )
-    })
+    crate::replace_confined_file(&target, content, None, force_mode, false, false, None).map_err(
+        |err| {
+            format!(
+                "atomic config write to {} failed: {err}",
+                file_path.display()
+            )
+        },
+    )
 }
 
 /// Creates a `.bak` backup copy of `file_path` if `file_path` exists.
@@ -1150,11 +1152,8 @@ pub fn native_app_spec(canonical_app: &str, bp_config_path: &str) -> NativeAppSp
                 sqlite_db_path: None,
             }
         }
-        "transmission" => {
-            for p in [
-                "/etc/transmission-daemon/settings.json",
-                "/var/lib/transmission-daemon/info/settings.json",
-            ] {
+        "transmission" | "transmission-daemon" => {
+            for p in TRANSMISSION_CONFIG_PATHS {
                 let s = p.to_string();
                 if !paths.contains(&s) {
                     paths.push(s);
@@ -1167,8 +1166,9 @@ pub fn native_app_spec(canonical_app: &str, bp_config_path: &str) -> NativeAppSp
         }
         "overseerr" | "jellyseerr" => {
             for candidate in [
-                format!("/var/lib/{}/config/settings.json", canonical_app),
-                format!("/var/lib/{}/settings.json", canonical_app),
+                format!("/etc/systemd/system/{canonical_app}.service"),
+                format!("/var/lib/{canonical_app}/settings.json"),
+                format!("/var/lib/{canonical_app}/config/settings.json"),
             ] {
                 if !paths.contains(&candidate) {
                     paths.push(candidate);
@@ -1433,7 +1433,8 @@ pub fn has_config_root() -> bool {
 }
 
 fn check_app_file(path: &Path, logical: &str) -> Result<bool, String> {
-    match crate::open_confined_file(path, &crate::app_metadata_users(Path::new(logical))) {
+    let users = crate::app_metadata_users(Path::new(logical));
+    match crate::open_confined_file(path, &users.iter().map(String::as_str).collect::<Vec<_>>()) {
         Ok(_) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(format!(
@@ -1457,7 +1458,10 @@ pub(crate) fn apply_host_config_with_state(
     // hold the cross-process blueprint admission lock until this request returns.
     static MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _lock = MUTATION_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    let app = req.app_name.as_str();
+    let app = match req.app_name.as_str() {
+        "transmission-daemon" => "transmission",
+        app => app,
+    };
     anyhow::ensure!(crate::SAFE_PKG_ID.is_match(app), "invalid blueprint app");
     anyhow::ensure!(
         (0..=65535).contains(&req.listen_port),
@@ -1470,7 +1474,7 @@ pub(crate) fn apply_host_config_with_state(
             sqlite_routes_injected: 0,
         });
     }
-    let existing_ingress = if app == "sabnzbd" {
+    let existing_ingress = if matches!(app, "sabnzbd" | "transmission") {
         match state {
             Some(conn) => af_db::load_lifecycle_ingress(conn, app)?,
             None if req.lifecycle_job_id.is_empty() => af_db::get_app_ingress_config(app)?,
@@ -1490,20 +1494,48 @@ pub(crate) fn apply_host_config_with_state(
     } else {
         Default::default()
     };
-    let mut changes = crate::package_executor::RunnerBlueprintConfigChanges::new(None);
-    apply_native_config(
-        app,
-        req.listen_port,
-        &spec,
-        existing_ingress,
-        master,
-        state,
-        &mut changes,
-    )
-    .map_err(|error| {
-        changes
-            .rollback(crate::package_executor::PackageExecutorError::VerificationFailed(error))
-            .into()
+    let real_host = !has_config_root() && cfg!(target_os = "linux");
+    let transmission = real_host
+        && app == "transmission"
+        && spec
+            .config_paths
+            .iter()
+            .any(|path| resolve_config_path(path).symlink_metadata().is_ok());
+    with_transmission_stopped(transmission, run_systemctl, || {
+        let mut changes = crate::package_executor::RunnerBlueprintConfigChanges::new(None);
+        let result = apply_native_config(
+            app,
+            req.listen_port,
+            &spec,
+            existing_ingress,
+            master,
+            state,
+            &mut changes,
+        );
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(changes
+                    .rollback(
+                        crate::package_executor::PackageExecutorError::VerificationFailed(error),
+                    )
+                    .into())
+            }
+        };
+        if real_host && service_units_changed(&response.mutated_files) {
+            if let Err(error) = reload_changed_units(&response.mutated_files, run_systemctl) {
+                let rollback = changes.rollback(
+                    crate::package_executor::PackageExecutorError::VerificationFailed(
+                        error.to_string(),
+                    ),
+                );
+                if let Err(error) = reload_changed_units(&response.mutated_files, run_systemctl) {
+                    anyhow::bail!("{rollback}; reloading restored systemd units failed: {error}");
+                }
+                return Err(rollback.into());
+            }
+        }
+        Ok(response)
     })
 }
 
@@ -1522,11 +1554,25 @@ fn apply_native_config(
     });
     for raw_path in &spec.config_paths {
         let resolved = resolve_config_path(raw_path);
-        if !check_app_file(&resolved, raw_path)? {
+        if app == "transmission" && is_transmission_config_alias(&resolved, resolve_config_path) {
             continue;
         }
-
-        changes.capture(&resolved).map_err(|err| err.to_string())?;
+        let best_effort = matches!(app, "overseerr" | "jellyseerr") && raw_path.ends_with(".json");
+        let checked = check_app_file(&resolved, raw_path).and_then(|exists| {
+            if exists {
+                changes.capture(&resolved).map_err(|err| err.to_string())?;
+            }
+            Ok(exists)
+        });
+        match checked {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) if best_effort => {
+                tracing::warn!(path = %resolved.display(), %error, "Skipping optional Seerr configuration");
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
         let port_str = effective_port.to_string();
         match app {
             "dispatcharr" => {
@@ -1688,25 +1734,7 @@ fn apply_native_config(
                     file_changed |= mutate_ini_key(&resolved, "misc", "host", "127.0.0.1")?;
                 }
                 let mut whitelist = "sabnzbd.aether.local, localhost, 127.0.0.1".to_string();
-                let base_domain = if let Some(conn) = state {
-                    conn.query_row("SELECT base_domain FROM settings WHERE id = 1", [], |row| {
-                        row.get::<_, String>(0)
-                    })
-                    .optional()
-                    .map_err(|err| err.to_string())?
-                    .map(|d| af_db::normalize_base_domain(&d))
-                    .unwrap_or_default()
-                } else {
-                    af_db::get_base_domain()
-                };
-                let base_domain = if base_domain.is_empty() {
-                    std::env::var("AETHERFLOW_BASE_DOMAIN")
-                        .or_else(|_| std::env::var("AETHERFLOW_DOMAIN"))
-                        .map(|d| af_db::normalize_base_domain(&d))
-                        .unwrap_or_default()
-                } else {
-                    base_domain
-                };
+                let base_domain = blueprint_base_domain(state).map_err(|err| err.to_string())?;
                 if !base_domain.is_empty() {
                     let public_domain = format!("sabnzbd.{base_domain}");
                     if !public_domain.is_empty() {
@@ -1767,6 +1795,12 @@ fn apply_native_config(
                     file_changed |=
                         mutate_json_key(&resolved, "rpc-host-whitelist-enabled", json!(false))?;
                 }
+                let base_domain = blueprint_base_domain(state).map_err(|err| err.to_string())?;
+                file_changed |= mutate_transmission_whitelist(
+                    &resolved,
+                    &base_domain,
+                    existing_ingress.as_ref(),
+                )?;
                 if !master_user.is_empty() && !master_pass.is_empty() {
                     let has_user = existing_json
                         .get("rpc-username")
@@ -1788,10 +1822,19 @@ fn apply_native_config(
                 }
             }
             "overseerr" | "jellyseerr" => {
-                if effective_port > 0
-                    && mutate_json_key(&resolved, "main.port", json!(effective_port))?
-                {
-                    mutated_files.push(resolved.to_string_lossy().to_string());
+                if effective_port > 0 {
+                    let changed = if best_effort {
+                        mutate_json_key(&resolved, "main.port", json!(effective_port))
+                            .unwrap_or_else(|error| {
+                                tracing::warn!(path = %resolved.display(), %error, "Could not update optional Seerr settings");
+                                false
+                            })
+                    } else {
+                        mutate_systemd_port(&resolved, effective_port)?
+                    };
+                    if changed {
+                        mutated_files.push(resolved.to_string_lossy().to_string());
+                    }
                 }
             }
             "jackett" => {
@@ -1858,4 +1901,359 @@ fn apply_native_config(
         mutated_files,
         sqlite_routes_injected,
     })
+}
+
+pub(crate) const TRANSMISSION_CONFIG_PATHS: [&str; 3] = [
+    "/etc/transmission-daemon/settings.json",
+    "/var/lib/transmission-daemon/info/settings.json",
+    "/var/lib/transmission-daemon/.config/transmission-daemon/settings.json",
+];
+
+pub(crate) fn service_units_changed(files: &[String]) -> bool {
+    files.iter().any(|path| path.ends_with(".service"))
+}
+
+pub(crate) fn is_transmission_config_alias(path: &Path, resolve: impl Fn(&str) -> PathBuf) -> bool {
+    if validate_no_symlink_parents(path, true).is_err()
+        || !path.symlink_metadata().is_ok_and(|meta| meta.is_symlink())
+    {
+        return false;
+    }
+    path.canonicalize().is_ok_and(|destination| {
+        TRANSMISSION_CONFIG_PATHS.into_iter().any(|candidate| {
+            let candidate = resolve(candidate);
+            candidate != path
+                && candidate == destination
+                && candidate
+                    .symlink_metadata()
+                    .is_ok_and(|meta| meta.is_file())
+        })
+    })
+}
+
+pub(crate) fn reload_changed_units(
+    files: &[String],
+    mut run: impl FnMut(&[&str]) -> std::io::Result<std::process::Output>,
+) -> anyhow::Result<()> {
+    if !service_units_changed(files) {
+        return Ok(());
+    }
+    systemctl_success(&mut run, &["daemon-reload"])?;
+    for unit in files
+        .iter()
+        .filter_map(|path| Path::new(path).file_name()?.to_str())
+    {
+        if unit.ends_with(".service") {
+            anyhow::ensure!(
+                crate::SAFE_SERVICE_NAME.is_match(unit),
+                "invalid systemd unit {unit}"
+            );
+            systemctl_success(&mut run, &["try-restart", "--", unit])?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn run_systemctl(args: &[&str]) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(
+        std::env::var_os("AETHERFLOW_SYSTEMCTL_BIN").unwrap_or_else(|| "/usr/bin/systemctl".into()),
+    )
+    .args(args)
+    .output()
+}
+
+pub(crate) fn systemctl_success(
+    mut run: impl FnMut(&[&str]) -> std::io::Result<std::process::Output>,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    let output = run(args)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "systemctl {} failed: {} ({})",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim(),
+        output.status
+    );
+    Ok(())
+}
+
+pub(crate) fn with_transmission_stopped<T>(
+    enabled: bool,
+    mut run: impl FnMut(&[&str]) -> std::io::Result<std::process::Output>,
+    mutate: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    const UNIT: &str = "transmission-daemon.service";
+    if !enabled {
+        return mutate();
+    }
+    let output = run(&["show", "--property=ActiveState", "--value", UNIT])?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not determine Transmission service state: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "inactive" | "failed" => return mutate(),
+        "active" | "reloading" | "refreshing" | "activating" => {}
+        state => anyhow::bail!("Transmission has unexpected service state {state:?}"),
+    }
+    systemctl_success(&mut run, &["stop", UNIT])?;
+    let result = mutate();
+    let restart = systemctl_success(&mut run, &["start", UNIT]);
+    match (result, restart) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(start)) => {
+            Err(error.context(format!("Transmission start failed: {start}")))
+        }
+    }
+}
+
+pub(crate) fn blueprint_base_domain(state: Option<&Connection>) -> anyhow::Result<String> {
+    let base = if let Some(conn) = state {
+        conn.query_row("SELECT base_domain FROM settings WHERE id = 1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .map(|domain| af_db::normalize_base_domain(&domain))
+        .unwrap_or_default()
+    } else {
+        af_db::get_base_domain()
+    };
+    if base.is_empty() {
+        return Ok(std::env::var("AETHERFLOW_BASE_DOMAIN")
+            .or_else(|_| std::env::var("AETHERFLOW_DOMAIN"))
+            .map(|domain| af_db::normalize_base_domain(&domain))
+            .unwrap_or_default());
+    }
+    Ok(base)
+}
+
+pub(crate) fn mutate_transmission_whitelist(
+    path: &Path,
+    base_domain: &str,
+    ingress: Option<&af_models::AppIngressConfig>,
+) -> Result<bool, String> {
+    let text = read_mutation_text(path).map_err(|err| {
+        format!(
+            "failed to read Transmission settings {}: {err}",
+            path.display()
+        )
+    })?;
+    let settings: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("invalid Transmission settings {}: {err}", path.display()))?;
+    let mut hosts: Vec<_> = settings["rpc-host-whitelist"]
+        .as_str()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let public = ingress
+        .map(|ingress| ingress.public_domain.trim().to_ascii_lowercase())
+        .filter(|domain| af_models::valid_ingress_hostname(domain));
+    let base_host = (!base_domain.is_empty()).then(|| format!("transmission.{base_domain}"));
+    for host in ["transmission.aether.local", "localhost", "127.0.0.1"]
+        .into_iter()
+        .chain(base_host.as_deref())
+        .chain(public.as_deref())
+    {
+        if !hosts
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(host))
+        {
+            hosts.push(host.to_owned());
+        }
+    }
+    mutate_json_key(path, "rpc-host-whitelist", json!(hosts.join(",")))
+}
+
+pub(crate) fn mutate_systemd_port(path: &Path, port: i32) -> Result<bool, String> {
+    let original = read_mutation_text(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    static PORT_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r#"^([ \t]*Environment[ \t]*=[ \t]*["']?PORT=)[0-9]+(["']?[ \t]*\r?\n?)$"#)
+            .expect("valid port directive regex")
+    });
+    let mut lines: Vec<_> = original.split_inclusive('\n').map(str::to_owned).collect();
+    let Some(header) = lines.iter().rposition(|line| line.trim() == "[Service]") else {
+        return Err(format!("missing [Service] section in {}", path.display()));
+    };
+    let end = (header + 1..lines.len())
+        .find(|&index| lines[index].trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let last_environment = (header + 1..end).rev().find(|&index| {
+        lines[index]
+            .split_once('=')
+            .is_some_and(|(name, _)| name.trim() == "Environment")
+    });
+    if let Some(index) = last_environment
+        .filter(|&index| {
+            !lines[header + 1..index]
+                .iter()
+                .any(|line| line.trim_end().ends_with('\\'))
+        })
+        .filter(|&index| PORT_LINE.is_match(&lines[index]))
+    {
+        let captured = PORT_LINE
+            .captures(&lines[index])
+            .expect("matched port directive");
+        lines[index] = format!("{}{port}{}", &captured[1], &captured[2]);
+    } else {
+        let newline = if lines[header].ends_with("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        if !lines[end - 1].ends_with('\n') {
+            lines[end - 1].push_str(newline);
+        }
+        // Appending after existing directives handles resets and mixed assignments.
+        lines.insert(end, format!("Environment=PORT={port}{newline}"));
+    }
+    let updated = lines.concat();
+    if updated == original {
+        return Ok(false);
+    }
+    backup_config_file(path)?;
+    write_file_atomic(path, updated.as_bytes())?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    fn output(status: i32, stdout: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            status: ExitStatus::from_raw(status << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn port_mutation_preserves_service_settings_and_reloads_before_restarting() {
+        let root = std::env::temp_dir().join(format!("af-unit-port-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let mut changed = Vec::new();
+        for app in ["overseerr", "jellyseerr", "listenarr"] {
+            let name = format!("{app}.service");
+            let spec = native_app_spec(app, "");
+            assert!(spec.config_paths.iter().any(|path| path.ends_with(&name)));
+            let path = root.join(name);
+            let (directive, updated) = if app == "listenarr" {
+                (
+                    "Environment=ASPNETCORE_URLS=http://127.0.0.1:5055",
+                    "Environment=ASPNETCORE_URLS=http://127.0.0.1:18990",
+                )
+            } else {
+                ("Environment=\"PORT=5055\"", "Environment=\"PORT=18990\"")
+            };
+            let unit = format!("[Unit]\nDescription=Fixture\n[Service]\nEnvironment=CONFIG_DIRECTORY=/var/lib/{app}\n{directive}\nExecStart=/bin/true\n[Install]\nWantedBy=multi-user.target\n");
+            fs::write(&path, &unit).unwrap();
+            let mutate = if app == "listenarr" {
+                mutate_systemd_aspnetcore_urls
+            } else {
+                mutate_systemd_port
+            };
+            assert!(mutate(&path, 18990).unwrap());
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                unit.replace(directive, updated)
+            );
+            assert!(!mutate(&path, 18990).unwrap());
+            changed.push(path.to_string_lossy().into_owned());
+        }
+        let mut commands = Vec::new();
+        reload_changed_units(&changed, |args| {
+            commands.push(args.join(" "));
+            output(0, "")
+        })
+        .unwrap();
+        assert_eq!(
+            commands,
+            [
+                "daemon-reload",
+                "try-restart -- overseerr.service",
+                "try-restart -- jellyseerr.service",
+                "try-restart -- listenarr.service",
+            ]
+        );
+        assert!(!service_units_changed(&[
+            "settings.json".into(),
+            "foo.service.bak".into()
+        ]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transmission_stops_before_mutation_and_recovers_after_a_write_error() {
+        for (state, stop, fail_write) in [
+            ("active", 0, false),
+            ("active", 0, true),
+            ("active", 1, false),
+            ("inactive", 0, false),
+        ] {
+            let commands = RefCell::new(Vec::new());
+            let result = with_transmission_stopped(
+                true,
+                |args| {
+                    commands.borrow_mut().push(args[0].to_owned());
+                    match args[0] {
+                        "show" => output(0, state),
+                        "stop" => output(stop, ""),
+                        "start" => output(0, ""),
+                        cmd => panic!("unexpected command {cmd}"),
+                    }
+                },
+                || {
+                    commands.borrow_mut().push("write".into());
+                    anyhow::ensure!(!fail_write, "fixture write error");
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_err(), stop != 0 || fail_write);
+            let expected: &[_] = match (state, stop) {
+                ("active", 0) => &["show", "stop", "write", "start"],
+                ("active", _) => &["show", "stop"],
+                _ => &["show", "write"],
+            };
+            assert_eq!(*commands.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn transmission_repairs_an_enabled_empty_host_whitelist() {
+        assert!(native_app_spec("transmission", "")
+            .config_paths
+            .iter()
+            .any(|path| path == TRANSMISSION_CONFIG_PATHS[2]));
+        let root = std::env::temp_dir().join(format!(
+            "af-transmission-whitelist-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"rpc-host-whitelist-enabled": true, "rpc-host-whitelist": ""}"#,
+        )
+        .unwrap();
+        let ingress = af_models::AppIngressConfig {
+            public_domain: "downloads.example.net".into(),
+            ..Default::default()
+        };
+        assert!(mutate_transmission_whitelist(&path, "example.org", Some(&ingress)).unwrap());
+        assert!(!mutate_transmission_whitelist(&path, "example.org", Some(&ingress)).unwrap());
+        let settings: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(settings["rpc-host-whitelist-enabled"], true);
+        assert_eq!(settings["rpc-host-whitelist"],
+            "transmission.aether.local,localhost,127.0.0.1,transmission.example.org,downloads.example.net");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

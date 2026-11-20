@@ -25,7 +25,7 @@ web-sys = { version = "=0.3.107", features = [
   "Window", "Document", "HtmlDocument", "Location", "History", "Storage", "StorageEvent", "Navigator",
   "Event", "EventTarget", "CustomEvent", "KeyboardEvent", "MouseEvent", "PointerEvent", "WheelEvent", "InputEvent", "SubmitEvent",
   "HtmlElement", "Element", "Node", "NodeList", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement",
-  "HtmlDialogElement", "HtmlAnchorElement", "HtmlIFrameElement", "DomRect", "CssStyleDeclaration",
+  "HtmlDialogElement", "HtmlAnchorElement", "HtmlFormElement", "HtmlIFrameElement", "DomRect", "CssStyleDeclaration",
   "Request", "RequestInit", "RequestCredentials", "RequestCache", "Headers", "Response", "AbortSignal", "AbortController",
   "ReadableStream", "ReadableStreamDefaultReader",
   "WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "Worker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope",

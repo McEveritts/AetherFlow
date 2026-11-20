@@ -91,11 +91,11 @@ flowchart LR
 
 | Crate | Role |
 | :--- | :--- |
-| **`af-api`** | Axum HTTP/WebSocket control plane, runtime WASM asset server, JWT/TOTP/OIDC/CSRF middlewares, streaming subdomain & plugin reverse proxy, FlowAI routing, and canonical streaming history endpoints & integration tests. |
+| **`af-api`** | Axum HTTP/WebSocket control plane, runtime WASM asset server, JWT/TOTP/OIDC/CSRF middlewares, native plugin runtime (`21000..=21999`), streaming subdomain & plugin reverse proxy, FlowAI routing, and canonical streaming history endpoints & integration tests. |
 | **`af-runner`** | Root UNIX socket daemon (`/run/aetherflow/runner.sock`), 12 built-in declarative Rust package recipes + locked Bash installer supervisor, `systemctl` allowlists, WireGuard/Tailscale helpers, and isolated `aetherflow-self-update.service` launcher. |
 | **`af-files`** | Native **McBrowser** capability-scoped tenant file system engine, resumable 64 GiB chunked upload sessions, ETag-guarded UTF-8 editor, 9-format archive engine, and public share links. |
-| **`af-db`** | Bundled `rusqlite` WAL connection pool (`max_size(1)`), schema migrations, SQLite-backed JWT revocation and session tracking (zero Redis requirement), and `enc:v1:` AES-256-GCM secret encryption. |
-| **`af-services`** | 77-package Marketplace catalog & update engine, pure-Rust XML/INI/JSON/SQLite/Apache config mutators, native plugin runtime (`21000..=21999`), `af-heal` watchdog, and HTTPS REST cluster heartbeat daemon. |
+| **`af-db`** | Bundled `rusqlite` WAL single-writer (`max_size(1)`) + concurrent read-only (`max_size(8)`) connection pools, schema migrations, SQLite-backed JWT revocation and session tracking (zero Redis requirement), and `enc:v1:` AES-256-GCM secret encryption. |
+| **`af-services`** | 77-package Marketplace catalog & update engine, pure-Rust XML/INI/JSON/SQLite/Apache config mutators, `af-heal` watchdog, MediaFlow worker, and HTTPS REST/mTLS cluster heartbeat daemon. |
 | **`af-release`** | Pull-based atomic release engine (`Deploy`, `Rollback`, `Cleanup`, `MigrateSystemd`) with 4-tier SQLite path resolution, WAL-safe pre-swap backups, executable permission normalization, and crash recovery. |
 | **`af-host`** | Shared host backup & verification library (`af-host.backup-manifest.v1`), WAL-consistent `OnlineBackupApi` / `VACUUM INTO` snapshots, 5-digit chunk splitting, staged restore (`--staging-root`), and native host maintenance (`tune`, `sentinel`, `clean-logs`, `showspace`). |
 | **`af-cli`** | Unified **`af`** administrative CLI binary for package lifecycle, systemd services, disk quotas (`setdisk`), sandbox drop-ins, releases, backups, maintenance, and 14-step resumable bare-metal provisioning. |

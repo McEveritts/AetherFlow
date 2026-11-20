@@ -18,7 +18,6 @@ use af_host::{
     apply_network_tuning, compute_file_sha256, reject_if_symlink, reject_symlink_chain,
     validate_no_parent_traversal,
 };
-use af_runner::render_systemd_sandbox_dropin;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -413,7 +412,6 @@ pub const CANONICAL_ALL_STEPS: &[&str] = &[
     "askcontinue",
     "askpartition",
     "ask10g",
-    "askdashtheme",
     "adduser",
     "askffmpeg",
     "askvsftpd",
@@ -514,7 +512,7 @@ pub fn canonical_step_catalog() -> Vec<ProvisionStepDescriptor> {
                 ),
                 "boot" => (
                     ProvisionStepTier::RustNativeFoundation,
-                    "Verify and stage systemd service drop-in & unit directory layout (/etc/systemd/system)",
+                    "Verify systemd unit directory layout (/etc/systemd/system) and remove any stale aetherflow-api sandbox drop-in",
                 ),
                 "harden_perms" => (
                     ProvisionStepTier::RustNativeFoundation,
@@ -1915,6 +1913,7 @@ fn execute_single_rust_step(
                     }
                 }
             }
+            provision_apache_htpasswd_if_configured(store)?;
             store.save_config_value("SUDOERS_HARDENED", "true")?;
             Ok(
                 "purged legacy /etc/sudoers.d/aether* files and recorded SUDOERS_HARDENED=true"
@@ -1958,8 +1957,7 @@ fn execute_single_rust_step(
                      AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock\n\
                      PRIVILEGED_RUNNER_ENABLED=true\n\
                      COOKIE_SECURE=false\n\
-                     AETHERFLOW_ENV=production\n\
-                     GIN_MODE=release\n"
+                     AETHERFLOW_ENV=production\n"
                 );
 
                 write_file_atomic_exclusive(
@@ -2004,41 +2002,58 @@ fn execute_single_rust_step(
                 0o755,
                 "systemd unit dir",
             )?;
-            // Render a baseline systemd sandbox drop-in template using af-runner's canonical helper
-            // and overlay it safely with a .aetherflow-sha256 sidecar.
+            // `aetherflow-api.service` owns its tailored sandboxing (GPU DeviceAllow, ProtectProc=default,
+            // ProcSubset=all, UMask=0027) and is exempt from `10-aetherflow-sandbox.conf`.
+            // Clean up any stale drop-in left behind by an older provisioner before reloading systemd.
             let dropin_dir = paths.etc_systemd_system.join("aetherflow-api.service.d");
-            ensure_dir_no_symlinks(&paths.fs_root, &dropin_dir, 0o755, "systemd dropin dir")?;
-            let rw_paths = vec![
-                "/var/lib/aetherflow".to_string(),
-                "/var/log/aetherflow".to_string(),
-            ];
-            let rendered =
-                render_systemd_sandbox_dropin("native", "aetherflow-api.service", &rw_paths);
-            let staging_src = paths.install_dir.join(format!(
-                ".staging-aetherflow-api-sandbox-{}-{}.conf",
-                std::process::id(),
-                Uuid::new_v4()
-            ));
-            write_file_atomic_exclusive(
-                &staging_src,
-                rendered.as_bytes(),
-                0o600,
-                "staging sandbox drop-in",
-            )?;
-            let target_dropin = dropin_dir.join("10-aetherflow-sandbox.conf");
-            let overlay_res = safe_overlay_config_file(&staging_src, &target_dropin, false, false);
-            let _ = fs::remove_file(&staging_src);
-            let overlay = overlay_res?;
-            Ok(format!(
-                "staged systemd sandbox drop-in at {} ({:?})",
-                overlay.target_path.display(),
-                overlay.outcome
-            ))
+            ensure_no_symlink_ancestors(&dropin_dir, "systemd dropin dir")?;
+            let mut removed_stale = false;
+            if dropin_dir.is_dir() {
+                let stale_dropin = dropin_dir.join("10-aetherflow-sandbox.conf");
+                if fs::symlink_metadata(&stale_dropin).is_ok() {
+                    fs::remove_file(&stale_dropin).map_err(|e| {
+                        CliError::io(
+                            format!("removing stale sandbox drop-in {}", stale_dropin.display()),
+                            e,
+                        )
+                    })?;
+                    removed_stale = true;
+                }
+                let stale_sidecar = dropin_dir.join("10-aetherflow-sandbox.conf.aetherflow-sha256");
+                if fs::symlink_metadata(&stale_sidecar).is_ok() {
+                    let _ = fs::remove_file(&stale_sidecar);
+                }
+            }
+            if paths.fs_root == Path::new("/") && Path::new("/run/systemd/system").is_dir() {
+                let output = std::process::Command::new("systemctl")
+                    .arg("daemon-reload")
+                    .output()
+                    .map_err(|e| CliError::io("running systemctl daemon-reload", e))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    return Err(CliError::Execution(format!(
+                        "systemctl daemon-reload failed ({}): {}",
+                        output.status, stderr
+                    )));
+                }
+            }
+            if removed_stale {
+                Ok(format!(
+                    "verified {} and removed stale aetherflow-api.service.d/10-aetherflow-sandbox.conf",
+                    paths.etc_systemd_system.display()
+                ))
+            } else {
+                Ok(format!(
+                    "verified systemd unit directory {} (aetherflow-api.service exempt from 10-aetherflow-sandbox.conf)",
+                    paths.etc_systemd_system.display()
+                ))
+            }
         }
         "harden_perms" => {
             if paths.install_dir.is_dir() {
                 ensure_install_dir_secure(&paths.fs_root, &paths.install_dir)?;
             }
+            provision_apache_htpasswd_if_configured(store)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -2113,6 +2128,193 @@ fn execute_single_rust_step(
             reason: "step is retained in setup/AetherFlow-Setup shell bootstrap".to_string(),
         }),
     }
+}
+
+static SAFE_APACHE_USER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-z_][a-z0-9_-]{0,31}$").unwrap());
+
+/// Provisions `/etc/apache2/AetherFlow/htpasswd` (`0640`, `root:www-data`) with a bcrypt `$2y$`
+/// credential entry when `/etc/apache2/AetherFlow` is present/configured.
+///
+/// Returns `Ok(None)` when `/etc/apache2/AetherFlow` does not exist yet.
+pub fn provision_apache_htpasswd_if_configured(
+    store: &ProvisionStateStore,
+) -> CliResult<Option<PathBuf>> {
+    let paths = store.paths();
+    let apache_af_dir = paths.fs_root.join("etc/apache2/AetherFlow");
+    ensure_no_symlink_ancestors(&apache_af_dir, "etc/apache2/AetherFlow")?;
+    match fs::symlink_metadata(&apache_af_dir) {
+        Ok(meta) => {
+            if !meta.is_dir() {
+                return Err(CliError::Validation(format!(
+                    "{} exists and is not a directory",
+                    apache_af_dir.display()
+                )));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(CliError::io(
+                format!("inspecting {}", apache_af_dir.display()),
+                e,
+            ))
+        }
+    }
+
+    let htpasswd_path = apache_af_dir.join("htpasswd");
+    ensure_no_symlink_ancestors(&htpasswd_path, "etc/apache2/AetherFlow/htpasswd")?;
+
+    let config_map = store.read_config_map()?;
+    let master_creds_json = read_unencrypted_master_creds_json(&paths.var_lib_aetherflow);
+
+    let candidate_user = config_map
+        .get("username")
+        .cloned()
+        .or_else(|| {
+            std::env::var("AETHERFLOW_USERNAME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("AF_SETUP_USER")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| read_trimmed_regular_file(&paths.fs_root.join("etc/apache2/master.txt")))
+        .or_else(|| {
+            master_creds_json
+                .as_ref()
+                .and_then(|v| v.get("username").and_then(|u| u.as_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "admin".to_string());
+    let username = candidate_user.trim().to_string();
+    if !SAFE_APACHE_USER_RE.is_match(&username) {
+        return Err(CliError::Validation(format!(
+            "invalid Apache admin username {:?}",
+            username
+        )));
+    }
+
+    let explicit_password = std::env::var("AETHERFLOW_PASSWORD")
+        .ok()
+        .or_else(|| std::env::var("AETHERFLOW_MASTER_CREDS_SECRET").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.starts_with("enc:v1:"))
+        .or_else(|| {
+            master_creds_json
+                .as_ref()
+                .and_then(|v| v.get("password").and_then(|p| p.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !s.starts_with("enc:v1:"))
+        });
+
+    let existing_raw = if htpasswd_path.is_file() {
+        Some(
+            fs::read_to_string(&htpasswd_path)
+                .map_err(|e| CliError::io(format!("reading {}", htpasswd_path.display()), e))?,
+        )
+    } else {
+        None
+    };
+
+    if explicit_password.is_none() {
+        if let Some(ref content) = existing_raw {
+            let prefix = format!("{}:", username);
+            let has_valid_bcrypt = content
+                .lines()
+                .any(|line| line.starts_with(&prefix) && line[prefix.len()..].starts_with("$2y$"));
+            if has_valid_bcrypt {
+                enforce_apache_htpasswd_perms(&htpasswd_path);
+                return Ok(Some(htpasswd_path));
+            }
+        }
+    }
+
+    let password = explicit_password.unwrap_or_else(|| generate_crypto_secret(24));
+    let bcrypt_hash = generate_bcrypt_2y_hash(&username, &password)?;
+
+    let user_prefix = format!("{}:", username);
+    let mut lines: Vec<String> = existing_raw
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with(&user_prefix))
+        .map(ToString::to_string)
+        .collect();
+    lines.push(format!("{}:{}", username, bcrypt_hash));
+    let mut body = lines.join("\n");
+    body.push('\n');
+
+    write_file_atomic_exclusive(
+        &htpasswd_path,
+        body.as_bytes(),
+        0o640,
+        "etc/apache2/AetherFlow/htpasswd",
+    )?;
+    enforce_apache_htpasswd_perms(&htpasswd_path);
+
+    Ok(Some(htpasswd_path))
+}
+
+fn read_trimmed_regular_file(path: &Path) -> Option<String> {
+    if ensure_no_symlink_ancestors(path, "regular config file").is_err() {
+        return None;
+    }
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 256 {
+        return None;
+    }
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn read_unencrypted_master_creds_json(var_lib_aetherflow: &Path) -> Option<serde_json::Value> {
+    let creds_path = var_lib_aetherflow.join(".master.creds");
+    if ensure_no_symlink_ancestors(&creds_path, ".master.creds").is_err() {
+        return None;
+    }
+    let meta = fs::symlink_metadata(&creds_path).ok()?;
+    if !meta.is_file() || meta.len() > 16384 {
+        return None;
+    }
+    let raw = fs::read_to_string(&creds_path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&raw).ok()
+}
+
+fn enforce_apache_htpasswd_perms(htpasswd_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        if is_effective_root_user() {
+            let gid = lookup_group_gid("www-data").unwrap_or(0);
+            if let Ok(path_c) = CString::new(htpasswd_path.as_os_str().as_bytes()) {
+                let _ = unsafe { libc::lchown(path_c.as_ptr(), 0, gid) };
+            }
+        }
+        let _ = fs::set_permissions(htpasswd_path, fs::Permissions::from_mode(0o640));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = htpasswd_path;
+    }
+}
+
+fn generate_bcrypt_2y_hash(_username: &str, password: &str) -> CliResult<String> {
+    if password.contains('\0') || password.contains('\n') || password.contains('\r') {
+        return Err(CliError::Validation(
+            "password must not contain NUL or newline characters".to_string(),
+        ));
+    }
+    let parts = bcrypt::hash_with_result(password, 10)
+        .map_err(|e| CliError::Execution(format!("failed to hash htpasswd credential: {}", e)))?;
+    Ok(parts.format_for_version(bcrypt::Version::TwoY))
 }
 
 #[cfg(test)]

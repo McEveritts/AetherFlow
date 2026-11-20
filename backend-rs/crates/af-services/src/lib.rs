@@ -1,7 +1,6 @@
 pub mod cluster_daemon;
 pub mod lifecycle_cache;
 pub mod mutators;
-pub mod plugins;
 mod service_observations;
 pub mod workers;
 
@@ -228,6 +227,7 @@ pub fn get_package_catalog() -> anyhow::Result<Vec<Package>> {
             p.sandbox_profile = auto.sandbox_profile.clone();
             p.sandbox_read_write = auto.sandbox_read_write.clone();
             p.sandbox_service_ids = auto.sandbox_service_ids.clone();
+            p.require_download_sha256 = auto.require_download_sha256;
         }
     }
     Ok(pkgs)
@@ -541,9 +541,14 @@ pub struct BlueprintSetupResult {
 fn default_blueprint_mutator_meta(app_name: &str) -> (&'static str, String, &'static str) {
     let clean = app_name.trim().to_lowercase();
     match clean.as_str() {
-        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
+        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" => {
             ("xml", format!("/var/lib/{}/config.xml", clean), "Port")
         }
+        "listenarr" => (
+            "systemd",
+            "/etc/systemd/system/listenarr.service".to_string(),
+            "ASPNETCORE_URLS",
+        ),
         "bazarr" => (
             "yaml",
             "/var/lib/bazarr/config/config.yaml".to_string(),
@@ -582,9 +587,9 @@ fn default_blueprint_mutator_meta(app_name: &str) -> (&'static str, String, &'st
             "rpc-port",
         ),
         "overseerr" | "jellyseerr" => (
-            "json",
-            format!("/var/lib/{}/config/settings.json", clean),
-            "main.port",
+            "systemd",
+            format!("/etc/systemd/system/{}.service", clean),
+            "PORT",
         ),
         "jackett" => (
             "json",
@@ -633,7 +638,10 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         mutator_type: mutator_type.to_string(),
         config_file_path,
         internal_domain: format!("{}.aether.local", p.name),
-        is_network_app: matches!(p.name.as_str(), "pihole" | "wireguard" | "tailscale"),
+        is_network_app: matches!(
+            p.name.as_str(),
+            "pihole" | "adguardhome" | "wireguard" | "tailscale"
+        ),
         dependencies: if p.name == "palate" {
             vec!["jellyfin".to_string()]
         } else {
@@ -2248,6 +2256,10 @@ pub async fn control_service(service_name: &str, action: &str) -> anyhow::Result
     control_service_with_manager(service_name, action, &managed_by).await
 }
 
+pub async fn runner_systemctl(action: &str, unit: &str) -> anyhow::Result<()> {
+    control_service_with_manager(unit, action, "systemd-unit").await
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Streaming Telemetry Monitor
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2551,111 +2563,6 @@ pub fn is_streaming_demo_mode() -> bool {
         .lock()
         .map(|guard| *guard)
         .unwrap_or(false)
-}
-
-pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDashboardResponse {
-    let demo_mode = is_streaming_demo_mode();
-    let mut jellyfin_server = StreamingServerStatus {
-        provider: "jellyfin".to_string(),
-        name: "Jellyfin".to_string(),
-        url: "http://127.0.0.1:8096".to_string(),
-        api_key_masked: String::new(),
-        configured: false,
-        enabled: true,
-        status: if demo_mode {
-            "demo".to_string()
-        } else {
-            "unconfigured".to_string()
-        },
-        support_stage: "active".to_string(),
-        server_id: String::new(),
-        version: String::new(),
-        operating_system: "Linux".to_string(),
-        last_connected_at: String::new(),
-        library_counts: StreamingLibraryCounts::default(),
-        error_message: String::new(),
-    };
-
-    if let Ok(conn) = af_db::get_conn() {
-        if let Ok((name, url, api_key, enabled, srv_id, srv_ver, last_conn)) = conn.query_row(
-            "SELECT name, url, api_key, enabled, COALESCE(server_id, ''), COALESCE(server_version, ''), COALESCE(CAST(last_connected_at AS TEXT), '') \
-             FROM streaming_servers WHERE provider = 'jellyfin'",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, bool>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                ))
-            },
-        ) {
-            jellyfin_server.name = name;
-            jellyfin_server.url = url;
-            jellyfin_server.enabled = enabled;
-            jellyfin_server.server_id = srv_id;
-            jellyfin_server.version = srv_ver;
-            jellyfin_server.last_connected_at = last_conn;
-            let decrypted = if api_key.is_empty() {
-                String::new()
-            } else {
-                af_db::decrypt_key(&api_key).unwrap_or_default()
-            };
-            if !decrypted.is_empty() {
-                jellyfin_server.configured = true;
-                if is_admin {
-                    let tail: String = decrypted
-                        .chars()
-                        .rev()
-                        .take(4)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    jellyfin_server.api_key_masked = format!("****{}", tail);
-                }
-                if jellyfin_server.status == "unconfigured" {
-                    jellyfin_server.status = "connected".to_string();
-                }
-            }
-        }
-    }
-
-    let plex_server = StreamingServerStatus {
-        provider: "plex".to_string(),
-        name: "Plex Media Server".to_string(),
-        url: "http://127.0.0.1:32400".to_string(),
-        enabled: true,
-        status: "unconfigured".to_string(),
-        support_stage: "active".to_string(),
-        ..Default::default()
-    };
-
-    let emby_server = StreamingServerStatus {
-        provider: "emby".to_string(),
-        name: "Emby Server".to_string(),
-        url: "http://127.0.0.1:8096".to_string(),
-        status: "coming_soon".to_string(),
-        support_stage: "coming_soon".to_string(),
-        ..Default::default()
-    };
-
-    StreamingDashboardResponse {
-        servers: vec![jellyfin_server, plex_server, emby_server],
-        live_summary: StreamingLiveSummary {
-            is_demo_mode: demo_mode,
-            ..Default::default()
-        },
-        active_sessions: Vec::new(),
-        analytics: StreamingAnalytics {
-            window_days: window_days.max(1),
-            ..Default::default()
-        },
-        updated_at: Utc::now().to_rfc3339(),
-    }
 }
 
 pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
@@ -3710,5 +3617,31 @@ mod tests {
         let services = get_active_services().unwrap();
         assert_eq!(services["AetherFlow Frontend"].status, "stopped");
         assert_eq!(services["AetherFlow API"].status, "stopped");
+    }
+
+    #[test]
+    fn test_catalog_require_download_sha256_and_blueprint_metadata_parity() {
+        let catalog = get_package_catalog().expect("load package catalog");
+        assert_eq!(catalog.len(), 77, "expected all 77 catalog packages");
+        for pkg in &catalog {
+            assert!(
+                pkg.require_download_sha256,
+                "catalog package '{}' must load require_download_sha256 == true",
+                pkg.name
+            );
+        }
+
+        let adguard_bp = get_blueprint("adguardhome").expect("adguardhome blueprint");
+        assert!(adguard_bp.is_network_app);
+
+        for (app, expected_path) in [
+            ("listenarr", "/etc/systemd/system/listenarr.service"),
+            ("overseerr", "/etc/systemd/system/overseerr.service"),
+            ("jellyseerr", "/etc/systemd/system/jellyseerr.service"),
+        ] {
+            let bp = get_blueprint(app).unwrap_or_else(|| panic!("{app} blueprint"));
+            assert_eq!(bp.config_file_path, expected_path);
+            assert!(bp.supports_dynamic_port);
+        }
     }
 }

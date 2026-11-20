@@ -82,7 +82,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing transmission-daemon and transmission-cli..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq transmission-cli transmission-common transmission-daemon curl ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq transmission-cli transmission-common transmission-daemon curl git ca-certificates
 
 af_logged systemctl stop transmission-daemon || true
 
@@ -103,35 +103,60 @@ elif [[ ! -s "$TRANSMISSION_CONFIG" && -s /etc/transmission-daemon/settings.json
     TRANSMISSION_CONFIG=/etc/transmission-daemon/settings.json
 fi
 validate_config_paths "$TRANSMISSION_CONFIG"
+TRANSMISSION_BASE_DOMAIN=""
+if declare -F get_base_domain >/dev/null 2>&1; then
+    TRANSMISSION_BASE_DOMAIN="$(get_base_domain 2>/dev/null || true)"
+fi
 if [[ ! -s "$TRANSMISSION_CONFIG" ]]; then
 TRANSMISSION_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}"
-AF_TRANSMISSION_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF'
+AF_TRANSMISSION_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" AF_BASE_DOMAIN="$TRANSMISSION_BASE_DOMAIN" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF'
 import os
 import sys, json
 filename = sys.argv[1]
 user, pw = os.environ['AF_TRANSMISSION_USER'], os.environ['AF_TRANSMISSION_PASS']
-cfg = {'download-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir-enabled': False, 'rpc-authentication-required': True, 'rpc-username': user, 'rpc-password': pw, 'rpc-bind-address': os.environ.get('AF_BIND_ADDRESS', '127.0.0.1'), 'rpc-enabled': True, 'rpc-host-whitelist-enabled': True, 'rpc-port': int(os.environ['AF_APP_PORT']), 'rpc-url': '/transmission/', 'rpc-whitelist': '127.0.0.1,::1', 'rpc-whitelist-enabled': True, 'umask': 2}
+base_domain = os.environ.get('AF_BASE_DOMAIN', '').strip().strip('.')
+host_entries = ['transmission.aether.local', 'localhost', '127.0.0.1']
+if base_domain and all(ch.isalnum() or ch in '.-' for ch in base_domain):
+    domain_host = f'transmission.{base_domain}'
+    if domain_host not in host_entries:
+        host_entries.insert(0, domain_host)
+cfg = {'download-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir-enabled': False, 'rpc-authentication-required': True, 'rpc-username': user, 'rpc-password': pw, 'rpc-bind-address': os.environ.get('AF_BIND_ADDRESS', '127.0.0.1'), 'rpc-enabled': True, 'rpc-host-whitelist': ','.join(host_entries), 'rpc-host-whitelist-enabled': True, 'rpc-port': int(os.environ['AF_APP_PORT']), 'rpc-url': '/transmission/', 'rpc-whitelist': '127.0.0.1,::1', 'rpc-whitelist-enabled': True, 'umask': 2}
 if safe_read_text(filename):
     raise ValueError('Refusing to replace an existing Transmission configuration')
 safe_write_text(filename, json.dumps(cfg, indent=4))
 PYEOF
 else
     TRANSMISSION_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}"
-    AF_TRANSMISSION_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" AF_RETAINED="$TRANSMISSION_RETAINED_CONFIG" AF_KEEP_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_EXPLICIT_PASS="${AF_CONFIG_PASS:-}" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF'
+    AF_TRANSMISSION_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" AF_RETAINED="$TRANSMISSION_RETAINED_CONFIG" AF_KEEP_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_EXPLICIT_PASS="${AF_CONFIG_PASS:-}" AF_BASE_DOMAIN="$TRANSMISSION_BASE_DOMAIN" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF'
 import json, os, sys
 config = json.loads(safe_read_text(sys.argv[1]))
 has_user = bool(str(config.get('rpc-username') or '').strip())
 has_pass = bool(str(config.get('rpc-password') or '').strip())
 retained = os.environ.get('AF_RETAINED') == 'true'
 rotate = bool(os.environ.get('AF_EXPLICIT_PASS')) and os.environ.get('AF_KEEP_SECRETS') != '1'
+base_domain = os.environ.get('AF_BASE_DOMAIN', '').strip().strip('.')
+host_entries = ['transmission.aether.local', 'localhost', '127.0.0.1']
+if base_domain and all(ch.isalnum() or ch in '.-' for ch in base_domain):
+    domain_host = f'transmission.{base_domain}'
+    if domain_host not in host_entries:
+        host_entries.insert(0, domain_host)
+host_whitelist = ','.join(host_entries)
+changed = False
 if not has_user or not has_pass or not retained or rotate:
     config['rpc-authentication-required'] = True
     config['rpc-username'] = os.environ['AF_TRANSMISSION_USER']
     config['rpc-password'] = os.environ['AF_TRANSMISSION_PASS']
     if not retained:
         config.update({'rpc-bind-address': os.environ.get('AF_BIND_ADDRESS', '127.0.0.1'),
+                       'rpc-host-whitelist': host_whitelist,
                        'rpc-host-whitelist-enabled': True, 'rpc-whitelist-enabled': True,
                        'rpc-whitelist': '127.0.0.1,::1'})
+    changed = True
+if config.get('rpc-host-whitelist-enabled', True) and not str(config.get('rpc-host-whitelist') or '').strip():
+    config['rpc-host-whitelist'] = host_whitelist
+    config['rpc-host-whitelist-enabled'] = True
+    changed = True
+if changed:
     safe_write_text(sys.argv[1], json.dumps(config, indent=4))
 PYEOF
 fi
@@ -139,20 +164,26 @@ set_config_value "$TRANSMISSION_CONFIG" json rpc-port "$APP_PORT"
 TRANSMISSION_CONFIG_DIR="$(dirname "$TRANSMISSION_CONFIG")"
 
 report_progress 70 "Installing Transmission Web Control UI..."
-TWC_TAG="$(github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1" "false")"
-TWC_URL="https://github.com/ronggang/transmission-web-control/archive/refs/tags/${TWC_TAG}.tar.gz"
-if [[ -n "$TWC_URL" ]]; then
+TWC_REPO="https://github.com/ronggang/transmission-web-control.git"
+if [[ -n "${AF_FIXTURE_VERSION:-}" ]]; then
+    TWC_TAG="$(github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1" "false")"
+else
+    TWC_TAG="$(AF_TARGET_VERSION="" github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1" "false")"
+fi
+if [[ -n "$TWC_TAG" ]] && git ls-remote --exit-code --tags "$TWC_REPO" "refs/tags/${TWC_TAG}" >/dev/null 2>&1; then
     mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
-    TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/twc-XXXXXX.tar.gz")
-    if af_logged download_file "$TWC_URL" "$TMP_TAR"; then
-        WEB_DIR="/usr/share/transmission/web"
-        mkdir -p "$WEB_DIR"
-        if [[ -f "${WEB_DIR}/index.html" && ! -f "${WEB_DIR}/index.original.html" ]]; then
-            cp "${WEB_DIR}/index.html" "${WEB_DIR}/index.original.html"
+    TMP_TWC="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/twc-XXXXXX")"
+    if af_logged git clone --branch "$TWC_TAG" --depth 1 "$TWC_REPO" "$TMP_TWC" && git -C "$TMP_TWC" rev-parse --verify HEAD >/dev/null 2>&1; then
+        if [[ -d "${TMP_TWC}/src" ]]; then
+            WEB_DIR="/usr/share/transmission/web"
+            mkdir -p "$WEB_DIR"
+            if [[ -f "${WEB_DIR}/index.html" && ! -f "${WEB_DIR}/index.original.html" ]]; then
+                cp "${WEB_DIR}/index.html" "${WEB_DIR}/index.original.html"
+            fi
+            cp -a -- "${TMP_TWC}/src/." "$WEB_DIR/"
         fi
-        af_logged tar -xzf "$TMP_TAR" --strip-components=2 -C "$WEB_DIR" --wildcards '*/src/*' || true
     fi
-    rm -f "$TMP_TAR"
+    rm -rf -- "$TMP_TWC"
 fi
 
 chown -hRP debian-transmission:debian-transmission /var/lib/transmission-daemon /etc/transmission-daemon

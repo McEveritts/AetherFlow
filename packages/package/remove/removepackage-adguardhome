@@ -45,10 +45,15 @@ else
     rm -f /opt/AdGuardHome/AdGuardHome /opt/AdGuardHome/.af-version
 fi
 
+AGH_DROPIN_REMOVED=false
 if [[ -e /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf || -L /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf ]]; then
     validate_config_paths /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf
     rm -f -- /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf
-    af_logged systemctl restart systemd-resolved
+    AGH_DROPIN_REMOVED=true
+fi
+af_restore_resolv_conf_state "adguardhome" "$AGH_DROPIN_REMOVED"
+if [[ "$AGH_DROPIN_REMOVED" == true ]] || systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    af_logged systemctl restart systemd-resolved || true
 fi
 
 af_logged systemctl daemon-reload

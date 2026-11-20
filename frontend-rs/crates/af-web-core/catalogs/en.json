@@ -2289,5 +2289,14 @@
     "verifying": "Verifying code…"
   },
   "Playback method breakdown": "Playback method breakdown",
-  "Media format distribution": "Media format distribution"
+  "Media format distribution": "Media format distribution",
+  "Pipeline service & queue telemetry": "Pipeline service & queue telemetry",
+  "Installed download clients": "Installed download clients",
+  "Installed automation apps": "Installed automation apps",
+  "Transcode queue": "Transcode queue",
+  "None installed": "None installed",
+  "{active} active / {installed} installed": "{active} active / {installed} installed",
+  "Loading": "Loading",
+  "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.": "Synchronized {count} item summaries in this bounded batch. Additional items remain; click synchronize again to resume from the saved checkpoint. These are not confirmed playback events.",
+  "({remaining} remaining sources)": "({remaining} remaining sources)"
 }

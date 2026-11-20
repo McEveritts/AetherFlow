@@ -96,46 +96,64 @@ pub fn install_packaged_unit_if_missing(
     Ok(true)
 }
 
-const DAEMON_DEFAULTS_DROPIN: &[u8] =
-    b"[Service]\nRestart=on-failure\nRestartSec=3s\nTimeoutStopSec=30s\n";
-const ONESHOT_DEFAULTS_DROPIN: &[u8] = b"[Service]\nTimeoutStartSec=120s\nTimeoutStopSec=30s\n";
 const RUNNER_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n";
 const API_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n";
-const LOG_RETENTION_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n";
 
-/// Atomically installs vendor-managed systemd hardening and lifecycle default drop-ins
+/// Atomically installs vendor-managed systemd hardening drop-ins matching `deploy/release-manager.sh`
 /// without modifying existing base `.service` files (preserving custom operator `ReadWritePaths`/`BindPaths`
 /// and allowing higher-numbered operator drop-ins such as `override.conf` to win).
+///
+/// Removes stale `05-aetherflow-unit-defaults.conf` (canonical units own `RestartSec`/`TimeoutStopSec`)
+/// and removes stale `aetherflow-log-retention.service.d/10-aetherflow-hardening.conf` (canonical unit
+/// sets `UMask=0027`).
 pub fn install_systemd_hardening_dropins(
     systemd_units_dst: &Path,
     include_log_retention: bool,
 ) -> ReleaseResult<()> {
     crate::fs_security::create_dir_all_no_symlinks(systemd_units_dst, 0o755)?;
-    let mut entries = vec![
-        (
-            "aetherflow-runner.service.d",
-            DAEMON_DEFAULTS_DROPIN,
-            RUNNER_HARDENING_DROPIN,
-        ),
-        (
-            "aetherflow-api.service.d",
-            DAEMON_DEFAULTS_DROPIN,
-            API_HARDENING_DROPIN,
-        ),
+    let mut entries: Vec<(&str, Option<&[u8]>)> = vec![
+        ("aetherflow-runner.service.d", Some(RUNNER_HARDENING_DROPIN)),
+        ("aetherflow-api.service.d", Some(API_HARDENING_DROPIN)),
     ];
     if include_log_retention {
-        entries.push((
-            "aetherflow-log-retention.service.d",
-            ONESHOT_DEFAULTS_DROPIN,
-            LOG_RETENTION_HARDENING_DROPIN,
-        ));
+        entries.push(("aetherflow-log-retention.service.d", None));
     }
-    for (dropin_dir_name, defaults_content, content) in entries {
+    for (dropin_dir_name, content_opt) in entries {
         let dropin_dir = systemd_units_dst.join(dropin_dir_name);
-        crate::fs_security::create_dir_all_no_symlinks(&dropin_dir, 0o755)?;
         let defaults_path = dropin_dir.join("05-aetherflow-unit-defaults.conf");
-        crate::fs_security::atomic_write_bytes_with_mode(&defaults_path, defaults_content, 0o644)?;
         let conf_path = dropin_dir.join("10-aetherflow-hardening.conf");
+        crate::fs_security::ensure_no_symlink_ancestors(&defaults_path)?;
+        crate::fs_security::ensure_no_symlink_ancestors(&conf_path)?;
+
+        if fs::symlink_metadata(&defaults_path).is_ok() {
+            fs::remove_file(&defaults_path).map_err(|e| {
+                ReleaseError::io(
+                    format!(
+                        "removing stale unit defaults drop-in {}",
+                        defaults_path.display()
+                    ),
+                    e,
+                )
+            })?;
+        }
+
+        let Some(content) = content_opt else {
+            if fs::symlink_metadata(&conf_path).is_ok() {
+                fs::remove_file(&conf_path).map_err(|e| {
+                    ReleaseError::io(
+                        format!(
+                            "removing stale log-retention hardening drop-in {}",
+                            conf_path.display()
+                        ),
+                        e,
+                    )
+                })?;
+            }
+            let _ = fs::remove_dir(&dropin_dir);
+            continue;
+        };
+
+        crate::fs_security::create_dir_all_no_symlinks(&dropin_dir, 0o755)?;
         crate::fs_security::atomic_write_bytes_with_mode(&conf_path, content, 0o644)?;
     }
     Ok(())
@@ -193,10 +211,7 @@ pub fn verify_isolated_systemd_lifecycle_authorized(config: &ReleaseConfig) -> R
     Ok(())
 }
 
-/// Synchronizes `<cli_bin_dir>/af` symlink when the release contains `af` or `bin/af`,
-/// matching `sync_cli_entrypoints` in `deploy/release-manager.sh` while staying strictly
-/// contained within `config.cli_bin_dir`.
-pub fn sync_cli_entrypoints(config: &ReleaseConfig, epoch_id: &str) -> ReleaseResult<()> {
+fn validate_cli_bin_dir(config: &ReleaseConfig) -> ReleaseResult<()> {
     if let Some(ref isolated_root) = config.isolated_root {
         af_models::validate_path_within_isolated_root(
             &config.cli_bin_dir,
@@ -208,6 +223,67 @@ pub fn sync_cli_entrypoints(config: &ReleaseConfig, epoch_id: &str) -> ReleaseRe
             reason,
         })?;
     }
+    Ok(())
+}
+
+/// Preflights `config.cli_bin_dir` parent directory and write permissions BEFORE swapping `current`
+/// when `release_dir` contains a CLI binary (`af` or `bin/af`), so permission/containment errors
+/// fail cleanly pre-swap rather than stranding `current` on an unvalidated candidate.
+pub fn preflight_cli_entrypoints(config: &ReleaseConfig, release_dir: &Path) -> ReleaseResult<()> {
+    let has_af = release_dir.join("af").is_file() || release_dir.join("bin/af").is_file();
+    if !has_af {
+        return Ok(());
+    }
+    validate_cli_bin_dir(config)?;
+    crate::fs_security::create_dir_all_no_symlinks(&config.cli_bin_dir, 0o755)?;
+
+    let dest_af = config.cli_bin_dir.join("af");
+    match fs::symlink_metadata(&dest_af) {
+        Ok(meta) if !meta.file_type().is_symlink() => {
+            // Existing regular wrapper (e.g. packages/system/af) is left untouched by sync_cli_entrypoints
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!("inspecting CLI entrypoint {}", dest_af.display()),
+                err,
+            ));
+        }
+    }
+
+    let probe_path = config.cli_bin_dir.join(format!(
+        ".af-cli-preflight-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let probe_file = opts.open(&probe_path).map_err(|err| {
+        ReleaseError::io(
+            format!(
+                "preflighting writable CLI_BIN_DIR {}",
+                config.cli_bin_dir.display()
+            ),
+            err,
+        )
+    })?;
+    drop(probe_file);
+    let _ = fs::remove_file(&probe_path);
+    Ok(())
+}
+
+/// Synchronizes `<cli_bin_dir>/af` symlink when the release contains `af` or `bin/af`,
+/// matching `sync_cli_entrypoints` in `deploy/release-manager.sh` while staying strictly
+/// contained within `config.cli_bin_dir`.
+pub fn sync_cli_entrypoints(config: &ReleaseConfig, epoch_id: &str) -> ReleaseResult<()> {
+    validate_cli_bin_dir(config)?;
 
     let candidate_af = if config.current_link.join("af").is_file() {
         Some(config.current_link.join("af"))
@@ -221,32 +297,27 @@ pub fn sync_cli_entrypoints(config: &ReleaseConfig, epoch_id: &str) -> ReleaseRe
         return Ok(());
     };
 
-    if create_dir_all_for_cli_bin(&config.cli_bin_dir, config.isolated_root.is_some()).is_err() {
-        return Ok(());
-    }
+    crate::fs_security::create_dir_all_no_symlinks(&config.cli_bin_dir, 0o755)?;
 
     let dest_af = config.cli_bin_dir.join("af");
     let replace_allowed = match fs::symlink_metadata(&dest_af) {
         Ok(meta) => meta.file_type().is_symlink(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => false,
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!("inspecting CLI entrypoint {}", dest_af.display()),
+                err,
+            ));
+        }
     };
     if replace_allowed {
-        let _ = crate::symlink::atomic_replace_symlink(
+        crate::symlink::atomic_replace_file_symlink(
             &dest_af,
             &target_af,
             &format!("af.{}", epoch_id),
-        );
+        )?;
     }
     Ok(())
-}
-
-fn create_dir_all_for_cli_bin(cli_bin_dir: &Path, strict: bool) -> ReleaseResult<()> {
-    match crate::fs_security::create_dir_all_no_symlinks(cli_bin_dir, 0o755) {
-        Ok(()) => Ok(()),
-        Err(err) if strict => Err(err),
-        Err(_) => Ok(()),
-    }
 }
 
 /// Trait abstracting host service lifecycle operations (`systemctl` and legacy `pm2` cleanup).
@@ -698,7 +769,7 @@ mod runtime_identity_tests {
     }
 
     #[test]
-    fn hardening_and_unit_defaults_dropins_install_cleanly() {
+    fn hardening_dropins_remove_stale_defaults_and_log_retention_hardening() {
         let tmp = std::env::temp_dir().join(format!(
             "af-dropin-test-{}-{}",
             std::process::id(),
@@ -708,18 +779,60 @@ mod runtime_identity_tests {
                 .unwrap_or(0)
         ));
         let _ = std::fs::remove_dir_all(&tmp);
+        for unit in [
+            "aetherflow-runner.service.d",
+            "aetherflow-api.service.d",
+            "aetherflow-log-retention.service.d",
+        ] {
+            let dir = tmp.join(unit);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("05-aetherflow-unit-defaults.conf"),
+                b"[Service]\nTimeoutStopSec=30s\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            tmp.join("aetherflow-log-retention.service.d/10-aetherflow-hardening.conf"),
+            b"[Service]\nUMask=0077\n",
+        )
+        .unwrap();
+
         install_systemd_hardening_dropins(&tmp, true).expect("install dropins");
-        let api_defaults = std::fs::read_to_string(
-            tmp.join("aetherflow-api.service.d/05-aetherflow-unit-defaults.conf"),
+
+        for unit in [
+            "aetherflow-runner.service.d",
+            "aetherflow-api.service.d",
+            "aetherflow-log-retention.service.d",
+        ] {
+            assert!(
+                !tmp.join(unit)
+                    .join("05-aetherflow-unit-defaults.conf")
+                    .exists(),
+                "stale 05-aetherflow-unit-defaults.conf must be removed in {unit}"
+            );
+        }
+        assert!(
+            !tmp.join("aetherflow-log-retention.service.d/10-aetherflow-hardening.conf")
+                .exists(),
+            "stale log-retention 10-aetherflow-hardening.conf must be removed"
+        );
+        assert!(
+            !tmp.join("aetherflow-log-retention.service.d").exists(),
+            "empty log-retention drop-in dir should be pruned"
+        );
+        let runner_hardening = std::fs::read_to_string(
+            tmp.join("aetherflow-runner.service.d/10-aetherflow-hardening.conf"),
         )
-        .expect("api defaults");
-        assert!(api_defaults.contains("Restart=on-failure"));
-        assert!(api_defaults.contains("TimeoutStopSec=30s"));
-        let retention_defaults = std::fs::read_to_string(
-            tmp.join("aetherflow-log-retention.service.d/05-aetherflow-unit-defaults.conf"),
+        .expect("runner hardening");
+        assert!(runner_hardening.contains("UMask=0077"));
+        let api_hardening = std::fs::read_to_string(
+            tmp.join("aetherflow-api.service.d/10-aetherflow-hardening.conf"),
         )
-        .expect("retention defaults");
-        assert!(retention_defaults.contains("TimeoutStartSec=120s"));
+        .expect("api hardening");
+        assert!(api_hardening.contains("UMask=0027"));
+        assert!(api_hardening.contains("LogsDirectory="));
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

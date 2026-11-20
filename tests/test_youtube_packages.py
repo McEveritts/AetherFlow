@@ -74,6 +74,7 @@ report_progress() { :; }
 ensure_node() { record "ensure_node $*"; }
 write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
+purge_system_user() { record "purge_system_user $*"; }
 id() { return 0; }
 chown() { :; }
 stat() {
@@ -171,7 +172,14 @@ runuser() {
         fi
         return 0
     fi
-    if [[ "$1" == psql ]]; then cat >/dev/null; return 0; fi
+    if [[ "$1" == psql ]]; then
+        local sql
+        sql="$(cat)"
+        if [[ "$sql" == *'SELECT (SELECT count(*) FROM pg_database'* ]]; then
+            printf '%s\n' "${MOCK_PG_REMAINING-0}"
+        fi
+        return 0
+    fi
     if [[ "$1" == pg_dump ]]; then printf 'fixture SQL backup\n'; return 0; fi
     if [[ "$1" == cp ]]; then command cp "${@:2}"; return; fi
     if [[ "$clean_environment" == true ]]; then
@@ -359,6 +367,25 @@ rollback_apt_packages
                     result = self.run_script(app, **environment)
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertFalse((self.root / f"install/.{app}.lock").exists())
+
+    def test_purge_preserves_files_until_postgresql_teardown_is_verified(self):
+        app = "piped"
+        result = self.run_script(app)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = self.root / "etc" / app / "config.properties"
+        marker = self.root / "install" / f".{app}.lock"
+        for remaining in ("", "1"):
+            with self.subTest(remaining=remaining):
+                result = self.run_script(app, "remove", DELETE_DATA="true", MOCK_PG_REMAINING=remaining)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("PostgreSQL database or role verification failed", result.stderr)
+                self.assertTrue(config.is_file())
+                self.assertTrue(marker.is_file())
+
+        result = self.run_script(app, "remove", DELETE_DATA="true")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(config.exists())
+        self.assertFalse(marker.exists())
 
     def test_companion_download_failure_is_fatal(self):
         result = self.run_script("invidious", MOCK_BAD_ASSET="1")

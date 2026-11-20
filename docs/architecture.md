@@ -29,10 +29,11 @@ Eleven workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 - **Rust WASM UI**: Trunk builds `frontend-rs/` into static HTML, CSS, JavaScript loaders, and WebAssembly for the app and workers. CI stages these as separate `web/dist` release assets. Serving the dashboard requires no Node.js process.
 - **Static serving**: The API serves existing assets from the selected directory and returns `index.html` for supported client routes. Entry points revalidate; content-addressed assets can be cached for a year.
 - **Security, Plugin RBAC & Gateway Middleware**: Enforces HS256 JWT session validation (`aetherflow_session` cookie or `Authorization: Bearer`), dedicated `PluginTokenClaims` route-scope verification (`AETHERFLOW_PLUGIN_TOKEN_FILE`, default-denying `/api/v1/admin/*` and `/api/v1/ingress/*`), SQLite-backed token revocation and active session tracking, TOTP 2FA, OIDC/OAuth2 PKCE, state-changing CSRF origin/token checks, per-IP rate limiting, and streaming subdomain & plugin reverse proxying (`Body::from_stream` without full-body RAM buffering).
+- **Native Plugin Runtime (`backend-rs/crates/af-api/src/plugins.rs`)**: Discovers and validates `plugins/*/plugin.manifest.json`, allocates deterministic/dynamic loopback ports (`21000..=21999`), and verifies segment-boundary `api_scopes`.
 - **Control Plane Subsystems**: Hosts REST and WebSocket endpoints for Marketplace management, Native McBrowser file operations (`af-files`), FlowAI multi-provider intelligence (`intelligence.rs`), canonical Streaming History & reconciliation (Plex/Jellyfin/Emby), MediaFlow transcoding/polling, GitHub release update checking (with 5-minute response cache, `X-RateLimit-Reset` / `Retry-After` backoff, `stable`/`nightly` channel filtering, and branch-head SHA fallback), backup archive chunked uploads/restores, multi-node cluster enrollment & durable worker command queues, and user storage quotas.
+- **`aetherflow-api.service`**: Runs as unprivileged `User=aetherflow` (`Group=aetherflow`) with tailored systemd sandboxing (`ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`, `DevicePolicy=closed` with `/dev/dri` & `/dev/nvidia*` telemetry/transcode access, `UMask=0027`, and `LimitNOFILE=65535`).
 
 ### 2. `af-runner` (`backend-rs/crates/af-runner`) — Privileged UNIX Socket Daemon
-- **`aetherflow-api.service`**: Runs as unprivileged `User=aetherflow` (`Group=aetherflow`) with systemd sandboxing (`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`, `MemoryMax=512M`).
 - **`aetherflow-runner.service`**: Runs `/opt/AetherFlow/current/aetherflow-api runner` in a root cgroup listening on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`), enforcing `SO_PEERCRED` + `/proc/<pid>/exe` caller verification.
 - **Allowlisted Privileged Verbs**: Exposes `/v1/health`, `/v1/systemctl` (strictly allowlisted unit names and actions), `/v1/package` (12 built-in declarative Rust recipes + legacy Bash fallback serialized under a shared advisory lock), `/v1/package/cancel`, `/v1/blueprint/apply` (sandboxed XML/INI/JSON/TOML/SQLite blueprint mutations), `/v1/ingress/vhost` (Apache2 ACME/TLS vhost sync), `/v1/self-update` (launches isolated `aetherflow-self-update.service` units integrated with `af-release` and `deploy/release-manager.sh`), `/v1/sandbox`, `/v1/hosts` (`/etc/hosts`, Pi-hole, and AdGuard Home `.aether.local` DNS sync), `/v1/network`, `/v1/quota`, and `/v1/app-meta`.
 
@@ -41,7 +42,7 @@ Eleven workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 - **Resumable Uploads & Safe Actions**: Supports durable chunked uploads up to 64 GiB (`PATCH` 4 MiB chunks), ETag-guarded UTF-8 editing (up to 10 MiB), 9-format archive creation/extraction, password-protected public shares, and FlowAI natural-language BFS file search.
 
 ### 4. `af-db` (`backend-rs/crates/af-db`) — Bundled SQLite WAL & Envelope Encryption
-- **Single-Writer SQLite Pool**: Uses `rusqlite` (bundled SQLite) with `r2d2` (`max_size(1)`) in `WAL` mode (`busy_timeout = 5000`, `synchronous = NORMAL`, `foreign_keys = ON`) over `/var/lib/aetherflow/aetherflow.sqlite`.
+- **Split Writer/Reader SQLite WAL Pools**: Uses `rusqlite` (bundled SQLite) with a `max_size(1)` writer pool and a `max_size(8)` `SQLITE_OPEN_READ_ONLY` reader pool in `WAL` mode (`busy_timeout = 5000`, `synchronous = NORMAL`, `foreign_keys = ON`) over `/var/lib/aetherflow/aetherflow.sqlite`.
 - **Zero Redis Dependency**: Session tracking, JWT revocation (`revoked_tokens`), OIDC state nonces, and audit logs are persisted directly in SQLite; Redis is disabled in v4.0.0 (`/health/ready` reports `"redis": "disabled"`).
 - **Cryptographic Storage**: Encrypts stored secrets and API keys at rest using AES-256-GCM (`enc:v1:<nonce>:<ciphertext>`) derived from `AES_MASTER_KEY`.
 
@@ -49,10 +50,9 @@ Eleven workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 - Collects CPU, memory, swap, network, per-mount disk usage, and `/proc/diskstats` I/O counters via `sysinfo` and procfs without spawning shell subprocesses on hot polling paths.
 - Dynamically loads `libnvidia-ml.so.1` via `libloading` FFI for zero-fork NVIDIA GPU utilization, VRAM, temperature, and power telemetry.
 
-### 6. `af-services` (`backend-rs/crates/af-services`) — Catalog, Mutators, Plugins & Workers
+### 6. `af-services` (`backend-rs/crates/af-services`) — Catalog, Mutators & Background Workers
 - **Catalog & Blueprints**: Loads canonical `config/packages.json` (77 bare-metal apps including Tailscale, Palate, Maintainerr, McVNC, KasmVNC, Piped, Invidious, and native Rust LibreSpeed) and `config/package_automation.json`, resolves dependency graphs, and checks runtime systemd/process states.
 - **Native Config Mutators**: Pure-Rust mutators (`mutators.rs`) for XML (`xml_xpath`), INI (`ini_key`), JSON (`json_key`), SQLite (`sqlite_query`), Pi-hole (`pihole_Config`), and Apache2 domain/TLS virtual hosts (`apache_vhosts`).
-- **Native Plugin Runtime (`plugins.rs`)**: Discovers and validates `plugins/*/plugin.manifest.json`, allocates deterministic/dynamic loopback ports (`21000..=21999`), and verifies segment-boundary `api_scopes`.
 - **Background Workers & Cluster Daemon**: Runs the periodic metrics recorder, `af-heal` health evaluator, smart backup scheduler (wired to `af-host` for WAL-safe SQLite snapshots + `.manifest.json` + `.sha256`), upstream release watcher, MediaFlow queue poller (`workers.rs`), and multi-node cluster heartbeat daemon (`cluster_daemon.rs`).
 
 ### 7. `af-release`, `af-host`, `af-cli` & `af-models`

@@ -133,7 +133,18 @@ replace_app_tree "$BUILD_DIR" /var/www/organizr api/db
 BUILD_DIR=""
 queue_app_version /var/www/organizr/.af-version "${TARGET_TAG#v}"
 chown -hRP www-data:www-data /var/www/organizr
-find -P /var/www/organizr \( -type d -o -type f \) -exec chmod 775 -- {} +
+find -P /var/www/organizr -type d -exec chmod 0750 -- {} +
+find -P /var/www/organizr -type f -exec chmod 0640 -- {} +
+if [[ -d /var/www/organizr/api/config && ! -L /var/www/organizr/api/config ]]; then
+    chmod 0700 -- /var/www/organizr/api/config
+    if [[ -f /var/www/organizr/api/config/config.php && ! -L /var/www/organizr/api/config/config.php ]]; then
+        chmod 0600 -- /var/www/organizr/api/config/config.php
+    fi
+fi
+if [[ -d /var/www/organizr/api/db && ! -L /var/www/organizr/api/db ]]; then
+    chmod 0700 -- /var/www/organizr/api/db
+    find -P /var/www/organizr/api/db -type f -exec chmod 0600 -- {} +
+fi
 
 report_progress 80 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"

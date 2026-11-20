@@ -39,8 +39,11 @@ if program == 'getent':
 if program == 'pgrep':
     sys.exit(int(os.environ.get('PROCESS_EXIT', '1')))
 if program in ('runuser', 'mysql'):
+    sql = sys.stdin.read()
     with (root / 'sql').open('a') as output:
-        output.write(sys.stdin.read())
+        output.write(sql)
+    if program == 'runuser' and 'SELECT (SELECT count(*) FROM pg_database' in sql:
+        print(os.environ.get('REMAINING_PG_OBJECTS', '0'))
 if program == 'rm':
     for argument in arguments:
         if not argument.startswith('-') and not argument.startswith(str(root) + '/'):
@@ -155,7 +158,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                 self.assertNotIn('PROGRESS:100', result.stdout)
 
     def test_required_command_failures_retain_marker_and_never_complete(self):
-        for operation in ('disable', 'reset-failed', 'apt-get', 'autoremove', 'userdel', 'groupdel', 'daemon-reload'):
+        for operation in ('disable', 'reset-failed', 'apt-get', 'userdel', 'groupdel', 'daemon-reload'):
             with self.subTest(operation=operation):
                 self.file('install/.syncthing.lock', 'installed')
                 self.file('etc/systemd/system/syncthing.service', 'unit')
@@ -296,6 +299,24 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertTrue((self.root / f'install/.{package}.lock').is_file())
                     self.assertTrue((self.root / f'var/lib/{package}/sentinel').is_file())
+
+    def test_youtube_purge_fails_closed_when_postgresql_is_offline_or_unverified(self):
+        for package in ('piped', 'invidious'):
+            with self.subTest(package=package, case='offline-postgresql'):
+                self.file(f'install/.{package}.lock', 'installed')
+                self.file(f'var/lib/{package}/sentinel', 'data')
+                result = self.run_remove(package, DELETE_DATA='true', FAIL_OPERATION='is-active', FAIL_UNIT='postgresql.service')
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((self.root / f'install/.{package}.lock').is_file())
+                self.assertTrue((self.root / f'var/lib/{package}/sentinel').is_file())
+
+            with self.subTest(package=package, case='remaining-db-or-role'):
+                self.file(f'install/.{package}.lock', 'installed')
+                self.file(f'var/lib/{package}/sentinel', 'data')
+                result = self.run_remove(package, DELETE_DATA='true', REMAINING_PG_OBJECTS='1')
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((self.root / f'install/.{package}.lock').is_file())
+                self.assertTrue((self.root / f'var/lib/{package}/sentinel').is_file())
 
     def prepare_shared_web_app(self, package):
         self.file(f'install/.{package}.lock', 'installed')

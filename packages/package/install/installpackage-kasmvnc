@@ -81,13 +81,13 @@ TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/kasmvnc.XXXXXX")"
 chmod 755 "$TMP_DIR"
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     VERSION="${AF_TARGET_VERSION#v}"
-    if ! curl -fsSL "https://api.github.com/repos/kasmtech/KasmVNC/releases/tags/v${VERSION}" -o "${TMP_DIR}/release.json" 2>/dev/null && \
-       ! curl -fsSL "https://api.github.com/repos/kasmtech/KasmVNC/releases/tags/${VERSION}" -o "${TMP_DIR}/release.json" 2>/dev/null; then
+    if ! af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/kasmtech/KasmVNC/releases/tags/v${VERSION}" -o "${TMP_DIR}/release.json" 2>/dev/null && \
+       ! af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/kasmtech/KasmVNC/releases/tags/${VERSION}" -o "${TMP_DIR}/release.json" 2>/dev/null; then
         print_error "Failed to discover GitHub release for kasmtech/KasmVNC tag ${AF_TARGET_VERSION}"
         exit 1
     fi
 else
-    if ! curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest -o "${TMP_DIR}/release.json" \
+    if ! af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 https://api.github.com/repos/kasmtech/KasmVNC/releases/latest -o "${TMP_DIR}/release.json" \
         || ! VERSION="$(jq -er '.tag_name | ltrimstr("v")' "${TMP_DIR}/release.json")" || [[ -z "$VERSION" ]]; then
         print_error "Failed to discover latest GitHub release for kasmtech/KasmVNC"
         exit 1

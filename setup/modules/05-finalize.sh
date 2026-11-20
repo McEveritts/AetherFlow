@@ -12,14 +12,14 @@ function _ftpdconfig() {
 		*) return 0 ;;
 	esac
 
-	\cp -f ${local_setup}templates/openssl.cnf.template /root/.openssl.cnf
+	\cp -f "${local_setup}templates/openssl.cnf.template" /root/.openssl.cnf
 
 	#openssl req -config /root/.openssl.cnf -x509 -nodes -days 365 -newkey rsa:1024 -keyout /etc/ssl/private/vsftpd.pem -out /etc/ssl/private/vsftpd.pem >/dev/null 2>&1
 	openssl req -config /root/.openssl.cnf -x509 -nodes -days 720 -newkey rsa:2048 -keyout /etc/ssl/private/vsftpd.pem -out /etc/ssl/private/vsftpd.pem >/dev/null 2>&1
 	chown root:root /etc/ssl/private/vsftpd.pem 2>/dev/null || true
 	chmod 0600 /etc/ssl/private/vsftpd.pem
 
-	\cp -f ${local_setup}templates/vsftpd.conf.template /etc/vsftpd.conf
+	\cp -f "${local_setup}templates/vsftpd.conf.template" /etc/vsftpd.conf
 
 	# Enabling passive mode
 	sed -i 's/^\(pasv_min_port=\).*/\110090/' /etc/vsftpd.conf
@@ -128,11 +128,11 @@ except Exception:
 
 # function to set permissions on first user
 function _perms() {
-	chown -R ${username}.${username} /home/${username}/ >>"${OUTTO}" 2>&1
-	sudo -u ${username} chmod 755 /home/${username}/ >>"${OUTTO}" 2>&1
+	chown -R "${username}:${username}" "/home/${username}/" >>"${OUTTO}" 2>&1
+	sudo -u "${username}" chmod 755 "/home/${username}/" >>"${OUTTO}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	# Tightened from 777 → 770 (owner + group only, no world access)
-	chmod 770 /home/${username}/.sessions >/dev/null 2>&1
+	chmod 770 "/home/${username}/.sessions" >/dev/null 2>&1
 }
 
 ################################################################################
@@ -227,7 +227,7 @@ destination = "/var/lib/aetherflow/.master.creds"
 directory = "/var/lib/aetherflow"
 u = os.environ["AF_SETUP_USER"]
 p = os.environ.get("AF_MASTER_SECRET", "").strip() or secrets.token_hex(16)
-h = hashlib.md5(p.encode("utf-8")).hexdigest()
+h = hashlib.md5(f"{u}:Welcome to AetherFlow:{p}".encode("utf-8")).hexdigest()
 
 if os.path.lexists(directory) and stat.S_ISLNK(os.lstat(directory).st_mode):
     raise SystemExit("Refusing symlinked /var/lib/aetherflow")
@@ -451,7 +451,9 @@ EOF
 			systemctl enable vsftpd >>/dev/null 2>&1 || true
 			;;
 	esac
-	rm -rf /root/tmp/
+	if [[ -n "${AF_SETUP_SCRATCH_DIR:-}" && "${AF_SETUP_SCRATCH_DIR}" == /var/tmp/aetherflow-setup.* && "${AF_SETUP_SCRATCH_DIR}" != *".."* && -d "${AF_SETUP_SCRATCH_DIR}" && ! -L "${AF_SETUP_SCRATCH_DIR}" ]]; then
+		rm -rf -- "${AF_SETUP_SCRATCH_DIR}"
+	fi
 	local reboot_response
 	local saved_reboot
 	saved_reboot="$(_load_config reboot_after_install)"

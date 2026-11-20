@@ -39,7 +39,6 @@ purge_systemd_unit "qbittorrent"
 
 report_progress 50 "Purging qbittorrent-nox package..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq qbittorrent-nox
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 
 report_progress 80 "Removing qBittorrent state directories and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then

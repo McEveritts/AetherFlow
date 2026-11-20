@@ -162,12 +162,12 @@ fn validate_policy_payload(
             serde_json::from_str(trimmed).map_err(|e| format!("{field}: {e}"))?
         };
         for target in &list {
-            if !matches!(target.provider.as_str(), "jellyfin" | "emby")
+            if !matches!(target.provider.as_str(), "jellyfin" | "emby" | "plex")
                 || target.server_id.trim().is_empty()
                 || target.id.trim().is_empty()
             {
                 return Err(format!(
-                    "{field} entries require provider (jellyfin/emby), serverId, and stable id."
+                    "{field} entries require provider (jellyfin/emby/plex), serverId, and stable id."
                 ));
             }
         }
@@ -373,8 +373,8 @@ fn validate_user_binding_input(
         return Err("afUserId must be a positive integer.".into());
     }
     let clean_provider = provider.trim().to_ascii_lowercase();
-    if !matches!(clean_provider.as_str(), "jellyfin" | "emby") {
-        return Err("provider must be jellyfin or emby.".into());
+    if !matches!(clean_provider.as_str(), "jellyfin" | "emby" | "plex") {
+        return Err("provider must be jellyfin, emby, or plex.".into());
     }
     let clean_server = server_id.trim();
     let clean_remote = provider_user_id.trim();
@@ -490,6 +490,7 @@ fn StructuredUserBindingsEditor(
                     >
                         <option value="jellyfin">{"jellyfin"}</option>
                         <option value="emby">{"emby"}</option>
+                        <option value="plex">{"plex"}</option>
                     </select>
                 </label>
                 <label class="text-xs text-slate-400 space-y-1">
@@ -659,9 +660,19 @@ mod tests {
         )
         .is_err());
 
+        assert!(validate_policy_payload(
+            "0",
+            "0",
+            r#"[{"provider":"plex","serverId":"srv-plex","id":"u1"}]"#,
+            r#"[{"provider":"emby","serverId":"srv-emby","id":"lib-1"}]"#,
+        )
+        .is_ok());
+
         assert!(validate_user_binding_input("2", "jellyfin", "srv-1", "jf-user-1").is_ok());
+        assert!(validate_user_binding_input("2", "emby", "srv-1", "emby-user-1").is_ok());
+        assert!(validate_user_binding_input("2", "plex", "srv-1", "u1").is_ok());
         assert!(validate_user_binding_input("0", "jellyfin", "srv-1", "jf-user-1").is_err());
-        assert!(validate_user_binding_input("2", "plex", "srv-1", "u1").is_err());
+        assert!(validate_user_binding_input("2", "demo", "srv-1", "u1").is_err());
         assert!(validate_user_binding_input("2", "emby", "", "u1").is_err());
     }
 }

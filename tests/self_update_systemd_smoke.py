@@ -1,90 +1,126 @@
+"""Exercise the runner self-update route with two real systemd services in CI."""
 import argparse
 import json
 import os
 from pathlib import Path
-import select
+import stat
 import subprocess
 import sys
-import textwrap
+import tempfile
+import time
 import uuid
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--arguments-json", required=True)
-    parser.add_argument("--root", required=True, type=Path)
-    parser.add_argument("--bash", action="store_true")
-    options = parser.parse_args()
-    root = options.root.resolve(strict=True)
-    if not root.name.startswith("af-self-update-test-"):
-        raise ValueError("refusing an unexpected fixture directory")
-    use_user = os.environ.get("AF_SYSTEMD_TEST_USER") == "1"
-    scope = ["--user"] if use_user else []
-    service_prefix = "af-update-test-" + uuid.uuid4().hex
-    caller = service_prefix + "-caller.service"
-    updater = service_prefix + "-updater.service"
-    fifo = root / "completion.fifo"
-    first_pid = root / "first-pid"
-    os.mkfifo(fifo, 0o600)
-    descriptor = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
-    arguments = json.loads(options.arguments_json)
-    arguments = ["--unit=" + updater if value == "--unit=aetherflow-self-update.service" else value
-                 for value in arguments]
-    expected = ["deploy", "--channel", "nightly"]
-    if not options.bash:
-        expected = ["release", "deploy", "--local", "--channel", "nightly"]
-    command = ["systemctl", *scope]
-    public_reader = command if use_user else ["runuser", "-u", "nobody", "--", *command]
-    helper = root / "updater.py"
-    helper.write_text(textwrap.dedent(f"""\
-        import json, os, pathlib, subprocess, sys
-        assert sys.argv[1:] == {expected!r}, sys.argv
-        assert os.environ.get('GH_TOKEN') == 'fixture-token'
-        public_environment = subprocess.check_output({public_reader + ['show', '--property=Environment', '--value', updater]!r}, text=True)
-        assert 'fixture-token' not in public_environment and 'GH_TOKEN' not in public_environment
-        subprocess.run({command + ['restart', caller]!r}, check=True, timeout=15)
-        current = subprocess.check_output({command + ['show', '--property=MainPID', '--value', caller]!r}, text=True).strip()
-        previous = pathlib.Path({str(first_pid)!r}).read_text().strip()
-        assert current != previous and int(current) > 0, (current, previous)
-        with open({str(fifo)!r}, 'w') as stream:
-            json.dump({{'result': 'complete', 'callerRestarted': True}}, stream)
-        """), encoding="utf-8")
-    if options.bash:
-        (root / "release.sh").write_text('exec /usr/bin/python3 ' + str(helper) + ' "$@"\n', encoding="utf-8")
+def wait_for(path, seconds=25):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+        time.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for {path.name}")
+
+
+def systemctl(*args):
+    return subprocess.check_output(["systemctl", *args], text=True, timeout=15).strip()
+
+
+def fake_release_worker(root, caller, engine, args):
+    if engine == "native":
+        expected = ["--root", str(root), "release", "deploy", "--channel", "nightly", "--local"]
     else:
-        (root / "af").write_text("#!/usr/bin/python3\n" + helper.read_text(encoding="utf-8"), encoding="utf-8")
-        (root / "af").chmod(0o700)
-    launch = ["systemd-run", *scope, *arguments]
-    caller_script = root / "caller.py"
-    caller_script.write_text(textwrap.dedent(f"""\
-        import os, pathlib, signal, subprocess
-        marker = pathlib.Path({str(first_pid)!r})
+        assert engine == "bash"
+        expected = ["deploy", "--channel", "nightly", "--root", str(root)]
+    assert args[:len(expected)] == expected, args
+    flags = dict(zip(args[len(expected)::2], args[len(expected) + 1::2]))
+    receipt = Path(flags["--job-status-file"])
+    config = Path(flags["--config"])
+    updater = flags["--job-unit"]
+    assert receipt.parent == config.parent
+    assert receipt.stem == config.stem == updater
+    assert config.resolve().is_relative_to(root)
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert receipt == Path(os.environ["AETHERFLOW_SELF_UPDATE_STATUS_FILE"])
+    assert config == Path(os.environ["AETHERFLOW_RELEASE_CONF"])
+    assert config.is_file()
+    public_environment = subprocess.check_output(
+        ["runuser", "-u", "nobody", "--", "systemctl", "show",
+         "--property=Environment", "--value", updater],
+        text=True,
+        timeout=15,
+    )
+    assert "af-fixture-token" not in public_environment
+    assert os.environ.get("GH_TOKEN") != "af-fixture-token"
+    assert wait_for(root / "admitted") == updater
+    original_pid = int(wait_for(root / "caller-pid"))
+    systemctl("restart", caller)
+    replacement_pid = int(systemctl("show", "--property=MainPID", "--value", caller))
+    assert replacement_pid > 0 and replacement_pid != original_pid
+    status = json.loads(receipt.read_text(encoding="utf-8"))
+    assert status["status"] == "running", status
+    status.update(status="succeeded", completed=True, success=True, exit_code=0)
+    temporary = receipt.with_suffix(".fixture")
+    with os.fdopen(os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w") as stream:
+        json.dump(status, stream)
+    temporary.replace(receipt)
+    (root / "worker-complete").touch()
+
+
+def smoke(binary, engine):
+    caller = "af-update-test-" + uuid.uuid4().hex + ".service"
+    with tempfile.TemporaryDirectory(prefix="af-self-update-test-", dir="/var/tmp") as directory:
+        root = Path(directory)
+        worker = root / "af"
+        worker.write_text(
+            f"#!/bin/sh\nexec /usr/bin/python3 '{Path(__file__).resolve()}' "
+            f"--worker '{root}' '{caller}' '{engine}' \"$@\"\n",
+            encoding="utf-8",
+        )
+        worker.chmod(0o700)
+        environment = {
+            "AF_SELF_UPDATE_SMOKE_ROOT": root,
+            "AETHERFLOW_RELEASE_ROOT": root,
+            "AETHERFLOW_ENABLE_RUST_RELEASE": "1",
+            "AETHERFLOW_FORCE_BASH_RELEASE": "1" if engine == "bash" else "0",
+            "AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE": "1",
+            "AETHERFLOW_SYSTEMD_RUN_BIN": "/usr/bin/systemd-run",
+            "AETHERFLOW_CLI_BIN": worker,
+            "AETHERFLOW_RELEASE_MANAGER_SCRIPT": worker,
+            "GH_TOKEN": "af-fixture-token",
+        }
         try:
-            with marker.open('x') as stream:
-                stream.write(str(os.getpid()))
-        except FileExistsError:
-            pass
-        else:
-            subprocess.run({launch!r}, check=True, timeout=15)
-        signal.pause()
-        """), encoding="utf-8")
-    try:
-        subprocess.run(["systemd-run", *scope, "--unit=" + caller, "--service-type=exec",
-                        "--property=KillMode=control-group", "/usr/bin/python3", str(caller_script)],
-                       check=True, timeout=15)
-        ready, _, _ = select.select([descriptor], [], [], 25)
-        if not ready:
-            subprocess.run(["journalctl", *scope, "-u", caller, "-u", updater, "--no-pager", "-n", "35"], check=False)
-            raise AssertionError("independent updater did not survive caller restart")
-        result = json.loads(os.read(descriptor, 4096).decode())
-        assert result == {"result": "complete", "callerRestarted": True}, result
-        print("PASS: " + ("Bash" if options.bash else "native") + " updater survived caller restart without exposing credentials")
-    finally:
-        os.close(descriptor)
-        subprocess.run([*command, "stop", caller, updater], check=False, timeout=15)
-        subprocess.run([*command, "reset-failed", caller, updater], check=False, timeout=15,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["systemd-run", "--collect", f"--unit={caller}", "--service-type=exec",
+                 "--property=KillMode=control-group",
+                 *(f"--setenv={name}={value}" for name, value in environment.items()),
+                 "--", str(binary), "tests::self_update_smoke_caller", "--ignored", "--exact", "--nocapture"],
+                check=True,
+                timeout=15,
+            )
+            wait_for(root / "verified")
+            print(f"PASS: /v1/self-update {engine} worker survived caller restart")
+        except Exception:
+            units = [caller]
+            if (root / "admitted").is_file():
+                units.append((root / "admitted").read_text(encoding="utf-8"))
+            subprocess.run(
+                ["journalctl", *(arg for unit in units for arg in ("-u", unit)),
+                 "--no-pager", "-n", "50"],
+                check=False,
+                timeout=15,
+            )
+            raise
+        finally:
+            jobs = root / "var/lib/aetherflow/.self-update-jobs"
+            units = [caller, *(file.stem for file in jobs.glob("aetherflow-self-update-*.json"))]
+            subprocess.run(["systemctl", "stop", *units], check=False, timeout=15)
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        fake_release_worker(Path(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5:])
+    else:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--test-binary", required=True, type=Path)
+        binary = parser.parse_args().test_binary.resolve(strict=True)
+        for engine in ("native", "bash"):
+            smoke(binary, engine)

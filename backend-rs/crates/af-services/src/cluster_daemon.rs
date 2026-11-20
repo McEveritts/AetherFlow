@@ -79,6 +79,8 @@ pub struct PendingWorkerCommand {
     pub cmd_type: String,
     #[serde(default)]
     pub params: HashMap<String, String>,
+    #[serde(default)]
+    pub lease_generation: i64,
 }
 
 /// Durable SQLite representation of a cluster worker command (`cluster_commands`).
@@ -91,6 +93,8 @@ pub struct ClusterCommandRecord {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leased_until: Option<i64>,
+    #[serde(default)]
+    pub lease_generation: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_message: Option<String>,
     pub created_at: String,
@@ -104,6 +108,8 @@ pub struct WorkerCommandAck {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_generation: Option<i64>,
 }
 
 /// Payload accepted by `/cluster/v1/commands/ack`.
@@ -184,6 +190,8 @@ pub struct WorkerHeartbeatResponse {
     pub acknowledged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<PendingWorkerCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_command_ids: Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +229,62 @@ pub fn remove_cached_worker_metrics(node_id: &str) {
     }
 }
 
+/// Slices `s` at the largest valid UTF-8 character boundary `<= max_bytes`.
+#[inline]
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
+}
+
+fn truncate_diagnostic_utf8(raw: &str, max_bytes: usize) -> String {
+    let clean: String = raw
+        .chars()
+        .filter(|c| *c != '\r' && *c != '\n' && !c.is_control())
+        .collect();
+    let trimmed = clean.trim();
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    if max_bytes <= 3 {
+        return truncate_utf8(trimmed, max_bytes).to_string();
+    }
+    let prefix = truncate_utf8(trimmed, max_bytes - 3);
+    format!("{prefix}...")
+}
+
+/// Strictly validates whether `cmd_type` is an allowed remote cluster command verb.
+#[inline]
+pub fn is_allowed_worker_command_type(cmd_type: &str) -> bool {
+    matches!(
+        cmd_type.trim(),
+        "restart_service"
+            | "start_service"
+            | "stop_service"
+            | "reload_service"
+            | "systemctl"
+            | "package"
+            | "ping"
+    )
+}
+
+fn is_valid_command_target(cmd_type: &str, target: &str) -> bool {
+    let clean = target.trim();
+    if cmd_type.trim() == "ping" && clean.is_empty() {
+        return true;
+    }
+    !clean.is_empty()
+        && clean.len() <= 128
+        && clean
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@' | b':'))
+}
+
 /// Enqueues a validated remote command into durable SQLite `cluster_commands`.
 pub fn enqueue_cluster_command(
     node_id: &str,
@@ -236,18 +300,11 @@ pub fn enqueue_cluster_command(
         "valid node_id is required"
     );
     anyhow::ensure!(
-        matches!(
-            clean_type,
-            "restart_service" | "start_service" | "stop_service" | "reload_service"
-        ),
-        "unsupported cluster command type (allowed: restart_service, start_service, stop_service, reload_service)"
+        is_allowed_worker_command_type(clean_type),
+        "unsupported cluster command type (allowed: restart_service, start_service, stop_service, reload_service, systemctl, package, ping)"
     );
     anyhow::ensure!(
-        !clean_target.is_empty()
-            && clean_target.len() <= 128
-            && clean_target
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@')),
+        is_valid_command_target(clean_type, clean_target),
         "invalid command target identifier"
     );
 
@@ -268,8 +325,8 @@ pub fn enqueue_cluster_command(
     let cmd_id = format!("cmd-{}", uuid::Uuid::new_v4().simple());
     let now_iso = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, result_message, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, NULL, ?5, ?5)",
+        "INSERT INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, lease_generation, result_message, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, 0, NULL, ?5, ?5)",
         params![cmd_id, clean_node, clean_type, clean_target, now_iso],
     )
     .context("failed to persist cluster command")?;
@@ -281,6 +338,7 @@ pub fn enqueue_cluster_command(
         target: clean_target.to_string(),
         status: "queued".to_string(),
         leased_until: None,
+        lease_generation: 0,
         result_message: None,
         created_at: now_iso.clone(),
         updated_at: now_iso,
@@ -296,10 +354,15 @@ pub fn queue_worker_command(node_id: &str, cmd: PendingWorkerCommand) -> bool {
         .params
         .get("service")
         .or_else(|| cmd.params.get("target"))
+        .or_else(|| cmd.params.get("package"))
         .map(String::as_str)
         .unwrap_or("")
         .trim();
-    if clean_node.is_empty() || clean_type.is_empty() {
+    if clean_node.is_empty()
+        || clean_node.len() > 128
+        || !is_allowed_worker_command_type(clean_type)
+        || !is_valid_command_target(clean_type, target)
+    {
         return false;
     }
     let cmd_id = if cmd.id.trim().is_empty() {
@@ -322,15 +385,16 @@ pub fn queue_worker_command(node_id: &str, cmd: PendingWorkerCommand) -> bool {
     }
     let now_iso = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT OR IGNORE INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, result_message, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, NULL, ?5, ?5)",
+        "INSERT OR IGNORE INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, lease_generation, result_message, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, 0, NULL, ?5, ?5)",
         params![cmd_id, clean_node, clean_type, target, now_iso],
     )
     .map(|n| n > 0)
     .unwrap_or(false)
 }
 
-/// Leases the next queued (or lease-expired) command for `node_id` from SQLite `cluster_commands`.
+/// Leases the next queued (or lease-expired) command for `node_id` from SQLite `cluster_commands`,
+/// incrementing `lease_generation` monotonically so delayed acks from expired leases are fenced.
 pub fn lease_next_worker_command(
     node_id: &str,
     now_unix: i64,
@@ -341,28 +405,41 @@ pub fn lease_next_worker_command(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .ok()?;
-    let candidate: Option<(String, String, String)> = tx
+    let candidate: Option<(String, String, String, i64)> = tx
         .query_row(
-            "SELECT id, cmd_type, target
+            "SELECT id, cmd_type, target, COALESCE(lease_generation, 0)
              FROM cluster_commands
              WHERE node_id = ?1
                AND (status = 'queued' OR (status = 'leased' AND COALESCE(leased_until, 0) <= ?2))
              ORDER BY created_at ASC, rowid ASC
              LIMIT 1",
             params![node_id, now_unix],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .ok();
-    let (id, cmd_type, target) = candidate?;
+    let (id, cmd_type, target, prev_gen) = candidate?;
+    let next_gen = prev_gen.saturating_add(1);
     let lease_until = now_unix.saturating_add(lease_secs.max(5));
     let now_iso = Utc::now().to_rfc3339();
     let updated = tx
         .execute(
             "UPDATE cluster_commands
-             SET status = 'leased', leased_until = ?1, updated_at = ?2
-             WHERE id = ?3 AND node_id = ?4
-               AND (status = 'queued' OR (status = 'leased' AND COALESCE(leased_until, 0) <= ?5))",
-            params![lease_until, now_iso, id, node_id, now_unix],
+             SET status = 'leased',
+                 leased_until = ?1,
+                 lease_generation = ?2,
+                 updated_at = ?3
+             WHERE id = ?4 AND node_id = ?5
+               AND COALESCE(lease_generation, 0) = ?6
+               AND (status = 'queued' OR (status = 'leased' AND COALESCE(leased_until, 0) <= ?7))",
+            params![
+                lease_until,
+                next_gen,
+                now_iso,
+                id,
+                node_id,
+                prev_gen,
+                now_unix
+            ],
         )
         .ok()?;
     if updated == 0 {
@@ -375,10 +452,12 @@ pub fn lease_next_worker_command(
         params_map.insert("service".to_string(), target.clone());
         params_map.insert("target".to_string(), target);
     }
+    params_map.insert("lease_generation".to_string(), next_gen.to_string());
     Some(PendingWorkerCommand {
         id,
         cmd_type,
         params: params_map,
+        lease_generation: next_gen,
     })
 }
 
@@ -387,7 +466,8 @@ pub fn pop_worker_command(node_id: &str) -> Option<PendingWorkerCommand> {
     lease_next_worker_command(node_id, Utc::now().timestamp(), CLUSTER_COMMAND_LEASE_SECS)
 }
 
-/// Records terminal execution status (`executed` or `failed`) reported by `node_id`.
+/// Records terminal execution status (`executed` or `failed`) reported by `node_id`,
+/// enforcing lease-generation fencing when `ack.lease_generation` is present.
 pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyhow::Result<bool> {
     ensure_cluster_schema();
     let clean_id = ack.id.trim();
@@ -400,37 +480,57 @@ pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyh
     let msg = ack
         .result_message
         .as_deref()
-        .map(|s| {
-            let trimmed = s.trim();
-            if trimmed.len() > 1024 {
-                trimmed[..1024].to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
+        .map(|s| truncate_utf8(s.trim(), 1024).to_string())
         .filter(|s| !s.is_empty());
     let now_iso = Utc::now().to_rfc3339();
     let conn = af_db::get_conn().context("database unavailable")?;
-    let changed = conn.execute(
-        "UPDATE cluster_commands
-         SET status = ?1,
-             leased_until = NULL,
-             result_message = ?2,
-             updated_at = ?3
-         WHERE id = ?4 AND node_id = ?5 AND status IN ('queued', 'leased')",
-        params![clean_status, msg, now_iso, clean_id, node_id.trim()],
-    )?;
+    let changed = if let Some(ack_gen) = ack.lease_generation {
+        conn.execute(
+            "UPDATE cluster_commands
+             SET status = ?1,
+                 leased_until = NULL,
+                 result_message = ?2,
+                 updated_at = ?3
+             WHERE id = ?4
+               AND node_id = ?5
+               AND status IN ('queued', 'leased')
+               AND COALESCE(lease_generation, 0) = ?6",
+            params![
+                clean_status,
+                msg,
+                now_iso,
+                clean_id,
+                node_id.trim(),
+                ack_gen
+            ],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE cluster_commands
+             SET status = ?1,
+                 leased_until = NULL,
+                 result_message = ?2,
+                 updated_at = ?3
+             WHERE id = ?4 AND node_id = ?5 AND status IN ('queued', 'leased')",
+            params![clean_status, msg, now_iso, clean_id, node_id.trim()],
+        )?
+    };
     if changed > 0 {
         return Ok(true);
     }
-    let already_terminal: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM cluster_commands WHERE id = ?1 AND node_id = ?2 AND status IN ('executed', 'failed'))",
-            params![clean_id, node_id.trim()],
-            |r| r.get(0),
-        )
-        .unwrap_or(false);
-    Ok(already_terminal)
+    let existing_state: Option<(String, i64)> = match conn.query_row(
+        "SELECT status, COALESCE(lease_generation, 0) FROM cluster_commands WHERE id = ?1 AND node_id = ?2",
+        params![clean_id, node_id.trim()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ) {
+        Ok(pair) => Some(pair),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(err) => return Err(err).context("failed querying cluster command terminal state"),
+    };
+    match existing_state {
+        Some((st, _)) if matches!(st.as_str(), "executed" | "failed") => Ok(true),
+        _ => Ok(false),
+    }
 }
 
 /// Lists durable cluster commands (optionally filtered by `node_id`), newest first.
@@ -443,7 +543,7 @@ pub fn list_cluster_commands(
     let clean_filter = node_id_filter.map(str::trim).filter(|s| !s.is_empty());
     let conn = af_db::get_conn().context("database unavailable")?;
     let mut stmt = conn.prepare(
-        "SELECT id, node_id, cmd_type, target, status, leased_until, result_message, created_at, updated_at
+        "SELECT id, node_id, cmd_type, target, status, leased_until, COALESCE(lease_generation, 0), result_message, created_at, updated_at
          FROM cluster_commands
          WHERE (?1 IS NULL OR node_id = ?1)
          ORDER BY created_at DESC, rowid DESC
@@ -458,9 +558,10 @@ pub fn list_cluster_commands(
                 target: r.get(3)?,
                 status: r.get(4)?,
                 leased_until: r.get(5)?,
-                result_message: r.get(6)?,
-                created_at: r.get(7)?,
-                updated_at: r.get(8)?,
+                lease_generation: r.get(6)?,
+                result_message: r.get(7)?,
+                created_at: r.get(8)?,
+                updated_at: r.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -474,17 +575,7 @@ pub fn list_cluster_commands(
 /// Performs a constant-time byte slice equality check to prevent timing side-channels.
 #[inline]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut ha = Sha256::new();
-    ha.update(a);
-    let da = ha.finalize();
-    let mut hb = Sha256::new();
-    hb.update(b);
-    let db = hb.finalize();
-    let mut diff = 0u8;
-    for (&x, &y) in da.iter().zip(db.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0 && a.len() == b.len()
+    af_models::constant_time_eq(a, b)
 }
 
 fn hash_psk_sha256(psk: &str) -> String {
@@ -609,10 +700,12 @@ pub fn ensure_cluster_schema() {
             target TEXT NOT NULL,
             status TEXT NOT NULL,
             leased_until INTEGER,
+            lease_generation INTEGER NOT NULL DEFAULT 0,
             result_message TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );",
+        "ALTER TABLE cluster_commands ADD COLUMN lease_generation INTEGER DEFAULT 0;",
         "CREATE INDEX IF NOT EXISTS idx_cluster_commands_node_status ON cluster_commands(node_id, status, created_at);",
     ];
     for sql in migrations {
@@ -914,6 +1007,7 @@ pub fn register_worker_node_with_peer(
     .context("failed upserting enrolled cluster worker")?;
     tx.commit()
         .context("failed committing cluster worker enrollment")?;
+    drop(conn);
 
     let version = if req.version.trim().is_empty() {
         "4.0.0"
@@ -1054,56 +1148,37 @@ pub fn process_worker_heartbeat_with_peer(
         now.timestamp()
     };
 
-    if let Ok(conn) = af_db::get_conn() {
-        let cert_fp_str = incoming_cert_fp.unwrap_or("");
-        let updated = conn
-            .execute(
-                "UPDATE cluster_nodes \
-                 SET status = 'online', \
-                     last_heartbeat = ?1, \
-                     last_seen = ?1, \
-                     cpu_usage = ?2, \
-                     ram_usage = ?3, \
-                     disk_usage = ?4, \
-                     peer_cert_sha256 = CASE WHEN COALESCE(peer_cert_sha256, '') = '' AND ?5 != '' THEN ?5 ELSE COALESCE(peer_cert_sha256, '') END \
-                 WHERE id = ?6",
-                params![now_rfc3339, cpu_usage, ram_usage, disk_usage, cert_fp_str, node_id],
-            )
-            .unwrap_or(0);
+    let cert_fp_str = incoming_cert_fp.unwrap_or("");
+    let updated = {
+        let conn = af_db::get_conn().context("cluster database unavailable")?;
+        conn.execute(
+            "UPDATE cluster_nodes \
+             SET status = 'online', \
+                 last_heartbeat = ?1, \
+                 last_seen = ?1, \
+                 cpu_usage = ?2, \
+                 ram_usage = ?3, \
+                 disk_usage = ?4, \
+                 peer_cert_sha256 = CASE WHEN COALESCE(peer_cert_sha256, '') = '' AND ?5 != '' THEN ?5 ELSE COALESCE(peer_cert_sha256, '') END \
+             WHERE id = ?6",
+            params![
+                now_rfc3339,
+                cpu_usage,
+                ram_usage,
+                disk_usage,
+                cert_fp_str,
+                node_id
+            ],
+        )
+        .context("failed updating cluster worker heartbeat")?
+    };
 
-        if updated == 0 {
-            let hostname = if !req.hostname.trim().is_empty() {
-                req.hostname.trim().to_string()
-            } else {
-                node_id.trim_start_matches("node-").to_string()
-            };
-            let address = if !req.address.trim().is_empty() {
-                req.address.trim().to_string()
-            } else {
-                format!("{}:8080", hostname)
-            };
-            let psk_hash = if !req.psk.trim().is_empty() {
-                hash_psk_sha256(req.psk.trim())
-            } else {
-                String::new()
-            };
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO cluster_nodes \
-                 (id, hostname, address, psk_hash, peer_cert_sha256, role, status, last_heartbeat, last_seen, cpu_usage, ram_usage, disk_usage, enrolled_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'worker', 'online', ?6, ?6, ?7, ?8, ?9, ?6)",
-                params![
-                    node_id,
-                    hostname,
-                    address,
-                    psk_hash,
-                    cert_fp_str,
-                    now_rfc3339,
-                    cpu_usage,
-                    ram_usage,
-                    disk_usage
-                ],
-            );
-        }
+    if updated == 0 {
+        remove_cached_worker_metrics(&node_id);
+        anyhow::bail!(
+            "cluster worker '{}' is not enrolled or has been deleted",
+            node_id
+        );
     }
 
     let previous = get_cached_worker_metrics(&node_id);
@@ -1138,6 +1213,11 @@ pub fn process_worker_heartbeat_with_peer(
         .filter(|s| !s.is_empty())
         .unwrap_or("4.0.0");
 
+    let sanitized_services_err = req
+        .services_error
+        .as_deref()
+        .map(|s| truncate_utf8(s.trim(), 1024).to_string());
+
     let snapshot = serde_json::json!({
         "node_id": node_id,
         "hostname": if !req.hostname.is_empty() {
@@ -1157,14 +1237,26 @@ pub fn process_worker_heartbeat_with_peer(
         "services": services,
         "services_status": services_status,
         "services_observed_at": services_observed_at,
-        "services_error": req.services_error,
+        "services_error": sanitized_services_err,
         "system_info": sys_info,
     });
 
     cache_worker_metrics(&node_id, snapshot);
 
+    let mut confirmed_command_ids = Vec::new();
     for ack in &req.command_acks {
-        let _ = acknowledge_worker_command(&node_id, ack);
+        match acknowledge_worker_command(&node_id, ack) {
+            Ok(true) => confirmed_command_ids.push(ack.id.trim().to_string()),
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(
+                    node_id = %node_id,
+                    command_id = %ack.id,
+                    error = %err,
+                    "failed persisting command ack during worker heartbeat"
+                );
+            }
+        }
     }
 
     let command = lease_next_worker_command(&node_id, ts, CLUSTER_COMMAND_LEASE_SECS);
@@ -1172,6 +1264,7 @@ pub fn process_worker_heartbeat_with_peer(
         timestamp: ts,
         acknowledged: true,
         command,
+        confirmed_command_ids,
     })
 }
 
@@ -1783,14 +1876,30 @@ fn build_grpc_trailers(code: u8, message: Option<&str>) -> HeaderMap {
         trailers.insert("grpc-status", val);
     }
     if let Some(msg) = message {
-        let sanitized: String = msg
-            .chars()
-            .filter(|c| c.is_ascii() && !c.is_ascii_control())
-            .take(512)
-            .collect();
-        if !sanitized.is_empty() {
-            if let Ok(val) = HeaderValue::from_str(&sanitized) {
-                trailers.insert("grpc-message", val);
+        let bounded = truncate_diagnostic_utf8(msg, 512);
+        if !bounded.is_empty() {
+            let mut ascii_encoded = String::with_capacity(bounded.len());
+            for ch in bounded.chars() {
+                if ch.is_ascii() && !ch.is_ascii_control() && ch != '%' {
+                    if ascii_encoded.len() + 1 > 512 {
+                        break;
+                    }
+                    ascii_encoded.push(ch);
+                } else {
+                    let mut utf8_buf = [0u8; 4];
+                    let bytes = ch.encode_utf8(&mut utf8_buf).as_bytes();
+                    if ascii_encoded.len() + bytes.len() * 3 > 512 {
+                        break;
+                    }
+                    for b in bytes {
+                        ascii_encoded.push_str(&format!("%{b:02X}"));
+                    }
+                }
+            }
+            if !ascii_encoded.is_empty() {
+                if let Ok(val) = HeaderValue::from_str(&ascii_encoded) {
+                    trailers.insert("grpc-message", val);
+                }
             }
         }
     }
@@ -2775,12 +2884,18 @@ async fn handle_grpc_request(
             if let Err(msg) = authorize_cluster_control_plane(&header_psk, &peer_auth) {
                 return grpc_error_response(GrpcError::unauthenticated(msg));
             }
-            let known_worker = is_enrolled_cluster_node(&req.node_id)
-                || get_cached_worker_metrics(&req.node_id).is_some();
+            if !is_allowed_worker_command_type(&req.cmd_type) {
+                return grpc_error_response(GrpcError::invalid_argument(format!(
+                    "unsupported cluster command type '{}'",
+                    truncate_utf8(req.cmd_type.trim(), 64)
+                )));
+            }
+            let known_worker = is_enrolled_cluster_node(&req.node_id);
             let cmd = PendingWorkerCommand {
                 id: req.command_id.clone(),
                 cmd_type: req.cmd_type,
                 params: req.params,
+                lease_generation: 0,
             };
             let encoded = if known_worker && queue_worker_command(&req.node_id, cmd) {
                 encode_proto_command_response(
@@ -3039,14 +3154,22 @@ fn route_cluster_http_request(
             }
             match process_worker_heartbeat_with_peer(&req, peer_auth) {
                 Ok(resp) => (200, "OK", serde_json::to_value(resp).unwrap_or_default()),
-                Err(e) => (
-                    401,
-                    "Unauthorized",
-                    serde_json::json!({
-                        "acknowledged": false,
-                        "error": e.to_string(),
-                    }),
-                ),
+                Err(e) => {
+                    let err_str = truncate_diagnostic_utf8(&e.to_string(), 512);
+                    let (code, reason) = if err_str.contains("not enrolled or has been deleted") {
+                        (403, "Forbidden")
+                    } else {
+                        (401, "Unauthorized")
+                    };
+                    (
+                        code,
+                        reason,
+                        serde_json::json!({
+                            "acknowledged": false,
+                            "error": err_str,
+                        }),
+                    )
+                }
             }
         }
         ("POST", "/cluster/v1/commands/ack") => {
@@ -3061,6 +3184,16 @@ fn route_cluster_http_request(
                     400,
                     "Bad Request",
                     serde_json::json!({ "acknowledged": false, "error": "node_id is required" }),
+                );
+            }
+            if !is_enrolled_cluster_node(node_id) {
+                return (
+                    403,
+                    "Forbidden",
+                    serde_json::json!({
+                        "acknowledged": false,
+                        "error": "cluster worker is not enrolled or has been deleted",
+                    }),
                 );
             }
             if let Err(msg) = verify_cluster_psk(node_id, &req.psk) {
@@ -3090,18 +3223,36 @@ fn route_cluster_http_request(
                     }
                 }
             }
-            let mut processed = 0usize;
+            let mut confirmed_command_ids = Vec::new();
+            let mut persistence_error: Option<String> = None;
             for ack in &req.acks {
-                if acknowledge_worker_command(node_id, ack).unwrap_or(false) {
-                    processed += 1;
+                match acknowledge_worker_command(node_id, ack) {
+                    Ok(true) => confirmed_command_ids.push(ack.id.trim().to_string()),
+                    Ok(false) => {}
+                    Err(err) => {
+                        persistence_error = Some(truncate_diagnostic_utf8(&err.to_string(), 512));
+                    }
                 }
+            }
+            if let Some(err_msg) = persistence_error {
+                return (
+                    503,
+                    "Service Unavailable",
+                    serde_json::json!({
+                        "acknowledged": false,
+                        "processed": confirmed_command_ids.len(),
+                        "confirmed_command_ids": confirmed_command_ids,
+                        "error": err_msg,
+                    }),
+                );
             }
             (
                 200,
                 "OK",
                 serde_json::json!({
                     "acknowledged": true,
-                    "processed": processed,
+                    "processed": confirmed_command_ids.len(),
+                    "confirmed_command_ids": confirmed_command_ids,
                 }),
             )
         }
@@ -3770,24 +3921,257 @@ pub fn load_worker_registration_state_nofollow(
     serde_json::from_slice(&raw).ok()
 }
 
+const MAX_WORKER_ACK_OUTBOX_ENTRIES: usize = 256;
+
+/// Resolves the durable `0600` worker command-ack outbox file path.
+pub fn resolve_worker_ack_outbox_path(state_path: &Path) -> std::path::PathBuf {
+    if let Ok(explicit) = env::var("CLUSTER_WORKER_ACK_OUTBOX_FILE") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/var/lib/aetherflow"))
+        .join("cluster_worker_ack_outbox.json")
+}
+
+/// Atomically persists bounded unconfirmed worker command acks (`0600`, `O_NOFOLLOW`).
+pub fn persist_worker_ack_outbox_atomic(
+    path: &Path,
+    acks: &[WorkerCommandAck],
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("worker ack outbox path must have a parent directory");
+    };
+    if let Ok(pmeta) = std::fs::symlink_metadata(parent) {
+        if pmeta.file_type().is_symlink() {
+            anyhow::bail!("refusing symlink parent directory for worker ack outbox");
+        }
+    } else {
+        std::fs::create_dir_all(parent).context("creating worker ack outbox parent directory")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to overwrite symlink worker ack outbox file");
+        }
+    }
+
+    let bounded: &[WorkerCommandAck] = if acks.len() > MAX_WORKER_ACK_OUTBOX_ENTRIES {
+        &acks[acks.len() - MAX_WORKER_ACK_OUTBOX_ENTRIES..]
+    } else {
+        acks
+    };
+    let payload = serde_json::to_vec_pretty(bounded)?;
+    let tmp_name = format!(
+        ".cluster_worker_ack_outbox.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    );
+    let tmp_path = parent.join(tmp_name);
+
+    #[cfg(unix)]
+    let mut tmp_file = {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::FromRawFd;
+
+        let c_tmp = CString::new(tmp_path.as_os_str().as_bytes())
+            .context("worker ack outbox temp path contains interior NUL")?;
+        let fd = unsafe {
+            libc::open(
+                c_tmp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("opening exclusive 0600 worker ack outbox temp file");
+        }
+        unsafe {
+            let _ = libc::fchmod(fd, 0o600);
+            std::fs::File::from_raw_fd(fd)
+        }
+    };
+    #[cfg(not(unix))]
+    let mut tmp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)?;
+
+    if let Err(err) = tmp_file
+        .write_all(&payload)
+        .and_then(|_| tmp_file.sync_all())
+    {
+        drop(tmp_file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err).context("writing worker ack outbox temp file");
+    }
+    drop(tmp_file);
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&tmp_path);
+            anyhow::bail!("worker ack outbox target turned into a symlink");
+        }
+    }
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err).context("atomically activating worker ack outbox file");
+    }
+    if let Ok(dir_f) = std::fs::File::open(parent) {
+        let _ = dir_f.sync_all();
+    }
+    Ok(())
+}
+
+/// Loads persisted unconfirmed worker command acks safely with `O_NOFOLLOW`.
+pub fn load_worker_ack_outbox_nofollow(path: &Path) -> Vec<WorkerCommandAck> {
+    #[cfg(unix)]
+    let file = {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::FromRawFd;
+
+        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+            return Vec::new();
+        };
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Vec::new();
+        }
+        let f = unsafe { std::fs::File::from_raw_fd(fd) };
+        if !f.metadata().ok().is_some_and(|m| m.is_file()) {
+            return Vec::new();
+        }
+        f
+    };
+    #[cfg(not(unix))]
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+
+    let mut raw = Vec::new();
+    if file.take(256 * 1024).read_to_end(&mut raw).is_err() {
+        return Vec::new();
+    }
+    let mut parsed: Vec<WorkerCommandAck> = serde_json::from_slice(&raw).unwrap_or_default();
+    if parsed.len() > MAX_WORKER_ACK_OUTBOX_ENTRIES {
+        parsed.drain(0..(parsed.len() - MAX_WORKER_ACK_OUTBOX_ENTRIES));
+    }
+    parsed
+}
+
+/// Appends or updates an unconfirmed ack in memory and durably persists the `0600` outbox.
+pub fn enqueue_worker_ack_outbox_entry(
+    outbox_path: &Path,
+    pending: &mut Vec<WorkerCommandAck>,
+    ack: WorkerCommandAck,
+) -> anyhow::Result<()> {
+    if let Some(existing) = pending.iter_mut().find(|a| a.id == ack.id) {
+        *existing = ack;
+    } else {
+        if pending.len() >= MAX_WORKER_ACK_OUTBOX_ENTRIES {
+            pending.remove(0);
+        }
+        pending.push(ack);
+    }
+    persist_worker_ack_outbox_atomic(outbox_path, pending)
+}
+
+/// Evicts ONLY those ack entries whose command IDs appear in `confirmed_command_ids`.
+pub fn evict_confirmed_acks_from_outbox(
+    outbox_path: &Path,
+    pending: &mut Vec<WorkerCommandAck>,
+    confirmed_ids: &[String],
+) -> anyhow::Result<()> {
+    if confirmed_ids.is_empty() {
+        return Ok(());
+    }
+    let before = pending.len();
+    pending.retain(|ack| !confirmed_ids.iter().any(|cid| cid == &ack.id));
+    if pending.len() != before {
+        persist_worker_ack_outbox_atomic(outbox_path, pending)?;
+    }
+    Ok(())
+}
+
+fn parse_confirmed_command_ids(resp_bytes: &[u8]) -> Vec<String> {
+    let Ok(val) = serde_json::from_slice::<serde_json::Value>(resp_bytes) else {
+        return Vec::new();
+    };
+    if val.get("acknowledged").and_then(|v| v.as_bool()) != Some(true) {
+        return Vec::new();
+    }
+    val.get("confirmed_command_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 async fn execute_remote_worker_command_with_result(cmd: PendingWorkerCommand) -> WorkerCommandAck {
+    let lease_gen = (cmd.lease_generation > 0)
+        .then_some(cmd.lease_generation)
+        .or_else(|| {
+            cmd.params
+                .get("lease_generation")
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&g| g > 0)
+        });
     tracing::info!(
         command_id = %cmd.id,
         cmd_type = %cmd.cmd_type,
+        lease_generation = ?lease_gen,
         "cluster worker executing remote command from master"
     );
+    if cmd.cmd_type == "ping" {
+        return WorkerCommandAck {
+            id: cmd.id,
+            status: "executed".to_string(),
+            result_message: Some("pong".to_string()),
+            lease_generation: lease_gen,
+        };
+    }
     let action = match cmd.cmd_type.as_str() {
         "restart_service" => Some("restart"),
         "start_service" => Some("start"),
         "stop_service" => Some("stop"),
         "reload_service" => Some("reload"),
+        "systemctl" => match cmd.params.get("action").map(|s| s.trim()) {
+            Some("restart") => Some("restart"),
+            Some("start") => Some("start"),
+            Some("stop") => Some("stop"),
+            Some("reload") => Some("reload"),
+            _ => Some("restart"),
+        },
         _ => None,
     };
     let Some(svc_action) = action else {
         return WorkerCommandAck {
             id: cmd.id,
             status: "failed".to_string(),
-            result_message: Some(format!("unsupported command type '{}'", cmd.cmd_type)),
+            result_message: Some(format!(
+                "unsupported command type '{}'",
+                truncate_utf8(&cmd.cmd_type, 64)
+            )),
+            lease_generation: lease_gen,
         };
     };
     let service_name = cmd
@@ -3801,6 +4185,7 @@ async fn execute_remote_worker_command_with_result(cmd: PendingWorkerCommand) ->
             id: cmd.id,
             status: "failed".to_string(),
             result_message: Some("missing target service parameter".to_string()),
+            lease_generation: lease_gen,
         };
     };
     match crate::control_service(&service, svc_action).await {
@@ -3808,6 +4193,7 @@ async fn execute_remote_worker_command_with_result(cmd: PendingWorkerCommand) ->
             id: cmd.id,
             status: "executed".to_string(),
             result_message: Some(format!("{svc_action} {service} succeeded")),
+            lease_generation: lease_gen,
         },
         Err(err) => {
             tracing::warn!(
@@ -3819,7 +4205,8 @@ async fn execute_remote_worker_command_with_result(cmd: PendingWorkerCommand) ->
             WorkerCommandAck {
                 id: cmd.id,
                 status: "failed".to_string(),
-                result_message: Some(err.to_string()),
+                result_message: Some(truncate_utf8(&err.to_string(), 1024).to_string()),
+                lease_generation: lease_gen,
             }
         }
     }
@@ -3950,6 +4337,7 @@ async fn run_worker_registration_and_heartbeat_loop(
     let local_port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let worker_address = format!("{}:{}", hostname, local_port);
     let state_path = resolve_worker_registration_state_path();
+    let outbox_path = resolve_worker_ack_outbox_path(&state_path);
 
     let mut active_cred = resolve_live_enrollment_credential(&psk);
     let mut assigned_node_id = format!("node-{}", hostname);
@@ -3993,8 +4381,9 @@ async fn run_worker_registration_and_heartbeat_loop(
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     let in_flight_cmds: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let initial_outbox = load_worker_ack_outbox_nofollow(&outbox_path);
     let pending_acks: Arc<std::sync::Mutex<Vec<WorkerCommandAck>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+        Arc::new(std::sync::Mutex::new(initial_outbox));
 
     loop {
         ticker.tick().await;
@@ -4008,11 +4397,9 @@ async fn run_worker_registration_and_heartbeat_loop(
             &inventory,
         );
         hb_payload.psk.clear();
-        let batch_acks: Vec<WorkerCommandAck> = pending_acks
-            .lock()
-            .map(|mut g| std::mem::take(&mut *g))
-            .unwrap_or_default();
-        hb_payload.command_acks = batch_acks.clone();
+        let batch_acks: Vec<WorkerCommandAck> =
+            pending_acks.lock().map(|g| g.clone()).unwrap_or_default();
+        hb_payload.command_acks = batch_acks;
 
         let Ok(hb_bytes) = serde_json::to_vec(&hb_payload) else {
             continue;
@@ -4029,16 +4416,28 @@ async fn run_worker_registration_and_heartbeat_loop(
         {
             Ok((status, resp_bytes)) if status.is_success() => {
                 if let Ok(pong) = serde_json::from_slice::<WorkerHeartbeatResponse>(&resp_bytes) {
+                    if !pong.confirmed_command_ids.is_empty() {
+                        if let Ok(mut q) = pending_acks.lock() {
+                            let _ = evict_confirmed_acks_from_outbox(
+                                &outbox_path,
+                                &mut q,
+                                &pong.confirmed_command_ids,
+                            );
+                        }
+                    }
                     if let Some(cmd) = pong.command {
                         let cached_ack = completed_cmds
                             .lock()
                             .ok()
-                            .and_then(|m| m.get(&cmd.id).cloned());
+                            .and_then(|m| m.get(&cmd.id).cloned())
+                            .filter(|done| {
+                                done.lease_generation.is_none()
+                                    || done.lease_generation == Some(cmd.lease_generation)
+                            });
                         if let Some(done_ack) = cached_ack {
                             if let Ok(mut q) = pending_acks.lock() {
-                                if !q.iter().any(|a| a.id == done_ack.id) {
-                                    q.push(done_ack);
-                                }
+                                let _ =
+                                    enqueue_worker_ack_outbox_entry(&outbox_path, &mut q, done_ack);
                             }
                             continue;
                         }
@@ -4054,6 +4453,7 @@ async fn run_worker_registration_and_heartbeat_loop(
                             let done_map = Arc::clone(&completed_cmds);
                             let flight_set = Arc::clone(&in_flight_cmds);
                             let ack_queue = Arc::clone(&pending_acks);
+                            let outbox_clone = outbox_path.clone();
                             tokio::spawn(async move {
                                 let cmd_id = cmd.id.clone();
                                 let ack = execute_remote_worker_command_with_result(cmd).await;
@@ -4065,32 +4465,43 @@ async fn run_worker_registration_and_heartbeat_loop(
                                     }
                                     m.insert(cmd_id.clone(), ack.clone());
                                 }
+                                if let Ok(mut q) = ack_queue.lock() {
+                                    let _ = enqueue_worker_ack_outbox_entry(
+                                        &outbox_clone,
+                                        &mut q,
+                                        ack.clone(),
+                                    );
+                                }
                                 if let Ok(mut s) = flight_set.lock() {
                                     s.remove(&cmd_id);
                                 }
                                 let ack_req = WorkerCommandAckRequest {
                                     node_id: node_clone,
                                     psk: String::new(),
-                                    acks: vec![ack.clone()],
+                                    acks: vec![ack],
                                 };
-                                let ack_sent = if let Ok(bytes) = serde_json::to_vec(&ack_req) {
-                                    matches!(
-                                        send_worker_json_post(
-                                            &ep_clone,
-                                            &sec_clone,
-                                            "/cluster/v1/commands/ack",
-                                            &cred_clone,
-                                            bytes,
-                                        )
-                                        .await,
-                                        Ok((st, _)) if st.is_success()
+                                if let Ok(bytes) = serde_json::to_vec(&ack_req) {
+                                    if let Ok((st, body)) = send_worker_json_post(
+                                        &ep_clone,
+                                        &sec_clone,
+                                        "/cluster/v1/commands/ack",
+                                        &cred_clone,
+                                        bytes,
                                     )
-                                } else {
-                                    false
-                                };
-                                if !ack_sent {
-                                    if let Ok(mut q) = ack_queue.lock() {
-                                        q.push(ack);
+                                    .await
+                                    {
+                                        if st.is_success() {
+                                            let confirmed = parse_confirmed_command_ids(&body);
+                                            if confirmed.iter().any(|c| c == &cmd_id) {
+                                                if let Ok(mut q) = ack_queue.lock() {
+                                                    let _ = evict_confirmed_acks_from_outbox(
+                                                        &outbox_clone,
+                                                        &mut q,
+                                                        &confirmed,
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             });
@@ -4099,11 +4510,6 @@ async fn run_worker_registration_and_heartbeat_loop(
                 }
             }
             Ok((status, _)) => {
-                if !batch_acks.is_empty() {
-                    if let Ok(mut q) = pending_acks.lock() {
-                        q.extend(batch_acks);
-                    }
-                }
                 tracing::warn!(
                     status = %status,
                     "cluster master rejected heartbeat"
@@ -4130,11 +4536,6 @@ async fn run_worker_registration_and_heartbeat_loop(
                 }
             }
             Err(e) => {
-                if !batch_acks.is_empty() {
-                    if let Ok(mut q) = pending_acks.lock() {
-                        q.extend(batch_acks);
-                    }
-                }
                 tracing::debug!(
                     error = %e,
                     master = %endpoint.authority,
@@ -4326,6 +4727,16 @@ mod tests {
         let psk = "disposable-inventory-heartbeat-secret";
         env::set_var("CLUSTER_PSK", psk);
         let node = "node-inventory-regression";
+        let reg = register_worker_node(&RegisterWorkerRequest {
+            node_id: node.to_string(),
+            hostname: "fixture".to_string(),
+            address: "fixture:8080".to_string(),
+            psk: psk.to_string(),
+            version: "4.0.0".to_string(),
+            system_info: None,
+        })
+        .unwrap();
+        assert!(reg.accepted);
         let mut inventory = WorkerServiceInventory::default();
         let (unknown, _) =
             build_worker_heartbeat_payload(node, "fixture", "fixture:8080", psk, &inventory);
@@ -5258,11 +5669,23 @@ mod tests {
         for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
             env::set_var(key, &db_path);
         }
-        env::set_var("CLUSTER_PSK", "master-secret-psk-1234567890");
+        let master_psk = "master-secret-psk-1234567890-secure!!";
+        env::set_var("CLUSTER_PSK", master_psk);
         env::set_var("CLUSTER_REGISTER_INITIAL_BACKOFF_MS", "15");
         env::set_var("CLUSTER_REGISTER_MAX_BACKOFF_MS", "40");
         af_db::init_db().unwrap();
         ensure_cluster_schema();
+
+        let reg = register_worker_node(&RegisterWorkerRequest {
+            node_id: "node-alpha".to_string(),
+            hostname: "alpha".to_string(),
+            address: "127.0.0.1:8080".to_string(),
+            psk: master_psk.to_string(),
+            version: "4.0.0".to_string(),
+            system_info: None,
+        })
+        .unwrap();
+        assert!(reg.accepted);
 
         // 1. Enqueue durable command in SQLite
         let queued = enqueue_cluster_command("node-alpha", "restart_service", "sonarr").unwrap();
@@ -5271,6 +5694,7 @@ mod tests {
         // First lease succeeds; second lease before lease expiry returns None
         let first_lease = lease_next_worker_command("node-alpha", 1000, 30).unwrap();
         assert_eq!(first_lease.id, queued.id);
+        assert_eq!(first_lease.lease_generation, 1);
         assert_eq!(first_lease.cmd_type, "restart_service");
         assert_eq!(
             first_lease.params.get("service").map(String::as_str),
@@ -5278,26 +5702,41 @@ mod tests {
         );
         assert!(lease_next_worker_command("node-alpha", 1015, 30).is_none());
 
-        // After lease expires (`now >= 1030`), command is re-leased cleanly
+        // After lease expires (`now >= 1030`), command is re-leased cleanly with incremented generation
         let released = lease_next_worker_command("node-alpha", 1031, 30).unwrap();
         assert_eq!(released.id, queued.id);
+        assert_eq!(released.lease_generation, 2);
 
-        // Heartbeat carrying `command_acks` marks command terminal (`executed`) with message
+        // Delayed stale ack from expired lease_generation=1 MUST NOT overwrite lease_generation=2!
+        assert!(!acknowledge_worker_command(
+            "node-alpha",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: "failed".to_string(),
+                result_message: Some("stale expired worker attempt".to_string()),
+                lease_generation: Some(1),
+            }
+        )
+        .unwrap());
+
+        // Heartbeat carrying `command_acks` for current lease_generation=2 marks command terminal (`executed`) and returns confirmed_command_ids
         let hb_resp = process_worker_heartbeat(&WorkerHeartbeatRequest {
             node_id: "node-alpha".to_string(),
             hostname: "alpha".to_string(),
             address: "127.0.0.1:8080".to_string(),
-            psk: "master-secret-psk-1234567890".to_string(),
+            psk: master_psk.to_string(),
             timestamp: 1035,
             command_acks: vec![WorkerCommandAck {
                 id: queued.id.clone(),
                 status: "executed".to_string(),
                 result_message: Some("restart sonarr succeeded".to_string()),
+                lease_generation: Some(2),
             }],
             ..Default::default()
         })
         .unwrap();
         assert!(hb_resp.acknowledged);
+        assert_eq!(hb_resp.confirmed_command_ids, vec![queued.id.clone()]);
         assert!(hb_resp.command.is_none());
 
         let listed = list_cluster_commands(Some("node-alpha"), 10).unwrap();
@@ -5355,7 +5794,7 @@ mod tests {
             let assigned = register_worker_with_bounded_backoff(
                 &ep,
                 &WorkerTransportSecurity::InsecureLoopback,
-                "master-secret-psk-1234567890",
+                master_psk,
                 "node-initial",
                 "worker-host",
                 "127.0.0.1:8080",
@@ -5382,6 +5821,235 @@ mod tests {
 
             srv.abort();
         });
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn utf8_truncation_deleted_node_guard_verb_allowlist_and_ack_outbox_retention() {
+        let name = "cluster_daemon::tests::utf8_truncation_deleted_node_guard_verb_allowlist_and_ack_outbox_retention";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+
+        // 1. UTF-8 boundary truncation at byte 509 (512 - 3) & byte 1024 across HTTP JSON + gRPC trailers
+        // Construct multibyte strings where bytes 509 and 1024 land directly inside a 3-byte '☃' (E2 98 83) or 4-byte '🦀' (F0 9F A6 80)!
+        let msg_509 = format!("{}🦀{}", "a".repeat(507), "z".repeat(40)); // '🦀' spans 507..511 (509 is mid-char!)
+        let diag_512 = truncate_diagnostic_utf8(&msg_509, 512);
+        assert!(diag_512.len() <= 512);
+        assert_eq!(diag_512, format!("{}...", "a".repeat(507)));
+
+        let trailers =
+            build_grpc_trailers(16, Some(&format!("{}☃{}", "b".repeat(508), "x".repeat(20))));
+        let grpc_msg = trailers.get("grpc-message").unwrap().to_str().unwrap();
+        assert!(grpc_msg.len() <= 512);
+        assert!(grpc_msg.ends_with("..."));
+
+        let msg_1024 = format!("{}🦀{}", "c".repeat(1022), "y".repeat(30)); // '🦀' spans 1022..1026 (1024 is mid-char!)
+        let trunc_1024 = truncate_utf8(&msg_1024, 1024);
+        assert_eq!(trunc_1024.len(), 1022);
+
+        let root = env::temp_dir().join(format!("af-cluster-p4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("cluster_p4.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        let psk = "p4-cluster-master-psk-at-least-32-chars!!";
+        env::set_var("CLUSTER_PSK", psk);
+        af_db::init_db().unwrap();
+        ensure_cluster_schema();
+
+        // 2. Deleted-node heartbeat guard: unenrolled node rejected; enrolled then deleted node rejected (HTTP 403) without resurrection
+        assert!(process_worker_heartbeat(&WorkerHeartbeatRequest {
+            node_id: "node-never-enrolled".to_string(),
+            hostname: "ghost".to_string(),
+            address: "127.0.0.1:8080".to_string(),
+            psk: psk.to_string(),
+            timestamp: 2000,
+            ..Default::default()
+        })
+        .is_err());
+
+        let reg = register_worker_node(&RegisterWorkerRequest {
+            node_id: "node-ephemeral".to_string(),
+            hostname: "ephemeral".to_string(),
+            address: "127.0.0.1:8081".to_string(),
+            psk: psk.to_string(),
+            version: "4.0.0".to_string(),
+            system_info: None,
+        })
+        .unwrap();
+        assert!(reg.accepted);
+
+        // Admin deletes node from cluster_nodes
+        af_db::get_conn()
+            .unwrap()
+            .execute("DELETE FROM cluster_nodes WHERE id = 'node-ephemeral'", [])
+            .unwrap();
+        remove_cached_worker_metrics("node-ephemeral");
+
+        let hb_body = serde_json::to_vec(&WorkerHeartbeatRequest {
+            node_id: "node-ephemeral".to_string(),
+            hostname: "ephemeral".to_string(),
+            address: "127.0.0.1:8081".to_string(),
+            psk: String::new(),
+            timestamp: 2005,
+            ..Default::default()
+        })
+        .unwrap();
+        let (hb_code, _, hb_json) = route_cluster_http_request(
+            "POST",
+            "/cluster/v1/heartbeat",
+            "/cluster/v1/heartbeat",
+            psk,
+            &hb_body,
+            &PeerTransportAuth::InsecureLoopback,
+        );
+        assert_eq!(
+            hb_code, 403,
+            "deleted worker heartbeat must be rejected with 403"
+        );
+        assert_eq!(hb_json["acknowledged"], false);
+        let resurrected: i64 = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM cluster_nodes WHERE id = 'node-ephemeral'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            resurrected, 0,
+            "deleted worker must NEVER be re-inserted on heartbeat"
+        );
+
+        // 3. Command type allowlist: systemctl, package, ping, restart_service allowed; arbitrary verbs rejected (HTTP + gRPC)
+        let reg_live = register_worker_node(&RegisterWorkerRequest {
+            node_id: "node-live".to_string(),
+            hostname: "live".to_string(),
+            address: "127.0.0.1:8082".to_string(),
+            psk: psk.to_string(),
+            version: "4.0.0".to_string(),
+            system_info: None,
+        })
+        .unwrap();
+        assert!(reg_live.accepted);
+
+        assert!(enqueue_cluster_command("node-live", "systemctl", "radarr").is_ok());
+        assert!(enqueue_cluster_command("node-live", "package", "sonarr").is_ok());
+        assert!(enqueue_cluster_command("node-live", "ping", "").is_ok());
+        assert!(enqueue_cluster_command("node-live", "exec_shell", "bash").is_err());
+        assert!(!queue_worker_command(
+            "node-live",
+            PendingWorkerCommand {
+                id: "bad-1".to_string(),
+                cmd_type: "arbitrary_exec".to_string(),
+                params: HashMap::from([("target".to_string(), "sh".to_string())]),
+                lease_generation: 0,
+            }
+        ));
+
+        // Acknowledge with multibyte 1024-byte UTF-8 boundary diagnostic
+        let _ping_rec = enqueue_cluster_command("node-live", "ping", "health").unwrap();
+        let leased_ping = lease_next_worker_command("node-live", 3000, 30).unwrap();
+        let ack_ok = WorkerCommandAck {
+            id: leased_ping.id.clone(),
+            status: "executed".to_string(),
+            result_message: Some(msg_1024.clone()),
+            lease_generation: Some(leased_ping.lease_generation),
+        };
+        let ack_req_bytes = serde_json::to_vec(&WorkerCommandAckRequest {
+            node_id: "node-live".to_string(),
+            psk: String::new(),
+            acks: vec![ack_ok.clone()],
+        })
+        .unwrap();
+        let (ack_code, _, ack_json) = route_cluster_http_request(
+            "POST",
+            "/cluster/v1/commands/ack",
+            "/cluster/v1/commands/ack",
+            psk,
+            &ack_req_bytes,
+            &PeerTransportAuth::InsecureLoopback,
+        );
+        assert_eq!(ack_code, 200);
+        assert_eq!(
+            ack_json["confirmed_command_ids"],
+            serde_json::json!([leased_ping.id])
+        );
+
+        // 4. Persistent 0600 ack outbox retains unconfirmed acks on HTTP 503 DB failure and evicts ONLY when confirmed
+        let outbox_file = root.join("state/worker_ack_outbox.json");
+        let mut pending = Vec::new();
+        let unconfirmed = WorkerCommandAck {
+            id: "cmd-unconfirmed-99".to_string(),
+            status: "executed".to_string(),
+            result_message: Some("ok".to_string()),
+            lease_generation: Some(1),
+        };
+        enqueue_worker_ack_outbox_entry(&outbox_file, &mut pending, unconfirmed.clone()).unwrap();
+        let outbox_mode = std::fs::symlink_metadata(&outbox_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(outbox_mode, 0o600);
+        assert_eq!(
+            load_worker_ack_outbox_nofollow(&outbox_file),
+            vec![unconfirmed.clone()]
+        );
+
+        // Simulate DB failure on cluster_commands update via SQLite trigger -> /cluster/v1/commands/ack MUST return 503
+        let _failing_cmd = enqueue_cluster_command("node-live", "ping", "db-fail").unwrap();
+        let leased_fail = lease_next_worker_command("node-live", 3100, 30).unwrap();
+        af_db::get_conn()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_cluster_cmd_ack BEFORE UPDATE ON cluster_commands BEGIN SELECT RAISE(ABORT, 'simulated sqlite busy'); END;",
+            )
+            .unwrap();
+        let fail_ack_bytes = serde_json::to_vec(&WorkerCommandAckRequest {
+            node_id: "node-live".to_string(),
+            psk: String::new(),
+            acks: vec![WorkerCommandAck {
+                id: leased_fail.id.clone(),
+                status: "executed".to_string(),
+                result_message: Some("pong".to_string()),
+                lease_generation: Some(leased_fail.lease_generation),
+            }],
+        })
+        .unwrap();
+        let (fail_code, _, fail_json) = route_cluster_http_request(
+            "POST",
+            "/cluster/v1/commands/ack",
+            "/cluster/v1/commands/ack",
+            psk,
+            &fail_ack_bytes,
+            &PeerTransportAuth::InsecureLoopback,
+        );
+        assert_eq!(
+            fail_code, 503,
+            "DB persistence error on /commands/ack must return 503"
+        );
+        assert_eq!(fail_json["acknowledged"], false);
+        assert_eq!(
+            parse_confirmed_command_ids(&serde_json::to_vec(&fail_json).unwrap()),
+            Vec::<String>::new()
+        );
+
+        // Outbox retains entry until confirmed_command_ids explicitly names it
+        evict_confirmed_acks_from_outbox(&outbox_file, &mut pending, &[]).unwrap();
+        assert_eq!(load_worker_ack_outbox_nofollow(&outbox_file).len(), 1);
+        evict_confirmed_acks_from_outbox(
+            &outbox_file,
+            &mut pending,
+            &["cmd-unconfirmed-99".to_string()],
+        )
+        .unwrap();
+        assert!(load_worker_ack_outbox_nofollow(&outbox_file).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }

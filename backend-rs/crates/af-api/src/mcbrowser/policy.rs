@@ -671,7 +671,7 @@ pub(super) fn is_path_allowed_by_rules(rules: &[PathRule], normalized_path: &str
 pub(super) fn has_denied_descendant_rule(rules: &[PathRule], normalized_ancestor: &str) -> bool {
     rules.iter().any(|rule| {
         !rule.regex
-            && is_strict_ancestor_path(normalized_ancestor, &rule.path)
+            && policy_may_match_descendant(rule, normalized_ancestor)
             && !is_path_allowed_by_rules(rules, &rule.path)
     })
 }
@@ -679,9 +679,49 @@ pub(super) fn has_denied_descendant_rule(rules: &[PathRule], normalized_ancestor
 pub(super) fn has_allowed_descendant_rule(rules: &[PathRule], normalized_ancestor: &str) -> bool {
     rules.iter().any(|rule| {
         !rule.regex
-            && is_strict_ancestor_path(normalized_ancestor, &rule.path)
+            && policy_may_match_descendant(rule, normalized_ancestor)
             && is_path_allowed_by_rules(rules, &rule.path)
     })
+}
+
+// Regex rules can describe descendants that do not exist yet, so checking
+// only actual entries or treating the expression as a literal prefix is unsafe.
+fn policy_may_match_descendant(rule: &PathRule, normalized_ancestor: &str) -> bool {
+    rule.regex || is_strict_ancestor_path(normalized_ancestor, &rule.path)
+}
+
+fn reject_regex_denied_descendants(
+    rules: &[PathRule],
+    permission: Permission,
+    path: &str,
+) -> Result<(), McBrowserError> {
+    if rules
+        .iter()
+        .any(|rule| rule.regex && !rule.allow && policy_may_match_descendant(rule, path))
+    {
+        return Err(McBrowserError::Forbidden(format!(
+            "Cannot '{}' directory because a descendant may be denied by a regex policy rule",
+            permission.as_str()
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn authorize_recursive_paths_with_conn<'a>(
+    conn: &Connection,
+    user: &AuthUser,
+    permission: Permission,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<(), McBrowserError> {
+    let user_id = super::validate_mcbrowser_user(user)?;
+    let _ = verify_active_user_and_quota_conn(conn, user_id)?;
+    let policy = load_user_policy_conn(conn, user_id)?;
+    for path in paths {
+        let normalized_path = normalize_target_path(path, true)?;
+        authorize_with_policy(&policy, permission, &normalized_path)?;
+        reject_regex_denied_descendants(&policy.rules, permission, &normalized_path)?;
+    }
+    Ok(())
 }
 
 pub(super) fn authorize_with_policy(

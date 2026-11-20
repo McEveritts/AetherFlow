@@ -19,6 +19,7 @@ af-models.workspace = true
 af-runner.workspace = true
 af-release.workspace = true
 af-host.workspace = true
+bcrypt.workspace = true
 chrono.workspace = true
 hex.workspace = true
 http-body-util.workspace = true

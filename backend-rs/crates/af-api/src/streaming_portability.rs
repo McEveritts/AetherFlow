@@ -1498,27 +1498,45 @@ fn plan_merge(target: &PortableSnapshot, archive: &ArchiveData) -> MergePlan {
         }
     }
 
-    let target_bandwidth = target
-        .bandwidth_samples
-        .iter()
-        .map(|sample| (sample.id, sample))
-        .collect::<HashMap<_, _>>();
+    let bandwidth_values = |sample: &BandwidthSample| {
+        (
+            sample.active_streams,
+            sample.direct_play_count,
+            sample.direct_stream_count,
+            sample.transcode_count,
+            sample.total_bitrate_bps,
+            sample.bytes_delta,
+        )
+    };
+    let mut target_bandwidth = HashMap::with_capacity(target.bandwidth_samples.len());
+    for sample in &target.bandwidth_samples {
+        target_bandwidth
+            .entry((sample.timestamp.as_deref(), sample.provider.as_str()))
+            .or_insert_with(|| (sample.id, bandwidth_values(sample)));
+    }
     for sample in &archive.bandwidth_samples {
-        match target_bandwidth.get(&sample.id) {
+        let natural_key = (sample.timestamp.as_deref(), sample.provider.as_str());
+        match target_bandwidth.get(&natural_key) {
             None => {
+                target_bandwidth.insert(natural_key, (sample.id, bandwidth_values(sample)));
                 result.bandwidth_inserts.push(sample.clone());
                 result.counts.insert.bandwidth_samples += 1;
             }
-            Some(existing) if *existing == sample => {
+            Some((_, existing_vals)) if *existing_vals == bandwidth_values(sample) => {
                 result.counts.exact_duplicate.bandwidth_samples += 1;
             }
-            Some(_) => {
+            Some((existing_id, _)) => {
+                let key_label = format!(
+                    "{}:{}",
+                    sample.provider,
+                    sample.timestamp.as_deref().unwrap_or("null")
+                );
                 result.counts.conflict.bandwidth_samples += 1;
                 result.conflicts.push(conflict(
                     "streaming_bandwidth_samples",
-                    sample.id.to_string(),
-                    Some(sample.id.to_string()),
-                    "sample_id_collision",
+                    key_label,
+                    Some(existing_id.to_string()),
+                    "bandwidth_sample_collision",
                 ));
             }
         }
@@ -1569,6 +1587,7 @@ const INSERT_LABEL_SQL: &str =
     "INSERT INTO streaming_history_labels(history_id,kind,value,name) VALUES (?1,?2,?3,?4)";
 const INSERT_SESSION_SAMPLE_SQL: &str = "INSERT INTO streaming_session_samples(history_id,sampled_at,observed_secs,playing,bitrate_bps) VALUES (?1,?2,?3,?4,?5)";
 const INSERT_BANDWIDTH_SAMPLE_SQL: &str = "INSERT INTO streaming_bandwidth_samples(id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)";
+const INSERT_BANDWIDTH_SAMPLE_MERGE_SQL: &str = "INSERT INTO streaming_bandwidth_samples(timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta) SELECT ?1,?2,?3,?4,?5,?6,?7,?8 WHERE NOT EXISTS (SELECT 1 FROM streaming_bandwidth_samples s WHERE s.timestamp IS ?1 AND s.provider = ?2)";
 
 fn insert_history_with(
     statement: &mut Statement<'_>,
@@ -1680,6 +1699,27 @@ fn insert_bandwidth_samples(
     Ok(())
 }
 
+fn insert_bandwidth_samples_merge(
+    conn: &Connection,
+    samples: &[BandwidthSample],
+) -> PortabilityResult<usize> {
+    let mut statement = conn.prepare(INSERT_BANDWIDTH_SAMPLE_MERGE_SQL)?;
+    let mut inserted = 0usize;
+    for sample in samples {
+        inserted += statement.execute(params![
+            sample.timestamp,
+            sample.provider,
+            sample.active_streams,
+            sample.direct_play_count,
+            sample.direct_stream_count,
+            sample.transcode_count,
+            sample.total_bitrate_bps,
+            sample.bytes_delta,
+        ])?;
+    }
+    Ok(inserted)
+}
+
 fn update_policy(conn: &Connection, policy: &TrackingPolicy) -> PortabilityResult<()> {
     let changed = conn.execute(
         "UPDATE streaming_tracking_policies SET minimum_watch_secs=?1,excluded_users=?2,excluded_libraries=?3,reconnect_window_secs=?4,revision=revision+1 WHERE id=1",
@@ -1698,11 +1738,11 @@ fn apply_merge(conn: &Connection, plan: &MergePlan) -> PortabilityResult<bool> {
     insert_histories(conn, &plan.history_inserts)?;
     insert_labels(conn, &plan.label_inserts)?;
     insert_session_samples(conn, &plan.sample_inserts)?;
-    insert_bandwidth_samples(conn, &plan.bandwidth_inserts)?;
+    let bw_inserted = insert_bandwidth_samples_merge(conn, &plan.bandwidth_inserts)?;
     Ok(!plan.history_inserts.is_empty()
         || !plan.label_inserts.is_empty()
         || !plan.sample_inserts.is_empty()
-        || !plan.bandwidth_inserts.is_empty())
+        || bw_inserted > 0)
 }
 
 fn apply_replace(conn: &Connection, archive: &ArchiveData) -> PortabilityResult<()> {
@@ -2692,5 +2732,91 @@ mod tests {
             .body(Body::from(vec![b' '; MAX_PORTABILITY_BODY_BYTES + 1]))
             .unwrap();
         assert!(read_request_body(over_body_req).await.is_err());
+    }
+
+    #[test]
+    fn merge_mode_deduplicates_bandwidth_samples_by_natural_key_when_target_has_existing_ids() {
+        let source = disposable_db();
+        seed_sensitive_data(&source.connection);
+        source
+            .connection
+            .execute("DELETE FROM streaming_bandwidth_samples", [])
+            .unwrap();
+        for (id, ts, prov, streams, br) in [
+            (
+                1_i64,
+                "2026-10-01T10:00:00Z",
+                "jellyfin",
+                1_i64,
+                4_000_000_i64,
+            ),
+            (
+                2_i64,
+                "2026-10-01T10:01:00Z",
+                "jellyfin",
+                2_i64,
+                8_000_000_i64,
+            ),
+            (3_i64, "2026-10-01T10:02:00Z", "plex", 1_i64, 5_000_000_i64),
+        ] {
+            source.connection.execute(
+                "INSERT INTO streaming_bandwidth_samples(id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta) VALUES (?1,?2,?3,?4,1,0,0,?5,1024)",
+                params![id, ts, prov, streams, br],
+            ).unwrap();
+        }
+        let archive = export_archive(&source.connection);
+
+        // Target DB ALREADY has rows id = 1..3 (with id=2 matching archive's 10:00:00Z natural key!)
+        let mut target = disposable_db();
+        target.connection.execute(
+            "UPDATE streaming_tracking_policies SET minimum_watch_secs=45,excluded_users='[]',excluded_libraries='[]',reconnect_window_secs=30 WHERE id=1",
+            [],
+        ).unwrap();
+        for (id, ts, prov, streams, br) in [
+            (
+                1_i64,
+                "2026-09-30T09:00:00Z",
+                "jellyfin",
+                1_i64,
+                2_000_000_i64,
+            ),
+            (
+                2_i64,
+                "2026-10-01T10:00:00Z",
+                "jellyfin",
+                1_i64,
+                4_000_000_i64,
+            ),
+            (3_i64, "2026-09-30T09:05:00Z", "emby", 1_i64, 3_000_000_i64),
+        ] {
+            target.connection.execute(
+                "INSERT INTO streaming_bandwidth_samples(id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta) VALUES (?1,?2,?3,?4,1,0,0,?5,1024)",
+                params![id, ts, prov, streams, br],
+            ).unwrap();
+        }
+
+        let (preview, token) =
+            preview_and_token(&target.connection, &archive, RestoreMode::Merge, 44, 5000);
+        assert_eq!(preview.plan.exact_duplicate.bandwidth_samples, 1);
+        assert_eq!(preview.plan.insert.bandwidth_samples, 2);
+        assert_eq!(preview.plan.conflict.bandwidth_samples, 0);
+
+        let restored = restore_connection(
+            &mut target.connection,
+            target.database_path.to_str().unwrap(),
+            44,
+            RestoreMode::Merge,
+            &archive,
+            &token,
+            5001,
+        )
+        .expect("merge into target with existing bandwidth_samples id=1..3 must succeed without UNIQUE id conflict");
+        assert_eq!(restored.resulting_counts.bandwidth_samples, 5);
+
+        // Repeat merge preview sees all 3 archive bandwidth samples as exact duplicates!
+        let repeat_preview =
+            inspect_restore(&target.connection, &archive, RestoreMode::Merge).unwrap();
+        assert_eq!(repeat_preview.plan.insert.bandwidth_samples, 0);
+        assert_eq!(repeat_preview.plan.exact_duplicate.bandwidth_samples, 3);
     }
 }

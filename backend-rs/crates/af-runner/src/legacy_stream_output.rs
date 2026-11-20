@@ -2,13 +2,12 @@
 use std::io;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
-// Reserve one byte for the newline added by the stream. Both pipe buffers and
-// partial records remain bounded before anything is handed to an IPC consumer.
-const MAX_RECORD_BYTES: usize = 64 * 1024 - 1;
+const MAX_LINE_BYTES: usize = 64 * 1024;
 
 pub(crate) struct BoundedLines<R> {
     reader: BufReader<R>,
     pending: Vec<u8>,
+    skip_lf: bool,
 }
 
 impl<R: AsyncRead + Unpin> BoundedLines<R> {
@@ -16,6 +15,7 @@ impl<R: AsyncRead + Unpin> BoundedLines<R> {
         Self {
             reader: BufReader::new(reader),
             pending: Vec::new(),
+            skip_lf: false,
         }
     }
 
@@ -24,26 +24,29 @@ impl<R: AsyncRead + Unpin> BoundedLines<R> {
     pub(crate) async fn next_line(&mut self) -> io::Result<Option<String>> {
         loop {
             let bytes = self.reader.fill_buf().await?;
-            let newline = bytes.iter().position(|byte| *byte == b'\n');
-            let take = newline.unwrap_or(bytes.len());
-            if self.pending.len() + take > MAX_RECORD_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "installer output record exceeds the 65535-byte limit; operation failed",
-                ));
+            if self.skip_lf {
+                self.skip_lf = false;
+                if bytes.first() == Some(&b'\n') {
+                    self.reader.consume(1);
+                    continue;
+                }
             }
-            self.pending.extend_from_slice(&bytes[..take]);
+            let delimiter = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r'));
+            let take = delimiter.unwrap_or(bytes.len());
+            let keep = take.min(MAX_LINE_BYTES - self.pending.len());
+            self.pending.extend_from_slice(&bytes[..keep]);
             let eof = bytes.is_empty();
-            self.reader.consume(take + usize::from(newline.is_some()));
-            if newline.is_some() || eof {
+            self.skip_lf = bytes.get(take) == Some(&b'\r');
+            self.reader.consume(take + usize::from(delimiter.is_some()));
+            if delimiter.is_some() || eof {
                 if eof && self.pending.is_empty() {
                     return Ok(None);
                 }
-                let mut line = String::from_utf8(std::mem::take(&mut self.pending))
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                if line.ends_with('\r') {
-                    line.pop();
+                let mut line = String::from_utf8_lossy(&self.pending).into_owned();
+                if line.len() > MAX_LINE_BYTES {
+                    line.truncate(line.floor_char_boundary(MAX_LINE_BYTES));
                 }
+                self.pending.clear();
                 return Ok(Some(line));
             }
         }
@@ -65,7 +68,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_preserves_partial_records_and_newline_free_output_is_bounded() {
+    async fn cancellation_preserves_partial_records() {
         let (mut output, input) = tokio::io::duplex(32);
         let mut lines = BoundedLines::new(input);
         output.write_all(b"part").await.unwrap();
@@ -76,17 +79,33 @@ mod tests {
         );
         output.write_all(b"ial\n").await.unwrap();
         assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("partial"));
-        let writer = tokio::spawn(async move {
-            for _ in 0..MAX_RECORD_BYTES / 32 + 2 {
-                if output.write_all(&[b'x'; 32]).await.is_err() {
-                    break;
-                }
-            }
-        });
-        let error = lines.next_line().await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(lines.pending.len() <= MAX_RECORD_BYTES);
-        drop(lines);
-        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn localized_output_is_lossy() {
+        let mut lines = BoundedLines::new(&b"caf\xe9\nvalid \xc3\xa9\n\xff"[..]);
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("caf�"));
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("valid é"));
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("�"));
+    }
+
+    #[tokio::test]
+    async fn oversized_carriage_return_progress_is_truncated_and_drained() {
+        let mut input = vec![b'x'; MAX_LINE_BYTES + 32768];
+        input.extend_from_slice(b"\rprogress\r\ncomplete\n");
+        let mut lines = BoundedLines::new(input.as_slice());
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap(),
+            "x".repeat(MAX_LINE_BYTES)
+        );
+        assert_eq!(
+            lines.next_line().await.unwrap().as_deref(),
+            Some("progress")
+        );
+        assert_eq!(
+            lines.next_line().await.unwrap().as_deref(),
+            Some("complete")
+        );
+        assert!(lines.next_line().await.unwrap().is_none());
     }
 }

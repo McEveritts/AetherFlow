@@ -1,6 +1,8 @@
 use af_services::{ActiveStreamSession, StreamingLibraryCounts, StreamingServerStatus};
 use axum::http::{header, StatusCode};
-use chrono::{DateTime, Utc};
+#[cfg(test)]
+use chrono::DateTime;
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use rusqlite::params;
@@ -151,6 +153,7 @@ impl EmbyOptionalEventCapability {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbyItemSummaryRecord {
@@ -462,6 +465,7 @@ pub struct EmbySessionRaw {
     transcoding_info: Option<EmbyTranscodingInfoRaw>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmbyUserRaw {
@@ -471,6 +475,7 @@ struct EmbyUserRaw {
     name: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmbyUserDataRaw {
@@ -484,6 +489,7 @@ struct EmbyUserDataRaw {
     last_played_date: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmbyHistoryItemRaw {
@@ -519,6 +525,7 @@ struct EmbyHistoryItemRaw {
     user_data: Option<EmbyUserDataRaw>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmbyItemsEnvelopeRaw {
@@ -1887,6 +1894,7 @@ pub async fn probe_emby_optional_event_capability(
 /// Fetches Emby user item summaries (`/Users` + `/Users/{Id}/Items`) into normalized
 /// `EmbyItemSummaryRecord` structs without performing any database writes or fabricating
 /// unmeasured fields (client, device, IP, play_method, or data_used_bytes).
+#[cfg(test)]
 pub async fn fetch_emby_item_summaries(
     server_name: &str,
     server_url: &str,

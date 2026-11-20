@@ -42,7 +42,6 @@ if [[ "${DELETE_DATA:-false}" == true && -x /usr/libexec/netdata/netdata-uninsta
     af_logged /usr/libexec/netdata/netdata-uninstaller.sh --yes --force || true
 fi
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq "netdata*"
-DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 rm -f /etc/apt/sources.list.d/netdata*.list /usr/share/keyrings/netdata*.gpg
 
 report_progress 80 "Removing Netdata directories and user account..."
