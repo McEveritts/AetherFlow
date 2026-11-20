@@ -108,7 +108,8 @@ trap 'exit 143' TERM
 report_progress 50 "Downloading FileBot portable runtime..."
 FB_VERSION="5.1.6"
 FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
-TMP_FB="$(mktemp --suffix=.tar.xz)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_FB="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebot-XXXXXX.tar.xz")"
 if ! af_logged download_file "${FB_URL}" "${TMP_FB}"; then
     FB_VERSION="5.2.0"
     FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
@@ -117,7 +118,7 @@ fi
 af_logged tar -xJf "${TMP_FB}" -C "${FB_BUILD}"
 rm -f "${TMP_FB}"
 test -s "${FB_BUILD}/filebot.sh"
-chmod +x "${FB_BUILD}/filebot.sh"
+chmod 0755 "${FB_BUILD}/filebot.sh"
 
 report_progress 70 "Downloading FileBot Node Web UI..."
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
@@ -132,7 +133,7 @@ else
 fi
 NODE_URL="https://github.com/filebot/filebot-node/releases/download/${NODE_TAG}/filebot-node_${NODE_TAG}.tar.xz"
 
-TMP_NODE="$(mktemp --suffix=.tar.xz)"
+TMP_NODE="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebot-node-XXXXXX.tar.xz")"
 af_logged download_file "${NODE_URL}" "${TMP_NODE}"
 af_logged tar -xJf "${TMP_NODE}" -C "${NODE_BUILD}"
 rm -f "${TMP_NODE}"
@@ -158,7 +159,7 @@ fi
 test -s "${NODE_BUILD}/server/app.js"
 queue_app_version "$NODE_DIR/.af-version" "${NODE_TAG#v}"
 queue_app_version "$FB_DIR/.af-version" "${FB_VERSION#v}"
-chmod +x "${NODE_BUILD}/task" 2>/dev/null || true
+chmod 0755 "${NODE_BUILD}/task" 2>/dev/null || true
 if [[ -f "$SERVICE_FILE" ]] || systemctl is-active --quiet filebot.service 2>/dev/null; then
     WAS_RUNNABLE=true
 fi
@@ -223,6 +224,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now filebot.service

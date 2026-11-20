@@ -7,11 +7,11 @@ use crate::auth::{
 use crate::embed::spa_fallback_handler;
 use crate::intelligence::{
     ai_chat, ai_support, analyze_predictions, approve_mediaflow_item, bandwidth_analyze,
-    bandwidth_apply, bookmark_log, decline_mediaflow_item, enroll_worker, get_auth_metrics_history,
-    get_bookmarks, get_cluster_nodes, get_log_sources, get_logs, get_mediaflow_queue,
-    get_metrics_history, get_predictions, get_system_topology, get_worker_metrics,
-    metadata_results, metadata_scan, metadata_status, remove_worker, test_ai_connection,
-    trigger_mediaflow_scan,
+    bandwidth_apply, bookmark_log, decline_mediaflow_item, dispatch_worker_command, enroll_worker,
+    get_auth_metrics_history, get_bookmarks, get_cluster_nodes, get_log_sources,
+    get_mediaflow_queue, get_metrics_history, get_predictions, get_system_topology,
+    get_worker_metrics, list_worker_commands, metadata_results, metadata_scan, metadata_status,
+    remove_worker, test_ai_connection, trigger_mediaflow_scan,
 };
 use crate::middlewares::{
     ai_rate_limit_middleware, auth_rate_limit_middleware, host_validation_middleware,
@@ -519,8 +519,10 @@ fn build_v1_router() -> Router {
         )
         .route("/cluster/nodes", get(get_cluster_nodes))
         .route("/cluster/enroll", post(enroll_worker))
+        .route("/cluster/commands", get(list_worker_commands))
         .route("/cluster/nodes/:id", delete(remove_worker))
         .route("/cluster/nodes/:id/metrics", get(get_worker_metrics))
+        .route("/cluster/nodes/:id/commands", post(dispatch_worker_command))
         .route(
             "/oidc/clients",
             get(get_oidc_clients).post(create_oidc_client),
@@ -539,7 +541,7 @@ fn build_v1_router() -> Router {
             "/ai/backup/schedule",
             post(set_backup_schedule).put(set_backup_schedule),
         )
-        .route("/logs", get(get_logs))
+        .route("/logs", get(crate::service_logs::get_admin_logs))
         .route("/logs/sources", get(get_log_sources))
         .route("/logs/bookmarks", get(get_bookmarks).post(bookmark_log))
         .route(
@@ -1192,6 +1194,9 @@ async fn control_service_handler(
     headers: HeaderMap,
     Json(req): Json<ServiceControlReq>,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     if let Some(message) = system_update_lifecycle_block().await {
         return message.into_response();
     }
@@ -1323,7 +1328,7 @@ fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
         ) || crate::plugins::plugin_claims_allow_request(
             &plugin_claims,
             &axum::http::Method::GET,
-            "/api/v1/admin/packages",
+            "/api/v1/auth/packages",
         );
         return (is_authed, false);
     }
@@ -1332,20 +1337,7 @@ fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
             return (false, false);
         }
         if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
-            if crate::plugins::is_plugin_request_denied(
-                &axum::http::Method::GET,
-                "/api/v1/public/marketplace",
-            ) {
-                return (false, false);
-            }
-            let is_authed = af_services::plugins::verify_plugin_route_scope(
-                &claims.plugin_scopes,
-                "/api/v1/public/marketplace",
-            ) || af_services::plugins::verify_plugin_route_scope(
-                &claims.plugin_scopes,
-                "/api/v1/admin/packages",
-            );
-            return (is_authed, false);
+            return (false, false);
         }
         let ua = headers
             .get(header::USER_AGENT)
@@ -1381,11 +1373,6 @@ fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
         return (true, is_admin);
     }
     (false, false)
-}
-
-#[allow(dead_code)]
-fn has_valid_marketplace_auth(headers: &HeaderMap) -> bool {
-    get_marketplace_auth_info(headers).0
 }
 
 fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Response {
@@ -3292,7 +3279,7 @@ fn is_incomplete_rollback_error(err_msg: &str) -> bool {
         || lower.contains("failed to stop")
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 async fn restore_pre_stopped_units_after_installer_failure_with<ControlFn, ControlFut>(
     clean_id: &str,
     stopped_units: &[String],
@@ -3651,7 +3638,8 @@ where
     (receipt_restore_error, restart_failures)
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn quiesce_and_restore_candidate_receipts_with<ControlFn, ControlFut, StatusFn>(
     clean_id: &str,
     quiesce_units: &[String],
@@ -3740,7 +3728,7 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime(
     .await
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) async fn quiesce_and_restore_candidate_receipts(
     clean_id: &str,
     stopped_units: &[String],
@@ -3839,24 +3827,7 @@ where
     }
 }
 
-#[allow(dead_code)]
-fn resolve_confirmed_latest_version(clean_id: &str) -> Option<String> {
-    if let Ok(conn) = af_db::get_conn() {
-        if let Ok(ver) = conn.query_row(
-            "SELECT latest_version FROM app_updates WHERE package_name = ?1",
-            rusqlite::params![clean_id],
-            |r| r.get::<_, String>(0),
-        ) {
-            let trimmed = ver.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-#[allow(dead_code, clippy::result_large_err)]
+#[cfg(test)]
 pub(crate) async fn dispatch_package_lifecycle(
     pkg_id: String,
     action: &'static str,
@@ -3886,6 +3857,9 @@ async fn dispatch_package_lifecycle_with_target(
     auth_user: AuthUser,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     if delete_data && action != "remove" {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -5104,6 +5078,11 @@ pub struct SettingsPayload {
     pub anthropic_endpoint: String,
 }
 
+fn is_masked_secret(raw: &str) -> bool {
+    let value = raw.trim();
+    value.starts_with("****") || value == af_db::SECRET_MASK
+}
+
 fn mask_secret(raw: &str) -> String {
     if raw.is_empty() {
         return String::new();
@@ -5112,7 +5091,7 @@ fn mask_secret(raw: &str) -> String {
         Ok(value) if !value.starts_with("enc:v1:") => value,
         _ => return "****".to_string(),
     };
-    if dec.len() > 4 {
+    if dec.chars().count() > 4 {
         let last4: String = dec
             .chars()
             .rev()
@@ -5123,7 +5102,7 @@ fn mask_secret(raw: &str) -> String {
             .collect();
         format!("****{}", last4)
     } else {
-        String::new()
+        "****".to_string()
     }
 }
 
@@ -5198,7 +5177,13 @@ fn get_settings_for_role(role: &str) -> Response {
     }
 }
 
-async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
+async fn update_settings(
+    Extension(user): Extension<AuthUser>,
+    Json(mut req): Json<SettingsPayload>,
+) -> Response {
+    if let Err(response) = crate::auth::require_admin(&user) {
+        return *response;
+    }
     req.ai_model = req.ai_model.trim().to_owned();
     req.local_provider = req.local_provider.trim().to_owned();
     req.local_model = req.local_model.trim().to_owned();
@@ -5290,13 +5275,13 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
     } else {
         req.anthropic_endpoint.trim()
     };
-    let supplying_fresh_anth_key = !req.anthropic_api_key.trim().is_empty()
-        && !req.anthropic_api_key.trim().starts_with("****")
-        && req.anthropic_api_key.trim() != af_db::SECRET_MASK;
-    let will_have_anth_key = supplying_fresh_anth_key || !prev_anth_key.trim().is_empty();
+    let retaining_anth_key =
+        is_masked_secret(&req.anthropic_api_key) && !prev_anth_key.trim().is_empty();
+    let supplying_fresh_anth_key =
+        !req.anthropic_api_key.trim().is_empty() && !is_masked_secret(&req.anthropic_api_key);
+    let will_have_anth_key = supplying_fresh_anth_key || retaining_anth_key;
 
-    if !prev_anth_key.trim().is_empty()
-        && !supplying_fresh_anth_key
+    if retaining_anth_key
         && endpoint_origin_tuple(effective_prev_anth) != endpoint_origin_tuple(effective_next_anth)
     {
         return api_error(
@@ -5369,8 +5354,12 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
             ("openai_api_key", &req.openai_api_key),
             ("anthropic_api_key", &req.anthropic_api_key),
         ] {
-            if !value.is_empty() && !value.starts_with("****") {
-                let encrypted = af_db::encrypt_key(value)?;
+            if !is_masked_secret(value) {
+                let encrypted = if value.is_empty() {
+                    String::new()
+                } else {
+                    af_db::encrypt_key(value)?
+                };
                 transaction.execute(
                     &format!("UPDATE settings SET {column} = ?1 WHERE id = 1"),
                     params![encrypted],
@@ -5391,6 +5380,7 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
 
     drop(conn);
     af_db::invalidate_ingress_cache();
+    af_db::get_base_domain();
 
     if !norm_domain.is_empty() && norm_domain != prev_base_domain {
         let synchronized = af_services::mutators::with_blueprint_admission(async {
@@ -5608,6 +5598,17 @@ async fn update_password(
     headers: HeaderMap,
     Json(req): Json<ChangePasswordReq>,
 ) -> Response {
+    if req.current_password.len() > 72 || req.new_password.len() > 72 {
+        return crate::auth::password_too_long();
+    }
+    crate::auth::blocking_response(move || update_password_blocking(auth_user, headers, req)).await
+}
+
+fn update_password_blocking(
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    req: ChangePasswordReq,
+) -> Response {
     if req.new_password.len() < 8 {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -5615,7 +5616,7 @@ async fn update_password(
             "New password must be at least 8 characters",
         );
     }
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -5642,32 +5643,19 @@ async fn update_password(
     };
     drop(conn);
 
-    let current_password = req.current_password.clone();
-    let new_password = req.new_password.clone();
-    let hash_for_verify = existing_hash.clone();
-    let hashed = tokio::task::spawn_blocking(move || -> Result<String, &'static str> {
-        if !bcrypt::verify(&current_password, &hash_for_verify).unwrap_or(false) {
-            return Err("bad");
-        }
-        bcrypt::hash(&new_password, bcrypt::DEFAULT_COST).map_err(|_| "hash")
-    })
-    .await;
-    let new_hash = match hashed {
-        Ok(Ok(hash)) => hash,
-        Ok(Err("bad")) => {
-            return api_error(
-                StatusCode::FORBIDDEN,
-                "INVALID_CURRENT_PASSWORD",
-                "Current password is incorrect",
-            );
-        }
-        _ => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to hash password",
-            );
-        }
+    if !crate::auth::verify_password(&req.current_password, &existing_hash) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "INVALID_CURRENT_PASSWORD",
+            "Current password is incorrect",
+        );
+    }
+    let Ok(new_hash) = bcrypt::hash(&req.new_password, bcrypt::DEFAULT_COST) else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to hash password",
+        );
     };
     let tx_outcome = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
         let mut conn = af_db::get_conn()?;
@@ -5885,7 +5873,10 @@ async fn delete_avatar(Extension(auth_user): Extension<AuthUser>) -> Response {
     .into_response()
 }
 
-async fn get_users() -> Response {
+async fn get_users(Extension(user): Extension<AuthUser>) -> Response {
+    if let Err(response) = crate::auth::require_admin(&user) {
+        return *response;
+    }
     let Ok(conn) = af_db::get_conn() else {
         return Json(Vec::<User>::new()).into_response();
     };
@@ -5926,6 +5917,9 @@ async fn update_user_role(
     headers: HeaderMap,
     Json(req): Json<RoleReq>,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     if req.role != "admin" && req.role != "user" {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -5962,6 +5956,9 @@ async fn delete_user(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     if let Err(error) = crate::mcbrowser::lifecycle::delete_account(auth_user.clone(), id).await {
         return error.into_response();
     }
@@ -6383,6 +6380,9 @@ async fn sync_app_blueprint(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     if af_services::get_blueprint(&app_name).is_none() {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found");
     }
@@ -6739,6 +6739,9 @@ async fn handle_streaming_demo(
     headers: HeaderMap,
     Json(req): Json<DemoReq>,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -6793,9 +6796,15 @@ async fn handle_streaming_demo(
     }
 }
 
-async fn get_ingress_configs() -> Json<serde_json::Value> {
-    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
-    Json(serde_json::json!({ "configs": configs }))
+async fn get_ingress_configs(Extension(user): Extension<AuthUser>) -> Response {
+    if let Err(response) = crate::auth::require_admin(&user) {
+        return *response;
+    }
+    crate::auth::blocking_response(|| {
+        let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
+        Json(serde_json::json!({ "configs": configs })).into_response()
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -6930,8 +6939,12 @@ fn is_valid_ingress_app_slug(slug: &str) -> bool {
 
 async fn update_app_ingress_config(
     Path(app_name): Path<String>,
+    Extension(user): Extension<AuthUser>,
     Json(req): Json<UpdateIngressReq>,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&user) {
+        return *response;
+    }
     let clean_app = app_name.trim().to_lowercase();
     if clean_app.is_empty() {
         return api_error(
@@ -6947,81 +6960,206 @@ async fn update_app_ingress_config(
             "Invalid application name; must be a DNS-safe lowercase slug",
         );
     }
-    let guarded_app = clean_app.clone();
-    match af_services::mutators::with_blueprint_mutation(&guarded_app, async move {
-        let existing = match af_db::get_app_ingress_config(&clean_app) {
-            Ok(config) => config,
-            Err(error) => {
-                return Ok(api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    error.to_string(),
-                ))
-            }
-        };
+    // Keep the app mutation guard until host synchronization or rollback finishes,
+    // including when the HTTP client disconnects.
+    let update = tokio::spawn(async move {
+        let guarded_app = clean_app.clone();
+        af_services::mutators::with_blueprint_mutation(&guarded_app, async move {
+            upsert_app_ingress_config(clean_app, req).await
+        })
+        .await
+    })
+    .await;
+    match update {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) if af_runner::is_lifecycle_busy(&error) => {
+            blueprint_sync_failure_response(&error)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Ingress update failed");
+            api_error(
+                StatusCode::BAD_GATEWAY,
+                "INGRESS_SYNC_FAILED",
+                "Ingress configuration could not be synchronized",
+            )
+        }
+        Err(error) => {
+            tracing::error!(%error, "Ingress update worker failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Ingress configuration could not be updated",
+            )
+        }
+    }
+}
+
+async fn upsert_app_ingress_config(
+    clean_app: String,
+    req: UpdateIngressReq,
+) -> anyhow::Result<Response> {
+    let staged = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        af_db::invalidate_ingress_cache();
+        let previous = af_db::get_app_ingress_config(&clean_app)?;
+        let blueprint = af_services::get_blueprint(&clean_app);
         let runtime_port = af_services::mutators::get_app_runtime_meta(&clean_app).configured_port;
-        let blueprint_default_port = if runtime_port > 0 {
+        let native_port = if runtime_port > 0 {
             runtime_port
         } else {
-            af_services::get_blueprint(&clean_app)
-                .map(|blueprint| blueprint.default_port)
-                .unwrap_or(0)
+            blueprint
+                .as_ref()
+                .map_or(0, |blueprint| blueprint.default_port)
         };
-
-        let now = Utc::now();
         let cfg = match resolve_patched_ingress_config(
             &clean_app,
             &req,
-            existing.as_ref(),
-            blueprint_default_port,
-            now,
+            previous.as_ref(),
+            native_port,
+            Utc::now(),
         ) {
             Ok(cfg) => cfg,
-            Err((status, code, msg)) => return Ok(api_error(status, code, msg)),
+            Err((status, code, message)) => return Ok(Err(api_error(status, code, message))),
         };
-        if let Err(e) = af_db::set_app_ingress_config(&cfg) {
+        let internal = blueprint
+            .map(|blueprint| blueprint.internal_domain)
+            .filter(|domain| !domain.is_empty())
+            .unwrap_or_else(|| format!("{clean_app}.aether.local"));
+        let port_changed = previous
+            .as_ref()
+            .is_some_and(|old| old.listen_port != cfg.listen_port);
+        af_db::set_app_ingress_config(&cfg)?;
+        Ok(Ok((cfg, previous, internal, port_changed)))
+    })
+    .await??;
+    let (cfg, previous, internal, port_changed) = match staged {
+        Ok(staged) => staged,
+        Err(response) => return Ok(response),
+    };
+
+    let app = cfg.app_name.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let sync_cfg = cfg.clone();
+    let sync_internal = internal.clone();
+    let sync = async {
+        if port_changed {
+            // The mutator handles its host port work in a blocking task and
+            // reuses the app admission held by this update.
+            af_services::mutators::apply_blueprint_app_config(&app, cfg.listen_port)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let apache_managed = apache_ingress_is_managed();
+            let apache = sync_ingress_vhost(&sync_cfg, &sync_internal);
+            match apache {
+                Ok(true) => {}
+                Ok(false) if !apache_managed => {}
+                Err(error) if !apache_managed => {
+                    tracing::warn!(%error, "Apache unavailable during unmanaged ingress update");
+                }
+                Ok(false) => anyhow::bail!("Managed Apache did not apply ingress configuration"),
+                Err(error) => {
+                    anyhow::bail!("Managed Apache failed to apply ingress configuration: {error}")
+                }
+            }
+            let mut domains = vec![sync_internal];
+            if !sync_cfg.public_domain.is_empty() && !domains.contains(&sync_cfg.public_domain) {
+                domains.push(sync_cfg.public_domain);
+            }
+            if let Err(error) =
+                runtime.block_on(af_services::mutators::sync_local_dns_domains(&domains))
+            {
+                tracing::warn!(%error, "Internal DNS synchronization failed during ingress update");
+            }
+            if let Err(error) =
+                runtime.block_on(af_services::mutators::sync_network_dns_providers())
+            {
+                tracing::warn!(%error, "Network DNS synchronization failed during ingress update");
+            }
+            Ok(())
+        })
+        .await?
+    }
+    .await;
+
+    if let Err(error) = sync {
+        let rollback = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            restore_ingress_config(&app, previous.as_ref())?;
+            if let Some(previous) = previous {
+                if let Err(error) = sync_ingress_vhost(&previous, &internal) {
+                    tracing::error!(app = %app, %error, "Could not reapply previous Apache vhost");
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if !matches!(rollback, Ok(Ok(()))) {
+            tracing::error!(?rollback, "Ingress database rollback failed");
             return Ok(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                e.to_string(),
+                "INGRESS_ROLLBACK_FAILED",
+                "Ingress configuration could not be restored",
             ));
         }
-        af_db::invalidate_ingress_cache();
-
-        let internal_domain = af_services::get_blueprint(&clean_app)
-            .map(|bp| bp.internal_domain)
-            .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| format!("{}.aether.local", clean_app));
-        if let Err(error) = af_services::mutators::sync_apache_app_vhost(
-            &cfg.app_name,
-            cfg.listen_port,
-            &internal_domain,
-            &cfg.public_domain,
-            cfg.external_access_enabled,
-        ) {
-            tracing::warn!(app = %cfg.app_name, detail = %error, "Apache vhost sync skipped or failed during ingress update");
-        }
-        if cfg.tls_enabled {
-            af_services::mutators::trigger_apache_cert_sync().await;
-        }
-        let mut dns_domains = vec![internal_domain];
-        if !cfg.public_domain.is_empty() && !dns_domains.contains(&cfg.public_domain) {
-            dns_domains.push(cfg.public_domain.clone());
-        }
-        let _ = af_services::mutators::sync_local_dns_domains(&dns_domains).await;
-        let _ = af_services::mutators::sync_network_dns_providers().await;
-
-        Ok(Json(serde_json::json!({
-            "message": "Ingress configuration updated successfully",
-            "config": cfg,
-        }))
-        .into_response())
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => blueprint_sync_failure_response(&error),
+        return Err(error);
     }
+    if cfg.tls_enabled {
+        af_services::mutators::trigger_apache_cert_sync().await;
+    }
+    Ok(Json(serde_json::json!({
+        "message": "Ingress configuration updated successfully",
+        "config": cfg,
+    }))
+    .into_response())
+}
+
+fn apache_ingress_is_managed() -> bool {
+    env::var("PRIVILEGED_RUNNER_ENABLED").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    }) || af_services::mutators::resolve_config_path("/etc/apache2/sites-available").is_dir()
+        || std::path::Path::new(&af_runner::runner_socket_path()).exists()
+}
+
+fn sync_ingress_vhost(cfg: &AppIngressConfig, internal: &str) -> Result<bool, String> {
+    af_services::mutators::sync_apache_app_vhost(
+        &cfg.app_name,
+        cfg.listen_port,
+        internal,
+        &cfg.public_domain,
+        cfg.external_access_enabled,
+    )
+}
+
+fn restore_ingress_config(app: &str, previous: Option<&AppIngressConfig>) -> anyhow::Result<()> {
+    if let Some(previous) = previous {
+        af_db::get_conn()?
+            .execute(
+                "UPDATE app_ingress_configs SET public_domain = ?2, external_access_enabled = ?3,
+             listen_port = ?4, tls_enabled = ?5, updated_at = ?6 WHERE app_name = ?1",
+                params![
+                    app,
+                    previous.public_domain,
+                    previous.external_access_enabled,
+                    previous.listen_port,
+                    previous.tls_enabled,
+                    previous.updated_at.to_rfc3339()
+                ],
+            )
+            .and_then(|changed| {
+                if changed == 1 {
+                    Ok(())
+                } else {
+                    Err(rusqlite::Error::QueryReturnedNoRows)
+                }
+            })?;
+        af_db::invalidate_ingress_cache();
+    } else {
+        af_db::delete_app_ingress_config(app)?;
+    }
+    Ok(())
 }
 
 async fn get_notification_rules() -> Json<serde_json::Value> {
@@ -8826,35 +8964,56 @@ mod tests {
                 false,
             ),
         ];
-        for (scope, authenticated) in [
-            ("/api/v1/admin/packages", true),
-            ("/api/v1/public/marketplace", true),
-            ("/api/v1/auth/system/metrics", false),
+        for (pid, permission, scope, authenticated) in [
+            (
+                "inventory-packages",
+                "packages:read",
+                "/api/v1/auth/packages",
+                true,
+            ),
+            (
+                "inventory-marketplace",
+                "marketplace:read",
+                "/api/v1/public/marketplace",
+                true,
+            ),
+            (
+                "inventory-metrics",
+                "system:metrics:read",
+                "/api/v1/auth/system/metrics",
+                false,
+            ),
         ] {
-            let manifest = crate::plugins::ValidatedPluginManifest {
-                id: "inventory-reader".into(),
-                name: "Inventory reader".into(),
-                version: "1.0.0".into(),
-                sdk: String::new(),
-                contract_version: String::new(),
-                runtime_status: String::new(),
-                description: String::new(),
-                author: String::new(),
-                permissions: Vec::new(),
-                granted_scopes: vec![crate::plugins::PluginScopeRule {
-                    method: "GET".into(),
-                    route: scope.into(),
-                }],
-                lifecycle_hooks: Default::default(),
-                backend: Default::default(),
-                frontend: Default::default(),
-                plugin_dir: root.join("plugins/inventory-reader"),
-            };
+            let pdir = root.join("plugins").join(pid);
+            std::fs::create_dir_all(&pdir).unwrap();
+            std::fs::write(
+                pdir.join("plugin.manifest.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": pid,
+                    "name": pid,
+                    "version": "1.0.0",
+                    "permissions": [permission],
+                    "api_scopes": [format!("GET {scope}")],
+                    "backend": { "health_path": "/healthz" },
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO plugins_registry(plugin_id, enabled, allocated_port, token_epoch, status) VALUES (?1, 1, 0, 1, 'running')",
+                rusqlite::params![pid],
+            )
+            .unwrap();
+            drop(conn);
+            let (manifests, errs) = crate::plugins::discover_plugins();
+            assert!(errs.is_empty(), "plugin discovery errors: {errs:?}");
+            let manifest = manifests.into_iter().find(|m| m.id == pid).unwrap();
             let (token, _) =
                 crate::plugins::mint_scoped_plugin_token(&manifest, Some(300)).unwrap();
             assert!(crate::plugins::decode_and_verify_plugin_token(&token).is_ok());
             cases.push((format!("dedicated {scope}"), token, authenticated, false));
-            for plugin_id in ["inventory-reader", ""] {
+            for plugin_id in [pid, ""] {
                 let mut claims = admin_claims.clone();
                 claims.plugin_id = plugin_id.into();
                 claims.plugin_scopes = vec![scope.into()];
@@ -8866,12 +9025,7 @@ mod tests {
                 )
                 .unwrap();
                 assert!(crate::auth::decode_session_claims(&token, false).is_ok());
-                cases.push((
-                    format!("legacy {plugin_id:?} {scope}"),
-                    token,
-                    authenticated,
-                    false,
-                ));
+                cases.push((format!("legacy {plugin_id:?} {scope}"), token, false, false));
             }
         }
         let router = build_router();
@@ -12652,6 +12806,88 @@ mod hillclimb_tests {
     }
 
     #[tokio::test]
+    async fn managed_ingress_failure_rolls_back_previous_settings() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let database = ensure_shared_test_db();
+        env::set_var("PRIVILEGED_RUNNER_ENABLED", "true");
+        let host_root = database.parent().unwrap().join("managed-apache-fixture");
+        fs::create_dir_all(host_root.join("etc")).unwrap();
+        fs::write(host_root.join("etc/apache2"), "not an Apache directory").unwrap();
+        env::set_var("AETHERFLOW_FS_ROOT", &host_root);
+        env::set_var("AETHERFLOW_CONFIG_ROOT", &host_root);
+        env::set_var(
+            "AETHERFLOW_RUNNER_SOCK",
+            database.parent().unwrap().join("missing-runner.sock"),
+        );
+        let prior = AppIngressConfig {
+            app_name: "test-ingress".into(),
+            public_domain: "app.example.test".into(),
+            external_access_enabled: true,
+            listen_port: 11234,
+            tls_enabled: false,
+            ..Default::default()
+        };
+        af_db::set_app_ingress_config(&prior).unwrap();
+        let result = upsert_app_ingress_config(
+            prior.app_name.clone(),
+            UpdateIngressReq {
+                public_domain: None,
+                external_access_enabled: Some(false),
+                listen_port: None,
+                tls_enabled: None,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        let live = af_db::get_app_ingress_config(&prior.app_name)
+            .unwrap()
+            .unwrap();
+        assert!(live.external_access_enabled);
+        assert_eq!(live.public_domain, prior.public_domain);
+        assert_eq!(live.listen_port, prior.listen_port);
+    }
+
+    #[tokio::test]
+    async fn settings_can_clear_keys_and_keep_masked_placeholders() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        assert_eq!(mask_secret("abc"), "****");
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch("UPDATE settings SET gemini_api_key = 'old-gemini', openai_api_key = 'old-openai', anthropic_api_key = 'old-anthropic' WHERE id = 1;").unwrap();
+        drop(conn);
+        let response = update_settings(
+            Extension(AuthUser {
+                user_id: 1,
+                username: "admin".into(),
+                role: "admin".into(),
+                jti: String::new(),
+                plugin_id: None,
+                plugin_scopes: Vec::new(),
+            }),
+            Json(SettingsPayload {
+                ai_model: "qwen2.5:14b".into(),
+                local_provider: "ollama".into(),
+                local_model: "qwen2.5:14b".into(),
+                openai_api_key: "****enai".into(),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let keys: (String, String, String) = af_db::get_read_conn().unwrap().query_row(
+            "SELECT gemini_api_key, openai_api_key, anthropic_api_key FROM settings WHERE id = 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(keys, (String::new(), "old-openai".into(), String::new()));
+    }
+
+    #[tokio::test]
     async fn settings_persistence_failure_does_not_report_success_or_change_saved_fields() {
         use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
         if run_plugin_test_in_subprocess() {
@@ -12674,7 +12910,19 @@ mod hillclimb_tests {
             ..Default::default()
         };
         assert_eq!(
-            update_settings(Json(payload)).await.status(),
+            update_settings(
+                Extension(AuthUser {
+                    user_id: 1,
+                    username: "admin".into(),
+                    role: "admin".into(),
+                    jti: String::new(),
+                    plugin_id: None,
+                    plugin_scopes: Vec::new(),
+                }),
+                Json(payload)
+            )
+            .await
+            .status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         let conn = af_db::get_conn().unwrap();

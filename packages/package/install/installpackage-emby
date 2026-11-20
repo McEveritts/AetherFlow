@@ -56,7 +56,8 @@ EMBY_VERSION="$(github_latest_tag "MediaBrowser/Emby.Releases" "4.8.10.0")"
 EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_${EMBY_ARCH}.deb"
 
 report_progress 50 "Downloading Emby Server ${EMBY_VERSION}..."
-TMP_DEB=$(mktemp /tmp/emby-XXXXXX.deb)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_DEB=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/emby-XXXXXX.deb")
 af_logged download_file "$EMBY_URL" "$TMP_DEB"
 
 report_progress 75 "Installing Emby Server package..."

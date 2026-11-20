@@ -56,7 +56,8 @@ NZBGET_VERSION="$(github_latest_tag "nzbgetcom/nzbget" "24.3")"
 NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/download/v${NZBGET_VERSION}/nzbget-${NZBGET_VERSION}-bin-linux.run"
 
 report_progress 60 "Downloading and installing NZBGet ${NZBGET_VERSION}..."
-TMP_RUN=$(mktemp /tmp/nzbget-XXXXXX.run)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_RUN=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/nzbget-XXXXXX.run")
 af_logged download_file "$NZBGET_URL" "$TMP_RUN"
 BUILD_DIR="$(mktemp -d /opt/.nzbget-build.XXXXXX)"
 trap '[[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_RUN"' EXIT
@@ -106,6 +107,7 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/nzbget.service
 
 
 af_logged systemctl daemon-reload

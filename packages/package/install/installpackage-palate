@@ -136,13 +136,84 @@ fi
 install -d -m 750 -o af-palate -g af-palate "$DATA_DIR"
 install -d -m 750 -o root -g af-palate "$CONFIG_DIR"
 
+resolve_palate_app_url() {
+    local app_port="$1"
+    local base_domain="$2"
+    local db_path="" cand=""
+    for cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "${AETHERFLOW_DB_PATH:-}" \
+        /var/lib/aetherflow/aetherflow.sqlite \
+        /opt/AetherFlow/current/data/aetherflow.sqlite \
+        /opt/AetherFlow/data/aetherflow.sqlite \
+        /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+        if [[ -n "$cand" && -f "$cand" ]]; then
+            db_path="$cand"
+            break
+        fi
+    done
+    local aether_local="0"
+    if grep -qiE '(\.|[[:space:]])aether\.local([[:space:]]|$)' /etc/hosts 2>/dev/null || \
+       grep -rqi 'aether\.local' /etc/apache2/sites-available /etc/apache2/sites-enabled 2>/dev/null; then
+        aether_local="1"
+    fi
+    python3 - "$db_path" "$app_port" "$base_domain" "$aether_local" <<'PYEOF'
+import sqlite3, sys
+
+db_path, app_port, base_domain, aether_local = sys.argv[1:5]
+external_enabled = 0
+custom_domain = ""
+tls_enabled = 0
+
+if db_path:
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_ingress_configs'")
+        if cur.fetchone():
+            cols = {row[1] for row in cur.execute("PRAGMA table_info(app_ingress_configs)")}
+            ext_col = "external_access_enabled" if "external_access_enabled" in cols else ("external_enabled" if "external_enabled" in cols else "")
+            dom_col = "public_domain" if "public_domain" in cols else ("custom_domain" if "custom_domain" in cols else "")
+            tls_col = "tls_enabled" if "tls_enabled" in cols else ""
+            if ext_col:
+                sel = [
+                    ext_col,
+                    dom_col if dom_col else "''",
+                    tls_col if tls_col else "0",
+                ]
+                row = cur.execute(
+                    f"SELECT {', '.join(sel)} FROM app_ingress_configs WHERE LOWER(app_name) = 'palate' LIMIT 1"
+                ).fetchone()
+                if row:
+                    external_enabled = int(bool(row[0] or 0))
+                    custom_domain = (row[1] or "").strip()
+                    tls_enabled = int(bool(row[2] or 0))
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+managed_url = ""
+if external_enabled:
+    domain = custom_domain or (f"palate.{base_domain}" if base_domain else "")
+    if domain:
+        scheme = "https" if tls_enabled else "http"
+        managed_url = f"{scheme}://{domain}"
+
+if not managed_url:
+    managed_url = "http://palate.aether.local" if aether_local == "1" else f"http://127.0.0.1:{app_port}"
+
+print(managed_url)
+print(custom_domain)
+PYEOF
+}
+
 validate_config_paths "$ENV_FILE"
+BASE_DOMAIN="$(get_base_domain)"
+_PALATE_URL_INFO="$(resolve_palate_app_url "$APP_PORT" "$BASE_DOMAIN")"
+MANAGED_APP_URL="$(printf '%s\n' "$_PALATE_URL_INFO" | sed -n '1p')"
+INGRESS_CUSTOM_DOMAIN="$(printf '%s\n' "$_PALATE_URL_INFO" | sed -n '2p')"
 if [[ ! -f "$ENV_FILE" ]]; then
     DB_PORT="$(runuser -u postgres -- psql -XAt -d postgres -c 'SHOW port')"
     PALATE_DB_PASSWORD="$(openssl rand -hex 32)"
-    BASE_DOMAIN="$(get_base_domain)"
-    APP_URL="http://palate.aether.local"
-    [[ -z "$BASE_DOMAIN" ]] || APP_URL="https://palate.${BASE_DOMAIN}"
+    APP_URL="$MANAGED_APP_URL"
     umask 077
     write_config_file "$ENV_FILE" <<EOF
 NODE_ENV=production
@@ -170,13 +241,49 @@ if [[ ! "${PALATE_DB_PASSWORD:-}" =~ ^[a-f0-9]{64}$ ]]; then
     exit 1
 fi
 
-# Only update the allocated port; preserve all secrets and administrator settings.
-safe_config_python "$ENV_FILE" "$APP_PORT" <<'PY'
+# Update the allocated port and installer-managed NEXTAUTH_URL while preserving secrets and custom NEXTAUTH_URL.
+safe_config_python "$ENV_FILE" "$APP_PORT" "$MANAGED_APP_URL" "$BASE_DOMAIN" "$INGRESS_CUSTOM_DOMAIN" <<'PY'
 from pathlib import Path
+import re
 import sys
-path = Path(sys.argv[1])
-lines = [line for line in safe_read_text(path).splitlines() if not line.startswith('PORT=')]
-safe_write_text(path, '\n'.join(lines + ['PORT=' + sys.argv[2]]) + '\n')
+
+path, port, managed_url, base_domain, custom_domain = sys.argv[1:6]
+existing_lines = safe_read_text(path).splitlines()
+current_nextauth = ""
+for line in existing_lines:
+    if line.startswith("NEXTAUTH_URL="):
+        current_nextauth = line.split("=", 1)[1].strip()
+
+managed_candidates = {"", "http://palate.aether.local"}
+if base_domain:
+    managed_candidates.add(f"https://palate.{base_domain}")
+    managed_candidates.add(f"http://palate.{base_domain}")
+if custom_domain:
+    managed_candidates.add(f"https://{custom_domain}")
+    managed_candidates.add(f"http://{custom_domain}")
+
+is_managed_nextauth = (
+    current_nextauth in managed_candidates
+    or bool(re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):\d+", current_nextauth))
+)
+
+lines = []
+saw_nextauth = False
+for line in existing_lines:
+    if line.startswith("PORT="):
+        continue
+    if line.startswith("NEXTAUTH_URL="):
+        saw_nextauth = True
+        if is_managed_nextauth:
+            lines.append(f"NEXTAUTH_URL={managed_url}")
+        else:
+            lines.append(line)
+        continue
+    lines.append(line)
+if not saw_nextauth:
+    lines.append(f"NEXTAUTH_URL={managed_url}")
+lines.append(f"PORT={port}")
+safe_write_text(path, "\n".join(lines) + "\n")
 PY
 
 report_progress 20 "Preparing Palate's PostgreSQL database..."
@@ -188,7 +295,17 @@ SELECT 'CREATE DATABASE af_palate OWNER af_palate' WHERE NOT EXISTS (SELECT FROM
 SQL
 
 report_progress 30 "Fetching the latest stable Palate release..."
-TAG="$(git ls-remote --tags --refs --sort=-v:refname https://github.com/McEveritts/Palate.git | awk -F/ '$NF ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && !tag {tag=$NF} END {print tag}')"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TAG="${AF_TARGET_VERSION#release-}"
+    TAG="${TAG#Release-}"
+    if [[ "$TAG" =~ ^[0-9] ]]; then
+        TAG="v${TAG}"
+    elif [[ "$TAG" =~ ^V([0-9].*)$ ]]; then
+        TAG="v${BASH_REMATCH[1]}"
+    fi
+else
+    TAG="$(git ls-remote --tags --refs --sort=-v:refname https://github.com/McEveritts/Palate.git | awk -F/ '$NF ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && !tag {tag=$NF} END {print tag}')"
+fi
 if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     print_error "Unable to resolve a stable Palate release tag."
     exit 1
@@ -286,6 +403,7 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "$UNIT_FILE"
 af_logged systemctl daemon-reload
 af_logged systemctl enable af-palate.service
 af_logged systemctl restart af-palate.service

@@ -125,7 +125,7 @@ class TestComboPrivilegeBoundarySandbox(TestCase):
         super().__init__("T3_COMBO_08", "F33+F34+F07+F08", 3, "Systemd least privilege units, sudoers purge, runner socket, and sandbox caller")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
+        unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
         stack = inspector.read_file("setup/modules/modern_stack.sh")
         runner = inspector.read_file(RUNNER_RS)
         has_strict = bool(unit and "ProtectSystem=strict" in unit and "NoNewPrivileges=yes" in unit)

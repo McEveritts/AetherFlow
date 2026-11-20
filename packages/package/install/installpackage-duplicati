@@ -105,11 +105,16 @@ trap 'exit 143' TERM
 
 
 report_progress 45 "Resolving latest Duplicati release from GitHub..."
-RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/duplicati/duplicati/releases/latest 2>/dev/null || true)"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    _target_clean="${AF_TARGET_VERSION#[vV]}"
+    RELEASES_JSON="$(curl -fsSL "https://api.github.com/repos/duplicati/duplicati/releases/tags/v${_target_clean}" 2>/dev/null || curl -fsSL "https://api.github.com/repos/duplicati/duplicati/releases/tags/${_target_clean}" 2>/dev/null || true)"
+else
+    RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/duplicati/duplicati/releases/latest 2>/dev/null || true)"
+fi
 LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then
     if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
-        LATEST_TAG="v2.0.8.1-2.0.8.1_beta_2024-05-07"
+        LATEST_TAG="${AF_TARGET_VERSION:-v2.0.8.1-2.0.8.1_beta_2024-05-07}"
     else
         print_error "Failed to discover latest GitHub release for duplicati/duplicati"
         exit 1
@@ -134,7 +139,8 @@ if [[ -z "${DEB_URL}" ]]; then
 fi
 
 report_progress 65 "Downloading Duplicati package (${LATEST_TAG})..."
-TMP_DEB="$(mktemp --suffix=.deb)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_DEB="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/duplicati-XXXXXX.deb")"
 af_logged download_file "${DEB_URL}" "${TMP_DEB}"
 
 report_progress 75 "Installing Duplicati deb package..."
@@ -196,6 +202,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now duplicati.service

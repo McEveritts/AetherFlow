@@ -1069,6 +1069,169 @@ fn trend_palette(trend: &str) -> (&'static str, &'static str, &'static str) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BandwidthDiagnostics {
+    partial_apply: bool,
+    warning: Option<String>,
+    warnings: Vec<String>,
+    recovery: Option<String>,
+    message: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BandwidthApplyOutcome {
+    message: String,
+    is_error: bool,
+    is_partial_or_warning: bool,
+}
+
+fn non_empty_str(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_bandwidth_diagnostics(payload: &Value) -> BandwidthDiagnostics {
+    let partial_apply = payload["partial_apply"].as_bool() == Some(true)
+        || payload["partialApply"].as_bool() == Some(true)
+        || payload["status"].as_str().is_some_and(|s| {
+            s.eq_ignore_ascii_case("partial") || s.eq_ignore_ascii_case("partial_apply")
+        });
+
+    let warning = ["/warning", "/recovery_warning", "/recoveryWarning"]
+        .iter()
+        .find_map(|ptr| payload.pointer(ptr).and_then(non_empty_str));
+
+    let mut warnings = Vec::new();
+    if let Some(items) = payload["warnings"].as_array() {
+        for item in items {
+            if let Some(text) = non_empty_str(item) {
+                if warning.as_deref() != Some(text.as_str()) && !warnings.contains(&text) {
+                    warnings.push(text);
+                }
+            }
+        }
+    }
+
+    let recovery = [
+        "/recovery_diagnostic",
+        "/recoveryDiagnostic",
+        "/recovery_error",
+        "/recoveryError",
+        "/recovery_message",
+        "/recoveryMessage",
+        "/recovery",
+        "/diagnostic",
+        "/rollback_error",
+        "/rollbackError",
+    ]
+    .iter()
+    .find_map(|ptr| payload.pointer(ptr).and_then(non_empty_str));
+
+    let message = non_empty_str(&payload["message"]);
+    let error = non_empty_str(&payload["error"]);
+
+    BandwidthDiagnostics {
+        partial_apply,
+        warning,
+        warnings,
+        recovery,
+        message,
+        error,
+    }
+}
+
+fn summarize_bandwidth_apply_outcome(
+    context: crate::state::AppContext,
+    ok: bool,
+    status: u16,
+    payload: &Value,
+    raw_body: &str,
+    requested_limits: &Value,
+) -> BandwidthApplyOutcome {
+    let diag = extract_bandwidth_diagnostics(payload);
+    let has_partial_or_warning = diag.partial_apply
+        || diag.warning.is_some()
+        || !diag.warnings.is_empty()
+        || diag.recovery.is_some();
+
+    if ok && !has_partial_or_warning {
+        return BandwidthApplyOutcome {
+            message: format_bandwidth_applied_toast(context, payload, requested_limits),
+            is_error: false,
+            is_partial_or_warning: false,
+        };
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let push_unique = |parts: &mut Vec<String>, text: String| {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && !parts.iter().any(|existing| existing == trimmed) {
+            parts.push(trimmed.to_string());
+        }
+    };
+
+    if diag.partial_apply {
+        let (client, rx, tx) = parse_bandwidth_applied_details(payload, requested_limits);
+        let headline = tt(context, "Bandwidth limits partially applied");
+        let detail = match (client, rx, tx) {
+            (Some(c), Some(r), Some(t)) => {
+                let limits_text = tt_with(
+                    context,
+                    "RX {rx} KiB/s · TX {tx} KiB/s",
+                    &[("rx", &r.to_string()), ("tx", &t.to_string())],
+                );
+                format!("{headline} ({c}: {limits_text})")
+            }
+            (Some(c), _, _) => format!("{headline} ({c})"),
+            _ => headline,
+        };
+        push_unique(&mut parts, detail);
+        if let Some(msg) = diag.message.as_ref().or(diag.error.as_ref()) {
+            push_unique(&mut parts, tt(context, msg));
+        }
+    } else if !ok {
+        if let Some(msg) = diag.message.as_ref().or(diag.error.as_ref()) {
+            push_unique(&mut parts, tt(context, msg));
+        } else if !raw_body.trim().is_empty() && payload.is_null() {
+            push_unique(&mut parts, raw_body.trim().to_string());
+        } else {
+            push_unique(
+                &mut parts,
+                tt_with(
+                    context,
+                    "Bandwidth apply failed (HTTP {status})",
+                    &[("status", &status.to_string())],
+                ),
+            );
+        }
+    } else {
+        push_unique(
+            &mut parts,
+            format_bandwidth_applied_toast(context, payload, requested_limits),
+        );
+    }
+
+    if let Some(warning) = diag.warning {
+        push_unique(&mut parts, tt(context, &warning));
+    }
+    for extra in diag.warnings {
+        push_unique(&mut parts, tt(context, &extra));
+    }
+    if let Some(recovery) = diag.recovery {
+        push_unique(&mut parts, tt(context, &recovery));
+    }
+
+    BandwidthApplyOutcome {
+        message: parts.join(" — "),
+        is_error: true,
+        is_partial_or_warning: has_partial_or_warning,
+    }
+}
+
 fn format_bandwidth_applied_toast(
     context: crate::state::AppContext,
     response: &Value,
@@ -1127,6 +1290,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
     let busy = RwSignal::new(false);
     let applying = RwSignal::new(false);
     let bandwidth = RwSignal::new(Value::Null);
+    let bandwidth_feedback = RwSignal::new(None::<BandwidthApplyOutcome>);
     view! {
         <ObsCard title=Signal::derive(move || tt(context, "Overview.capacityPredictions"))>
             <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
@@ -1168,6 +1332,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                 return;
                             }
                             busy.set(true);
+                            bandwidth_feedback.set(None);
                             spawn_local(async move {
                                 let result = ApiClient
                                     .post("/api/v1/admin/ai/bandwidth/analyze", None)
@@ -1374,17 +1539,43 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                             };
                             let epoch = context.session_epoch.get_untracked();
                             applying.set(true);
+                            bandwidth_feedback.set(None);
                             spawn_local(async move {
-                                let result = ApiClient.post("/api/v1/admin/ai/bandwidth/apply", Some(&limits)).await;
-                                if applying.is_disposed() || context.session_epoch.try_get_untracked() != Some(epoch) {
+                                let result = ApiClient
+                                    .fetch("/api/v1/admin/ai/bandwidth/apply", "POST", Some(&limits))
+                                    .await;
+                                if applying.is_disposed()
+                                    || context.session_epoch.try_get_untracked() != Some(epoch)
+                                {
                                     return;
                                 }
                                 match result {
-                                    Ok(data) => context.toast(
-                                        format_bandwidth_applied_toast(context, &data, &limits),
-                                        false,
-                                    ),
-                                    Err(failure) => context.toast(tt(context, &failure.message), true),
+                                    Ok(response) => {
+                                        let ok = response.ok();
+                                        let status = response.status();
+                                        let body_text = response.text().await.unwrap_or_default();
+                                        if applying.is_disposed()
+                                            || context.session_epoch.try_get_untracked() != Some(epoch)
+                                        {
+                                            return;
+                                        }
+                                        let payload = serde_json::from_str::<Value>(&body_text)
+                                            .unwrap_or(Value::Null);
+                                        let outcome = summarize_bandwidth_apply_outcome(
+                                            context, ok, status, &payload, &body_text, &limits,
+                                        );
+                                        context.toast(outcome.message.clone(), outcome.is_error);
+                                        bandwidth_feedback.set(Some(outcome));
+                                    }
+                                    Err(failure) => {
+                                        let message = tt(context, &failure.message);
+                                        context.toast(message.clone(), true);
+                                        bandwidth_feedback.set(Some(BandwidthApplyOutcome {
+                                            message,
+                                            is_error: true,
+                                            is_partial_or_warning: false,
+                                        }));
+                                    }
                                 }
                                 applying.set(false);
                             });
@@ -1392,6 +1583,20 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                     >
                         {move || tt(context, if applying.get() { "Applying bandwidth limits…" } else { "Apply bandwidth limits" })}
                     </button>
+                    {move || {
+                        bandwidth_feedback.get().map(|outcome| {
+                            let class = if outcome.is_error || outcome.is_partial_or_warning {
+                                "text-sm text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 mt-3"
+                            } else {
+                                "text-sm text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 mt-3"
+                            };
+                            view! {
+                                <p role="status" class=class>
+                                    {outcome.message}
+                                </p>
+                            }
+                        })
+                    }}
                 </div>
             </Show>
         </ObsCard>
@@ -1460,5 +1665,80 @@ mod tests {
             parse_bandwidth_applied_details(&json!({}), &json!({})),
             (None, None, None)
         );
+    }
+
+    #[test]
+    fn bandwidth_apply_outcome_surfaces_partial_failures_warnings_and_recovery_diagnostics() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let context = crate::state::AppContext::new();
+            let req = json!({"download_kbps": 5000, "upload_kbps": 1200});
+
+            let partial = summarize_bandwidth_apply_outcome(
+                context,
+                true,
+                200,
+                &json!({
+                    "applied_client": "qbittorrent",
+                    "partial_apply": true,
+                    "warning": "setUploadLimit failed; download limit rollback succeeded",
+                    "recovery_diagnostic": "Restored prior downloadLimit=409600",
+                }),
+                "",
+                &req,
+            );
+            assert!(partial.is_error);
+            assert!(partial.is_partial_or_warning);
+            assert!(partial
+                .message
+                .contains("Bandwidth limits partially applied"));
+            assert!(partial
+                .message
+                .contains("setUploadLimit failed; download limit rollback succeeded"));
+            assert!(partial
+                .message
+                .contains("Restored prior downloadLimit=409600"));
+
+            let failed_with_recovery = summarize_bandwidth_apply_outcome(
+                context,
+                false,
+                502,
+                &json!({
+                    "error": "qBittorrent rejected setUploadLimit",
+                    "warning": "Download limit rollback failed",
+                    "recovery_error": "Transfer speed cap may remain altered at 5000 KiB/s",
+                }),
+                "",
+                &req,
+            );
+            assert!(failed_with_recovery.is_error);
+            assert!(failed_with_recovery.is_partial_or_warning);
+            assert!(failed_with_recovery
+                .message
+                .contains("qBittorrent rejected setUploadLimit"));
+            assert!(failed_with_recovery
+                .message
+                .contains("Download limit rollback failed"));
+            assert!(failed_with_recovery
+                .message
+                .contains("Transfer speed cap may remain altered at 5000 KiB/s"));
+
+            let clean = summarize_bandwidth_apply_outcome(
+                context,
+                true,
+                200,
+                &json!({
+                    "applied_client": "qbittorrent",
+                    "download_kbps": 5000,
+                    "upload_kbps": 1200,
+                }),
+                "",
+                &req,
+            );
+            assert!(!clean.is_error);
+            assert!(!clean.is_partial_or_warning);
+            assert!(clean.message.contains("Bandwidth limits applied"));
+            assert!(clean.message.contains("qbittorrent"));
+        });
     }
 }

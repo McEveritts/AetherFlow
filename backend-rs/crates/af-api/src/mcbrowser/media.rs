@@ -62,14 +62,6 @@ impl PreviewSize {
             Self::Big => (BIG_PREVIEW_DIMENSION, BIG_PREVIEW_DIMENSION),
         }
     }
-
-    #[allow(dead_code)]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Thumb => "thumb",
-            Self::Big => "big",
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Default)]

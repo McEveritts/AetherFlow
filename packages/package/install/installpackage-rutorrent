@@ -49,7 +49,31 @@ RUTORRENT_EXISTING_CONFIG=false
 [[ ! -s /var/www/rutorrent/conf/config.php ]] || RUTORRENT_EXISTING_CONFIG=true
 BUILD_DIR="$(mktemp -d /var/www/.rutorrent-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
-af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    RUT_TARGET_TAG="${AF_TARGET_VERSION#release-}"
+    RUT_TARGET_TAG="${RUT_TARGET_TAG#Release-}"
+    if [[ "$RUT_TARGET_TAG" =~ ^[0-9] ]]; then
+        RUT_TARGET_TAG="v${RUT_TARGET_TAG}"
+    elif [[ "$RUT_TARGET_TAG" =~ ^V([0-9].*)$ ]]; then
+        RUT_TARGET_TAG="v${BASH_REMATCH[1]}"
+    fi
+    if ! af_logged git clone --depth 1 --branch "$RUT_TARGET_TAG" https://github.com/Novik/ruTorrent.git "$BUILD_DIR"; then
+        rm -rf -- "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+        af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
+        if af_logged git -C "$BUILD_DIR" fetch --depth 1 origin "refs/tags/${RUT_TARGET_TAG}:refs/tags/${RUT_TARGET_TAG}"; then
+            af_logged git -C "$BUILD_DIR" checkout --detach "refs/tags/${RUT_TARGET_TAG}"
+        elif [[ "$RUT_TARGET_TAG" != "$AF_TARGET_VERSION" ]] && af_logged git -C "$BUILD_DIR" fetch --depth 1 origin "refs/tags/${AF_TARGET_VERSION}:refs/tags/${AF_TARGET_VERSION}"; then
+            af_logged git -C "$BUILD_DIR" checkout --detach "refs/tags/${AF_TARGET_VERSION}"
+        else
+            print_error "Unable to fetch ruTorrent release tag ${AF_TARGET_VERSION}"
+            exit 1
+        fi
+    fi
+else
+    af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
+    af_logged git -C "$BUILD_DIR" fetch --tags --depth 1 origin 2>/dev/null || true
+fi
 RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
 RUNTIME_SNAPSHOT_READY=false
 RUNTIME_STOPPED=false
@@ -121,8 +145,18 @@ mkdir -p /var/www/rutorrent/share/torrents \
          /var/www/rutorrent/share/users \
          /var/www/rutorrent/share/settings
 
-chown -hRP www-data:www-data /var/www/rutorrent /srv/rutorrent
-find -P /var/www/rutorrent \( -type d -o -type f \) -exec chmod 775 -- {} +
+chown -hRP root:www-data /var/www/rutorrent
+find -P /var/www/rutorrent -type d -exec chmod 0755 -- {} +
+find -P /var/www/rutorrent -type f -exec chmod 0644 -- {} +
+chown -hRP www-data:www-data /var/www/rutorrent/share
+find -P /var/www/rutorrent/share -type d -exec chmod 0775 -- {} +
+find -P /var/www/rutorrent/share -type f -exec chmod 0664 -- {} +
+if [[ -d /var/www/rutorrent/conf/users ]]; then
+    chown -hRP www-data:www-data /var/www/rutorrent/conf/users
+    find -P /var/www/rutorrent/conf/users -type d -exec chmod 0775 -- {} +
+    find -P /var/www/rutorrent/conf/users -type f -exec chmod 0664 -- {} +
+fi
+chown -h www-data:www-data /srv/rutorrent
 
 report_progress 85 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"

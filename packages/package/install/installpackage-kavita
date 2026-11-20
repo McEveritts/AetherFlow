@@ -63,7 +63,8 @@ KAV_VERSION="$(github_latest_tag "Kareadita/Kavita" "0.8.2")"
 KAV_URL="https://github.com/Kareadita/Kavita/releases/download/v${KAV_VERSION}/kavita-linux-${KAV_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting Kavita ${KAV_VERSION}..."
-TMP_TAR=$(mktemp /tmp/kavita-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/kavita-XXXXXX.tar.gz")
 af_logged download_file "$KAV_URL" "$TMP_TAR"
 BUILD_DIR="$(mktemp -d /opt/.kavita-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"; rm -f "$TMP_TAR"' EXIT
@@ -73,7 +74,7 @@ rm -f "$TMP_TAR"
 chmod 755 "$BUILD_DIR/Kavita"
 stage_app_archive "$BUILD_DIR" /opt/Kavita Kavita "" "$PACKAGE_NAME" "." "" preserve
 BUILD_DIR=""
-chmod +x /opt/Kavita/Kavita
+chmod 0755 /opt/Kavita/Kavita
 queue_app_version /opt/Kavita/.af-version "${KAV_VERSION#v}"
 
 for kav_cfg in /opt/Kavita/appsettings.json /opt/Kavita/config/appsettings.json; do
@@ -104,6 +105,7 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/kavita.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now kavita

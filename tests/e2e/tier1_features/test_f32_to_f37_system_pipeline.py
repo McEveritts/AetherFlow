@@ -63,35 +63,35 @@ class TestF32OnboardingUrlUsesPort8080(TestCase):
 
 class TestF33RunnerTemplateInSetup(TestCase):
     def __init__(self):
-        super().__init__("T1_F33_01", "F33", 1, "aetherflow-runner.template exists in setup/templates/sysd/")
+        super().__init__("T1_F33_01", "F33", 1, "aetherflow-runner.service exists in deploy/systemd/")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        has_template = inspector.file_exists("setup/templates/sysd/aetherflow-runner.template") or inspector.file_exists("deploy/systemd/aetherflow-runner.service")
-        self.assert_true(has_template, "F33: aetherflow-runner systemd template must exist")
+        has_unit = inspector.file_exists("deploy/systemd/aetherflow-runner.service")
+        self.assert_true(has_unit, "F33: deploy/systemd/aetherflow-runner.service must exist")
 
 class TestF33ApiTemplateProtectSystemStrict(TestCase):
     def __init__(self):
-        super().__init__("T1_F33_02", "F33", 1, "aetherflow-api.template declares ProtectSystem=strict")
+        super().__init__("T1_F33_02", "F33", 1, "aetherflow-api.service declares ProtectSystem=strict")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
-        self.assert_true(bool(unit and "ProtectSystem=strict" in unit), "F33: aetherflow-api.template must declare ProtectSystem=strict")
+        unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
+        self.assert_true(bool(unit and "ProtectSystem=strict" in unit), "F33: deploy/systemd/aetherflow-api.service must declare ProtectSystem=strict")
 
 class TestF33ApiTemplateNoNewPrivileges(TestCase):
     def __init__(self):
-        super().__init__("T1_F33_03", "F33", 1, "aetherflow-api.template declares NoNewPrivileges=yes")
+        super().__init__("T1_F33_03", "F33", 1, "aetherflow-api.service declares NoNewPrivileges=yes")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
-        self.assert_true(bool(unit and "NoNewPrivileges=yes" in unit), "F33: aetherflow-api.template must declare NoNewPrivileges=yes")
+        unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
+        self.assert_true(bool(unit and "NoNewPrivileges=yes" in unit), "F33: deploy/systemd/aetherflow-api.service must declare NoNewPrivileges=yes")
 
 class TestF33ApiTemplateUnprivilegedUser(TestCase):
     def __init__(self):
         super().__init__("T1_F33_04", "F33", 1, "aetherflow-api runs under unprivileged User=aetherflow")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
-        self.assert_true(bool(unit and "User=aetherflow" in unit), "F33: aetherflow-api.template must run as User=aetherflow")
+        unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
+        self.assert_true(bool(unit and "User=aetherflow" in unit), "F33: deploy/systemd/aetherflow-api.service must run as User=aetherflow")
 
 class TestF33ObsoleteFrontendUnitPurged(TestCase):
     def __init__(self):

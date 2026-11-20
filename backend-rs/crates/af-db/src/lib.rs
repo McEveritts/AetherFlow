@@ -1533,6 +1533,7 @@ pub fn init_db() -> anyhow::Result<()> {
         map.clear();
     }
     invalidate_ingress_cache();
+    get_base_domain();
 
     tracing::info!(path = %db_path, "SQLite WAL database connected");
     Ok(())
@@ -1861,7 +1862,19 @@ pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
         }
     }
 
-    let wal_pages: i64 = 0;
+    // A WAL frame occupies its database page plus a 24-byte frame header.
+    // Measuring the file avoids a checkpoint on the writer connection.
+    let path: String = conn.query_row("PRAGMA database_list", [], |row| row.get(2))?;
+    let page_size: u64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let wal_pages = if path.is_empty() {
+        0
+    } else {
+        match fs::metadata(format!("{path}-wal")) {
+            Ok(wal) => wal.len().saturating_sub(32) / (page_size + 24),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        }
+    };
 
     Ok(serde_json::json!({
         "status": "healthy",
@@ -1929,6 +1942,48 @@ static INGRESS_CACHE: Lazy<RwLock<IngressCache>> = Lazy::new(|| {
 
 const INGRESS_CACHE_TTL: Duration = Duration::from_secs(5);
 
+// This hint only sends possible subdomains to authoritative resolution. A
+// fingerprint match never grants access.
+static BASE_DOMAIN_HINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn base_domain_fingerprint(domain: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    domain.hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// A routing hint for passing requests to the control plane. Host validation
+/// still compares the complete authority before accepting a request.
+pub fn maybe_cached_control_plane_host(host: &str) -> bool {
+    let hint = BASE_DOMAIN_HINT.load(std::sync::atomic::Ordering::Acquire);
+    if hint == 0 {
+        return false;
+    }
+    base_domain_fingerprint(host) == hint
+        || host.split_once('.').is_some_and(|(label, suffix)| {
+            matches!(label, "www" | "direct" | "aetherflow")
+                && base_domain_fingerprint(suffix) == hint
+        })
+}
+
+pub fn cached_base_domain() -> Option<String> {
+    let cache = INGRESS_CACHE.try_read().ok()?;
+    cache
+        .base_domain_at
+        .filter(|at| at.elapsed() < INGRESS_CACHE_TTL)?;
+    Some(cache.base_domain.clone())
+}
+
+pub fn matches_cached_ingress_subdomain(host: &str) -> bool {
+    let hint = BASE_DOMAIN_HINT.load(std::sync::atomic::Ordering::Acquire);
+    hint != 0
+        && host.match_indices('.').any(|(offset, _)| {
+            base_domain_fingerprint(&host[offset + 1..]) == hint
+                && !matches!(&host[..offset], "www" | "direct" | "aetherflow")
+        })
+}
+
 pub fn invalidate_ingress_cache() {
     if let Ok(mut guard) = INGRESS_CACHE.write() {
         guard.generation = guard.generation.wrapping_add(1);
@@ -1975,6 +2030,10 @@ pub fn get_base_domain() -> String {
             }
         }
     }
+    let generation = INGRESS_CACHE
+        .read()
+        .map(|cache| cache.generation)
+        .unwrap_or(0);
     let domain = get_read_conn()
         .ok()
         .and_then(|c| {
@@ -1989,8 +2048,18 @@ pub fn get_base_domain() -> String {
         .unwrap_or_default();
 
     if let Ok(mut guard) = INGRESS_CACHE.write() {
-        guard.base_domain = domain.clone();
-        guard.base_domain_at = Some(Instant::now());
+        if guard.generation == generation {
+            guard.base_domain = domain.clone();
+            guard.base_domain_at = Some(Instant::now());
+            BASE_DOMAIN_HINT.store(
+                if domain.is_empty() {
+                    0
+                } else {
+                    base_domain_fingerprint(&domain)
+                },
+                std::sync::atomic::Ordering::Release,
+            );
+        }
     }
     domain
 }
@@ -2002,7 +2071,9 @@ pub fn set_base_domain(domain: &str) -> anyhow::Result<()> {
         "UPDATE settings SET base_domain = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
         params![norm],
     )?;
+    drop(conn);
     invalidate_ingress_cache();
+    get_base_domain();
     Ok(())
 }
 
@@ -2060,6 +2131,22 @@ pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
         }
     }
     Ok(result)
+}
+
+pub fn has_retained_app_ingress_config(app: &str) -> anyhow::Result<bool> {
+    let conn = get_read_conn()?;
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='retained_app_ingress_configs')",
+        [], |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM retained_app_ingress_configs WHERE app_name = ?1)",
+        [app],
+        |row| row.get(0),
+    )?)
 }
 
 pub fn get_app_ingress_config(app_name: &str) -> anyhow::Result<Option<AppIngressConfig>> {
@@ -2190,7 +2277,7 @@ pub fn query_audit_log(
     if limit <= 0 || limit > 200 {
         limit = 50;
     }
-    let conn = get_conn()?;
+    let conn = get_read_conn()?;
     let mut where_sql = String::from("WHERE 1=1");
     let mut bind_vals: Vec<String> = Vec::new();
     if !action.is_empty() {
@@ -2329,7 +2416,7 @@ pub fn list_pending_actions(mut limit: i64, offset: i64) -> anyhow::Result<Vec<P
     } else if limit > 500 {
         limit = 500;
     }
-    let conn = get_conn()?;
+    let conn = get_read_conn()?;
     let mut stmt = conn.prepare(
         "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
          FROM pending_actions ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
@@ -2360,7 +2447,7 @@ pub fn query_pending_actions(
     limit: i64,
     offset: i64,
 ) -> anyhow::Result<(Vec<PendingAction>, i64)> {
-    let conn = get_conn()?;
+    let conn = get_read_conn()?;
     query_pending_actions_with_connection(&conn, status_filter, limit, offset)
 }
 
@@ -2412,7 +2499,7 @@ fn query_pending_actions_with_connection(
 }
 
 pub fn get_pending_action_by_id(action_id: i64) -> anyhow::Result<Option<PendingAction>> {
-    let conn = get_conn()?;
+    let conn = get_read_conn()?;
     get_pending_action_by_id_with_connection(&conn, action_id)
 }
 
@@ -2707,7 +2794,9 @@ pub fn is_token_revoked(jti: &str) -> bool {
 
 pub fn store_2fa_pending(user_id: i64, secret: &str, ttl: Duration) {
     if let Ok(mut map) = PENDING_2FA_CACHE.lock() {
-        map.insert(user_id, (secret.to_string(), Instant::now() + ttl));
+        let now = Instant::now();
+        map.retain(|_, (_, expires)| *expires > now);
+        map.insert(user_id, (secret.to_string(), now + ttl));
     }
 }
 
@@ -3617,6 +3706,10 @@ mod pending_action_query_tests {
 
         init_db().unwrap();
         let writer = get_conn().unwrap();
+        writer.execute(
+            "INSERT INTO users (username, password_hash, role) VALUES ('committed', 'hash', 'user')",
+            [],
+        ).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         writer
             .execute(
@@ -3631,6 +3724,7 @@ mod pending_action_query_tests {
         let health =
             db_health_check().expect("read-only WAL health check must not stall on writer lock");
         assert_eq!(health["status"], "healthy");
+        assert!(health["wal_pages"].as_u64().unwrap() > 0);
 
         writer.execute_batch("ROLLBACK").unwrap();
         drop(writer);

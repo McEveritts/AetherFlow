@@ -139,7 +139,7 @@ class TestB03IncorrectCurrentPasswordRejected(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         routes = inspector.read_file(ROUTES_RS)
-        self.assert_true(bool(routes and "bcrypt::verify" in routes and "update_password" in routes), "B03: Mismatched current password must abort mutation")
+        self.assert_true(bool(routes and ("bcrypt::verify" in routes or "verify_password" in routes) and "update_password" in routes), "B03: Mismatched current password must abort mutation")
 
 
 class TestB03ShortNewPasswordRejected(TestCase):

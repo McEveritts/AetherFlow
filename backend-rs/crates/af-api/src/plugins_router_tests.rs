@@ -68,11 +68,7 @@ async fn destructive_plugin_request_time_gate_preserves_admin_users_and_readers(
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(
                 response.status(),
-                if method == Method::GET {
-                    StatusCode::NO_CONTENT
-                } else {
-                    StatusCode::FORBIDDEN
-                },
+                StatusCode::FORBIDDEN,
                 "{method} {path} from {scope}"
             );
         }

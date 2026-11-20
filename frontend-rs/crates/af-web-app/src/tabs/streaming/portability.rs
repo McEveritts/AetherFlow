@@ -9,8 +9,48 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-const MAX_ARCHIVE_RAW_BYTES: usize = 7 * 1024 * 1024;
-const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ARCHIVE_RAW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+const ERR_ARCHIVE_RAW_SIZE: &str =
+    "Choose an archive of 1 byte to 8 MiB (leaves headroom for the 10 MiB request wrapper).";
+const ERR_ARCHIVE_FILE_TOO_LARGE: &str =
+    "Archive exceeds 8 MiB raw limit (10 MiB max with request wrapper).";
+const ERR_ARCHIVE_FORMAT: &str =
+    "Choose a native aetherflow.streaming-history archive with manifest and data.";
+const ERR_REQUEST_ENVELOPE_SIZE: &str =
+    "Serialized archive request exceeds the 10 MiB backend limit.";
+
+fn validate_raw_archive_len(len: usize) -> Result<(), &'static str> {
+    if len == 0 || len > MAX_ARCHIVE_RAW_BYTES {
+        Err(ERR_ARCHIVE_RAW_SIZE)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_request_envelope(body: &Value) -> Result<(), &'static str> {
+    match serde_json::to_vec(body) {
+        Ok(bytes) if bytes.len() <= MAX_REQUEST_BODY_BYTES => Ok(()),
+        _ => Err(ERR_REQUEST_ENVELOPE_SIZE),
+    }
+}
+
+fn prepare_preview_request(mode: &str, content: &str) -> Result<Value, &'static str> {
+    validate_raw_archive_len(content.len())?;
+    let archive = match serde_json::from_str::<Value>(content) {
+        Ok(value)
+            if serde_json::from_value::<PortableArchive>(value.clone())
+                .is_ok_and(|archive| archive.manifest.format == "aetherflow.streaming-history") =>
+        {
+            value
+        }
+        _ => return Err(ERR_ARCHIVE_FORMAT),
+    };
+    let body = json!({"mode": mode, "archive": archive});
+    validate_request_envelope(&body)?;
+    Ok(body)
+}
 
 #[component]
 pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
@@ -106,36 +146,13 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
         }
         invalidate.run(());
         let content = raw.get_untracked();
-        if content.is_empty() || content.len() > MAX_ARCHIVE_RAW_BYTES {
-            result.set(Some(
-                "Choose an archive of 1 byte to 7 MiB (leaves headroom for the 8 MiB request wrapper)."
-                    .into(),
-            ));
-            return;
-        }
-        let archive = match serde_json::from_str::<Value>(&content) {
-            Ok(value)
-                if serde_json::from_value::<PortableArchive>(value.clone()).is_ok_and(
-                    |archive| archive.manifest.format == "aetherflow.streaming-history",
-                ) =>
-            {
-                value
-            }
-            _ => {
-                result.set(Some(
-                    "Choose a native aetherflow.streaming-history archive with manifest and data."
-                        .into(),
-                ));
+        let body = match prepare_preview_request(&mode.get_untracked(), &content) {
+            Ok(body) => body,
+            Err(message) => {
+                result.set(Some(message.into()));
                 return;
             }
         };
-        let body = json!({"mode":mode.get_untracked(),"archive":archive});
-        if serde_json::to_vec(&body).is_ok_and(|bytes| bytes.len() > MAX_REQUEST_BODY_BYTES) {
-            result.set(Some(
-                "Serialized archive request exceeds the 8 MiB backend limit.".into(),
-            ));
-            return;
-        }
         let ticket = generation.get_untracked();
         busy.set(true);
         spawn_local(async move {
@@ -238,7 +255,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 </select>
             </label>
             <label class="block text-sm">
-                {"Native archive JSON file (maximum 7 MiB raw to fit 8 MiB request limit)"}
+                {"Native archive JSON file (maximum 8 MiB raw to fit 10 MiB request limit)"}
                 <input
                     type="file"
                     accept=".json,application/json"
@@ -248,7 +265,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                         if let Some(file) = input.files().and_then(|files| files.get(0)) {
                             invalidate.run(());
                             if file.size() > MAX_ARCHIVE_RAW_BYTES as f64 {
-                                result.set(Some("Archive exceeds 7 MiB raw limit (8 MiB max with request wrapper).".into()));
+                                result.set(Some(ERR_ARCHIVE_FILE_TOO_LARGE.into()));
                                 return;
                             }
                             let ticket = generation.get_untracked();
@@ -345,5 +362,111 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 on_confirm=restore
             />
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_archive_with_padding(target_raw_bytes: usize) -> String {
+        let base = serde_json::to_string(&json!({
+            "manifest": {
+                "format": "aetherflow.streaming-history",
+                "version": 1,
+                "exportedAt": "2026-11-19T00:00:00Z",
+                "counts": { "history": 1 }
+            },
+            "data": {
+                "history": [
+                    { "sessionKey": "s-1", "padding": "" }
+                ]
+            }
+        }))
+        .unwrap();
+        let pad_len = target_raw_bytes.saturating_sub(base.len());
+        let padding = "a".repeat(pad_len);
+        serde_json::to_string(&json!({
+            "manifest": {
+                "format": "aetherflow.streaming-history",
+                "version": 1,
+                "exportedAt": "2026-11-19T00:00:00Z",
+                "counts": { "history": 1 }
+            },
+            "data": {
+                "history": [
+                    { "sessionKey": "s-1", "padding": padding }
+                ]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn accepts_seven_point_five_mib_archive_and_rejects_over_eight_mib() {
+        assert_eq!(MAX_ARCHIVE_RAW_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_REQUEST_BODY_BYTES, 10 * 1024 * 1024);
+
+        assert_eq!(validate_raw_archive_len(0), Err(ERR_ARCHIVE_RAW_SIZE));
+
+        let seven_half_mib = (7 * 1024 * 1024) + (512 * 1024);
+        let valid_raw = sample_archive_with_padding(seven_half_mib);
+        assert_eq!(valid_raw.len(), seven_half_mib);
+        assert!(validate_raw_archive_len(valid_raw.len()).is_ok());
+        let prepared = prepare_preview_request("merge", &valid_raw)
+            .expect("7.5 MiB native archive should pass client validation");
+        assert_eq!(prepared["mode"], "merge");
+
+        let exact_limit = sample_archive_with_padding(MAX_ARCHIVE_RAW_BYTES);
+        assert_eq!(exact_limit.len(), MAX_ARCHIVE_RAW_BYTES);
+        assert!(prepare_preview_request("merge", &exact_limit).is_ok());
+
+        let over_archive = sample_archive_with_padding(MAX_ARCHIVE_RAW_BYTES + 1);
+        assert_eq!(over_archive.len(), MAX_ARCHIVE_RAW_BYTES + 1);
+        assert_eq!(
+            prepare_preview_request("merge", &over_archive),
+            Err(ERR_ARCHIVE_RAW_SIZE)
+        );
+    }
+
+    #[test]
+    fn accepts_nine_point_five_mib_envelope_and_rejects_over_ten_mib() {
+        let nine_half_mib = (9 * 1024 * 1024) + (512 * 1024);
+        let probe = json!({
+            "mode": "replace",
+            "archive": {
+                "manifest": { "format": "aetherflow.streaming-history" },
+                "data": { "blob": "" }
+            }
+        });
+        let base_len = serde_json::to_vec(&probe).unwrap().len();
+        let valid_envelope = json!({
+            "mode": "replace",
+            "archive": {
+                "manifest": { "format": "aetherflow.streaming-history" },
+                "data": { "blob": "b".repeat(nine_half_mib - base_len) }
+            }
+        });
+        assert_eq!(
+            serde_json::to_vec(&valid_envelope).unwrap().len(),
+            nine_half_mib
+        );
+        assert!(validate_request_envelope(&valid_envelope).is_ok());
+
+        let oversized_envelope = json!({
+            "mode": "replace",
+            "archive": {
+                "manifest": { "format": "aetherflow.streaming-history" },
+                "data": { "blob": "b".repeat((MAX_REQUEST_BODY_BYTES + 1) - base_len) }
+            }
+        });
+        assert_eq!(
+            serde_json::to_vec(&oversized_envelope).unwrap().len(),
+            MAX_REQUEST_BODY_BYTES + 1
+        );
+        assert_eq!(
+            validate_request_envelope(&oversized_envelope),
+            Err(ERR_REQUEST_ENVELOPE_SIZE)
+        );
     }
 }

@@ -97,9 +97,9 @@ if [[ -f /opt/uptime-kuma/.env ]]; then
     cp -a /opt/uptime-kuma/.env "$BUILD_DIR/.env"
 fi
 if [[ -f "$BUILD_DIR/server/server.js" ]]; then
-    chmod +x "$BUILD_DIR/server/server.js"
+    chmod 0755 "$BUILD_DIR/server/server.js"
 elif [[ -f "$BUILD_DIR/new-code" ]]; then
-    chmod +x "$BUILD_DIR/new-code"
+    chmod 0755 "$BUILD_DIR/new-code"
 fi
 if ! command_exists stop_systemd_unit; then
     stop_systemd_unit() { af_logged systemctl stop "$1" || true; }
@@ -131,6 +131,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/uptime-kuma.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now uptime-kuma

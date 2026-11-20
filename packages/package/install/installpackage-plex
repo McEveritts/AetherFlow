@@ -52,8 +52,9 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-ce
 report_progress 30 "Configuring official Plex APT repository..."
 install -m 0755 -d /etc/apt/keyrings
 af_logged install_apt_signing_key https://downloads.plex.tv/plex-keys/PlexSign.key /etc/apt/keyrings/plex.gpg
-chmod a+r /etc/apt/keyrings/plex.gpg
+chmod 0644 /etc/apt/keyrings/plex.gpg
 echo "deb [signed-by=/etc/apt/keyrings/plex.gpg] https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
+chmod 0644 /etc/apt/sources.list.d/plexmediaserver.list
 
 report_progress 55 "Installing plexmediaserver package..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq

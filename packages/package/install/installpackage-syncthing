@@ -48,8 +48,9 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-ce
 report_progress 35 "Adding official Syncthing APT repository..."
 install -m 0755 -d /etc/apt/keyrings
 af_logged download_file https://syncthing.net/release-key.gpg /etc/apt/keyrings/syncthing-archive-keyring.gpg
-chmod a+r /etc/apt/keyrings/syncthing-archive-keyring.gpg
+chmod 0644 /etc/apt/keyrings/syncthing-archive-keyring.gpg
 echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" > /etc/apt/sources.list.d/syncthing.list
+chmod 0644 /etc/apt/sources.list.d/syncthing.list
 
 report_progress 60 "Installing Syncthing package..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
@@ -112,6 +113,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/syncthing.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now syncthing

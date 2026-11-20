@@ -25,6 +25,18 @@ from installer_test_helpers import common_functions, replace_paths_once
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _resolve_openable_tmp_root() -> str:
+    cand = Path(tempfile.gettempdir()).resolve()
+    if all(os.access(p, os.R_OK | os.X_OK) for p in (cand, *cand.parents)):
+        return str(cand)
+    if Path("/tmp").is_dir() and os.access("/tmp", os.R_OK | os.W_OK | os.X_OK):
+        return str(Path("/tmp").resolve())
+    return str(cand)
+
+
+RESOLVED_TMP_ROOT = _resolve_openable_tmp_root()
+
+
 def _extract_router_routes(code: str) -> list[tuple[str, list[str]]]:
     out: list[tuple[str, list[str]]] = []
     idx = 0
@@ -254,6 +266,36 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             for stepup_hdr in ("X-Reauth-Password", "X-Reauth-TOTP", "X-Reauth-Confirm"):
                 self.assertIn(stepup_hdr, param_names, f"{method.upper()} missing {stepup_hdr}")
 
+    def test_api_docs_v1_routes_exist_in_openapi_spec(self) -> None:
+        api_md = (ROOT / "docs/API.md").read_text(encoding="utf-8")
+        spec = yaml.safe_load((ROOT / "config/openapi-v1.yaml").read_text(encoding="utf-8"))
+        openapi_paths = set((spec.get("paths") or {}).keys())
+
+        table_routes = re.findall(
+            r"^\|\s*`[^`]+`\s*\|\s*`(/api/v1/[^`\s]+)`\s*\|",
+            api_md,
+            re.MULTILINE,
+        )
+        inline_routes = re.findall(
+            r"`(?:(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+|wss?://<host>)(/api/v1/[^`\s?]+)",
+            api_md,
+        )
+        documented_routes = sorted(set(table_routes + inline_routes))
+        self.assertTrue(documented_routes, "Expected at least one /api/v1 route in docs/API.md")
+
+        missing: list[str] = []
+        for raw_route in documented_routes:
+            rel = raw_route[len("/api/v1") :]
+            normalized = re.sub(r":([A-Za-z0-9_]+)", r"{\1}", rel)
+            if normalized not in openapi_paths:
+                missing.append(f"{raw_route} -> {normalized}")
+
+        self.assertEqual(
+            missing,
+            [],
+            f"Routes documented in docs/API.md missing from config/openapi-v1.yaml: {missing}",
+        )
+
     def test_rust_librespeed_and_external_wasm_assets_present(self) -> None:
         librespeed_toml = ROOT / "backend-rs/crates/af-librespeed/Cargo.toml"
         self.assertTrue(
@@ -322,7 +364,7 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
                     )
 
     def test_installpackage_librespeed_security_and_provenance_contracts(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="af-ls-cutover-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-ls-cutover-", dir=RESOLVED_TMP_ROOT) as tmp:
             root = Path(tmp)
             for rel in (
                 "bin",
@@ -964,7 +1006,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             )
 
     def test_update_aetherflow_executes_real_af_binary_and_common_https_readiness_guard(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="af-shim-bin-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-shim-bin-", dir=RESOLVED_TMP_ROOT) as tmp:
             root = Path(tmp)
             bin_dir = root / "current/bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
@@ -1028,10 +1070,20 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
     def test_af_certbot_sync_v4_sqlite_and_hosts_reconcile(self) -> None:
         import sqlite3
 
-        with tempfile.TemporaryDirectory(prefix="af-certbot-cutover-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-certbot-cutover-", dir=RESOLVED_TMP_ROOT) as tmp:
             root = Path(tmp)
-            for rel in ("bin", "etc", "install", "var/lib/aetherflow", "etc/aetherflow"):
+            for rel in ("bin", "etc", "install", "run/aetherflow", "var/lib/aetherflow", "etc/aetherflow"):
                 (root / rel).mkdir(parents=True, exist_ok=True)
+            (root / "run/aetherflow").chmod(0o750)
+            stat_wrapper = root / "bin/stat"
+            stat_wrapper.write_text(
+                "#!/bin/sh\n"
+                'if [ "${1:-}" = "-c" ] && [ "${2:-}" = "%u" ]; then echo 0; exit 0; fi\n'
+                'if [ "${1:-}" = "-Lc" ] && [ "${2:-}" = "%a %U:%G" ]; then echo "660 root:aetherflow"; exit 0; fi\n'
+                'exec /usr/bin/stat "$@"\n',
+                encoding="utf-8",
+            )
+            stat_wrapper.chmod(0o755)
             (root / "etc/hosts").write_text("127.0.0.1\tlocalhost\n", encoding="utf-8")
             (root / "install/.librespeed.lock").write_text("installed\n", encoding="utf-8")
             (root / "install/.core.lock").write_text("installed\n", encoding="utf-8")
@@ -1046,7 +1098,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             src = (ROOT / "packages/system/af-certbot-sync").read_text(encoding="utf-8")
             rebased = replace_paths_once(
                 src,
-                [(pfx, str(root) + pfx) for pfx in ("/opt", "/etc/", "/var/", "/install", "/srv/")],
+                [(pfx, str(root) + pfx) for pfx in ("/opt", "/etc/", "/run/", "/var/", "/install", "/srv/")],
             )
             script = root / "af-certbot-sync.sh"
             script.write_text(rebased, encoding="utf-8")
@@ -1070,7 +1122,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         self.assertIn("rust", sdk_script)
         self.assertNotIn("plugins/sdk-template/", sdk_script)
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as tmp:
             bad = subprocess.run(
                 ["bash", str(ROOT / "scripts/create-plugin-sdk.sh"), "../bad", "Bad", f"{tmp}/bad"],
                 cwd=ROOT,
@@ -1182,7 +1234,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         )
         self.assertIsNotNone(m_ready)
         snippet = m_ready.group(1)  # type: ignore[union-attr]
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as tmp:
             cfg = Path(tmp) / "settings.toml"
             for raw_cfg, expected in (
                 ('bind_address="127.0.0.1"\nenable_tls=false\n', "/"),
@@ -1233,7 +1285,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             "wait_for_service_ready",
         )
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as tmp:
             root = Path(tmp)
             env_file = root / "aetherflow.env"
             custom_data = root / "custom-data"
@@ -1324,7 +1376,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
 
     def test_wave10_update_shim_experimental_channel_rm_root_and_librespeed_socket(self) -> None:
         update_shim = ROOT / "packages/system/updateAetherFlow"
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as tmp:
             isolated_root = Path(tmp) / "isolated-af"
             deploy_dir = isolated_root / "deploy"
             deploy_dir.mkdir(parents=True)
@@ -1541,7 +1593,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             + ls_install[idx:end_idx]
         )
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as tmp:
             state_dir = Path(tmp) / "librespeed"
             state_dir.mkdir(parents=True)
             cfg = state_dir / "settings.toml"

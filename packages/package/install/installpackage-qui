@@ -60,7 +60,8 @@ QUI_VERSION="$(github_latest_tag "autobrr/qui" "1.33.1")"
 QUI_URL="https://github.com/autobrr/qui/releases/download/v${QUI_VERSION}/qui_${QUI_VERSION}_${QUI_ARCH}.tar.gz"
 
 report_progress 65 "Downloading and installing Qui ${QUI_VERSION}..."
-TMP_TAR=$(mktemp /tmp/qui-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/qui-XXXXXX.tar.gz")
 af_logged download_file "$QUI_URL" "$TMP_TAR"
 stage_app_archive "$TMP_TAR" "/usr/local/bin/qui" "qui" "/var/lib/qui" "$PACKAGE_NAME" "." "" "" "binary"
 rm -f "$TMP_TAR"
@@ -111,6 +112,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/qui.service
 
 
 af_logged systemctl daemon-reload

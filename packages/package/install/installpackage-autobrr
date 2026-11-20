@@ -60,9 +60,10 @@ AB_VERSION="$(github_latest_tag "autobrr/autobrr" "1.46.0")"
 AB_URL="https://github.com/autobrr/autobrr/releases/download/v${AB_VERSION}/autobrr_${AB_VERSION}_${AB_ARCH}.tar.gz"
 
 report_progress 65 "Downloading and installing Autobrr ${AB_VERSION}..."
-TMP_TAR=$(mktemp /tmp/autobrr-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/autobrr-XXXXXX.tar.gz")
 af_logged download_file "$AB_URL" "$TMP_TAR"
-TMP_DIR="$(mktemp -d /tmp/autobrr-extract-XXXXXX)"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/autobrr-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
 af_logged tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl
 rm -f "$TMP_TAR"
@@ -70,7 +71,7 @@ chmod 755 "$TMP_DIR/autobrr" "$TMP_DIR/autobrrctl"
 stage_app_archive "$TMP_DIR" /usr/local/bin/autobrr autobrr /var/lib/autobrr "$PACKAGE_NAME" "." /usr/local/bin/autobrrctl "" binary
 TMP_DIR=""
 install_binary_atomic "$AF_ARCHIVE_BACKUP/release/prepared/autobrrctl" /usr/local/bin/autobrrctl
-chmod +x /usr/local/bin/autobrr /usr/local/bin/autobrrctl
+chmod 0755 /usr/local/bin/autobrr /usr/local/bin/autobrrctl
 queue_app_version /var/lib/autobrr/.af-version "${AB_VERSION#v}"
 
 if [[ ! -f /var/lib/autobrr/config.toml ]]; then
@@ -113,6 +114,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/autobrr.service
 
 
 af_logged systemctl daemon-reload

@@ -362,18 +362,16 @@ _depends
         self.assertNotIn("AF_GO_VERSION", modern)
 
     def test_systemd_templates_and_packaged_units_share_data_root_without_db_override(self):
-        tpl_api = (ROOT / "setup/templates/sysd/aetherflow-api.template").read_text(encoding="utf-8")
-        tpl_runner = (ROOT / "setup/templates/sysd/aetherflow-runner.template").read_text(encoding="utf-8")
+        self.assertFalse((ROOT / "setup/templates/sysd/aetherflow-api.template").exists())
+        self.assertFalse((ROOT / "setup/templates/sysd/aetherflow-runner.template").exists())
         pkg_api = (ROOT / "deploy/systemd/aetherflow-api.service").read_text(encoding="utf-8")
         pkg_runner = (ROOT / "deploy/systemd/aetherflow-runner.service").read_text(encoding="utf-8")
 
-        self.assertIn("ExecStart=/opt/AetherFlow/current/aetherflow-api", tpl_api)
         self.assertIn("ExecStart=/opt/AetherFlow/current/aetherflow-api", pkg_api)
-        for unit in (tpl_api, tpl_runner, pkg_api, pkg_runner):
+        self.assertIn("ExecStart=/opt/AetherFlow/current/aetherflow-api runner", pkg_runner)
+        for unit in (pkg_api, pkg_runner):
             self.assertIn("Environment=DATA_DIR=/var/lib/aetherflow", unit)
             self.assertNotRegex(unit, r"(?m)^Environment=(?:AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=")
-        self.assertIn("ExecStart=/opt/AetherFlow/current/aetherflow-api runner", tpl_runner)
-        self.assertIn("ExecStart=/opt/AetherFlow/current/aetherflow-api runner", pkg_runner)
 
     def test_release_manager_syncs_cli_entrypoints_on_swap_and_rollback(self):
         rm = (ROOT / "deploy/release-manager.sh").read_text(encoding="utf-8")
@@ -401,6 +399,229 @@ _depends
             setup.index("Bootstrap archive SHA-256 verification failed"),
             setup.index('bootstrap_backup="/opt/AetherFlow.bak.$$"'),
         )
+        self.assertLess(
+            setup.index("_verify_bootstrap_sigstore_attestation"),
+            setup.index('bootstrap_backup="/opt/AetherFlow.bak.$$"'),
+        )
+
+    @unittest.skipUnless(os.name == "posix", "Bash bootstrap behavior requires POSIX shell")
+    def test_bootstrap_standalone_checkout_enforces_sigstore_attestation_and_sha256_pin(self):
+        import hashlib
+        import io
+        import shutil
+        import tarfile
+
+        setup_src = (ROOT / "setup/AetherFlow-Setup").read_text(encoding="utf-8")
+        resolved_tmp = str(Path(tempfile.gettempdir()).resolve())
+        with tempfile.TemporaryDirectory(prefix="af-bs-test-", dir=resolved_tmp) as tmp:
+            root = Path(tmp)
+            standalone_dir = root / "standalone"
+            standalone_dir.mkdir()
+            standalone_setup = standalone_dir / "AetherFlow-Setup"
+            standalone_setup.write_text(setup_src, encoding="utf-8")
+            standalone_setup.chmod(0o755)
+
+            # Build a minimal valid bootstrap tarball
+            tar_buf = io.BytesIO()
+            for name, payload, mode in (
+                ("AetherFlow/setup/AetherFlow-Setup", b"#!/bin/bash\nexit 0\n", 0o755),
+                ("AetherFlow/setup/modules/00-core.sh", b"#!/bin/bash\n", 0o644),
+            ):
+                pass
+            with tarfile.open(fileobj=tar_buf, mode="w:gz") as tf:
+                d_info = tarfile.TarInfo("AetherFlow")
+                d_info.type = tarfile.DIRTYPE
+                d_info.mode = 0o755
+                tf.addfile(d_info)
+                for name, payload, mode in (
+                    ("AetherFlow/setup/AetherFlow-Setup", b"#!/bin/bash\necho STAGED_OK\n", 0o755),
+                    ("AetherFlow/setup/modules/00-core.sh", b"#!/bin/bash\n", 0o644),
+                ):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(payload)
+                    info.mode = mode
+                    tf.addfile(info, io.BytesIO(payload))
+            tar_bytes = tar_buf.getvalue()
+            tar_sha = hashlib.sha256(tar_bytes).hexdigest()
+
+            release_dir = root / "release-assets"
+            release_dir.mkdir()
+            (release_dir / "aetherflow-bootstrap.tar.gz").write_bytes(tar_bytes)
+            (release_dir / "SHA256SUMS").write_text(f"{tar_sha}  aetherflow-bootstrap.tar.gz\n", encoding="utf-8")
+            (release_dir / "aetherflow-bootstrap.tar.gz.attestation.jsonl").write_text(
+                '{"verificationMaterial":{},"dsseEnvelope":{"payloadType":"application/vnd.in-toto+json","payload":"e30=","signatures":[{"sig":"AA=="}]}}\n',
+                encoding="utf-8",
+            )
+
+            opt_target = root / "opt" / "AetherFlow"
+            opt_target.mkdir(parents=True)
+            sentinel = opt_target / "SENTINEL"
+            sentinel.write_text("PRESERVED", encoding="utf-8")
+
+            tool_bin = root / "tools"
+            tool_bin.mkdir()
+            for tool in ("awk", "bash", "cat", "chmod", "cp", "dirname", "env", "find", "head", "mkdir", "mktemp", "mv", "openssl", "python3", "rm", "sed", "sha256sum", "tar", "tr"):
+                src = shutil.which(tool)
+                if src:
+                    (tool_bin / tool).symlink_to(src)
+            (tool_bin / "apt-get").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (tool_bin / "apt-get").chmod(0o755)
+            (tool_bin / "curl").write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, shutil, sys\n"
+                "args = sys.argv[1:]\n"
+                "out = pathlib.Path(args[args.index('-o') + 1] if '-o' in args else args[args.index('--output') + 1])\n"
+                "url = args[-1]\n"
+                "rdir = pathlib.Path(os.environ['TEST_RELEASE_DIR'])\n"
+                "if url.endswith('/releases/latest') or '/releases?' in url:\n"
+                "    import json\n"
+                "    assets = [\n"
+                "        {'name': 'aetherflow-bootstrap.tar.gz', 'browser_download_url': 'https://github.com/McEveritts/AetherFlow/releases/download/v4.0.0/aetherflow-bootstrap.tar.gz'},\n"
+                "        {'name': 'SHA256SUMS', 'browser_download_url': 'https://github.com/McEveritts/AetherFlow/releases/download/v4.0.0/SHA256SUMS'},\n"
+                "    ]\n"
+                "    if os.environ.get('TEST_INCLUDE_ATTEST_ASSET') == '1':\n"
+                "        assets.append({'name': 'aetherflow-bootstrap.tar.gz.attestation.jsonl', 'browser_download_url': 'https://github.com/McEveritts/AetherFlow/releases/download/v4.0.0/aetherflow-bootstrap.tar.gz.attestation.jsonl'})\n"
+                "    rel = {'tag_name': 'v4.0.0', 'draft': False, 'prerelease': False, 'assets': assets}\n"
+                "    out.write_text(json.dumps(rel if url.endswith('/latest') else [rel]))\n"
+                "    sys.exit(0)\n"
+                "name = url.rsplit('/', 1)[-1]\n"
+                "cand = rdir / name\n"
+                "if not cand.is_file():\n"
+                "    sys.exit(22)\n"
+                "shutil.copyfile(cand, out)\n",
+                encoding="utf-8",
+            )
+            (tool_bin / "curl").chmod(0o755)
+
+            os_rel = root / "os-release"
+            os_rel.write_text('ID=ubuntu\nVERSION_ID="22.04"\n', encoding="utf-8")
+
+            base_env = {
+                "PATH": str(tool_bin),
+                "TEST_RELEASE_DIR": str(release_dir),
+                "AETHERFLOW_BOOTSTRAP_TMPDIR": str(root / "tmp"),
+                "AETHERFLOW_BOOTSTRAP_INSTALL_ROOT": str(opt_target),
+                "AETHERFLOW_BOOTSTRAP_NO_EXEC": "1",
+                "AETHERFLOW_BOOTSTRAP_URL": "https://github.com/McEveritts/AetherFlow/releases/download/v4.0.0/aetherflow-bootstrap.tar.gz",
+            }
+            (root / "tmp").mkdir()
+
+            bootstrap_prefix = setup_src.split('if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then', 1)[0]
+
+            def run_bootstrap(extra_args=(), extra_env=None):
+                env = {**base_env, **(extra_env or {})}
+                probe_script = (
+                    bootstrap_prefix
+                    + f'\nexport PATH="{tool_bin}:${{PATH}}"\n'
+                    + "\nbootstrap_check_supported_os() { return 0; }\n"
+                    + "_bootstrap_standalone_checkout\n"
+                )
+                probe_file = root / "probe_bootstrap.sh"
+                probe_file.write_text(probe_script, encoding="utf-8")
+                return subprocess.run(
+                    ["bash", str(probe_file), *extra_args],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+
+            # 0. Verify embedded self-contained Python Sigstore verifier passes on real captured GitHub Actions bundle (including JSONL format)
+            real_fixture = ROOT / "tests" / "fixtures" / "sigstore_bundle_nightly_109_1.json"
+            real_digest = "018a270e2833886b1c59e2f831912c794e2ed66dacf6c2249ab1390fc2d44b26"
+            py_verifier = setup_src.split("<<'PYEOF'\n", 2)[1].split("\nPYEOF\n", 1)[0]
+            jsonl_bundle = root / "real.attestation.jsonl"
+            jsonl_bundle.write_text(real_fixture.read_text(encoding="utf-8").strip() + "\n", encoding="utf-8")
+            real_res = subprocess.run(
+                [
+                    "python3",
+                    "-",
+                    str(jsonl_bundle),
+                    "McEveritts/AetherFlow",
+                    real_digest,
+                    "aetherflow-linux-amd64.tar.gz",
+                    "v4.0.0-nightly.109.1",
+                    "nightly",
+                ],
+                input=py_verifier,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(real_res.returncode, 0, real_res.stderr)
+
+            # Subject name mismatch (e.g. replaying linux tarball bundle as bootstrap tarball) must fail closed
+            mismatch_res = subprocess.run(
+                [
+                    "python3",
+                    "-",
+                    str(jsonl_bundle),
+                    "McEveritts/AetherFlow",
+                    real_digest,
+                    "aetherflow-bootstrap.tar.gz",
+                    "v4.0.0-nightly.109.1",
+                    "nightly",
+                ],
+                input=py_verifier,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(mismatch_res.returncode, 0)
+
+            # 1. Missing attestation bundle fails closed BEFORE extraction & preserves opt_target
+            (release_dir / "aetherflow-bootstrap.tar.gz.attestation.jsonl").unlink()
+            res_missing = run_bootstrap()
+            self.assertNotEqual(res_missing.returncode, 0)
+            self.assertIn("Sigstore attestation", res_missing.stderr)
+            self.assertEqual(sentinel.read_text(), "PRESERVED")
+
+            # 2. Invalid/forged attestation bundle fails closed via self-contained Python verifier (no gh in PATH)
+            (release_dir / "aetherflow-bootstrap.tar.gz.attestation.jsonl").write_text(
+                '{"verificationMaterial":{},"dsseEnvelope":{"payloadType":"application/vnd.in-toto+json","payload":"e30=","signatures":[{"sig":"AA=="}]}}\n',
+                encoding="utf-8",
+            )
+            res_bad_sigstore = run_bootstrap()
+            self.assertNotEqual(res_bad_sigstore.returncode, 0)
+            self.assertIn("Sigstore attestation verification failed", res_bad_sigstore.stderr)
+            self.assertEqual(sentinel.read_text(), "PRESERVED")
+
+            # 3. With gh installed, gh attestation verify args are enforced and valid verification stages tree
+            gh_log = root / "gh_args.json"
+            (tool_bin / "gh").write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "if sys.argv[1:4] == ['attestation', 'verify', '--help']:\n"
+                "    sys.exit(0)\n"
+                "pathlib.Path(os.environ['TEST_GH_LOG']).write_text(json.dumps(sys.argv[1:]))\n"
+                "sys.exit(int(os.environ.get('TEST_GH_RC', '0')))\n",
+                encoding="utf-8",
+            )
+            (tool_bin / "gh").chmod(0o755)
+
+            res_gh_fail = run_bootstrap(extra_env={"TEST_GH_LOG": str(gh_log), "TEST_GH_RC": "1"})
+            self.assertNotEqual(res_gh_fail.returncode, 0)
+            self.assertEqual(sentinel.read_text(), "PRESERVED")
+
+            res_gh_ok = run_bootstrap(extra_env={"TEST_GH_LOG": str(gh_log), "TEST_GH_RC": "0"})
+            self.assertEqual(res_gh_ok.returncode, 0, res_gh_ok.stderr)
+            gh_args = json.loads(gh_log.read_text())
+            self.assertIn("--repo", gh_args)
+            self.assertEqual(gh_args[gh_args.index("--repo") + 1], "McEveritts/AetherFlow")
+            self.assertIn("--source-ref", gh_args)
+            self.assertEqual(gh_args[gh_args.index("--source-ref") + 1], "refs/tags/v4.0.0")
+            self.assertTrue((opt_target / "setup/modules/00-core.sh").is_file())
+            self.assertFalse(sentinel.exists())
+
+            # 4. Explicit --sha256 offline pin bypasses attestation download and succeeds when digest matches, fails on mismatch
+            (tool_bin / "gh").unlink()
+            res_pin_bad = run_bootstrap(extra_args=("--sha256", "0" * 64))
+            self.assertNotEqual(res_pin_bad.returncode, 0)
+            self.assertIn("SHA-256 verification failed", res_pin_bad.stderr)
+
+            opt_target.joinpath("SENTINEL2").write_text("OLD", encoding="utf-8")
+            (release_dir / "aetherflow-bootstrap.tar.gz.attestation.jsonl").unlink()
+            res_pin_ok = run_bootstrap(extra_args=("--sha256", tar_sha))
+            self.assertEqual(res_pin_ok.returncode, 0, res_pin_ok.stderr)
+            self.assertFalse(opt_target.joinpath("SENTINEL2").exists())
+            self.assertTrue((opt_target / "setup/AetherFlow-Setup").is_file())
 
     def test_embedded_e2e_runner_defaults_no_runner_and_fails_closed_without_isolation_controls(self):
         import shutil

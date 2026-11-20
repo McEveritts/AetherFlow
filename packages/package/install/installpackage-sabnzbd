@@ -135,7 +135,8 @@ SAB_URL="https://github.com/sabnzbd/sabnzbd/releases/download/${SAB_VERSION}/SAB
 
 report_progress 55 "Downloading and extracting SABnzbd ${SAB_VERSION} into staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.sabnzbd-build.XXXXXX)"
-TMP_TAR=$(mktemp /tmp/sabnzbd-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/sabnzbd-XXXXXX.tar.gz")
 af_logged download_file "$SAB_URL" "$TMP_TAR"
 af_validate_tar_archive "$TMP_TAR"
 af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1

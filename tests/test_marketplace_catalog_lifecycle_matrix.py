@@ -3447,8 +3447,6 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
             ("tautulli", ("var/lib/tautulli/config.ini",), False),
             ("sabnzbd", ("var/lib/sabnzbd/sabnzbd.ini",), False),
             ("nzbget", ("var/lib/nzbget/nzbget.conf",), False),
-            ("filebrowser", ("opt/AetherFlow/logs/filebrowser_credentials.txt",), True),
-            ("nextcloud", ("opt/AetherFlow/logs/nextcloud_credentials.txt",), True),
             ("vaultwarden", ("etc/vaultwarden/vaultwarden.env", "etc/vaultwarden/admin_token.txt"), False),
         )
         previous_umask = os.umask(0o022)
@@ -3467,6 +3465,15 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
                     for path in paths:
                         self.assertTrue(path.is_file(), path)
                         self.assertEqual(path.stat().st_mode & 0o077, 0, f"{path} mode {oct(path.stat().st_mode & 0o777)}")
+            for app, forbidden_dump in (
+                ("filebrowser", "opt/AetherFlow/logs/filebrowser_credentials.txt"),
+                ("nextcloud", "opt/AetherFlow/logs/nextcloud_credentials.txt"),
+            ):
+                with self.subTest(app=app, forbidden_dump=forbidden_dump):
+                    fixture = self.fixture(app)
+                    result = fixture.run("install")
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertFalse((fixture.root / forbidden_dump).exists(), forbidden_dump)
         finally:
             os.umask(previous_umask)
 

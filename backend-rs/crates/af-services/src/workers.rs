@@ -1,7 +1,7 @@
 //! Background Orchestration Workers.
 //!
 //! Provides four background tasks and on-demand package update utilities:
-//! 1. [`start_metrics_recorder`] — 60-second system metrics snapshotter & hourly 7-day retention pruner.
+//! 1. [`start_metrics_recorder`] — 60-second system metrics snapshotter & hourly 90-day retention pruner.
 //! 2. [`start_heal_worker`] — `af-heal` systemd service watchdog with exponential backoff (`10s * 2^attempt`, max 3 retries) and notifications.
 //! 3. [`start_smart_backup_scheduler`] — 30-minute scheduled SQLite online backup (`VACUUM INTO` + `.sha256` sidecar).
 //! 4. [`start_app_update_watcher`] & [`refresh_all_package_updates`] / [`refresh_package_update_by_id`] / [`get_package_update_map`] —
@@ -34,7 +34,7 @@ static METRICS_RECORDER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Spawns a background tokio task (60-second interval) that samples
 /// [`af_hardware::get_system_metrics_core()`], computes CPU usage, memory/swap
 /// percentages, disk read/write MB/s, and network rx/tx MB/s, inserts a row into
-/// `metrics_history`, and prunes rows older than 7 days every hour.
+/// `metrics_history`, and prunes rows older than 90 days every hour.
 pub fn start_metrics_recorder() {
     start_mediaflow_poller();
     if METRICS_RECORDER_ACTIVE.swap(true, Ordering::SeqCst) {
@@ -44,7 +44,7 @@ pub fn start_metrics_recorder() {
     tokio::spawn(async move {
         tracing::info!(
             interval_secs = 60,
-            retention_days = 7,
+            retention_days = 90,
             "metrics recorder initialized"
         );
 
@@ -457,6 +457,58 @@ fn collect_heal_poll_units() -> anyhow::Result<Option<HealPollInventory>> {
     Ok(Some(collect_monitored_systemd_units()?))
 }
 
+fn is_heal_auto_approve_enabled() -> bool {
+    env::var("AF_HEAL_AUTO_APPROVE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
+}
+
+fn notify_all_admin_users(level: &str, title: &str, message: &str) {
+    let Ok(conn) = af_db::get_conn() else {
+        return;
+    };
+    let mut admin_ids = Vec::new();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT id FROM users WHERE LOWER(TRIM(role)) = 'admin' ORDER BY id ASC")
+    {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
+            for uid in rows.flatten() {
+                admin_ids.push(uid);
+            }
+        }
+    }
+    for uid in admin_ids {
+        let _ = conn.execute(
+            "INSERT INTO notifications (user_id, level, title, message, read) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![uid, level, title, message],
+        );
+    }
+}
+
+fn queue_pending_heal_restart_dedup(unit: &str, display_name: &str) -> bool {
+    let action_cmd = format!("systemctl restart {unit}");
+    let already_pending = af_db::get_conn()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pending_actions WHERE status = 'pending' AND source = 'af-heal' AND action = ?1)",
+                params![action_cmd],
+                |r| r.get::<_, bool>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(false);
+    if already_pending {
+        return false;
+    }
+    let reason = format!(
+        "Service {} ({}) reported unhealthy; approve supervised systemd restart.",
+        display_name, unit
+    );
+    let (action_id, _) = af_db::queue_action("warn", "af-heal", &action_cmd, &reason);
+    action_id > 0
+}
+
 async fn perform_heal_check() {
     let inventory = match tokio::task::spawn_blocking(collect_heal_poll_units).await {
         Ok(Ok(Some(units))) => units,
@@ -473,6 +525,7 @@ async fn perform_heal_check() {
         });
     }
     let now = Instant::now();
+    let auto_approve = is_heal_auto_approve_enabled();
 
     for (unit, display_name) in inventory.monitored {
         if af_runner::is_package_execution_active(&unit) {
@@ -528,8 +581,7 @@ async fn perform_heal_check() {
                 max_retries = MAX_HEAL_RETRIES,
                 "af-heal: retry budget exhausted — manual intervention required"
             );
-            insert_user_notification(
-                1,
+            notify_all_admin_users(
                 "error",
                 "af-heal Restart Retries Exhausted",
                 &format!(
@@ -555,6 +607,26 @@ async fn perform_heal_check() {
         {
             return;
         }
+
+        if !auto_approve {
+            if queue_pending_heal_restart_dedup(&unit, &display_name) {
+                tracing::warn!(
+                    unit = %unit,
+                    service = %display_name,
+                    "af-heal: queued pending restart action (AF_HEAL_AUTO_APPROVE=false)"
+                );
+                notify_all_admin_users(
+                    "warning",
+                    "af-heal Restart Approval Required",
+                    &format!(
+                        "Service {} ({}) is unhealthy. A pending restart action was queued for administrator approval.",
+                        display_name, unit
+                    ),
+                );
+            }
+            continue;
+        }
+
         let previous_state = {
             let Ok(mut states) = HEAL_STATES.lock() else {
                 continue;
@@ -592,8 +664,7 @@ async fn perform_heal_check() {
                     attempt = attempt_num,
                     "af-heal: restart command succeeded"
                 );
-                insert_user_notification(
-                    1,
+                notify_all_admin_users(
                     "warning",
                     "af-heal Auto-Recovery",
                     &format!(
@@ -626,8 +697,7 @@ async fn perform_heal_check() {
                     };
 
                     if mark_exhausted {
-                        insert_user_notification(
-                            1,
+                        notify_all_admin_users(
                             "error",
                             "af-heal Recovery Exhausted",
                             &format!(
@@ -637,8 +707,7 @@ async fn perform_heal_check() {
                         );
                     }
                 } else {
-                    insert_user_notification(
-                        1,
+                    notify_all_admin_users(
                         "warning",
                         "af-heal Restart Attempt Failed",
                         &format!(
@@ -1762,18 +1831,29 @@ pub fn ensure_app_updates_columns_with_connection(conn: &rusqlite::Connection) {
     );
 }
 
+static PACKAGE_UPDATE_CACHE_DB_PATH: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+
 pub fn load_previous_package_update_records() -> HashMap<String, PackageUpdateRecord> {
-    ensure_app_updates_columns();
     let mut result = HashMap::new();
 
-    if let Ok(conn) = af_db::get_conn() {
-        if let Ok(mut stmt) = conn.prepare(
+    if let Ok(conn) = af_db::get_read_conn() {
+        let with_source_sql =
             "SELECT package_name, COALESCE(installed_version, ''), COALESCE(latest_version, ''),
                     COALESCE(update_available, 0), COALESCE(update_url, ''),
                     COALESCE(CAST(checked_at AS TEXT), ''), COALESCE(last_error, ''),
                     COALESCE(source_key, '')
-             FROM app_updates",
-        ) {
+             FROM app_updates";
+        let fallback_sql =
+            "SELECT package_name, COALESCE(installed_version, ''), COALESCE(latest_version, ''),
+                    COALESCE(update_available, 0), COALESCE(update_url, ''),
+                    COALESCE(CAST(checked_at AS TEXT), ''), COALESCE(last_error, ''),
+                    ''
+             FROM app_updates";
+
+        let stmt_res = conn
+            .prepare(with_source_sql)
+            .or_else(|_| conn.prepare(fallback_sql));
+        if let Ok(mut stmt) = stmt_res {
             if let Ok(rows) = stmt.query_map([], |r| {
                 let pkg_id: String = r.get(0)?;
                 let installed_ver: String = r.get(1)?;
@@ -1785,7 +1865,7 @@ pub fn load_previous_package_update_records() -> HashMap<String, PackageUpdateRe
                     update_available: r.get(3)?,
                     release_url: r.get(4)?,
                     checked_at: r.get(5)?,
-                    error: r.get(6)?,
+                    error: public_update_error(&r.get::<_, String>(6)?),
                     source_key: r.get(7)?,
                 })
             }) {
@@ -1800,14 +1880,27 @@ pub fn load_previous_package_update_records() -> HashMap<String, PackageUpdateRe
 
 /// Returns persisted and cached update records with safe status summaries.
 pub fn get_package_update_map() -> HashMap<String, PackageUpdateRecord> {
+    let current_db = af_db::get_db_path();
     let mut result = load_previous_package_update_records();
 
     if let Ok(mut cache) = PACKAGE_UPDATE_CACHE.lock() {
+        if let Ok(mut tracked_db) = PACKAGE_UPDATE_CACHE_DB_PATH.lock() {
+            if *tracked_db != current_db {
+                cache.clear();
+                *tracked_db = current_db;
+            }
+        }
         for (k, v) in &result {
             cache.entry(k.clone()).or_insert_with(|| v.clone());
         }
         for (k, v) in cache.iter() {
-            result.insert(k.clone(), v.clone());
+            let should_overlay = match result.get(k) {
+                None => true,
+                Some(db_rec) => !v.checked_at.is_empty() && v.checked_at > db_rec.checked_at,
+            };
+            if should_overlay {
+                result.insert(k.clone(), v.clone());
+            }
         }
     }
 
@@ -5284,8 +5377,10 @@ pub fn publish_mediaflow_progress(event: &serde_json::Value) {
     let _ = MEDIAFLOW_PROGRESS_TX.send(event.to_string());
 }
 
-async fn probe_mediaflow_duration_secs(src_path: &Path) -> Option<f64> {
-    let file_uri = format!("file:{}", src_path.to_string_lossy());
+async fn probe_mediaflow_duration_secs(
+    input_uri: &str,
+    #[cfg(unix)] pinned_fd: Option<std::os::unix::io::RawFd>,
+) -> Option<f64> {
     let mut cmd = Command::new("ffprobe");
     cmd.args([
         "-v",
@@ -5294,9 +5389,24 @@ async fn probe_mediaflow_duration_secs(src_path: &Path) -> Option<f64> {
         "format=duration",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
-        &file_uri,
+        input_uri,
     ])
     .kill_on_drop(true);
+    #[cfg(unix)]
+    if let Some(raw_fd) = pinned_fd {
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(raw_fd, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(raw_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
         .await
         .ok()?
@@ -5358,7 +5468,62 @@ fn is_path_within_allowed_mediaflow_roots(candidate: &Path, roots: &[PathBuf]) -
     })
 }
 
-fn validate_queued_mediaflow_source(raw_path: &str) -> Result<PathBuf, String> {
+const MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG: &str =
+    "Source media file changed during transcode; aborting publication to preserve replacement file";
+
+struct PinnedMediaflowSource {
+    #[cfg(unix)]
+    parent_dir: fs::File,
+    source_file: fs::File,
+    canon_parent: PathBuf,
+    canon_src: PathBuf,
+    source_fname: String,
+    #[cfg(unix)]
+    src_dev: u64,
+    #[cfg(unix)]
+    src_ino: u64,
+    #[allow(dead_code)]
+    src_size: u64,
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    src_mtime: i64,
+}
+
+#[cfg(unix)]
+fn cstring_from_os_name(name: &str, label: &str) -> Result<std::ffi::CString, String> {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(format!("Invalid {label} entry name"));
+    }
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| format!("{label} contains interior NUL"))
+}
+
+#[cfg(unix)]
+fn fstatat_nofollow(
+    dirfd: std::os::unix::io::RawFd,
+    entry_name: &str,
+) -> std::io::Result<libc::stat> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_name = std::ffi::CString::new(std::ffi::OsStr::new(entry_name).as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstatat(dirfd, c_name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(st)
+    }
+}
+
+#[cfg(unix)]
+fn unlinkat_entry(dirfd: std::os::unix::io::RawFd, entry_name: &str) {
+    if let Ok(c_name) = std::ffi::CString::new(entry_name.as_bytes()) {
+        unsafe {
+            let _ = libc::unlinkat(dirfd, c_name.as_ptr(), 0);
+        }
+    }
+}
+
+fn open_and_pin_mediaflow_source(raw_path: &str) -> Result<PinnedMediaflowSource, String> {
     let src_path = Path::new(raw_path);
     if raw_path.trim().is_empty() || !src_path.is_absolute() {
         return Err("Source path must be an absolute path".to_string());
@@ -5366,9 +5531,11 @@ fn validate_queued_mediaflow_source(raw_path: &str) -> Result<PathBuf, String> {
     let Some(fname_os) = src_path.file_name() else {
         return Err("Source path has no filename".to_string());
     };
-    let fname = fname_os.to_string_lossy();
-    if fname.starts_with(".tmp_mediaflow_")
-        || fname.ends_with(".tmp.mkv")
+    let Some(fname_str) = fname_os.to_str() else {
+        return Err("Source filename must be valid UTF-8".to_string());
+    };
+    if fname_str.starts_with(".tmp_mediaflow_")
+        || fname_str.ends_with(".tmp.mkv")
         || src_path
             .components()
             .any(|c| c.as_os_str() == ".mediaflow_trash")
@@ -5379,6 +5546,12 @@ fn validate_queued_mediaflow_source(raw_path: &str) -> Result<PathBuf, String> {
         return Err("Source path has no parent directory".to_string());
     };
 
+    let parent_lmeta =
+        fs::symlink_metadata(parent).map_err(|_| "Parent directory does not exist".to_string())?;
+    if parent_lmeta.file_type().is_symlink() || !parent_lmeta.is_dir() {
+        return Err("Source parent directory must not be a symlink".to_string());
+    }
+
     let lmeta =
         fs::symlink_metadata(src_path).map_err(|_| "Source file does not exist".to_string())?;
     if lmeta.file_type().is_symlink() {
@@ -5387,47 +5560,7 @@ fn validate_queued_mediaflow_source(raw_path: &str) -> Result<PathBuf, String> {
     if !lmeta.file_type().is_file() {
         return Err("Source path is not a regular file".to_string());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if lmeta.nlink() != 1 {
-            return Err("Refusing hard-linked source file (st_nlink != 1)".to_string());
-        }
-    }
 
-    let mut open_opts = fs::OpenOptions::new();
-    open_opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let opened = open_opts
-        .open(src_path)
-        .map_err(|e| format!("Failed to open source file safely: {e}"))?;
-    let fmeta = opened
-        .metadata()
-        .map_err(|e| format!("Failed to stat opened source file: {e}"))?;
-    if !fmeta.is_file() {
-        return Err("Opened source descriptor is not a regular file".to_string());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if fmeta.nlink() != 1 {
-            return Err("Refusing hard-linked source descriptor (st_nlink != 1)".to_string());
-        }
-        if fmeta.dev() != lmeta.dev() || fmeta.ino() != lmeta.ino() {
-            return Err("Source file inode changed concurrently during validation".to_string());
-        }
-    }
-    drop(opened);
-
-    let parent_lmeta =
-        fs::symlink_metadata(parent).map_err(|_| "Parent directory does not exist".to_string())?;
-    if parent_lmeta.file_type().is_symlink() || !parent_lmeta.is_dir() {
-        return Err("Source parent directory must not be a symlink".to_string());
-    }
     let canon_parent = fs::canonicalize(parent)
         .map_err(|e| format!("Failed to canonicalize parent directory: {e}"))?;
     let canon_src = fs::canonicalize(src_path)
@@ -5435,22 +5568,107 @@ fn validate_queued_mediaflow_source(raw_path: &str) -> Result<PathBuf, String> {
     if canon_src != canon_parent.join(fname_os) {
         return Err("Source path resolved through an unexpected link".to_string());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let cmeta = fs::symlink_metadata(&canon_src)
-            .map_err(|e| format!("Failed to verify canonical source metadata: {e}"))?;
-        if cmeta.dev() != lmeta.dev() || cmeta.ino() != lmeta.ino() || cmeta.nlink() != 1 {
-            return Err("Canonical source metadata mismatch".to_string());
-        }
-    }
 
     let roots = mediaflow_allowed_roots();
     if !is_path_within_allowed_mediaflow_roots(&canon_src, &roots) {
         return Err("Source file is outside allowed MediaFlow library roots".to_string());
     }
 
-    Ok(canon_src)
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        if lmeta.nlink() != 1 {
+            return Err("Refusing hard-linked source file (st_nlink != 1)".to_string());
+        }
+
+        let parent_cstr = std::ffi::CString::new(parent.as_os_str().as_bytes())
+            .map_err(|_| "Parent directory path contains interior NUL".to_string())?;
+        let dir_fd = unsafe {
+            libc::open(
+                parent_cstr.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if dir_fd < 0 {
+            return Err(format!(
+                "Failed to open pinned parent directory safely: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let parent_dir = unsafe { fs::File::from_raw_fd(dir_fd) };
+        let dir_meta = parent_dir
+            .metadata()
+            .map_err(|e| format!("Failed to stat pinned parent directory: {e}"))?;
+        let canon_parent_meta = fs::symlink_metadata(&canon_parent)
+            .map_err(|e| format!("Failed to verify canonical parent directory: {e}"))?;
+        if dir_meta.dev() != canon_parent_meta.dev() || dir_meta.ino() != canon_parent_meta.ino() {
+            return Err("Parent directory changed concurrently during pinning".to_string());
+        }
+
+        let fname_cstr = cstring_from_os_name(fname_str, "source filename")?;
+        let src_fd = unsafe {
+            libc::openat(
+                parent_dir.as_raw_fd(),
+                fname_cstr.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if src_fd < 0 {
+            return Err(format!(
+                "Failed to open pinned source file safely: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let source_file = unsafe { fs::File::from_raw_fd(src_fd) };
+        let fmeta = source_file
+            .metadata()
+            .map_err(|e| format!("Failed to stat opened source file: {e}"))?;
+        if !fmeta.is_file() {
+            return Err("Opened source descriptor is not a regular file".to_string());
+        }
+        if fmeta.nlink() != 1 {
+            return Err("Refusing hard-linked source descriptor (st_nlink != 1)".to_string());
+        }
+        if fmeta.dev() != lmeta.dev() || fmeta.ino() != lmeta.ino() {
+            return Err("Source file inode changed concurrently during validation".to_string());
+        }
+
+        Ok(PinnedMediaflowSource {
+            parent_dir,
+            source_file,
+            canon_parent,
+            canon_src,
+            source_fname: fname_str.to_string(),
+            src_dev: fmeta.dev(),
+            src_ino: fmeta.ino(),
+            src_size: fmeta.len(),
+            src_mtime: fmeta.mtime(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    {
+        let source_file = fs::OpenOptions::new()
+            .read(true)
+            .open(&canon_src)
+            .map_err(|e| format!("Failed to open source file safely: {e}"))?;
+        let fmeta = source_file
+            .metadata()
+            .map_err(|e| format!("Failed to stat opened source file: {e}"))?;
+        if !fmeta.is_file() {
+            return Err("Opened source descriptor is not a regular file".to_string());
+        }
+        Ok(PinnedMediaflowSource {
+            source_file,
+            canon_parent,
+            canon_src,
+            source_fname: fname_str.to_string(),
+            src_size: fmeta.len(),
+        })
+    }
 }
 
 fn is_stale_mediaflow_temp_name(name: &str) -> bool {
@@ -5627,7 +5845,7 @@ pub async fn process_next_mediaflow_job() -> bool {
         return false;
     };
 
-    let src_path = match validate_queued_mediaflow_source(&file_path) {
+    let pinned = match open_and_pin_mediaflow_source(&file_path) {
         Ok(valid) => valid,
         Err(reason) => {
             record_mediaflow_failure(job_id, &reason);
@@ -5640,18 +5858,17 @@ pub async fn process_next_mediaflow_job() -> bool {
             return true;
         }
     };
+    let src_path = &pinned.canon_src;
+    let parent_dir = &pinned.canon_parent;
 
     let flags = af_hardware::get_gpu_transcode_flags();
-    let Some(parent_dir) = src_path.parent() else {
-        record_mediaflow_failure(job_id, "Source file has no parent directory");
-        return true;
-    };
     let stem = src_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let out_path = parent_dir.join(format!("{}_hevc.mkv", stem));
-    if out_path != src_path && fs::symlink_metadata(&out_path).is_ok() {
+    let out_fname = format!("{}_hevc.mkv", stem);
+    let out_path = parent_dir.join(&out_fname);
+    if out_path != *src_path && fs::symlink_metadata(&out_path).is_ok() {
         let msg = format!(
             "Refusing to clobber existing output file: {}",
             out_path.display()
@@ -5666,21 +5883,38 @@ pub async fn process_next_mediaflow_job() -> bool {
         return true;
     }
 
-    let temp_output = parent_dir.join(format!(".tmp_mediaflow_{}.mkv", job_id));
-    if let Ok(tmeta) = fs::symlink_metadata(&temp_output) {
-        if tmeta.file_type().is_symlink() || !tmeta.file_type().is_file() {
-            let msg = "Refusing unsafe pre-existing temporary output entry";
-            record_mediaflow_failure(job_id, msg);
-            publish_mediaflow_progress(&serde_json::json!({
-                "status": "failed",
-                "file": file_path,
-                "progress": 0,
-                "message": msg,
-            }));
-            return true;
-        }
-        if let Err(err) = fs::remove_file(&temp_output) {
-            let msg = format!("Failed to clear stale temporary output file: {err}");
+    let temp_fname = format!(
+        ".tmp_mediaflow_{}_{}.mkv",
+        job_id,
+        uuid::Uuid::new_v4().simple()
+    );
+    let temp_output = parent_dir.join(&temp_fname);
+
+    #[cfg(unix)]
+    let (temp_dev, temp_ino) = {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        let temp_cstr = match cstring_from_os_name(&temp_fname, "temporary output filename") {
+            Ok(c) => c,
+            Err(msg) => {
+                record_mediaflow_failure(job_id, &msg);
+                return true;
+            }
+        };
+        let tfd = unsafe {
+            libc::openat(
+                pinned.parent_dir.as_raw_fd(),
+                temp_cstr.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if tfd < 0 {
+            let msg = format!(
+                "Failed to create exclusive temporary output file: {}",
+                std::io::Error::last_os_error()
+            );
             record_mediaflow_failure(job_id, &msg);
             publish_mediaflow_progress(&serde_json::json!({
                 "status": "failed",
@@ -5690,9 +5924,43 @@ pub async fn process_next_mediaflow_job() -> bool {
             }));
             return true;
         }
+        let temp_file = unsafe { fs::File::from_raw_fd(tfd) };
+        match temp_file.metadata() {
+            Ok(meta) => (meta.dev(), meta.ino()),
+            Err(err) => {
+                drop(temp_file);
+                unlinkat_entry(pinned.parent_dir.as_raw_fd(), &temp_fname);
+                let msg = format!("Failed to inspect temporary output file: {err}");
+                record_mediaflow_failure(job_id, &msg);
+                return true;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    if let Err(err) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_output)
+    {
+        let msg = format!("Failed to create exclusive temporary output file: {err}");
+        record_mediaflow_failure(job_id, &msg);
+        return true;
     }
 
-    let mut args: Vec<String> = vec!["-nostdin".to_string()];
+    let cleanup_temp_file = || {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unlinkat_entry(pinned.parent_dir.as_raw_fd(), &temp_fname);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fs::remove_file(&temp_output);
+        }
+    };
+
+    let mut args: Vec<String> = vec!["-nostdin".to_string(), "-y".to_string()];
     if !flags.hw_accel.is_empty() && flags.hw_accel != "none" {
         args.push("-hwaccel".to_string());
         args.push(flags.hw_accel.clone());
@@ -5712,10 +5980,22 @@ pub async fn process_next_mediaflow_job() -> bool {
         flags.video_codec.trim()
     };
 
+    #[cfg(unix)]
+    let (input_uri, child_pinned_fd) = {
+        use std::os::unix::io::AsRawFd;
+        let raw_fd = pinned.source_file.as_raw_fd();
+        if cfg!(target_os = "linux") && Path::new("/proc/self/fd").is_dir() {
+            (format!("file:/proc/self/fd/{raw_fd}"), Some(raw_fd))
+        } else {
+            (format!("file:{}", src_path.to_string_lossy()), None)
+        }
+    };
+    #[cfg(not(unix))]
     let input_uri = format!("file:{}", src_path.to_string_lossy());
+
     args.extend([
         "-i".to_string(),
-        input_uri,
+        input_uri.clone(),
         "-map".to_string(),
         "0".to_string(),
         "-c:v".to_string(),
@@ -5745,7 +6025,10 @@ pub async fn process_next_mediaflow_job() -> bool {
         "message": "Starting transcode",
     }));
 
-    let duration_secs = probe_mediaflow_duration_secs(&src_path).await;
+    #[cfg(unix)]
+    let duration_secs = probe_mediaflow_duration_secs(&input_uri, child_pinned_fd).await;
+    #[cfg(not(unix))]
+    let duration_secs = probe_mediaflow_duration_secs(&input_uri).await;
     let timeout = mediaflow_transcode_timeout();
 
     let mut cmd = Command::new("ffmpeg");
@@ -5753,11 +6036,26 @@ pub async fn process_next_mediaflow_job() -> bool {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    if let Some(raw_fd) = child_pinned_fd {
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(raw_fd, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(raw_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(err) => {
-            let _ = fs::remove_file(&temp_output);
+            cleanup_temp_file();
             let msg = format!("FFmpeg execution error: {}", err);
             record_mediaflow_failure(job_id, &msg);
             publish_mediaflow_progress(&serde_json::json!({
@@ -5833,13 +6131,30 @@ pub async fn process_next_mediaflow_job() -> bool {
 
     match wait_result {
         Ok((Ok(status), _stderr_text)) if status.success() => {
+            #[cfg(unix)]
+            let temp_size = {
+                use std::os::unix::io::AsRawFd;
+                let dirfd = pinned.parent_dir.as_raw_fd();
+                match fstatat_nofollow(dirfd, &temp_fname) {
+                    Ok(st)
+                        if (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+                            && st.st_dev == temp_dev
+                            && st.st_ino == temp_ino =>
+                    {
+                        st.st_size.max(0) as u64
+                    }
+                    _ => 0,
+                }
+            };
+            #[cfg(not(unix))]
             let temp_size = fs::symlink_metadata(&temp_output)
                 .ok()
                 .filter(|m| !m.file_type().is_symlink() && m.file_type().is_file())
                 .map(|m| m.len())
                 .unwrap_or(0);
+
             if temp_size == 0 {
-                let _ = fs::remove_file(&temp_output);
+                cleanup_temp_file();
                 let msg = "FFmpeg exited cleanly but produced an empty or missing output file";
                 record_mediaflow_failure(job_id, msg);
                 publish_mediaflow_progress(&serde_json::json!({
@@ -5851,10 +6166,57 @@ pub async fn process_next_mediaflow_job() -> bool {
                 return true;
             }
 
-            let trash_dir = parent_dir.join(".mediaflow_trash");
-            if let Ok(tmeta) = fs::symlink_metadata(&trash_dir) {
-                if tmeta.file_type().is_symlink() || !tmeta.is_dir() {
-                    let _ = fs::remove_file(&temp_output);
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::{AsRawFd, FromRawFd};
+                let dirfd = pinned.parent_dir.as_raw_fd();
+                let source_matches = match fstatat_nofollow(dirfd, &pinned.source_fname) {
+                    Ok(live_st) => {
+                        (live_st.st_mode & libc::S_IFMT) == libc::S_IFREG
+                            && live_st.st_dev == pinned.src_dev
+                            && live_st.st_ino == pinned.src_ino
+                    }
+                    Err(_) => false,
+                };
+                if !source_matches {
+                    cleanup_temp_file();
+                    record_mediaflow_failure(job_id, MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG);
+                    publish_mediaflow_progress(&serde_json::json!({
+                        "status": "failed",
+                        "file": file_path,
+                        "progress": 0,
+                        "message": MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG,
+                    }));
+                    return true;
+                }
+
+                let trash_cstr = std::ffi::CString::new(".mediaflow_trash").unwrap();
+                unsafe {
+                    if libc::mkdirat(dirfd, trash_cstr.as_ptr(), 0o755) < 0 {
+                        let err = std::io::Error::last_os_error();
+                        if err.kind() != std::io::ErrorKind::AlreadyExists {
+                            cleanup_temp_file();
+                            let msg = format!("Failed to create .mediaflow_trash directory: {err}");
+                            record_mediaflow_failure(job_id, &msg);
+                            publish_mediaflow_progress(&serde_json::json!({
+                                "status": "failed",
+                                "file": file_path,
+                                "progress": 0,
+                                "message": msg,
+                            }));
+                            return true;
+                        }
+                    }
+                }
+                let raw_trash_fd = unsafe {
+                    libc::openat(
+                        dirfd,
+                        trash_cstr.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if raw_trash_fd < 0 {
+                    cleanup_temp_file();
                     let msg = "Refusing symlink or non-directory .mediaflow_trash";
                     record_mediaflow_failure(job_id, msg);
                     publish_mediaflow_progress(&serde_json::json!({
@@ -5865,10 +6227,115 @@ pub async fn process_next_mediaflow_job() -> bool {
                     }));
                     return true;
                 }
-            } else if let Err(err) = fs::create_dir(&trash_dir) {
-                if err.kind() != std::io::ErrorKind::AlreadyExists {
-                    let _ = fs::remove_file(&temp_output);
-                    let msg = format!("Failed to create .mediaflow_trash directory: {err}");
+                let trash_dir_file = unsafe { fs::File::from_raw_fd(raw_trash_fd) };
+                let trash_fd = trash_dir_file.as_raw_fd();
+
+                let mut trash_entry_name = format!("{job_id}_{}", pinned.source_fname);
+                if fstatat_nofollow(trash_fd, &trash_entry_name).is_ok() {
+                    trash_entry_name = format!(
+                        "{job_id}_{}_{}",
+                        uuid::Uuid::new_v4().simple(),
+                        pinned.source_fname
+                    );
+                }
+                if fstatat_nofollow(trash_fd, &trash_entry_name).is_ok() {
+                    cleanup_temp_file();
+                    let msg = "Refusing to clobber existing .mediaflow_trash entry";
+                    record_mediaflow_failure(job_id, msg);
+                    publish_mediaflow_progress(&serde_json::json!({
+                        "status": "failed",
+                        "file": file_path,
+                        "progress": 0,
+                        "message": msg,
+                    }));
+                    return true;
+                }
+
+                let temp_c = std::ffi::CString::new(temp_fname.as_bytes()).unwrap();
+                let out_c = std::ffi::CString::new(out_fname.as_bytes()).unwrap();
+                let src_c = std::ffi::CString::new(pinned.source_fname.as_bytes()).unwrap();
+                let trash_entry_c = std::ffi::CString::new(trash_entry_name.as_bytes()).unwrap();
+
+                let publish_res: Result<(), String> = if out_fname != pinned.source_fname {
+                    let link_rc =
+                        unsafe { libc::linkat(dirfd, temp_c.as_ptr(), dirfd, out_c.as_ptr(), 0) };
+                    if link_rc < 0 {
+                        let err = std::io::Error::last_os_error();
+                        cleanup_temp_file();
+                        Err(format!(
+                            "Failed to publish transcoded output without clobbering target: {err}"
+                        ))
+                    } else {
+                        let still_same = fstatat_nofollow(dirfd, &pinned.source_fname)
+                            .map(|st| {
+                                (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+                                    && st.st_dev == pinned.src_dev
+                                    && st.st_ino == pinned.src_ino
+                            })
+                            .unwrap_or(false);
+                        if !still_same {
+                            unlinkat_entry(dirfd, &out_fname);
+                            cleanup_temp_file();
+                            Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string())
+                        } else if unsafe {
+                            libc::renameat(dirfd, src_c.as_ptr(), trash_fd, trash_entry_c.as_ptr())
+                        } < 0
+                        {
+                            let err = std::io::Error::last_os_error();
+                            unlinkat_entry(dirfd, &out_fname);
+                            cleanup_temp_file();
+                            Err(format!(
+                                "Failed to move original media into .mediaflow_trash: {err}"
+                            ))
+                        } else {
+                            cleanup_temp_file();
+                            Ok(())
+                        }
+                    }
+                } else {
+                    let still_same = fstatat_nofollow(dirfd, &pinned.source_fname)
+                        .map(|st| {
+                            (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+                                && st.st_dev == pinned.src_dev
+                                && st.st_ino == pinned.src_ino
+                        })
+                        .unwrap_or(false);
+                    if !still_same {
+                        cleanup_temp_file();
+                        Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string())
+                    } else if unsafe {
+                        libc::renameat(dirfd, src_c.as_ptr(), trash_fd, trash_entry_c.as_ptr())
+                    } < 0
+                    {
+                        let err = std::io::Error::last_os_error();
+                        cleanup_temp_file();
+                        Err(format!(
+                            "Failed to move original media into .mediaflow_trash: {err}"
+                        ))
+                    } else if unsafe {
+                        libc::linkat(dirfd, temp_c.as_ptr(), dirfd, out_c.as_ptr(), 0)
+                    } < 0
+                    {
+                        let err = std::io::Error::last_os_error();
+                        unsafe {
+                            let _ = libc::renameat(
+                                trash_fd,
+                                trash_entry_c.as_ptr(),
+                                dirfd,
+                                src_c.as_ptr(),
+                            );
+                        }
+                        cleanup_temp_file();
+                        Err(format!("Failed to publish transcoded output: {err}"))
+                    } else {
+                        cleanup_temp_file();
+                        Ok(())
+                    }
+                };
+
+                drop(trash_dir_file);
+
+                if let Err(msg) = publish_res {
                     record_mediaflow_failure(job_id, &msg);
                     publish_mediaflow_progress(&serde_json::json!({
                         "status": "failed",
@@ -5880,72 +6347,7 @@ pub async fn process_next_mediaflow_job() -> bool {
                 }
             }
 
-            let fname = src_path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("source");
-            let mut trashed_src = trash_dir.join(format!("{job_id}_{fname}"));
-            if fs::symlink_metadata(&trashed_src).is_ok() {
-                trashed_src = trash_dir.join(format!(
-                    "{job_id}_{}_{fname}",
-                    uuid::Uuid::new_v4().simple()
-                ));
-            }
-            if fs::symlink_metadata(&trashed_src).is_ok() {
-                let _ = fs::remove_file(&temp_output);
-                let msg = "Refusing to clobber existing .mediaflow_trash entry";
-                record_mediaflow_failure(job_id, msg);
-                publish_mediaflow_progress(&serde_json::json!({
-                    "status": "failed",
-                    "file": file_path,
-                    "progress": 0,
-                    "message": msg,
-                }));
-                return true;
-            }
-
-            let publish_res: Result<(), String> = if out_path != src_path {
-                // Non-clobbering publication: hard_link fails atomically if out_path exists.
-                if let Err(err) = fs::hard_link(&temp_output, &out_path) {
-                    let _ = fs::remove_file(&temp_output);
-                    Err(format!(
-                        "Failed to publish transcoded output without clobbering target: {err}"
-                    ))
-                } else if let Err(err) = fs::rename(&src_path, &trashed_src) {
-                    let _ = fs::remove_file(&out_path);
-                    let _ = fs::remove_file(&temp_output);
-                    Err(format!(
-                        "Failed to move original media into .mediaflow_trash: {err}"
-                    ))
-                } else {
-                    let _ = fs::remove_file(&temp_output);
-                    Ok(())
-                }
-            } else if let Err(err) = fs::rename(&src_path, &trashed_src) {
-                let _ = fs::remove_file(&temp_output);
-                Err(format!(
-                    "Failed to move original media into .mediaflow_trash: {err}"
-                ))
-            } else if let Err(err) = fs::hard_link(&temp_output, &out_path) {
-                let _ = fs::rename(&trashed_src, &src_path);
-                let _ = fs::remove_file(&temp_output);
-                Err(format!("Failed to publish transcoded output: {err}"))
-            } else {
-                let _ = fs::remove_file(&temp_output);
-                Ok(())
-            };
-
-            if let Err(msg) = publish_res {
-                record_mediaflow_failure(job_id, &msg);
-                publish_mediaflow_progress(&serde_json::json!({
-                    "status": "failed",
-                    "file": file_path,
-                    "progress": 0,
-                    "message": msg,
-                }));
-                return true;
-            }
-
+            let trash_dir = parent_dir.join(".mediaflow_trash");
             prune_mediaflow_trash_dir(&trash_dir, mediaflow_trash_retention());
 
             let new_size = temp_size as i64;
@@ -5970,7 +6372,7 @@ pub async fn process_next_mediaflow_job() -> bool {
             }));
         }
         Ok((Ok(status), stderr_text)) => {
-            let _ = fs::remove_file(&temp_output);
+            cleanup_temp_file();
             let err_log = tail_error_log(&stderr_text, 1000);
             let msg = format!("FFmpeg error ({}): {}", status, err_log);
             record_mediaflow_failure(job_id, &msg);
@@ -5982,7 +6384,7 @@ pub async fn process_next_mediaflow_job() -> bool {
             }));
         }
         Ok((Err(err), _)) => {
-            let _ = fs::remove_file(&temp_output);
+            cleanup_temp_file();
             let msg = format!("FFmpeg execution error: {}", err);
             record_mediaflow_failure(job_id, &msg);
             publish_mediaflow_progress(&serde_json::json!({
@@ -5995,7 +6397,7 @@ pub async fn process_next_mediaflow_job() -> bool {
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            let _ = fs::remove_file(&temp_output);
+            cleanup_temp_file();
             let msg = format!("FFmpeg timed out after {}s", timeout.as_secs());
             record_mediaflow_failure(job_id, &msg);
             publish_mediaflow_progress(&serde_json::json!({
@@ -6007,6 +6409,7 @@ pub async fn process_next_mediaflow_job() -> bool {
         }
     }
 
+    drop(pinned);
     true
 }
 
@@ -6858,16 +7261,22 @@ signal.pause()'
 
     #[test]
     fn test_threadfin_fallback_preserves_newer_previous_and_sets_error() {
+        let expected_key = crate::get_package_catalog()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "threadfin")
+            .map(|p| canonical_update_source_key("https://api.github.com", &p))
+            .unwrap();
         let prev = PackageUpdateRecord {
             package_id: "threadfin".to_string(),
             installed: true,
             installed_version: "1.1.0".to_string(),
-            latest_version: "1.2.0".to_string(),
+            latest_version: "1.3.0".to_string(),
             update_available: true,
             checked_at: "2026-11-01T00:00:00Z".to_string(),
-            release_url: "https://github.com/Threadfin/Threadfin/releases/tag/1.2.0".to_string(),
+            release_url: "https://github.com/Threadfin/Threadfin/releases/tag/1.3.0".to_string(),
             error: String::new(),
-            source_key: "github:https://api.github.com|threadfin/threadfin|stable".to_string(),
+            source_key: expected_key,
         };
 
         let failed_record = build_package_update_record(
@@ -6879,8 +7288,8 @@ signal.pause()'
             "2026-11-08T12:00:00Z".to_string(),
         );
 
-        // Newer version 1.2.0 from previous observation must NOT be overwritten by static fallback (e.g. 1.1.2)
-        assert_eq!(failed_record.latest_version, "1.2.0");
+        // Newer version 1.3.0 from previous observation must NOT be overwritten by static fallback (1.2.37)
+        assert_eq!(failed_record.latest_version, "1.3.0");
         assert_eq!(failed_record.checked_at, "2026-11-01T00:00:00Z");
         assert_eq!(failed_record.error, "Latest version could not be confirmed");
     }
@@ -10749,5 +11158,184 @@ signal.pause()'
         assert!(movie.exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_mediaflow_mid_transcode_source_replacement_preserves_replacement_untouched() {
+        let name = "workers::tests::test_mediaflow_mid_transcode_source_replacement_preserves_replacement_untouched";
+        if std::env::var("AF_MEDIAFLOW_SWAP_CHILD").as_deref() != Ok(name) {
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("AF_MEDIAFLOW_SWAP_CHILD", name)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = env::temp_dir().join(format!("af-mf-swap-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("media")).unwrap();
+        let db_path = root.join("aetherflow.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        env::set_var("AF_ALLOWED_FS_ROOTS", root.join("media"));
+        af_db::init_db().unwrap();
+
+        let src_file = root.join("media/movie.mp4");
+        fs::write(&src_file, b"original-v1-video-payload").unwrap();
+
+        // Fake ffmpeg verifies pinned `/proc/self/fd/<fd>` input, atomically swaps `movie.mp4` mid-transcode
+        // when AF_SWAP_TARGET is set, and writes transcoded bytes into the exclusive 0600 temp file.
+        let fake_ffmpeg = root.join("bin/ffmpeg");
+        fs::write(
+            &fake_ffmpeg,
+            "#!/bin/sh\nset -eu\nin_uri=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-i\" ]; then in_uri=\"$arg\"; fi\n  prev=\"$arg\"\n  out=\"$arg\"\ndone\nin_path=\"${in_uri#file:}\"\ncat \"$in_path\" > /dev/null\nif [ -n \"${AF_SWAP_TARGET:-}\" ]; then\n  printf 'upgraded-replacement-4k-remux' > \"${AF_SWAP_TARGET}.new\"\n  mv \"${AF_SWAP_TARGET}.new\" \"$AF_SWAP_TARGET\"\nfi\nout_path=\"${out#file:}\"\nprintf 'transcoded-hevc-stream-payload' > \"$out_path\"\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+        let fake_ffprobe = root.join("bin/ffprobe");
+        fs::write(&fake_ffprobe, "#!/bin/sh\necho 12.0\n").unwrap();
+        fs::set_permissions(&fake_ffprobe, fs::Permissions::from_mode(0o755)).unwrap();
+        env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("bin").display(),
+                env::var("PATH").unwrap()
+            ),
+        );
+        env::set_var("AF_SWAP_TARGET", &src_file);
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (1, ?1, 'h264', 25, 'APPROVED')",
+                params![src_file.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+
+        assert!(process_next_mediaflow_job().await);
+
+        // 1. Replacement file MUST remain completely untouched and never moved into `.mediaflow_trash`!
+        assert_eq!(
+            fs::read(&src_file).unwrap(),
+            b"upgraded-replacement-4k-remux"
+        );
+        assert!(!root.join("media/movie_hevc.mkv").exists());
+        let trash_dir = root.join("media/.mediaflow_trash");
+        if trash_dir.exists() {
+            assert_eq!(fs::read_dir(&trash_dir).unwrap().count(), 0);
+        }
+        // No leftover `.tmp_mediaflow_*` files
+        let media_entries: Vec<String> = fs::read_dir(root.join("media"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(media_entries, vec!["movie.mp4".to_string()]);
+
+        let (status, err_log): (String, String) = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT status, error_log FROM mediaflow_queue WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "FAILED");
+        assert_eq!(err_log, MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG);
+
+        // 2. Normal un-swapped job succeeds end-to-end with pinned dirfd + random 0600 temp file
+        env::remove_var("AF_SWAP_TARGET");
+        let src_ok = root.join("media/clean.mp4");
+        fs::write(&src_ok, b"untouched-original-source").unwrap();
+        let orig_ino = fs::symlink_metadata(&src_ok).unwrap().ino();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (2, ?1, 'h264', 25, 'APPROVED')",
+                params![src_ok.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+        assert!(process_next_mediaflow_job().await);
+        assert!(!src_ok.exists());
+        assert_eq!(
+            fs::read(root.join("media/clean_hevc.mkv")).unwrap(),
+            b"transcoded-hevc-stream-payload"
+        );
+        let trashed_ino = fs::symlink_metadata(root.join("media/.mediaflow_trash/2_clean.mp4"))
+            .unwrap()
+            .ino();
+        assert_eq!(trashed_ino, orig_ino);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_heal_auto_approve_false_queues_deduplicated_action_and_notifies_all_admins() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        let name = "workers::tests::test_heal_auto_approve_false_queues_deduplicated_action_and_notifies_all_admins";
+        if !isolated(name) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let db_path = fixture.root.join("heal-admins.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        env::remove_var("AF_HEAL_AUTO_APPROVE");
+        af_db::init_db().unwrap();
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM users", []).unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role) VALUES (10, 'admin_a', 'x', 'admin'), (20, 'admin_b', 'x', 'admin'), (30, 'viewer_c', 'x', 'user')",
+                [],
+            )
+            .unwrap();
+        }
+
+        fixture.write_packages(&[Fixture::package("fixture", "systemd", "fixture-main")]);
+        fixture.command(
+            "systemctl",
+            "printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\ncase \"$1 $2\" in 'is-active fixture-main') echo inactive; exit 3;; is-active*) echo active;; show*) printf 'LoadState=loaded\\nType=simple\\n';; *) exit 92;; esac\n",
+        );
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        *HEAL_STATES.lock().unwrap() = HashMap::new();
+        runtime.block_on(perform_heal_check());
+        // Second tick must deduplicate pending action and avoid spamming notifications
+        runtime.block_on(perform_heal_check());
+
+        let conn = af_db::get_conn().unwrap();
+        let pending_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_actions WHERE source = 'af-heal' AND action = 'systemctl restart fixture-main' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 1);
+
+        let mut notified_uids: Vec<i64> = Vec::new();
+        let mut stmt = conn
+            .prepare("SELECT user_id FROM notifications ORDER BY user_id ASC")
+            .unwrap();
+        for uid in stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .flatten()
+        {
+            notified_uids.push(uid);
+        }
+        assert_eq!(notified_uids, vec![10, 20]);
     }
 }

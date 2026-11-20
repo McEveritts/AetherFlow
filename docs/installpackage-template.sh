@@ -52,7 +52,12 @@ esac
 ASSET_SUFFIX="linux-${APP_ARCH}.tar.gz"
 
 report_progress 25 "Resolving the current ${APP_LABEL} release..."
-RELEASE_JSON="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    _target_clean="${AF_TARGET_VERSION#[vV]}"
+    RELEASE_JSON="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${_target_clean}" 2>/dev/null || curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${_target_clean}")"
+else
+    RELEASE_JSON="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")"
+fi
 RELEASE_INFO="$(python3 - "$RELEASE_JSON" "$ASSET_SUFFIX" <<'PYEOF'
 import json, sys
 release = json.loads(sys.argv[1])
@@ -73,13 +78,13 @@ DOWNLOAD_URL="${RELEASE_INFO#*$'\n'}"
 if ! id -u "$PACKAGE_NAME" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$APP_DATA_DIR" --shell /usr/sbin/nologin "$PACKAGE_NAME"
 fi
-mkdir -p "$APP_DATA_DIR" "$(dirname "$APP_INSTALL_DIR")"
-TMP_TAR="$(mktemp "/tmp/${PACKAGE_NAME}-XXXXXX.tar.gz")"
+mkdir -p "$APP_DATA_DIR" "$(dirname "$APP_INSTALL_DIR")" "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/${PACKAGE_NAME}-XXXXXX.tar.gz")"
 trap 'rm -f -- "$TMP_TAR"' EXIT
 report_progress 40 "Downloading and staging ${APP_LABEL}..."
 af_logged download_file "$DOWNLOAD_URL" "$TMP_TAR"
 stage_app_archive "$TMP_TAR" "$APP_INSTALL_DIR" "$APP_LABEL" "$APP_DATA_DIR" "$PACKAGE_NAME" "$APP_LABEL"
-chmod 755 "$APP_BINARY"
+chmod 0755 "$APP_BINARY"
 queue_app_version "$APP_INSTALL_DIR/.af-version" "${APP_VERSION#v}"
 chown -hRP "$PACKAGE_NAME:$PACKAGE_NAME" "$APP_INSTALL_DIR" "$APP_DATA_DIR"
 
@@ -113,6 +118,7 @@ ReadWritePaths=${APP_DATA_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "/etc/systemd/system/${PACKAGE_NAME}.service"
 af_logged systemctl daemon-reload
 af_logged systemctl enable "$PACKAGE_NAME"
 af_logged systemctl restart "$PACKAGE_NAME"

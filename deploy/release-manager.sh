@@ -1964,7 +1964,7 @@ restart_systemd_units() {
             return 1
         fi
         mkdir -p "${SYSTEMD_UNITS_DST}"
-        local dropin_unit dropin_dir dropin_dest defaults_dest tmp_dropin tmp_defaults dropin_payload defaults_payload
+        local dropin_unit dropin_dir dropin_dest defaults_dest tmp_dropin dropin_payload
         for dropin_unit in "${dropin_units[@]}"; do
             dropin_dir="${SYSTEMD_UNITS_DST}/${dropin_unit}.d"
             defaults_dest="${dropin_dir}/05-aetherflow-unit-defaults.conf"
@@ -1973,24 +1973,20 @@ restart_systemd_units() {
                 printf 'Refusing symlinked systemd drop-in path: %s\n' "${dropin_dest}" >&2
                 return 1
             fi
+            # Remove stale 05-aetherflow-unit-defaults.conf (canonical units own RestartSec/TimeoutStopSec)
+            rm -f "${defaults_dest}"
+            if [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
+                # Remove stale log-retention 10-aetherflow-hardening.conf (canonical unit sets UMask=0027)
+                rm -f "${dropin_dest}"
+                rmdir "${dropin_dir}" 2>/dev/null || true
+                continue
+            fi
             mkdir -p "${dropin_dir}"
             chmod 0755 "${dropin_dir}"
-            if [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
-                defaults_payload=$'[Service]\nTimeoutStartSec=120s\nTimeoutStopSec=30s\n'
-            else
-                defaults_payload=$'[Service]\nRestart=on-failure\nRestartSec=3s\nTimeoutStopSec=30s\n'
-            fi
             if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
                 dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n'
-            elif [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
-                dropin_payload=$'[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n'
             else
                 dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n'
-            fi
-            tmp_defaults="$(mktemp "${dropin_dir}/.05-aetherflow-unit-defaults.conf.tmp.XXXXXX")" || return 1
-            if ! printf '%s' "${defaults_payload}" > "${tmp_defaults}" || ! chmod 0644 "${tmp_defaults}" || ! mv -f "${tmp_defaults}" "${defaults_dest}"; then
-                rm -f "${tmp_defaults}"
-                return 1
             fi
             tmp_dropin="$(mktemp "${dropin_dir}/.10-aetherflow-hardening.conf.tmp.XXXXXX")" || return 1
             if ! printf '%s' "${dropin_payload}" > "${tmp_dropin}" || ! chmod 0644 "${tmp_dropin}" || ! mv -f "${tmp_dropin}" "${dropin_dest}"; then

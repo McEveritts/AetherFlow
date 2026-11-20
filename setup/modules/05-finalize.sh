@@ -5,12 +5,19 @@
 OUTTO="${OUTTO:-/dev/null}"
 
 
-# function to configure pure-ftpd
+# function to configure vsftpd (explicit opt-in via AETHERFLOW_ENABLE_FTPD=yes)
 function _ftpdconfig() {
+	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
+		1|true|TRUE|yes|YES|y|Y|on|ON) ;;
+		*) return 0 ;;
+	esac
+
 	\cp -f ${local_setup}templates/openssl.cnf.template /root/.openssl.cnf
 
 	#openssl req -config /root/.openssl.cnf -x509 -nodes -days 365 -newkey rsa:1024 -keyout /etc/ssl/private/vsftpd.pem -out /etc/ssl/private/vsftpd.pem >/dev/null 2>&1
 	openssl req -config /root/.openssl.cnf -x509 -nodes -days 720 -newkey rsa:2048 -keyout /etc/ssl/private/vsftpd.pem -out /etc/ssl/private/vsftpd.pem >/dev/null 2>&1
+	chown root:root /etc/ssl/private/vsftpd.pem 2>/dev/null || true
+	chmod 0600 /etc/ssl/private/vsftpd.pem
 
 	\cp -f ${local_setup}templates/vsftpd.conf.template /etc/vsftpd.conf
 
@@ -27,13 +34,30 @@ function _ftpdconfig() {
 
 # seedbox boot for first user
 function _boot() {
+	local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
+	local runner_unit_src="" api_unit_src=""
+	if [[ -f "${af_root}/deploy/systemd/aetherflow-runner.service" ]]; then
+		runner_unit_src="${af_root}/deploy/systemd/aetherflow-runner.service"
+	elif [[ -f "${af_root}/current/deploy/systemd/aetherflow-runner.service" ]]; then
+		runner_unit_src="${af_root}/current/deploy/systemd/aetherflow-runner.service"
+	elif [[ -n "${BASE_DIR:-}" && -f "${BASE_DIR}/deploy/systemd/aetherflow-runner.service" ]]; then
+		runner_unit_src="${BASE_DIR}/deploy/systemd/aetherflow-runner.service"
+	fi
+	if [[ -f "${af_root}/deploy/systemd/aetherflow-api.service" ]]; then
+		api_unit_src="${af_root}/deploy/systemd/aetherflow-api.service"
+	elif [[ -f "${af_root}/current/deploy/systemd/aetherflow-api.service" ]]; then
+		api_unit_src="${af_root}/current/deploy/systemd/aetherflow-api.service"
+	elif [[ -n "${BASE_DIR:-}" && -f "${BASE_DIR}/deploy/systemd/aetherflow-api.service" ]]; then
+		api_unit_src="${BASE_DIR}/deploy/systemd/aetherflow-api.service"
+	fi
+
 	# Install AetherFlow Runner and Control Plane single-binary systemd service files
-	if [[ ! -f /etc/systemd/system/aetherflow-runner.service ]]; then
-		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-runner.template" \
+	if [[ ! -f /etc/systemd/system/aetherflow-runner.service && -n "${runner_unit_src}" ]]; then
+		_safe_overlay_config "${runner_unit_src}" \
 			/etc/systemd/system/aetherflow-runner.service
 	fi
-	if [[ ! -f /etc/systemd/system/aetherflow-api.service ]] || grep -qE "__AES_MASTER_KEY__|ProtectProc=invisible|ProcSubset=pid" /etc/systemd/system/aetherflow-api.service 2>/dev/null; then
-		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-api.template" \
+	if [[ -n "${api_unit_src}" ]] && { [[ ! -f /etc/systemd/system/aetherflow-api.service ]] || grep -qE "__AES_MASTER_KEY__|ProtectProc=invisible|ProcSubset=pid" /etc/systemd/system/aetherflow-api.service 2>/dev/null; }; then
+		_safe_overlay_config "${api_unit_src}" \
 			/etc/systemd/system/aetherflow-api.service
 	fi
 	rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
@@ -402,9 +426,9 @@ function _finished() {
 	echo
 	echo -e "  Useful CLI Commands:  "
 	echo '  ----------------------'
-	echo -e "  ${green}aetherflow logs${normal}    - View real-time system logs"
-	echo -e "  ${green}aetherflow restart${normal} - Restart all AetherFlow services"
-	echo -e "  ${green}aetherflow status${normal}  - Check status of backend & frontend"
+	echo -e "  ${green}af health${normal}          - Verify control plane & database health"
+	echo -e "  ${green}af service status${normal}  - Check status of backend & runner services"
+	echo -e "  ${green}af service restart${normal} - Restart all AetherFlow services"
 	echo
 	
 	install -m 0600 /dev/null /root/information.info
@@ -417,10 +441,16 @@ EOF
 	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
 		rm -rf "$0" >>"${OUTTO}" 2>&1
 	fi
-	for i in ssh apache2 vsftpd fail2ban memcached cron; do
+	for i in ssh apache2 fail2ban memcached cron; do
 		systemctl restart "${i}" >>/dev/null 2>&1 || true
 		systemctl enable "${i}" >>/dev/null 2>&1 || true
 	done
+	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
+		1|true|TRUE|yes|YES|y|Y|on|ON)
+			systemctl restart vsftpd >>/dev/null 2>&1 || true
+			systemctl enable vsftpd >>/dev/null 2>&1 || true
+			;;
+	esac
 	rm -rf /root/tmp/
 	local reboot_response
 	local saved_reboot

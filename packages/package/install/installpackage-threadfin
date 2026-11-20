@@ -59,9 +59,10 @@ TF_TAG="$(github_latest_tag "Threadfin/Threadfin" "1.2.37" "false")"
 TF_URL="https://github.com/Threadfin/Threadfin/releases/download/${TF_TAG}/${TF_ASSET}"
 
 report_progress 65 "Downloading and installing Threadfin ${TF_TAG}..."
-TMP_BIN=$(mktemp /tmp/threadfin-XXXXXX)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_BIN=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/threadfin-XXXXXX")
 af_logged download_file "$TF_URL" "$TMP_BIN"
-BUILD_DIR="$(mktemp -d /tmp/threadfin-extract-XXXXXX)"
+BUILD_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/threadfin-extract-XXXXXX")"
 trap '[[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_BIN"' EXIT
 mv -- "$TMP_BIN" "$BUILD_DIR/threadfin"
 chmod 755 "$BUILD_DIR/threadfin"
@@ -90,6 +91,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/threadfin.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now threadfin

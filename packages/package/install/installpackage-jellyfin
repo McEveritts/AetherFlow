@@ -48,7 +48,7 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-ce
 report_progress 30 "Configuring official Jellyfin APT repository..."
 install -m 0755 -d /etc/apt/keyrings
 af_logged install_apt_signing_key https://repo.jellyfin.org/jellyfin_team.gpg.key /etc/apt/keyrings/jellyfin.gpg
-chmod a+r /etc/apt/keyrings/jellyfin.gpg
+chmod 0644 /etc/apt/keyrings/jellyfin.gpg
 
 # Detect Debian vs Ubuntu codename and distro ID
 DISTRO_ID="debian"
@@ -73,6 +73,7 @@ Components: main
 Architectures: ${ARCH}
 Signed-By: /etc/apt/keyrings/jellyfin.gpg
 EOF
+chmod 0644 /etc/apt/sources.list.d/jellyfin.sources
 rm -f /etc/apt/sources.list.d/jellyfin.list
 
 report_progress 60 "Installing Jellyfin server..."

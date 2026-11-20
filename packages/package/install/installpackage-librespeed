@@ -88,10 +88,11 @@ for candidate in \
 done
 
 LS_VERSION="${AF_TARGET_VERSION:-}"
-TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/librespeed-XXXXXX.tar.gz")
 if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
     report_progress 35 "Staging local native LibreSpeed binary..."
-    TMP_STAGE_DIR=$(mktemp -d /tmp/librespeed-stage-XXXXXX)
+    TMP_STAGE_DIR=$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/librespeed-stage-XXXXXX")
     cp --no-dereference "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
     chmod 755 "${TMP_STAGE_DIR}/speedtest-backend"
     report_progress 60 "Packaging staged LibreSpeed binary..."
@@ -149,7 +150,7 @@ else
             exit 1
         fi
         LS_SHA256="$(sha256sum "$TMP_TAR" | awk '{print $1}')"
-        TMP_BUNDLE="$(mktemp /tmp/librespeed-bundle-XXXXXX.sigstore.json)"
+        TMP_BUNDLE="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/librespeed-bundle-XXXXXX.sigstore.json")"
         BUNDLE_ARGS=()
         if af_logged curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 "${LS_URL}.sigstore.json" -o "$TMP_BUNDLE" && [[ -s "$TMP_BUNDLE" ]]; then
             BUNDLE_ARGS=(--bundle-file "$TMP_BUNDLE")
@@ -1254,6 +1255,7 @@ Backlog=1024
 [Install]
 WantedBy=sockets.target
 EOF
+chmod 0644 /etc/systemd/system/librespeed.socket
 
 cat <<'EOF' > /etc/systemd/system/librespeed.service
 [Unit]
@@ -1294,6 +1296,7 @@ ReadOnlyPaths=-/opt/librespeed/speedtest-backend -/opt/librespeed/assets -/opt/l
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/librespeed.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now librespeed.socket

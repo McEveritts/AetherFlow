@@ -1,5 +1,4 @@
 use crate::auth::{api_error, decode_session_claims, resolve_raw_token, AuthUser};
-use crate::ws::extract_client_ip;
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::Request;
@@ -7,9 +6,10 @@ use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use once_cell::sync::Lazy;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,49 @@ fn strip_host_port_and_dot(raw_host: &str) -> String {
     host.to_ascii_lowercase()
 }
 
+const PROXY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+static PROXY_RESOLVE_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+
+async fn resolve_proxy_work<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    tokio::time::timeout(PROXY_RESOLVE_TIMEOUT, async {
+        let permit = PROXY_RESOLVE_LIMIT.acquire().await.ok()?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn local_control_plane_host(host: &str) -> bool {
+    matches!(
+        host,
+        "" | "localhost" | "aether.local" | "aetherflow.aether.local"
+    ) || host.parse::<IpAddr>().is_ok()
+}
+
+fn explicit_control_plane_host(raw: &str, clean: &str) -> bool {
+    let base = configured_base_domain();
+    is_control_plane_base_host(clean, &base)
+        || (matches_allowed_hosts_control_plane(raw, clean)
+            && !clean.ends_with(".aether.local")
+            && (base.is_empty() || !clean.ends_with(&format!(".{base}")))
+            && !af_db::matches_cached_ingress_subdomain(clean))
+}
+
+fn configured_base_domain() -> String {
+    env::var("AETHERFLOW_BASE_DOMAIN")
+        .or_else(|_| env::var("AETHERFLOW_DOMAIN"))
+        .map(|domain| af_db::normalize_base_domain(&domain))
+        .unwrap_or_default()
+}
+
 fn query_settings_base_domain() -> String {
     let db_domain = af_db::get_base_domain();
     if !db_domain.is_empty() {
@@ -87,7 +130,7 @@ fn query_settings_base_domain() -> String {
             }
         }
     }
-    af_services::resolve_base_domain()
+    configured_base_domain()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,22 +166,22 @@ fn matches_allowed_hosts_control_plane(raw_host: &str, clean_host: &str) -> bool
 
 fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
     let clean_host = strip_host_port_and_dot(raw_host);
-    if clean_host.is_empty()
-        || clean_host == "localhost"
-        || clean_host == "127.0.0.1"
-        || clean_host == "::1"
-        || clean_host == "aether.local"
-        || clean_host == "aetherflow.aether.local"
-    {
-        return AppHostResolution::ControlPlane;
-    }
-    if clean_host.parse::<IpAddr>().is_ok() {
+    if local_control_plane_host(&clean_host) {
         return AppHostResolution::ControlPlane;
     }
 
     let base_domain = query_settings_base_domain();
-    if is_control_plane_base_host(&clean_host, &base_domain)
-        || matches_allowed_hosts_control_plane(raw_host, &clean_host)
+    if is_control_plane_base_host(&clean_host, &base_domain) {
+        return AppHostResolution::ControlPlane;
+    }
+
+    if (!base_domain.is_empty()
+        && clean_host
+            .strip_suffix(&format!(".{base_domain}"))
+            .is_some_and(|label| label.contains('.')))
+        || clean_host
+            .strip_suffix(".aether.local")
+            .is_some_and(|label| label.contains('.'))
     {
         return AppHostResolution::ControlPlane;
     }
@@ -206,7 +249,7 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
             _ => AppHostResolution::ControlPlane,
         };
     };
-    let Ok(packages) = af_services::get_packages_with_jobs(&jobs) else {
+    let Ok(packages) = af_services::get_package_catalog() else {
         return match matched_public_cfg {
             Some(cfg) => AppHostResolution::DisabledExternalApp(cfg.app_name.clone()),
             None if !is_internal && blueprint_opt.is_some() => {
@@ -230,10 +273,29 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
         {
             return false;
         }
+        let lock_file = packages
+            .iter()
+            .find(|package| package.name.eq_ignore_ascii_case(app))
+            .map(|package| package.lock_file.as_str())
+            .filter(|path| !path.is_empty());
+        let installed = if let Some(lock_file) = lock_file {
+            let path = env::var("AETHERFLOW_FS_ROOT")
+                .ok()
+                .filter(|root| !root.trim().is_empty())
+                .map_or_else(
+                    || PathBuf::from(lock_file),
+                    |root| Path::new(root.trim()).join(lock_file.trim_start_matches('/')),
+                );
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.is_file() => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                _ => return false,
+            }
+        } else {
+            false
+        };
         active_ingress
-            || (packages.iter().any(|package| {
-                package.name.eq_ignore_ascii_case(app) && package.status == "installed"
-            }) && matches!(af_db::get_retained_app_ingress_config(app), Ok(None)))
+            || (installed && matches!(af_db::has_retained_app_ingress_config(app), Ok(false)))
     };
 
     if let Some(cfg) = matched_public_cfg {
@@ -391,34 +453,6 @@ fn is_forwarded_header_name(name: &str) -> bool {
     )
 }
 
-fn sanitize_headers_for_peer(
-    headers: &axum::http::HeaderMap,
-    peer_ip: Option<IpAddr>,
-    trust_forwarded: bool,
-) -> axum::http::HeaderMap {
-    let mut sanitized = headers.clone();
-    if !trust_forwarded {
-        for name in [
-            "forwarded",
-            "x-forwarded-for",
-            "x-forwarded-host",
-            "x-forwarded-proto",
-            "x-forwarded-port",
-            "x-forwarded-server",
-            "x-real-ip",
-        ] {
-            sanitized.remove(name);
-        }
-        if let Some(ip) = peer_ip {
-            if let Ok(hv) = HeaderValue::from_str(&ip.to_string()) {
-                sanitized.insert(HeaderName::from_static("x-real-ip"), hv.clone());
-                sanitized.insert(HeaderName::from_static("x-forwarded-for"), hv);
-            }
-        }
-    }
-    sanitized
-}
-
 fn canonical_forwarded_headers(
     incoming_headers: &axum::http::HeaderMap,
     raw_host: &str,
@@ -426,19 +460,9 @@ fn canonical_forwarded_headers(
     trust_forwarded: bool,
 ) -> Vec<(HeaderName, HeaderValue)> {
     let mut out = Vec::new();
-    let xf_host = if trust_forwarded {
-        incoming_headers
-            .get("x-forwarded-host")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(raw_host)
-    } else {
-        raw_host
-    };
-    if !xf_host.is_empty() {
-        if let Ok(hv) = HeaderValue::from_str(xf_host) {
-            out.push((HeaderName::from_static("x-forwarded-host"), hv));
+    if !strip_host_port_and_dot(raw_host).is_empty() {
+        if let Ok(value) = HeaderValue::from_str(raw_host) {
+            out.push((HeaderName::from_static("x-forwarded-host"), value));
         }
     }
 
@@ -465,50 +489,11 @@ fn canonical_forwarded_headers(
         HeaderValue::from_static(xf_proto),
     ));
 
-    if trust_forwarded {
-        let existing_xff = incoming_headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .map(|raw| {
-                raw.split(',')
-                    .map(|hop| hop.trim().trim_matches(['[', ']']))
-                    .filter(|hop| hop.parse::<IpAddr>().is_ok())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let mut xff_parts = existing_xff
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect::<Vec<_>>();
-        if let Some(ip) = peer_ip {
-            let ip_s = ip.to_string();
-            if xff_parts.last().map(|s| s.as_str()) != Some(ip_s.as_str()) {
-                xff_parts.push(ip_s);
-            }
-        }
-        if !xff_parts.is_empty() {
-            if let Ok(hv) = HeaderValue::from_str(&xff_parts.join(", ")) {
-                out.push((HeaderName::from_static("x-forwarded-for"), hv));
-            }
-        }
-        let real_ip = incoming_headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().trim_matches(['[', ']']))
-            .filter(|s| s.parse::<IpAddr>().is_ok())
-            .map(|s| s.to_string())
-            .or_else(|| xff_parts.first().cloned())
-            .or_else(|| peer_ip.map(|p| p.to_string()));
-        if let Some(ip_s) = real_ip {
-            if let Ok(hv) = HeaderValue::from_str(&ip_s) {
-                out.push((HeaderName::from_static("x-real-ip"), hv));
-            }
-        }
-    } else if let Some(ip) = peer_ip {
-        if let Ok(hv) = HeaderValue::from_str(&ip.to_string()) {
-            out.push((HeaderName::from_static("x-real-ip"), hv.clone()));
-            out.push((HeaderName::from_static("x-forwarded-for"), hv));
+    if let Some(peer) = peer_ip {
+        let client_ip = crate::ws::extract_client_ip_for_peer(incoming_headers, Some(peer));
+        if let Ok(value) = HeaderValue::from_str(&client_ip) {
+            out.push((HeaderName::from_static("x-forwarded-for"), value.clone()));
+            out.push((HeaderName::from_static("x-real-ip"), value));
         }
     }
     out
@@ -603,28 +588,150 @@ fn is_private_or_loopback_ip(raw_ip: &str) -> bool {
     }
 }
 
-fn resolve_authenticated_username(headers: &axum::http::HeaderMap) -> Option<String> {
+fn resolve_optional_authenticated_user(
+    headers: &axum::http::HeaderMap,
+    peer: Option<IpAddr>,
+) -> Option<crate::auth::ActiveSubject> {
     let token = resolve_raw_token(headers)?;
     let claims = decode_session_claims(&token, false).ok()?;
+    if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
+        return None;
+    }
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
-        || !crate::auth::matches_client_fingerprint(
-            &claims.cfp,
-            &extract_client_ip(headers),
-            user_agent,
-        )
+    let ip = if peer.is_some() {
+        crate::ws::extract_client_ip_for_peer(headers, peer)
+    } else {
+        "127.0.0.1".to_string()
+    };
+    let fingerprint = crate::auth::legacy_client_fingerprint(&ip, user_agent);
+    if crate::auth::is_session_token_revoked_beyond_grace_for_fp(
+        &claims.jti,
+        claims.user_id,
+        Some(&fingerprint),
+    ) || !crate::auth::matches_client_fingerprint(&claims.cfp, &ip, user_agent)
     {
         return None;
     }
     let conn = af_db::get_read_conn().ok()?;
-    let subj = crate::auth::load_active_human_subject(&conn, claims.user_id).ok()?;
-    if claims.ver < subj.sessions_revoked_after {
+    let subject = crate::auth::load_active_human_subject(&conn, claims.user_id).ok()?;
+    (claims.ver >= subject.sessions_revoked_after && !subject.username.is_empty())
+        .then_some(subject)
+}
+
+fn external_proxy_requires_auth(app: &str) -> bool {
+    matches!(
+        app,
+        "mcvnc" | "scrutiny" | "prometheus" | "flaresolverr" | "threadfin" | "rutorrent"
+    )
+}
+
+fn has_operator_role(role: &str) -> bool {
+    matches!(role, "admin" | "operator")
+}
+
+fn verify_proxy_basic_credentials(headers: &axum::http::HeaderMap) -> Option<String> {
+    use base64::Engine;
+    let (scheme, encoded) = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") || encoded.len() > 4096 {
         return None;
     }
-    Some(subj.username).filter(|u| !u.is_empty())
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let (username, password) = std::str::from_utf8(&decoded).ok()?.split_once(':')?;
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+    let (master_user, master_password, _) = af_services::mutators::load_master_credentials();
+    if username == master_user
+        && !master_password.is_empty()
+        && af_services::cluster_daemon::constant_time_eq(
+            password.as_bytes(),
+            master_password.as_bytes(),
+        )
+    {
+        return Some(master_user);
+    }
+    let conn = af_db::get_read_conn().ok()?;
+    let (user_id, hash): (i64, String) = conn
+        .query_row(
+            "SELECT id, COALESCE(password_hash, '') FROM users WHERE username = ?1",
+            [username],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    let subject = crate::auth::load_active_human_subject(&conn, user_id).ok()?;
+    drop(conn);
+    (has_operator_role(&subject.role) && crate::auth::verify_password(password, &hash))
+        .then_some(subject.username)
+}
+
+fn librespeed_tls_client() -> Result<Option<reqwest::Client>, String> {
+    let override_path =
+        env::var_os("AETHERFLOW_LIBRESPEED_SETTINGS_PATH").filter(|path| !path.is_empty());
+    let path = override_path.map(PathBuf::from).unwrap_or_else(|| {
+        let primary = Path::new("/etc/aetherflow/librespeed/settings.toml");
+        match std::fs::symlink_metadata(primary) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                PathBuf::from("/opt/librespeed/settings.toml")
+            }
+            _ => primary.to_path_buf(),
+        }
+    });
+    let settings =
+        af_runner::package_executor::try_librespeed_runner_settings_tls_config(&path, None)
+            .ok_or_else(|| "Could not read LibreSpeed TLS settings".to_string())?;
+    if !settings.enabled {
+        return Ok(None);
+    }
+    let cert_path = settings
+        .ca_cert_file
+        .ok_or_else(|| "Missing LibreSpeed upstream certificate".to_string())?;
+    let pem = std::fs::read(cert_path).map_err(|error| error.to_string())?;
+    // In the Rustls backend, a PEM file with no certificate blocks can
+    // otherwise construct a client with an empty trust store.
+    if reqwest::Certificate::from_pem_bundle(&pem)
+        .map_err(|error| error.to_string())?
+        .is_empty()
+    {
+        return Err("LibreSpeed upstream PEM contains no certificates".into());
+    }
+    let cert = reqwest::Certificate::from_pem(&pem).map_err(|error| error.to_string())?;
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .no_proxy()
+        .http1_only()
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(cert)
+        .build()
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn local_domain_client_allowed(headers: &axum::http::HeaderMap, peer: Option<IpAddr>) -> bool {
+    peer.is_none_or(|peer| {
+        is_private_or_loopback_ip(&peer.to_string())
+            && is_private_or_loopback_ip(&crate::ws::extract_client_ip_for_peer(
+                headers,
+                Some(peer),
+            ))
+    })
+}
+
+fn internal_domain_forbidden() -> Response {
+    api_error(
+        StatusCode::FORBIDDEN,
+        "INTERNAL_DOMAIN",
+        "Internal .aether.local domains are restricted to local network clients",
+    )
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
@@ -660,76 +767,29 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
 
     let clean_host = strip_host_port_and_dot(&raw_host);
 
-    if clean_host == "aether.local" || clean_host.ends_with(".aether.local") {
-        let mut allowed = true;
-
-        if let Some(peer_ip) = peer_ip_opt {
-            if !is_private_or_loopback_ip(&peer_ip.to_string()) {
-                allowed = false;
-            }
-        }
-
-        if trust_forwarded {
-            if let Some(real_ip) = req
-                .headers()
-                .get("X-Real-IP")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                if !is_private_or_loopback_ip(real_ip) {
-                    allowed = false;
-                }
-            }
-
-            if let Some(xff) = req
-                .headers()
-                .get("X-Forwarded-For")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                for hop in xff.split(',') {
-                    let hop_ip = hop.trim().trim_matches(['[', ']']);
-                    if hop_ip.is_empty() || !is_private_or_loopback_ip(hop_ip) {
-                        allowed = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !allowed {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "Internal .aether.local domains are restricted to local network clients"
-                })),
-            )
-                .into_response();
-        }
+    let is_internal_aether_local = clean_host.ends_with(".aether.local");
+    if local_control_plane_host(&clean_host) {
+        return next.run(req).await;
+    }
+    // Known control-plane authorities need no DB or auth work.
+    if explicit_control_plane_host(&raw_host, &clean_host)
+        || af_db::maybe_cached_control_plane_host(&clean_host)
+    {
+        return next.run(req).await;
+    }
+    if is_internal_aether_local && !local_domain_client_allowed(req.headers(), peer_ip_opt) {
+        return internal_domain_forbidden();
     }
 
     let lookup_host = raw_host.clone();
-    let lookup_headers = sanitize_headers_for_peer(req.headers(), peer_ip_opt, trust_forwarded);
-    let lookup = crate::auth::blocking_auth_work(move || {
-        let disposition = resolve_app_host_disposition(&lookup_host);
-        let username = match &disposition {
-            AppHostResolution::Proxy(_, _) => resolve_authenticated_username(&lookup_headers),
-            AppHostResolution::DisabledExternalApp(_) | AppHostResolution::ControlPlane => None,
-        };
-        (disposition, username)
-    })
-    .await;
-    let (disposition, authenticated_user) = match lookup {
-        Ok(result) => result,
-        Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Proxy authentication unavailable",
-            )
-                .into_response()
-        }
+    let Some(disposition) =
+        resolve_proxy_work(move || resolve_app_host_disposition(&lookup_host)).await
+    else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PROXY_RESOLUTION_UNAVAILABLE",
+            "Proxy resolution unavailable",
+        );
     };
     let (app_name, target_port) = match disposition {
         AppHostResolution::Proxy(app, port) => (app, port),
@@ -744,6 +804,40 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     };
     if !(1..=65535).contains(&target_port) {
         return next.run(req).await;
+    }
+
+    let requires_auth = !is_internal_aether_local && external_proxy_requires_auth(&app_name);
+    let headers = req.headers().clone();
+    let authenticated_user =
+        resolve_proxy_work(move || resolve_optional_authenticated_user(&headers, peer_ip_opt))
+            .await
+            .flatten()
+            .filter(|user| !requires_auth || has_operator_role(&user.role))
+            .map(|user| user.username);
+    let authenticated_user = if requires_auth && authenticated_user.is_none() {
+        let headers = req.headers().clone();
+        tokio::time::timeout(
+            PROXY_RESOLVE_TIMEOUT,
+            crate::auth::blocking_auth_work(move || verify_proxy_basic_credentials(&headers)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+    } else {
+        authenticated_user
+    };
+    if requires_auth && authenticated_user.is_none() {
+        let mut response = api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Administrator or operator authentication required",
+        );
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=\"AetherFlow\""),
+        );
+        return response;
     }
 
     let upgrade_header = req
@@ -768,11 +862,30 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         .map(|pq| pq.as_str())
         .unwrap_or("/")
         .to_string();
-    let use_tls = upstream_uses_tls(&app_name, target_port as u16);
+    let pinned_client = if app_name == "librespeed" {
+        match resolve_proxy_work(librespeed_tls_client).await {
+            Some(Ok(client)) => client,
+            result => {
+                tracing::warn!(?result, "LibreSpeed upstream TLS configuration unavailable");
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "BAD_GATEWAY",
+                    "LibreSpeed upstream TLS configuration unavailable",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let use_tls = pinned_client.is_some()
+        || (app_name != "librespeed" && upstream_uses_tls(&app_name, target_port as u16));
     let scheme = if use_tls { "https" } else { "http" };
     let target_url = format!("{scheme}://127.0.0.1:{target_port}{path_and_query}");
 
-    let incoming_headers = req.headers().clone();
+    let mut incoming_headers = req.headers().clone();
+    if requires_auth {
+        incoming_headers.remove(header::AUTHORIZATION);
+    }
 
     if is_ws_upgrade {
         if use_tls {
@@ -789,7 +902,10 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
 
             let reqwest_method =
                 reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-            let mut ws_req = PROXY_LOOPBACK_TLS_WS_CLIENT.request(reqwest_method, &target_url);
+            let mut ws_req = pinned_client
+                .as_ref()
+                .unwrap_or(&PROXY_LOOPBACK_TLS_WS_CLIENT)
+                .request(reqwest_method, &target_url);
             ws_req = forward_proxy_http_headers(
                 ws_req,
                 &incoming_headers,
@@ -1155,7 +1271,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             )
                 .into_response();
         }
-        &*PROXY_LOOPBACK_TLS_CLIENT
+        pinned_client.as_ref().unwrap_or(&PROXY_LOOPBACK_TLS_CLIENT)
     } else {
         &*PROXY_HTTP_CLIENT
     };
@@ -1282,15 +1398,7 @@ fn matches_configured_env_host(clean_host: &str) -> bool {
             }
         }
     }
-    for key in ["AETHERFLOW_BASE_DOMAIN", "AETHERFLOW_DOMAIN"] {
-        if let Ok(raw) = env::var(key) {
-            let norm = af_db::normalize_base_domain(&raw);
-            if !norm.is_empty() && (clean_host == norm || clean_host.ends_with(&format!(".{norm}")))
-            {
-                return true;
-            }
-        }
-    }
+
     false
 }
 
@@ -1301,62 +1409,42 @@ fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
     }
     let trimmed = candidate_raw.trim().to_ascii_lowercase();
 
-    // When ALLOWED_HOSTS is explicitly configured, treat it as a closed allowlist.
-    if !allowed_set.is_empty() {
-        return allowed_set.contains(&trimmed) || allowed_set.contains(&clean);
-    }
-
-    // When ALLOWED_HOSTS is unset, allow loopback authorities, direct IP-literal access
-    // (pre-domain setup), and explicitly configured URLs/domains, rejecting arbitrary hosts.
-    if clean == "localhost"
-        || clean.parse::<IpAddr>().is_ok()
-        || matches_configured_env_host(&clean)
-    {
+    if local_control_plane_host(&clean) {
         return true;
-    }
-
-    if clean == "aether.local" || clean.ends_with(".aether.local") {
-        return true;
-    }
-
-    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
-    for cfg in &configs {
-        let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
-        if !pub_dom.is_empty() && clean == pub_dom {
-            return cfg.external_access_enabled;
-        }
     }
 
     let base_domain = query_settings_base_domain();
-    if base_domain.is_empty() {
-        return false;
-    }
     if is_control_plane_base_host(&clean, &base_domain) {
         return true;
     }
-    let suffix = format!(".{base_domain}");
-    if let Some(sub) = clean.strip_suffix(&suffix) {
-        if !sub.is_empty() && !sub.contains('.') {
-            if let Some(bp) = af_services::get_blueprint(sub) {
-                return configs.iter().any(|cfg| {
-                    cfg.app_name.eq_ignore_ascii_case(&bp.app_name)
-                        && cfg.external_access_enabled
-                        && {
-                            let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
-                            pub_dom.is_empty() || pub_dom == clean
-                        }
-                });
-            }
-            if let Some(cfg) = configs
-                .iter()
-                .find(|c| c.app_name.eq_ignore_ascii_case(sub))
-            {
-                return cfg.external_access_enabled;
-            }
-        }
-        return true;
+    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
+    if let Some(subdomain) = clean.strip_suffix(".aether.local") {
+        return !subdomain.contains('.')
+            && (configs.iter().any(|cfg| cfg.app_name == subdomain)
+                || af_services::get_blueprint(subdomain).is_some());
     }
-    false
+    if !base_domain.is_empty() {
+        if let Some(label) = clean.strip_suffix(&format!(".{base_domain}")) {
+            if label.contains('.') {
+                return false;
+            }
+            return configs.iter().any(|cfg| {
+                cfg.external_access_enabled
+                    && (strip_host_port_and_dot(&cfg.public_domain) == clean
+                        || (cfg.public_domain.is_empty()
+                            && cfg.app_name.eq_ignore_ascii_case(label)))
+            });
+        }
+    }
+    if let Some(config) = configs
+        .iter()
+        .find(|cfg| strip_host_port_and_dot(&cfg.public_domain) == clean)
+    {
+        return config.external_access_enabled;
+    }
+    allowed_set.contains(&trimmed)
+        || allowed_set.contains(&clean)
+        || matches_configured_env_host(&clean)
 }
 
 pub(crate) fn is_trusted_request_host(candidate_raw: &str) -> bool {
@@ -1377,43 +1465,66 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
         .filter(|s| !s.is_empty())
         .collect();
 
-    if let Some(host_val) = req
+    let host = req
         .headers()
         .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-    {
-        if !is_host_trusted(host_val, &allowed_set) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_HOST",
-                "Untrusted Host header",
-            );
-        }
-    }
-
-    let peer_ip_opt = req
+        .map(|value| value.to_str().unwrap_or("").to_string());
+    let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
-    if peer_ip_opt.is_none_or(is_trusted_proxy_ip) {
-        if let Some(xfh_val) = req
-            .headers()
-            .get("X-Forwarded-Host")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(first_hop) = xfh_val
-                .split(',')
-                .next()
+    if host.as_deref().is_some_and(|raw| {
+        let host = strip_host_port_and_dot(raw);
+        host == "aether.local" || host.ends_with(".aether.local")
+    }) && !local_domain_client_allowed(req.headers(), peer)
+    {
+        return internal_domain_forbidden();
+    }
+    let forwarded = peer
+        .is_some_and(is_trusted_proxy_ip)
+        .then(|| {
+            req.headers()
+                .get("X-Forwarded-Host")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
                 .map(str::trim)
-                .filter(|h| !h.is_empty())
-            {
-                if !is_host_trusted(first_hop, &allowed_set) {
-                    return api_error(
-                        StatusCode::BAD_REQUEST,
-                        "INVALID_HOST",
-                        "Untrusted Host header",
-                    );
-                }
+                .filter(|host| !host.is_empty())
+                .map(str::to_owned)
+        })
+        .flatten();
+    let hosts: Vec<_> = host
+        .into_iter()
+        .chain(forwarded)
+        .filter(|raw| {
+            let host = strip_host_port_and_dot(raw);
+            host.is_empty()
+                || !(local_control_plane_host(&host)
+                    || explicit_control_plane_host(raw, &host)
+                    || (af_db::maybe_cached_control_plane_host(&host)
+                        && af_db::cached_base_domain()
+                            .is_some_and(|base| is_control_plane_base_host(&host, &base))))
+        })
+        .collect();
+    if !hosts.is_empty() {
+        match resolve_proxy_work(move || {
+            hosts.iter().all(|host| is_host_trusted(host, &allowed_set))
+        })
+        .await
+        {
+            Some(true) => {}
+            Some(false) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_HOST",
+                    "Untrusted Host header",
+                )
+            }
+            None => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "HOST_VALIDATION_UNAVAILABLE",
+                    "Host validation unavailable",
+                )
             }
         }
     }
@@ -1425,8 +1536,16 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
 // 4. Per-IP Sliding-Window Rate Limiter Middlewares
 // ──────────────────────────────────────────────────────────────────────────────
 
+const RATE_LIMIT_KEY_CAPACITY: usize = 16_384;
+
+#[derive(Default)]
+struct RateLimitVisitors {
+    timestamps: HashMap<String, Vec<Instant>>,
+    oldest_first: BTreeSet<(Instant, String)>,
+}
+
 struct SlidingWindowLimiter {
-    visitors: Mutex<HashMap<String, Vec<Instant>>>,
+    visitors: Mutex<RateLimitVisitors>,
     limit: usize,
     window: Duration,
 }
@@ -1434,34 +1553,45 @@ struct SlidingWindowLimiter {
 impl SlidingWindowLimiter {
     fn new(limit: usize, window: Duration) -> Self {
         Self {
-            visitors: Mutex::new(HashMap::new()),
+            visitors: Mutex::new(RateLimitVisitors::default()),
             limit,
             window,
         }
     }
 
     fn allow(&self, ip: &str) -> bool {
-        let mut guard = match self.visitors.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut guard = self
+            .visitors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let RateLimitVisitors {
+            timestamps,
+            oldest_first,
+        } = &mut *guard;
         let now = Instant::now();
-        let window = self.window;
-
-        if guard.len() > 2048 {
-            guard.retain(|_, timestamps| {
-                timestamps.retain(|&t| now.duration_since(t) < window);
-                !timestamps.is_empty()
-            });
+        while let Some((last_seen, _)) = oldest_first.first() {
+            if now.duration_since(*last_seen) < self.window {
+                break;
+            }
+            let (_, expired) = oldest_first.pop_first().expect("first entry exists");
+            timestamps.remove(&expired);
         }
-
-        let entry = guard.entry(ip.to_string()).or_default();
-        entry.retain(|&t| now.duration_since(t) < window);
-
+        if timestamps.len() >= RATE_LIMIT_KEY_CAPACITY && !timestamps.contains_key(ip) {
+            if let Some((_, oldest)) = oldest_first.pop_first() {
+                timestamps.remove(&oldest);
+            }
+        }
+        let entry = timestamps.entry(ip.to_string()).or_default();
+        let previous = entry.last().copied();
+        entry.retain(|&t| now.duration_since(t) < self.window);
         if entry.len() >= self.limit {
             return false;
         }
+        if let Some(previous) = previous {
+            oldest_first.remove(&(previous, ip.to_string()));
+        }
         entry.push(now);
+        oldest_first.insert((now, ip.to_string()));
         true
     }
 }

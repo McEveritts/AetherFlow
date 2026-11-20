@@ -30,12 +30,13 @@ Handles login, TOTP 2FA verification, OAuth2/OIDC handshakes, and Subdomain Gate
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/health/ready` | Readiness probe returning database status, uptime, and physical running binary version. |
+| `GET` | `/api/v1/auth/ready` | Authenticated readiness probe returning control-plane status and database health (unauthenticated probe: `/health/ready`). |
 | `POST` | `/api/v1/public/auth/login` | Authenticates credentials and issues the JWT session + CSRF token. |
-| `POST` | `/api/v1/public/auth/verify-2fa` | Validates a 6-digit TOTP code or recovery code during login. |
+| `POST` | `/api/v1/public/auth/mfa/verify` | Validates a 6-digit TOTP code or recovery code during login. |
 | `GET` | `/api/v1/public/auth/verify` | Perimeter SSO endpoint for Apache2 Subdomain Gateway (`X-Aetherflow-User` injection). |
-| `GET` | `/api/v1/auth/profile` | Returns the authenticated user's profile, role, and 2FA status. |
-| `POST` | `/api/v1/auth/auth/logout` | Revokes the active JWT (`revoked_tokens`) and clears `aetherflow_session`. |
+| `GET` | `/api/v1/auth/session` | Returns the authenticated user's session profile, role, and 2FA status. |
+| `PUT` | `/api/v1/auth/profile` | Updates the authenticated user's profile details. |
+| `POST` | `/api/v1/auth/logout` | Revokes the active JWT (`revoked_tokens`) and clears `aetherflow_session`. |
 
 ### 2. System, Services & Self-Update (`/api/v1/auth`, `/api/v1/admin`)
 Provides hardware telemetry, `systemd` service lifecycle control (via `aetherflow-runner`), and atomic release management.
@@ -44,7 +45,7 @@ Provides hardware telemetry, `systemd` service lifecycle control (via `aetherflo
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/auth/system/metrics` | Returns live CPU, RAM, swap, disk I/O, network, and NVML/DRM GPU metrics. |
 | `GET` | `/api/v1/auth/services` | Lists managed `systemd` services, ports, subdomains, and runtime states. |
-| `POST` | `/api/v1/admin/services/:name/:action` | Dispatches allowlisted `systemctl` actions (`start`, `stop`, `restart`, `enable`, `disable`) over `/run/aetherflow/runner.sock`. |
+| `POST` | `/api/v1/admin/services/{name}/control` | Dispatches allowlisted `systemctl` actions (`start`, `stop`, `restart`, `enable`, `disable`) over `/run/aetherflow/runner.sock`. |
 | `GET` | `/api/v1/admin/system/update/check` | Checks GitHub Releases for `stable`, `nightly`, or `experimental` updates (with 5-min cache & rate-limit backoff). |
 | `POST` | `/api/v1/admin/system/update/run` | Launches an isolated `aetherflow-self-update.service` deployment or rollback. |
 | `GET` | `/api/v1/admin/system/update/status` | Returns restart-surviving self-update status, operation ID, and recovery journal state. |
@@ -55,9 +56,10 @@ Controls the lifecycle of the **77 bare-metal applications**.
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/public/marketplace` | Lists all 77 catalog packages, categories, installation status, and update availability. |
-| `POST` | `/api/v1/admin/packages/:id/install` | Starts asynchronous package installation via `af-runner` (declarative Rust or locked Bash). |
-| `POST` | `/api/v1/admin/packages/:id/update` | Performs an in-place package update with automatic service stop/restart and rollback protection. |
-| `DELETE` | `/api/v1/admin/packages/:id` | Uninstalls a package (preserving application data unless `delete_data=true`). |
+| `POST` | `/api/v1/admin/packages/{id}/install` | Starts asynchronous package installation via `af-runner` (declarative Rust or locked Bash). |
+| `POST` | `/api/v1/admin/packages/{id}/update` | Performs an in-place package update with automatic service stop/restart and rollback protection. |
+| `POST` | `/api/v1/admin/packages/{id}/reinstall` | Repairs or reinstalls an installed package while preserving its service configuration. |
+| `POST` | `/api/v1/admin/packages/{id}/uninstall` | Uninstalls a package (preserving application data unless `?purge=true`). |
 | `POST` | `/api/v1/admin/packages/updates/check` | Checks upstream versions across installed Marketplace packages. |
 
 ### 4. Native McBrowser (`af-files` — `/api/v1/auth/mcbrowser`)
@@ -65,22 +67,26 @@ Capability-scoped tenant file manager backed by `af-files`. See [Native McBrowse
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/v1/auth/mcbrowser/list` | Lists directory contents, breadcrumbs, sorting, and quota usage within the user's scoped root. |
-| `POST` | `/api/v1/auth/mcbrowser/uploads` | Creates or manages resumable chunked upload sessions (up to 64 GiB per file, 4 MiB `PATCH` chunks). |
+| `GET` | `/api/v1/auth/mcbrowser/entries` | Lists directory contents, breadcrumbs, sorting, and quota usage within the user's scoped root. |
+| `GET/POST` | `/api/v1/auth/mcbrowser/uploads` | Lists or creates resumable chunked upload sessions (up to 64 GiB per file, `PATCH` chunks via `/api/v1/auth/mcbrowser/uploads/{id}`). |
 | `GET/PUT` | `/api/v1/auth/mcbrowser/content` | Reads or saves UTF-8 text files (up to 10 MiB) with ETag conflict detection. |
 | `POST` | `/api/v1/auth/mcbrowser/actions` | Executes safe built-in actions (checksums, 9-format archive creation/extraction, media metadata). |
-| `POST` | `/api/v1/auth/mcbrowser/shares` | Creates password-protected, expiring public share links. |
+| `GET/POST` | `/api/v1/auth/mcbrowser/shares` | Lists or creates password-protected, expiring public share links. |
 
 ### 5. Canonical Streaming Analytics (`/api/v1/auth/streaming`, `/api/v1/admin/streaming`)
-Live Jellyfin/Plex session telemetry and snapshot-consistent playback history. See [Streaming History Contract](./streaming-history-contract.md).
+Live Plex/Jellyfin/Emby session telemetry and snapshot-consistent playback history. See [Streaming History Contract](./streaming-history-contract.md).
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/v1/auth/streaming/sessions` | Returns active Direct Play vs. Transcode sessions and real-time bandwidth. |
+| `GET` | `/api/v1/auth/streaming/dashboard` | Returns provider connection status, active Direct Play vs. Transcode sessions, and live bandwidth summary. |
 | `GET` | `/api/v1/auth/streaming/history` | Queries canonical playback history with rolling/calendar windows and snapshot cursors. |
 | `GET` | `/api/v1/auth/streaming/history/export` | Streams full-query CSV export bound to `snapshotToken`. |
-| `POST` | `/api/v1/admin/streaming/import` | Imports idempotent, checkpointed playback events (up to 500 per batch). |
-| `POST` | `/api/v1/admin/streaming/reconcile/*` | Previews and executes backup-verified, human-approved history reconciliation. |
+| `POST` | `/api/v1/admin/streaming/imports/events` | Imports idempotent, checkpointed playback events (up to 500 per batch). |
+| `POST` | `/api/v1/admin/streaming/reconciliation/preview` | Previews proposed history reconciliation changes without mutating stored records. |
+| `POST` | `/api/v1/admin/streaming/reconciliation/apply` | Executes backup-verified, human-approved history reconciliation. |
+| `GET` | `/api/v1/admin/streaming/portability/export` | Exports a native JSON streaming history archive (up to 8 MiB / 100,000 records). |
+| `POST` | `/api/v1/admin/streaming/portability/preview` | Previews a native JSON archive restore (10 MiB JSON request envelope limit) and issues an approval token. |
+| `POST` | `/api/v1/admin/streaming/portability/restore` | Applies an approved merge or replacement archive restore with verified on-disk backup. |
 
 ### 6. Network & Mesh VPN (`/api/v1/admin/network`)
 Manages native **WireGuard** (`wg0`) and **Tailscale** via `aetherflow-runner`. See [Network: WireGuard & Tailscale](./network-vpn.md).
@@ -101,8 +107,20 @@ Interfaces with the multi-provider FlowAI engine (`af-api::intelligence`). See [
 | `POST` | `/api/v1/auth/ai/chat` | Multi-provider chat (Gemini, OpenAI, Anthropic, Ollama, LM Studio) with Assistant action detection. |
 | `POST` | `/api/v1/auth/ai/support` | Grounded diagnostic session injecting live metrics and service logs (`full`, `logs`, `metrics`). |
 | `POST` | `/api/v1/admin/settings/test-ai` | Tests provider connectivity using saved or unsaved API keys. |
-| `GET` | `/api/v1/admin/actions/pending` | Lists pending AI or `af-heal` remediation actions in the Approval Inbox. |
-| `POST` | `/api/v1/admin/actions/:id/approve` | Authorizes and executes a pending action, recording an entry in `admin_audit_log`. |
+| `GET` | `/api/v1/admin/actions/pending` | Lists pending AI remediation actions in the Approval Inbox. |
+| `POST` | `/api/v1/admin/actions/{id}/approve` | Authorizes and executes a pending action, recording an entry in `admin_audit_log`. |
+
+### 8. Cluster Master & Worker (`/api/v1/admin/cluster`)
+Multi-node enrollment, telemetry heartbeats, and durable worker command orchestration (`af-services::cluster_daemon`; worker mTLS listener on `:50051` serves `/cluster/v1/register` and `/cluster/v1/heartbeat`).
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/admin/cluster/enroll` | Issues a cluster enrollment token (`enrollment_token`) and worker mTLS onboarding instructions. |
+| `GET` | `/api/v1/admin/cluster/nodes` | Lists registered cluster worker nodes, health status, and last-seen telemetry. |
+| `DELETE` | `/api/v1/admin/cluster/nodes/{id}` | Removes a cluster worker node registration. |
+| `GET` | `/api/v1/admin/cluster/nodes/{id}/metrics` | Returns recent telemetry metrics for a registered cluster worker node. |
+| `GET` | `/api/v1/admin/cluster/commands` | Lists durable cluster worker commands and execution states (`pending`, `dispatched`, `completed`, `failed`). |
+| `POST` | `/api/v1/admin/cluster/nodes/{id}/commands` | Enqueues a durable remote command for a registered cluster worker node. |
 
 ---
 
@@ -110,7 +128,7 @@ Interfaces with the multi-provider FlowAI engine (`af-api::intelligence`). See [
 
 AetherFlow pushes frame-0 hardware state, live service status, and package installation progress over a full-duplex WebSocket connection.
 
-- **Ticket Handshake**: `POST /api/v1/auth/ws-ticket` (issues a single-use, 30-second TTL ticket).
-- **WebSocket Endpoint**: `wss://<host>/api/v1/ws?ticket=<ticket>`
+- **Ticket Handshake**: `GET /api/v1/auth/ws/ticket` (issues a single-use, 30-second TTL ticket).
+- **WebSocket Endpoint**: `wss://<host>/api/v1/auth/ws?ticket=<ticket>`
 
 Upon connection (`frame 0`), the server immediately broadcasts a `METRICS_UPDATE` snapshot containing cached CPU, memory, storage, GPU, network, and service states so charts and status badges hydrate without polling delay.

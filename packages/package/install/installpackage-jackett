@@ -56,8 +56,14 @@ esac
 
 report_progress 35 "Downloading latest Jackett (${JACKETT_ARCH})..."
 JACKETT_VERSION="$(github_latest_tag "Jackett/Jackett" "0.22.1000")"
-TMP_TAR=$(mktemp /tmp/jackett-XXXXXX.tar.gz)
-af_logged download_file "https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz" "$TMP_TAR"
+if [[ -n "${JACKETT_VERSION:-}" ]]; then
+    JACKETT_URL="https://github.com/Jackett/Jackett/releases/download/v${JACKETT_VERSION#v}/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz"
+else
+    JACKETT_URL="https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz"
+fi
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/jackett-XXXXXX.tar.gz")"
+af_logged download_file "$JACKETT_URL" "$TMP_TAR"
 
 report_progress 65 "Extracting Jackett to /opt/Jackett..."
 stage_app_archive "$TMP_TAR" "/opt/Jackett" "jackett" "/var/lib/jackett" "${PACKAGE_NAME}" "Jackett" "" ""
@@ -120,6 +126,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/jackett.service
 
 
 af_logged systemctl daemon-reload

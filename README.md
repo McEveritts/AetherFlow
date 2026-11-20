@@ -29,7 +29,7 @@
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations (12 native declarative Rust recipes + serialized Bash installers), `systemctl` transitions, WireGuard/Tailscale management, quota updates, and isolated `aetherflow-self-update.service` deployments are mediated over `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the streaming **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
 - **Frame-0 Real-Time Telemetry & NVML FFI (`Hyperspeed`)** — Immediate frame-0 WebSocket state hydration, decoupled navigation/telemetry rendering, zero-fork `/proc` & `sysinfo` sampling, and dynamic `libnvidia-ml.so.1` FFI + DRM `sysfs` GPU discovery.
-- **Canonical Streaming Intelligence & VPN Control** — Built-in Plex, Jellyfin, and Emby streaming history explorer with snapshot-consistent pagination, CSV/JSON portability, reconciliation gates, and native **WireGuard** (`wg0`) + **Tailscale** mesh VPN management.
+- **Canonical Streaming Intelligence & VPN Control** — Built-in **Jellyfin** (full live telemetry, session control, item-summary sync, and canonical playback history), **Plex** (live `/status/sessions` telemetry, `/identity` verification, `/library/sections` enrichment, canonical playback history, and native Plex/Tautulli JSON & CSV import), and **Emby** (staged live telemetry, artwork, and canonical history; session commands and item-summary sync are not yet supported) streaming explorer with snapshot-consistent pagination, CSV/JSON portability (`8 MiB` archive / `10 MiB` restore envelope), reconciliation gates, and native **WireGuard** (`wg0`) + **Tailscale** mesh VPN management.
 - **100% Bare-Metal, Zero Docker Overhead** — Every application runs natively under `systemd` cgroups and `af-systemd-sandbox` profiles—zero Docker daemons, zero container bridging latency.
 
 ---
@@ -121,7 +121,7 @@ AetherFlow manages **77 native Linux packages** across 7 infrastructure domains,
 | Domain | Managed Applications |
 | :--- | :--- |
 | **🎬 Media, IPTV & YouTube Frontends (23)** | Plex Media Server, Jellyfin, Emby, Dispatcharr, Threadfin, Navidrome, Jellyseerr (Seerr), Overseerr, Maintainerr, Requestrr, Audiobookshelf, Kavita, Calibre-Web, FileBot, Unmanic, Unpackerr, Autoscan, Recyclarr, Tautulli, Ombi, FlareSolverr, Piped *(Experimental)*, Invidious *(Experimental)* |
-| **🤖 Arr Automation Stack (8)** | Sonarr, Radarr, Lidarr, Readarr, Listenarr, Prowlarr, Bazarr, Jackett |
+| **🤖 Arr Automation Stack (8)** | Sonarr, Radarr, Lidarr, Readarr *(Retired Upstream)*, Listenarr, Prowlarr, Bazarr, Jackett |
 | **⬇️ Download Clients (12)** | qBittorrent (`qbittorrent-nox`), Qui, Autobrr, Flood, SeedCross, pyLoad, rTorrent, ruTorrent, SABnzbd, NZBGet, Deluge, Transmission |
 | **☁️ Cloud & Union Storage (8)** | Nextcloud, Syncthing, File Browser, Duplicati, Rclone (`rclone-vfs`), MergerFS, Cloudplow, Paperless-ngx |
 | **🌐 Network, DNS & Mesh VPN (8)** | WireGuard, Tailscale, Pi-hole, AdGuard Home, LibreSpeed (Obsidian V2), The Lounge, ZNC, Quassel |
@@ -133,7 +133,7 @@ AetherFlow manages **77 native Linux packages** across 7 infrastructure domains,
 ## 🗂️ Native McBrowser & Streaming Intelligence
 
 - **Scoped Tenant File Manager (`McBrowser`)** — Manage files directly from the dashboard sidebar without containers or separate logins. Supports drag-and-drop directory uploads, resumable multi-gigabyte transfers, Ace code editing with Markdown/KaTeX preview, password-protected public shares, and FlowAI natural-language search.
-- **Canonical Streaming Analytics** — Real-time Plex, Jellyfin, and Emby session monitoring paired with a snapshot-consistent playback history archive, server-identity verification, asynchronous library/genre metadata enrichment, CSV/JSON portability exports, and human-gated history reconciliation.
+- **Canonical Streaming Analytics** — Real-time **Jellyfin**, **Plex**, and **Emby** (staged) session monitoring paired with a snapshot-consistent playback history archive, server-identity verification, asynchronous library/genre metadata enrichment, CSV/JSON portability exports, native Plex/Tautulli playback import, and human-gated history reconciliation. (Emby session commands and item-summary sync remain unsupported.)
 - **WireGuard & Tailscale Control Center** — Provision one-time WireGuard client keypairs/QR codes and manage Tailscale tailnet authentication, advertised subnet routes, and exit-node preferences directly from the **Network** tab.
 
 ---
@@ -219,7 +219,7 @@ Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./doc
 
 ```bash
 # Run Rust control plane unit & contract tests across all 11 crates
-cargo test --manifest-path backend-rs/Cargo.toml --workspace --locked
+cargo test --manifest-path backend-rs/Cargo.toml --workspace --locked -- --test-threads=1
 
 # Test and build the Rust WASM dashboard and workers
 cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
@@ -229,7 +229,7 @@ bash scripts/build_wasm_frontend.sh --stage
 # Run release manager, marketplace, and build tool regression suites
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 
-# Verify shell hygiene across all 260+ installer and lifecycle scripts
+# Verify shell hygiene across all installer, setup, and lifecycle scripts
 python3 tests/check_shell_hygiene.py
 
 # Package the API, CLI, external web/dist assets, and SHA256SUMS

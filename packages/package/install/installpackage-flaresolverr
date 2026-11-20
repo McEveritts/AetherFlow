@@ -140,13 +140,14 @@ if [[ -f /etc/systemd/system/flaresolverr.service ]]; then
     cp -a /etc/systemd/system/flaresolverr.service "$BACKUP_DIR/flaresolverr.service"
 fi
 BUILD_DIR="$(mktemp -d /opt/.flaresolverr-build.XXXXXX)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 if [[ -n "$FS_URL" ]]; then
-    TMP_TAR=$(mktemp /tmp/flaresolverr-XXXXXX.tar.gz)
+    TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/flaresolverr-XXXXXX.tar.gz")
     af_logged download_file "$FS_URL" "$TMP_TAR"
     tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR"
     rm -f "$TMP_TAR"
 else
-    TMP_TAR=$(mktemp /tmp/flaresolverr-src-XXXXXX.tar.gz)
+    TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/flaresolverr-src-XXXXXX.tar.gz")
     af_logged download_file "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" "$TMP_TAR"
     af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
     rm -f "$TMP_TAR"
@@ -167,7 +168,7 @@ else
 #!/bin/bash
 exec /opt/flaresolverr/.venv/bin/python3 /opt/flaresolverr/src/flaresolverr.py "$@"
 WRAP
-    chmod +x "$BUILD_DIR/flaresolverr"
+    chmod 0755 "$BUILD_DIR/flaresolverr"
 fi
 
 test -s "$BUILD_DIR/flaresolverr" || test -s "$BUILD_DIR/src/flaresolverr.py" || { log_error "Failed to verify FlareSolverr build output"; exit 1; }
@@ -223,6 +224,7 @@ TimeoutStopSec=20
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/flaresolverr.service
 UNIT_WRITTEN=1
 
 af_logged systemctl daemon-reload

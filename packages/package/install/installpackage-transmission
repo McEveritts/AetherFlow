@@ -142,7 +142,8 @@ report_progress 70 "Installing Transmission Web Control UI..."
 TWC_TAG="$(github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1" "false")"
 TWC_URL="https://github.com/ronggang/transmission-web-control/archive/refs/tags/${TWC_TAG}.tar.gz"
 if [[ -n "$TWC_URL" ]]; then
-    TMP_TAR=$(mktemp /tmp/twc-XXXXXX.tar.gz)
+    mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+    TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/twc-XXXXXX.tar.gz")
     if af_logged download_file "$TWC_URL" "$TMP_TAR"; then
         WEB_DIR="/usr/share/transmission/web"
         mkdir -p "$WEB_DIR"
@@ -176,6 +177,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/transmission-daemon.service
 
 report_progress 90 "Starting and enabling transmission-daemon.service..."
 af_logged systemctl daemon-reload

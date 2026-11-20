@@ -166,18 +166,8 @@ async fn catalog_znc_generates_unique_non_static_credentials_and_persists_receip
     assert!(!conf_a.contains("aetherflowzncsalt123"));
     assert_ne!(conf_a, conf_b, "each fresh ZNC install must generate unique salt and password hash");
 
-    let creds_path = root_a.join("opt/AetherFlow/logs/znc_credentials.txt");
-    assert!(creds_path.is_file());
-    let creds = fs::read_to_string(&creds_path).unwrap();
-    assert!(creds.contains("ZNC Admin User: admin\nZNC Admin Password: "));
-    assert!(!creds.contains("aetherflow-bootstrap"));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&creds_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+    for root in [&root_a, &root_b] {
+        assert!(!root.join("opt/AetherFlow/logs/znc_credentials.txt").exists());
     }
 
     match prev_user {

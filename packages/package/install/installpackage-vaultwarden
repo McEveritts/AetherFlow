@@ -62,7 +62,8 @@ report_progress 35 "Fetching latest Vaultwarden release metadata..."
 VW_VERSION="$(github_latest_tag "dani-garcia/vaultwarden" "1.32.7")"
 
 report_progress 55 "Extracting prebuilt Vaultwarden binary and Web Vault (${OCI_ARCH})..."
-TMP_EXTRACT=$(mktemp -d /tmp/vw-oci-XXXXXX)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_EXTRACT=$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/vw-oci-XXXXXX")
 VW_TAG="${VW_VERSION#v}"
 TOKEN="$(curl -fsSL "https://ghcr.io/token?scope=repository:dani-garcia/vaultwarden:pull" 2>/dev/null | jq -r '.token // empty' || true)"
 
@@ -168,6 +169,7 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/vaultwarden.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now vaultwarden

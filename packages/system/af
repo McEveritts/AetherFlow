@@ -92,7 +92,6 @@ function _install() {
   mapfile -t locks < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | grep -vx 'template' | sort -d)
   for i in "${locks[@]}"; do
     app=${i}
-    if [[ $i == autodl ]]; then app=autodlirssi; fi
     if [[ ! -f /install/.$app.lock ]]; then
       installa+=("$i" '""')
     fi
@@ -115,7 +114,6 @@ removea=()
 mapfile -t locks < <(find "$(package_root remove)" -type f -name 'removepackage-*' -printf "%f\n" | sed 's/^removepackage-//' | grep -vx 'template' | sort -d)
 for i in "${locks[@]}"; do
   app=${i}
-  if [[ $i == autodl ]]; then app=autodlirssi; fi
   if [[ -f /install/.$app.lock ]]; then
     removea+=("$i" '""')
   fi
@@ -142,7 +140,6 @@ function _cli() {
       return 1
     fi
     app="$package"
-    if [[ "$package" == autodl ]]; then app=autodlirssi; fi
     if [[ "$action" == update && ! -f /etc/Swizzin/.${app}.lock && ! -f /install/.${app}.lock ]]; then
       printf 'Package %s not installed; cannot update\n' "$package" >&2
       return 1
@@ -154,7 +151,6 @@ function _cli() {
   fi
   for package in "$@"; do
     app="$package"
-    if [[ "$package" == autodl ]]; then app=autodlirssi; fi
     if [[ -f /install/.${app}.lock && "$action" == install ]]; then
       printf 'Package %s already installed\n' "$package"
     else
@@ -183,7 +179,6 @@ function _clr() {
   export AF_LIFECYCLE_ACTION=remove AF_PACKAGE_ACTION=remove DELETE_DATA="$purge"
   for package in "$@"; do
     app="$package"
-    if [[ "$package" == autodl ]]; then app=autodlirssi; fi
     if [[ -f /etc/Swizzin/.$app.lock || -f /install/.$app.lock ]]; then
       script="$(package_script remove "$package")" || return 1
       printf 'Removing %s\n' "$package"

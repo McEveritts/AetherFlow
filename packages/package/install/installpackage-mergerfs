@@ -50,7 +50,8 @@ if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq mergerfs fu
         MFS_DEB_URL="$(printf '%s' "$MFS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*debian-bookworm_'${ARCH}'\.deb' | head -1 || true)"
     fi
     if [[ -n "$MFS_DEB_URL" ]]; then
-        TMP_DEB=$(mktemp /tmp/mergerfs-XXXXXX.deb)
+        mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+        TMP_DEB=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/mergerfs-XXXXXX.deb")
         af_logged download_file "$MFS_DEB_URL" "$TMP_DEB"
         install_deb_verified "$TMP_DEB" mergerfs
         rm -f "$TMP_DEB"
@@ -97,6 +98,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/mergerfs.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable mergerfs

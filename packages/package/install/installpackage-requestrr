@@ -69,7 +69,12 @@ case "${ARCH}" in
 esac
 
 report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
-RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/thomst08/requestrr/releases/latest 2>/dev/null || true)"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    _target_clean="${AF_TARGET_VERSION#[vV]}"
+    RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/thomst08/requestrr/releases/tags/v${_target_clean}" 2>/dev/null || curl -fsSL "https://api.github.com/repos/thomst08/requestrr/releases/tags/${_target_clean}" 2>/dev/null || true)"
+else
+    RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/thomst08/requestrr/releases/latest 2>/dev/null || true)"
+fi
 LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then
     print_error "Failed to discover latest GitHub release for thomst08/requestrr"
@@ -86,8 +91,9 @@ if [[ -z "${ASSET_URL}" ]]; then
     exit 1
 fi
 
-TMP_TAR="$(mktemp --suffix=.tar.gz)"
-TMP_EXTRACT="$(mktemp -d)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/requestrr-XXXXXX.tar.gz")"
+TMP_EXTRACT="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/requestrr-extract-XXXXXX")"
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
 af_logged download_file "${ASSET_URL}" "${TMP_TAR}"
 
@@ -102,7 +108,7 @@ if [[ ! -f "${TMP_EXTRACT}/Requestrr.WebApi" ]]; then
     fi
 fi
 RELEASE_DIR="${RELEASE_DIR:-$TMP_EXTRACT}"
-chmod +x "$RELEASE_DIR/Requestrr.WebApi"
+chmod 0755 "$RELEASE_DIR/Requestrr.WebApi"
 stage_app_archive "$RELEASE_DIR" "$INSTALL_DIR" Requestrr.WebApi "$DATA_DIR" "$PACKAGE_NAME" "."
 [[ "$RELEASE_DIR" == "$TMP_EXTRACT" ]] || rm -rf -- "$TMP_EXTRACT"
 
@@ -119,7 +125,7 @@ if [[ -f "${DATA_DIR}/config/settings.json" ]]; then
     set_config_value "${DATA_DIR}/config/settings.json" json Port "$APP_PORT"
 fi
 
-chmod +x "${INSTALL_DIR}/Requestrr.WebApi"
+chmod 0755 "${INSTALL_DIR}/Requestrr.WebApi"
 CLEAN_VER="${LATEST_TAG#[vV]}"
 queue_app_version "${INSTALL_DIR}/.af-version" "${CLEAN_VER}"
 chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
@@ -146,6 +152,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now requestrr.service

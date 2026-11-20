@@ -932,25 +932,28 @@ EOF
     fi
     mv -f "${tmp_env}" "${env_dir}/aetherflow.env"
 
-    # ── Install systemd unit files from templates ────────────────────────
+    # ── Install canonical systemd unit files ─────────────────────────────
     local sysd_dir="${af_root}/setup/templates/sysd"
+    local canonical_sysd_dir="${af_root}/deploy/systemd"
+    local current_sysd_dir="${af_root}/current/deploy/systemd"
     mkdir -p "${sysd_dst}"
-    if [[ -f "${sysd_dir}/aetherflow-runner.template" ]]; then
-        if type _safe_overlay_config &>/dev/null; then
-            _safe_overlay_config "${sysd_dir}/aetherflow-runner.template" "${sysd_dst}/aetherflow-runner.service"
-        else
-            cp "${sysd_dir}/aetherflow-runner.template" "${sysd_dst}/aetherflow-runner.service"
-            sha256sum "${sysd_dst}/aetherflow-runner.service" | awk '{print $1}' > "${sysd_dst}/aetherflow-runner.service.aetherflow-sha256"
+    local unit_name unit_src
+    for unit_name in aetherflow-runner.service aetherflow-api.service; do
+        unit_src=""
+        if [[ -f "${canonical_sysd_dir}/${unit_name}" ]]; then
+            unit_src="${canonical_sysd_dir}/${unit_name}"
+        elif [[ -f "${current_sysd_dir}/${unit_name}" ]]; then
+            unit_src="${current_sysd_dir}/${unit_name}"
         fi
-    fi
-    if [[ -f "${sysd_dir}/aetherflow-api.template" ]]; then
-        if type _safe_overlay_config &>/dev/null; then
-            _safe_overlay_config "${sysd_dir}/aetherflow-api.template" "${sysd_dst}/aetherflow-api.service"
-        else
-            cp "${sysd_dir}/aetherflow-api.template" "${sysd_dst}/aetherflow-api.service"
-            sha256sum "${sysd_dst}/aetherflow-api.service" | awk '{print $1}' > "${sysd_dst}/aetherflow-api.service.aetherflow-sha256"
+        if [[ -n "${unit_src}" ]]; then
+            if type _safe_overlay_config &>/dev/null; then
+                _safe_overlay_config "${unit_src}" "${sysd_dst}/${unit_name}"
+            else
+                cp "${unit_src}" "${sysd_dst}/${unit_name}"
+                sha256sum "${sysd_dst}/${unit_name}" | awk '{print $1}' > "${sysd_dst}/${unit_name}.aetherflow-sha256"
+            fi
         fi
-    fi
+    done
     if [[ -f "${sysd_dir}/af-certbot-sync.service" ]]; then
         cp -f "${sysd_dir}/af-certbot-sync.service" "${sysd_dst}/af-certbot-sync.service"
     fi

@@ -81,6 +81,36 @@ pub struct StoredChannel {
 // 1. 2FA Recovery Code Regeneration (`POST /user/2fa/recovery/regenerate`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn replace_recovery_hashes(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    encrypted_secret: &str,
+    password_hash: &str,
+    code: &str,
+    recovery: Option<crate::auth::RecoveryCodeMatch>,
+    hashes: &[String],
+) -> anyhow::Result<bool> {
+    let secret = af_db::decrypt_key(encrypted_secret)?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let current: (String, bool, String) = transaction.query_row(
+        "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
+        params![user_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if !current.1 || current.0 != encrypted_secret || current.2 != password_hash {
+        return Ok(false);
+    }
+    if !crate::auth::consume_totp_code(&transaction, user_id, &secret, code)
+        && !crate::auth::consume_recovery_code(&transaction, user_id, recovery.as_ref())
+    {
+        return Ok(false);
+    }
+    store_recovery_codes(&transaction, user_id, hashes)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+#[cfg(test)]
 fn replace_verified_recovery_codes(
     conn: &rusqlite::Connection,
     user_id: i64,
@@ -92,29 +122,19 @@ fn replace_verified_recovery_codes(
     if !password_ok || code.trim().is_empty() {
         return Ok(None);
     }
-    let transaction =
-        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    let current: (String, bool, String) = transaction.query_row(
-        "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
-        params![user_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-    )?;
-    if !current.1 || current.0 != encrypted_secret || current.2 != password_hash {
-        return Ok(None);
-    }
-    let secret = if current.0.is_empty() {
-        String::new()
-    } else {
-        af_db::decrypt_key(&current.0)?
-    };
-    if !crate::auth::consume_totp_code(&transaction, user_id, &secret, code)
-        && !crate::auth::validate_recovery_code(&transaction, user_id, code)
-    {
-        return Ok(None);
-    }
+    let recovery = crate::auth::match_recovery_in_connection(conn, user_id, code);
     let codes = generate_recovery_codes();
-    store_recovery_codes(&transaction, user_id, &codes)?;
-    transaction.commit()?;
-    Ok(Some(codes))
+    let hashes = crate::auth::hash_recovery_codes(&codes)?;
+    Ok(replace_recovery_hashes(
+        conn,
+        user_id,
+        encrypted_secret,
+        password_hash,
+        code,
+        recovery,
+        &hashes,
+    )?
+    .then_some(codes))
 }
 
 pub async fn regenerate_2fa_recovery_codes(
@@ -149,9 +169,22 @@ pub async fn regenerate_2fa_recovery_codes(
         let password_ok = password_hash.is_empty()
             || (!req.password.is_empty()
                 && crate::auth::verify_password(&req.password, &password_hash));
-        let result = (|| -> anyhow::Result<_> {
+        let result = (|| -> anyhow::Result<Option<Vec<String>>> {
+            if !password_ok {
+                return Ok(None);
+            }
+            let recovery = crate::auth::validate_recovery_code(user.user_id, &req.code);
+            if recovery.is_none()
+                && !crate::auth::has_matching_totp_code(&af_db::decrypt_key(&encrypted_secret)?, &req.code)
+            {
+                return Ok(None);
+            }
+            let codes = generate_recovery_codes();
+            let hashes = crate::auth::hash_recovery_codes(&codes)?;
             let conn = af_db::get_conn()?;
-            replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_ok)
+            Ok(replace_recovery_hashes(
+                &conn, user.user_id, &encrypted_secret, &password_hash, &req.code, recovery, &hashes,
+            )?.then_some(codes))
         })();
         let codes = match result {
             Ok(Some(codes)) => codes,

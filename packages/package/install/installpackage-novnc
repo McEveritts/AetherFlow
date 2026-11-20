@@ -109,6 +109,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${XVNC_SERVICE_FILE}"
 
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
@@ -128,6 +129,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now novnc-xvnc.service novnc.service

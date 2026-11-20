@@ -751,6 +751,73 @@ paths:
         - cookieAuth: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
+  /admin/cluster/commands:
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: List cluster worker commands and execution states
+      parameters:
+        - in: query
+          name: node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/cluster/nodes/{id}/commands:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Enqueue a durable remote command for a cluster worker node
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
   /admin/cluster/nodes/{id}/metrics:
     parameters:
       - in: path

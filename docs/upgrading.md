@@ -4,7 +4,7 @@ This guide covers the release channels, atomic upgrade pipeline (`af-release`, `
 
 ## Upgrade Channels
 
-AetherFlow supports three release channels managed from **Settings → System Updates** or via the unified `af` CLI (`sudo af release deploy --channel <channel>`):
+AetherFlow supports two release channels managed from **Settings → System Updates** or via the unified `af` CLI (`sudo af release deploy --channel <channel>`):
 
 | Channel | Source | Stability | Use Case |
 | :--- | :--- | :--- | :--- |

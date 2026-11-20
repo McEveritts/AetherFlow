@@ -769,21 +769,9 @@ fn fstat_fd(fd: libc::c_int) -> io::Result<libc::stat> {
 
 struct VerifiedScopedUserRoot {
     bfs: BrowserFs,
-    #[allow(dead_code)] // RAII descriptor pin for the open scoped user root
-    root_fd: OwnedFd,
     scope: String,
     scope_dev: u64,
     scope_ino: u64,
-}
-
-/// Opens the owner's configured scoped tenant root via the production runtime using the same
-/// SQLite `Connection` for `super::policy::effective_scope_with_conn` and descriptor-confined
-/// scoped root traversal.
-#[allow(dead_code)]
-pub fn open_configured_share_tenant_root(user_id: i64) -> Result<BrowserFs, McBrowserError> {
-    ShareRuntime::Production.with_conn_and_root(|conn, base_root, _policy| {
-        Ok(open_verified_user_root_fd(conn, base_root, user_id)?.bfs)
-    })
 }
 
 /// Opens the owner's configured scoped tenant root directory as both a `BrowserFs` and an
@@ -873,7 +861,6 @@ fn open_verified_user_root_fd(
 
     Ok(VerifiedScopedUserRoot {
         bfs: scoped_bfs,
-        root_fd: current_fd,
         scope: normalized_scope,
         scope_dev: scope_st.st_dev as u64,
         scope_ino: scope_st.st_ino as u64,

@@ -145,6 +145,7 @@ pub struct AetherFlowClient {
     base_url: String,
     bearer_token: Option<String>,
     http: reqwest::Client,
+    token_file: Option<std::path::PathBuf>,
 }
 
 impl AetherFlowClient {
@@ -161,11 +162,16 @@ impl AetherFlowClient {
             base_url: normalize_base_url(base_url.as_ref()),
             bearer_token: sanitize_token(bearer_token.as_deref()),
             http,
+            token_file: None,
         }
     }
 
     pub fn from_config(config: &PluginConfig) -> Self {
-        Self::new(&config.api_base_url, config.bearer_token.clone())
+        let mut client = Self::new(&config.api_base_url, config.bearer_token.clone());
+        client.token_file = env::var_os("AETHERFLOW_PLUGIN_TOKEN_FILE")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        client
     }
 
     pub fn base_url(&self) -> &str {
@@ -173,7 +179,15 @@ impl AetherFlowClient {
     }
 
     pub fn has_bearer_token(&self) -> bool {
-        self.bearer_token.is_some()
+        self.current_token().is_some()
+    }
+
+    fn current_token(&self) -> Option<String> {
+        if let Some(file) = &self.token_file {
+            let value = std::fs::read_to_string(file).ok()?;
+            return sanitize_token(Some(&value));
+        }
+        self.bearer_token.clone()
     }
 
     /// Constructs the full request URL for a verified control-plane path.
@@ -217,7 +231,7 @@ impl AetherFlowClient {
 
         if require_auth {
             self.validate_base_url_for_auth()?;
-            match &self.bearer_token {
+            match self.current_token() {
                 Some(token) => {
                     let raw = format!("Bearer {}", token);
                     let header_val =
@@ -398,6 +412,27 @@ async fn snapshot_handler(State(client): State<Arc<AetherFlowClient>>) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_client_reads_rotated_token_for_each_request() {
+        let dir = std::env::temp_dir().join(format!("af-sdk-token-test-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let token_file = dir.join("fixture.token");
+        let mut client = AetherFlowClient::new(DEFAULT_API_BASE_URL, Some("fallback".into()));
+        client.token_file = Some(token_file.clone());
+        for token in ["first", "rotated"] {
+            std::fs::write(&token_file, token).unwrap();
+            assert_eq!(
+                client.build_headers(true, "/test").unwrap()[AUTHORIZATION]
+                    .to_str()
+                    .unwrap(),
+                format!("Bearer {token}"),
+            );
+        }
+        std::fs::remove_file(&token_file).unwrap();
+        assert!(!client.has_bearer_token());
+        std::fs::remove_dir(dir).unwrap();
+    }
 
     #[test]
     fn normalizes_base_urls_and_defaults() {

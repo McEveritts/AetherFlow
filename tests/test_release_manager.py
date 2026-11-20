@@ -14,6 +14,18 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "release-manager.sh"
+
+
+def _resolve_openable_tmp_root() -> str:
+    cand = Path(tempfile.gettempdir()).resolve()
+    if all(os.access(p, os.R_OK | os.X_OK) for p in (cand, *cand.parents)):
+        return str(cand)
+    if Path("/tmp").is_dir() and os.access("/tmp", os.R_OK | os.W_OK | os.X_OK):
+        return str(Path("/tmp").resolve())
+    return str(cand)
+
+
+RESOLVED_TMP_ROOT = _resolve_openable_tmp_root()
 REAL_TOOLS = (
     "sqlite3", "flock", "mkdir", "date", "cp", "mv", "ln", "rm", "cat", "tee",
     "find", "awk", "grep", "sed", "mktemp", "readlink", "chmod", "chown", "id",
@@ -124,7 +136,7 @@ os.execv(real, [real, *arguments])
 
 class ReleaseManagerTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.data = self.root / "var" / "lib" / "aetherflow"
@@ -1120,10 +1132,67 @@ os.execvp(inner[0], inner)
         self.assertEqual(self.marker(self.data / "aetherflow.sqlite"), "v3-slot-marker")
         self.assertEqual(self.env_file.read_text(), "JWT_SECRET=slot-secret-value\n")
 
+    def test_deploy_removes_conflicting_defaults_and_log_retention_dropins(self):
+        # Include deploy/log-retention.py and log-retention units in artifact so retention drop-in path is exercised
+        binary = b"#!/bin/bash\necho aetherflow-api\n"
+        unit = (ROOT / "deploy/systemd/aetherflow-api.service").read_bytes()
+        runner = (ROOT / "deploy/systemd/aetherflow-runner.service").read_bytes()
+        ret_svc = (ROOT / "deploy/systemd/aetherflow-log-retention.service").read_bytes()
+        ret_tmr = (ROOT / "deploy/systemd/aetherflow-log-retention.timer").read_bytes()
+        ret_py = (ROOT / "deploy/log-retention.py").read_bytes()
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for name, payload, mode in (
+                ("aetherflow-api", binary, 0o755),
+                (".version", b"v4.0.0\n", 0o644),
+                ("web/dist/index.html", b"<html>app</html>", 0o644),
+                ("web/dist/app.wasm", b"wasm", 0o644),
+                ("speedtest-backend", b"speedtest-fixture", 0o755),
+                ("deploy/log-retention.py", ret_py, 0o755),
+                ("deploy/systemd/aetherflow-api.service", unit, 0o644),
+                ("deploy/systemd/aetherflow-runner.service", runner, 0o644),
+                ("deploy/systemd/aetherflow-log-retention.service", ret_svc, 0o644),
+                ("deploy/systemd/aetherflow-log-retention.timer", ret_tmr, 0o644),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                info.mode = mode
+                archive.addfile(info, io.BytesIO(payload))
+        data = buffer.getvalue()
+        (self.root / "artifact.tar.gz").write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "SHA256SUMS").write_text(digest + "  aetherflow-linux-amd64.tar.gz\n")
+
+        # Seed stale conflicting drop-ins that previously overrode TimeoutStopSec=35s, RestartSec=5s, and UMask=0027
+        for u in ("aetherflow-api.service", "aetherflow-runner.service", "aetherflow-log-retention.service"):
+            ddir = self.units / f"{u}.d"
+            ddir.mkdir(parents=True, exist_ok=True)
+            (ddir / "05-aetherflow-unit-defaults.conf").write_text("[Service]\nRestartSec=3s\nTimeoutStopSec=30s\n")
+        (self.units / "aetherflow-log-retention.service.d/10-aetherflow-hardening.conf").write_text(
+            "[Service]\nUMask=0077\n"
+        )
+
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        for u in ("aetherflow-api.service", "aetherflow-runner.service", "aetherflow-log-retention.service"):
+            self.assertFalse(
+                (self.units / f"{u}.d/05-aetherflow-unit-defaults.conf").exists(),
+                f"Stale 05-aetherflow-unit-defaults.conf should be removed for {u}",
+            )
+        self.assertFalse(
+            (self.units / "aetherflow-log-retention.service.d/10-aetherflow-hardening.conf").exists(),
+            "Conflicting log-retention 10-aetherflow-hardening.conf (UMask=0077) should be removed",
+        )
+        api_hardening = (self.units / "aetherflow-api.service.d/10-aetherflow-hardening.conf").read_text()
+        runner_hardening = (self.units / "aetherflow-runner.service.d/10-aetherflow-hardening.conf").read_text()
+        self.assertIn("UMask=0027", api_hardening)
+        self.assertIn("UMask=0077", runner_hardening)
+
 
 class SourceReleaseFrontendTests(unittest.TestCase):
     def test_source_build_keeps_runtime_ui_after_cleanup(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as directory:
             root = Path(directory)
             repo = root / "repo"
             release = root / "release"

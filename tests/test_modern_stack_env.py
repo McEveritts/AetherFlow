@@ -22,7 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODERN_STACK_SH = REPO_ROOT / "setup" / "modules" / "modern_stack.sh"
 PACKAGED_API_UNIT = REPO_ROOT / "deploy" / "systemd" / "aetherflow-api.service"
 PACKAGED_RUNNER_UNIT = REPO_ROOT / "deploy" / "systemd" / "aetherflow-runner.service"
-TEMPLATE_API_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "aetherflow-api.template"
+RETIRED_TEMPLATE_API_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "aetherflow-api.template"
+RETIRED_TEMPLATE_RUNNER_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "aetherflow-runner.template"
 RETIRED_QBIT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "qbittorrent.template"
 RETIRED_RTORRENT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "rtorrent.template"
 
@@ -162,7 +163,11 @@ class ModernStackEnvGenerationTests(unittest.TestCase):
         self.sysd_dst.mkdir(parents=True, exist_ok=True)
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stage only systemd templates into isolated install_root so REPO_ROOT is never mutated
+        # Stage canonical deploy/systemd units and remaining templates into isolated install_root so REPO_ROOT is never mutated
+        deploy_sysd_dst = self.install_root / "deploy" / "systemd"
+        deploy_sysd_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(REPO_ROOT / "deploy" / "systemd", deploy_sysd_dst,
+                        copy_function=shutil.copyfile)
         templates_dst = self.install_root / "setup" / "templates" / "sysd"
         templates_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(REPO_ROOT / "setup" / "templates" / "sysd", templates_dst,
@@ -388,16 +393,27 @@ class PackagedSystemdUnitPortabilityTests(unittest.TestCase):
         self.assertIn("StateDirectory=aetherflow", content)
         self.assertIn("ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow", content)
 
-    def test_packaged_template_contains_no_cookie_secure_false_and_no_personal_paths(self):
-        """OPUS-004 & OPUS-009: Template setup/templates/sysd/aetherflow-api.template must be clean."""
-        self.assertTrue(TEMPLATE_API_UNIT.exists(), "Template aetherflow-api.template missing")
-        content = TEMPLATE_API_UNIT.read_text(encoding="utf-8")
+    def test_canonical_systemd_units_consolidated_and_duplicate_templates_retired(self):
+        """Canonical deploy/systemd units must be the single source of truth without duplicate .template files."""
+        self.assertFalse(RETIRED_TEMPLATE_API_UNIT.exists(), "Duplicate setup/templates/sysd/aetherflow-api.template should be removed")
+        self.assertFalse(RETIRED_TEMPLATE_RUNNER_UNIT.exists(), "Duplicate setup/templates/sysd/aetherflow-runner.template should be removed")
 
-        self.assertNotIn("COOKIE_SECURE=false", content, "Template should not set COOKIE_SECURE=false")
-        self.assertNotIn("betheenvy", content)
-        self.assertNotIn("/home/hdd", content)
-        self.assertIn("SupplementaryGroups=systemd-journal adm", content)
-        self.assertIn("ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow", content)
+        for unit_path in (PACKAGED_API_UNIT, PACKAGED_RUNNER_UNIT):
+            self.assertTrue(unit_path.exists(), f"Canonical unit missing: {unit_path}")
+            content = unit_path.read_text(encoding="utf-8")
+            self.assertNotIn("COOKIE_SECURE=false", content, f"{unit_path.name} should not set COOKIE_SECURE=false")
+            self.assertNotIn("betheenvy", content)
+            self.assertNotIn("/home/hdd", content)
+
+        modern = MODERN_STACK_SH.read_text(encoding="utf-8")
+        finalize = (REPO_ROOT / "setup" / "modules" / "05-finalize.sh").read_text(encoding="utf-8")
+        self.assertNotIn("aetherflow-api.template", modern)
+        self.assertNotIn("aetherflow-runner.template", modern)
+        self.assertNotIn("aetherflow-api.template", finalize)
+        self.assertNotIn("aetherflow-runner.template", finalize)
+        self.assertIn("deploy/systemd", modern)
+        self.assertIn("deploy/systemd/aetherflow-api.service", finalize)
+        self.assertIn("deploy/systemd/aetherflow-runner.service", finalize)
 
     def test_retired_quickbox_media_unit_templates_stay_removed(self):
         """Obsolete QuickBox killall-based qbittorrent/rtorrent unit templates must remain retired."""

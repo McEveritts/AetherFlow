@@ -93,17 +93,7 @@ fn package_definition(name: &str) -> Result<Package> {
         .find(|package| package.name == name)
         .context("Package catalog entry is unavailable")?;
     if let Some(automation) = automation.get(name) {
-        package.update_source = automation.update_source.clone();
-        package.require_download_sha256 = automation.require_download_sha256;
-        package.update_repo = automation.update_repo.clone();
-        package.update_repo_url = automation.update_repo_url.clone();
-        package.update_package = automation.update_package.clone();
-        package.update_channel = automation.update_channel.clone();
-        package.version_command = automation.version_command.clone();
-        package.version_regex = automation.version_regex.clone();
-        package.sandbox_profile = automation.sandbox_profile.clone();
-        package.sandbox_read_write = automation.sandbox_read_write.clone();
-        package.sandbox_service_ids = automation.sandbox_service_ids.clone();
+        af_models::merge_package_automation(&mut package, automation);
     }
     Ok(package)
 }
@@ -2364,7 +2354,8 @@ impl CoordinatedOperation {
         })
     }
 
-    #[allow(dead_code, clippy::too_many_arguments)]
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn restore_and_restart_units(
         backend: &impl LifecycleBackend,
         lifecycle_job_id: &str,

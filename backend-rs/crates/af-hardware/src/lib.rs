@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Native NVML Dynamic FFI (`libnvidia-ml.so.1`) — Zero Subprocess Overhead
@@ -50,7 +50,6 @@ impl NvmlRuntime {
             "libnvidia-ml.so",
             "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
             "/usr/lib64/libnvidia-ml.so.1",
-            "nvml.dll",
         ];
         for path in candidates {
             if let Ok(lib) = unsafe { Library::new(path) } {
@@ -288,8 +287,6 @@ struct TelemetryState {
     last_disk_write_bytes: u64,
     last_disk_check: Option<Instant>,
     cached_processes: Vec<ProcessInfo>,
-    #[allow(dead_code)]
-    prev_proc_cpu_ticks: HashMap<i32, u64>,
     last_process_scan: Option<Instant>,
     cached_gpus: Vec<GpuMetric>,
     gpu_scanned: bool,
@@ -332,7 +329,6 @@ impl TelemetryState {
             last_disk_write_bytes: d_write,
             last_disk_check: Some(Instant::now()),
             cached_processes: Vec::new(),
-            prev_proc_cpu_ticks: HashMap::new(),
             last_process_scan: None,
             cached_gpus: Vec::new(),
             gpu_scanned: false,
@@ -777,7 +773,7 @@ fn collect_disk_partitions(disks: &Disks) -> (Vec<DiskPartition>, f64, f64, f64)
         let free_gb = sanitize_f64((avail_bytes as f64) / (1024.0 * 1024.0 * 1024.0));
         let used_pct = sanitize_f64(((used_bytes as f64) / (total_bytes as f64)) * 100.0);
 
-        if mount == "/" || (root_total == 0.0 && mount.ends_with(":\\")) {
+        if mount == "/" {
             root_total = total_gb;
             root_used = used_gb;
             root_free = free_gb;
@@ -1196,10 +1192,30 @@ fn memory_devices(record: &str) -> (i32, String) {
     (banks, types.into_iter().collect::<Vec<_>>().join(" / "))
 }
 
-/// Returns detailed hardware report for the host hardware inventory.
+const HARDWARE_REPORT_TTL: Duration = Duration::from_secs(30);
+static HARDWARE_REPORT_CACHE: Mutex<Option<(Instant, HardwareReport)>> = Mutex::new(None);
+
+/// Returns the host inventory, refreshing it at most once every 30 seconds.
 pub fn get_detailed_hardware() -> HardwareReport {
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    let mut cache = HARDWARE_REPORT_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some((at, report)) = &*cache {
+        if at.elapsed() < HARDWARE_REPORT_TTL {
+            return report.clone();
+        }
+    }
+    let report = collect_detailed_hardware();
+    *cache = Some((Instant::now(), report.clone()));
+    report
+}
+
+fn collect_detailed_hardware() -> HardwareReport {
+    let sys = System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_cpu(CpuRefreshKind::nothing())
+            .with_memory(MemoryRefreshKind::nothing().with_ram()),
+    );
 
     let system_vendor = fs::read_to_string("/sys/class/dmi/id/board_vendor")
         .or_else(|_| fs::read_to_string("/sys/class/dmi/id/sys_vendor"))
@@ -1333,6 +1349,18 @@ pub fn get_detailed_hardware() -> HardwareReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detailed_inventory_is_cached_between_calls() {
+        let first = get_detailed_hardware();
+        let sampled = HARDWARE_REPORT_CACHE.lock().unwrap().as_ref().unwrap().0;
+        assert_eq!(get_detailed_hardware(), first);
+        assert_eq!(
+            HARDWARE_REPORT_CACHE.lock().unwrap().as_ref().unwrap().0,
+            sampled
+        );
+        assert!(first.cpu.as_ref().is_some_and(|cpu| cpu.threads > 0));
+    }
 
     #[test]
     fn memory_metadata_counts_only_populated_slots() {

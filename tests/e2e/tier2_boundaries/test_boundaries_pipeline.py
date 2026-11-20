@@ -87,7 +87,7 @@ class TestB33RuntimeDirectoryModeEnforced(TestCase):
         super().__init__("T2_B33_01", "F33", 2, "aetherflow-runner unit specifies RuntimeDirectoryMode=0750")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        runner_unit = inspector.read_file("setup/templates/sysd/aetherflow-runner.template") or inspector.read_file("deploy/systemd/aetherflow-runner.service")
+        runner_unit = inspector.read_file("deploy/systemd/aetherflow-runner.service")
         self.assert_true(bool(runner_unit and ("RuntimeDirectory" in runner_unit or "0750" in runner_unit or "0755" in runner_unit)), "B33: Runner unit must specify RuntimeDirectory configuration")
 
 class TestB33StateDirectorySandboxed(TestCase):
@@ -95,7 +95,7 @@ class TestB33StateDirectorySandboxed(TestCase):
         super().__init__("T2_B33_02", "F33", 2, "aetherflow-api unit specifies StateDirectory=aetherflow for sandboxed database writes")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        api_unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
+        api_unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
         self.assert_true(bool(api_unit and ("StateDirectory" in api_unit or "/var/lib/aetherflow" in api_unit)), "B33: aetherflow-api unit must define StateDirectory")
 
 class TestB33EnvironmentFileConfigured(TestCase):
@@ -103,7 +103,7 @@ class TestB33EnvironmentFileConfigured(TestCase):
         super().__init__("T2_B33_03", "F33", 2, "aetherflow-api unit loads configuration from EnvironmentFile=/etc/aetherflow/aetherflow.env")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        api_unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
+        api_unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
         self.assert_true(bool(api_unit and ("EnvironmentFile" in api_unit or "aetherflow.env" in api_unit)), "B33: aetherflow-api unit must load EnvironmentFile")
 
 class TestB33ServiceDependencyOrdering(TestCase):
@@ -111,7 +111,7 @@ class TestB33ServiceDependencyOrdering(TestCase):
         super().__init__("T2_B33_04", "F33", 2, "aetherflow-api declares After=aetherflow-runner.service and Wants=aetherflow-runner.service")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        api_unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
+        api_unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
         self.assert_true(bool(api_unit and ("After" in api_unit or "runner" in api_unit.lower())), "B33: aetherflow-api unit must order after runner daemon")
 
 class TestB33RestartSecBackoffConfigured(TestCase):
@@ -119,7 +119,7 @@ class TestB33RestartSecBackoffConfigured(TestCase):
         super().__init__("T2_B33_05", "F33", 2, "Systemd units specify Restart=on-failure and RestartSec backoff")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        api_unit = inspector.read_file("setup/templates/sysd/aetherflow-api.template")
+        api_unit = inspector.read_file("deploy/systemd/aetherflow-api.service")
         self.assert_true(bool(api_unit and "Restart=" in api_unit), "B33: aetherflow-api unit must declare Restart policy")
 
 # ============================================================================

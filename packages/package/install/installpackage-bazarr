@@ -107,9 +107,14 @@ mkdir -p /opt /var/lib/bazarr /var/backups
 
 report_progress 30 "Downloading official Bazarr release bundle..."
 BAZARR_VERSION="$(github_latest_tag "morpheus65535/bazarr" "1.5.1")"
-BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip"
+if [[ -n "${BAZARR_VERSION:-}" ]]; then
+    BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/download/v${BAZARR_VERSION#v}/bazarr.zip"
+else
+    BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip"
+fi
 
-TMP_ZIP=$(mktemp /tmp/bazarr-XXXXXX.zip)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_ZIP="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/bazarr-XXXXXX.zip")"
 af_logged download_file "$BAZARR_URL" "$TMP_ZIP"
 
 report_progress 55 "Extracting Bazarr and creating isolated Python virtualenv..."

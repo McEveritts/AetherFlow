@@ -57,7 +57,8 @@ esac
 report_progress 35 "Downloading Sonarr v4 (${SONARR_ARCH})..."
 SONARR_VERSION="$(github_latest_tag "Sonarr/Sonarr" "4.0.12.2823")"
 SONARR_URL="https://github.com/Sonarr/Sonarr/releases/download/v${SONARR_VERSION#v}/Sonarr.main.${SONARR_VERSION#v}.linux-${SONARR_ARCH}.tar.gz"
-TMP_TAR=$(mktemp /tmp/sonarr-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/sonarr-XXXXXX.tar.gz")
 af_logged download_file "$SONARR_URL" "$TMP_TAR"
 
 report_progress 65 "Extracting Sonarr to /opt/Sonarr..."
@@ -129,6 +130,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/sonarr.service
 
 
 af_logged systemctl daemon-reload

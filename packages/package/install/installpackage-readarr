@@ -111,6 +111,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/readarr.service
 
 
 af_logged systemctl daemon-reload

@@ -289,6 +289,23 @@ pub struct ImportEventsBatchRequest {
     pub events: Vec<ImportedEventInput>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NativeExportImportRequest {
+    pub provider: String,
+    pub server_id: String,
+    #[serde(default)]
+    pub server_name: Option<String>,
+    pub source: String,
+    pub checkpoint: String,
+    #[serde(default)]
+    pub expected_checkpoint: Option<String>,
+    /// `"json"` or `"csv"`.
+    pub format: String,
+    /// Raw JSON export payload (`MediaContainer.Metadata` or array) or CSV text string.
+    pub payload: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportEventOutcome {
@@ -518,12 +535,12 @@ struct SignedApprovalTokenPayload {
 
 fn normalize_provider(raw: &str) -> ImportResult<String> {
     let normalized = raw.trim().to_ascii_lowercase();
-    if matches!(normalized.as_str(), "jellyfin" | "emby") {
+    if matches!(normalized.as_str(), "jellyfin" | "emby" | "plex") {
         Ok(normalized)
     } else {
         Err(StreamingImportError::bad_request(
             "invalid_provider",
-            "provider must be 'jellyfin' or 'emby'",
+            "provider must be 'jellyfin', 'emby', or 'plex'",
         ))
     }
 }
@@ -573,11 +590,11 @@ fn normalize_play_method(raw: &Option<String>) -> ImportResult<String> {
     }
     match trimmed
         .to_ascii_lowercase()
-        .replace([' ', '_'], "")
+        .replace([' ', '_', '-'], "")
         .as_str()
     {
         "directplay" => Ok("DirectPlay".to_string()),
-        "directstream" => Ok("DirectStream".to_string()),
+        "directstream" | "copy" => Ok("DirectStream".to_string()),
         "transcode" => Ok("Transcode".to_string()),
         "unknown" => Ok(String::new()),
         _ => Err(StreamingImportError::bad_request(
@@ -598,8 +615,8 @@ fn normalize_media_type(raw: &Option<String>) -> ImportResult<String> {
     match trimmed.to_ascii_lowercase().as_str() {
         "movie" => Ok("Movie".to_string()),
         "episode" => Ok("Episode".to_string()),
-        "audio" => Ok("Audio".to_string()),
-        "video" => Ok("Video".to_string()),
+        "audio" | "track" => Ok("Audio".to_string()),
+        "video" | "clip" => Ok("Video".to_string()),
         "unknown" => Ok(String::new()),
         _ => Err(StreamingImportError::bad_request(
             "invalid_media_type",
@@ -608,7 +625,7 @@ fn normalize_media_type(raw: &Option<String>) -> ImportResult<String> {
     }
 }
 
-/// Parses an RFC3339 timestamp or SQL UTC timestamp (`YYYY-MM-DD HH:MM:SS`) into `(sql_utc, unix_secs)`.
+/// Parses an RFC3339 timestamp, SQL UTC timestamp (`YYYY-MM-DD HH:MM:SS`), or Unix epoch seconds into `(sql_utc, unix_secs)`.
 fn parse_event_timestamp(raw: &str, field: &'static str) -> ImportResult<(String, i64)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -616,6 +633,22 @@ fn parse_event_timestamp(raw: &str, field: &'static str) -> ImportResult<(String
             "invalid_timestamp",
             format!("{field} is required for real playback events"),
         ));
+    }
+    if let Ok(raw_epoch) = trimmed.parse::<i64>() {
+        let secs = if raw_epoch > 100_000_000_000 {
+            raw_epoch / 1000
+        } else {
+            raw_epoch
+        };
+        if secs <= 0 {
+            return Err(StreamingImportError::bad_request(
+                "invalid_timestamp",
+                format!("{field} must be after the Unix epoch"),
+            ));
+        }
+        if let Some(utc) = DateTime::from_timestamp(secs, 0) {
+            return Ok((utc.format("%Y-%m-%d %H:%M:%S").to_string(), secs));
+        }
     }
     if let Ok(parsed) = DateTime::parse_from_rfc3339(trimmed) {
         let utc = parsed.with_timezone(&Utc);
@@ -710,9 +743,19 @@ pub fn evaluate_upstream_capability(
     let trimmed_path = endpoint_path.trim();
     let lower_path = trimmed_path.to_ascii_lowercase();
 
-    let (classification, reason) = if lower_path.contains("/users/")
-        && lower_path.contains("/items")
-    {
+    let (classification, reason) = if provider == "plex" {
+        if lower_path.contains("/status/sessions/history") || lower_path.contains("tautulli") {
+            (
+                "plex_history_export_supported".to_string(),
+                "Plex /status/sessions/history/all JSON and native CSV/Tautulli watch-history exports are normalized into canonical imported_event records with stable sourceEventId deduplication.".to_string(),
+            )
+        } else {
+            (
+                "plex_batch_or_export_import".to_string(),
+                "Plex watch history can be imported via structured event batches or native JSON/CSV watch-history exports.".to_string(),
+            )
+        }
+    } else if lower_path.contains("/users/") && lower_path.contains("/items") {
         (
             "item_summary_only".to_string(),
             "Jellyfin/Emby /Users/{id}/Items returns per-item UserData summaries (LastPlayedDate, PlayCount), never individual playback events. Refusing to fabricate imported_event records from item summaries.".to_string(),
@@ -787,7 +830,7 @@ pub fn get_import_status(
     let mut server_stmt = conn.prepare(
         "SELECT lower(trim(provider)), COALESCE(NULLIF(trim(server_id), ''), 'default')
          FROM streaming_servers
-         WHERE lower(trim(provider)) IN ('jellyfin', 'emby')",
+         WHERE lower(trim(provider)) IN ('jellyfin', 'emby', 'plex')",
     )?;
     let configured_servers = server_stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1108,13 +1151,11 @@ pub fn import_events_batch(
     let checkpoint = normalize_nonempty_token(&request.checkpoint, "checkpoint", 512)?;
     let server_name = match &request.server_name {
         Some(name) if !name.trim().is_empty() => normalize_nonempty_token(name, "serverName", 128)?,
-        _ => {
-            if provider == "jellyfin" {
-                "Jellyfin".to_string()
-            } else {
-                "Emby".to_string()
-            }
-        }
+        _ => match provider.as_str() {
+            "jellyfin" => "Jellyfin".to_string(),
+            "plex" => "Plex".to_string(),
+            _ => "Emby".to_string(),
+        },
     };
 
     // Guard against callers attempting to pass item_summary or activity_log sources as events.
@@ -2482,14 +2523,492 @@ pub async fn probe_upstream_event_source_handler(
     }
 }
 
+fn json_value_to_string(val: &serde_json::Value) -> Option<String> {
+    match val {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn json_field_str(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    for &key in keys {
+        if let Some(v) = obj.get(key).and_then(json_value_to_string) {
+            return Some(v);
+        }
+        if let Some((_, v)) = obj.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)) {
+            if let Some(s) = json_value_to_string(v) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+fn json_field_i64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<i64> {
+    for &key in keys {
+        if let Some(v) = obj.get(key) {
+            if let Some(i) = v.as_i64() {
+                return Some(i);
+            }
+            if let Some(s) = v.as_str().and_then(|s| s.trim().parse::<i64>().ok()) {
+                return Some(s);
+            }
+        }
+        if let Some((_, v)) = obj.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)) {
+            if let Some(i) = v.as_i64() {
+                return Some(i);
+            }
+            if let Some(s) = v.as_str().and_then(|s| s.trim().parse::<i64>().ok()) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_plex_record_map(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    is_native_media_container: bool,
+) -> ImportResult<ImportedEventInput> {
+    let item_id = json_field_str(obj, &["ratingKey", "rating_key", "itemId", "item_id"])
+        .ok_or_else(|| {
+            StreamingImportError::bad_request(
+                "invalid_plex_export",
+                "Plex export record missing ratingKey / itemId",
+            )
+        })?;
+    let item_name = json_field_str(obj, &["title", "itemName", "item_name", "full_title"])
+        .ok_or_else(|| {
+            StreamingImportError::bad_request(
+                "invalid_plex_export",
+                "Plex export record missing title / itemName",
+            )
+        })?;
+    let user_id = json_field_str(
+        obj,
+        &["accountID", "account_id", "user_id", "userId", "user"],
+    )
+    .unwrap_or_else(|| "plex-default-user".to_string());
+    let user_name = json_field_str(
+        obj,
+        &["user", "friendly_name", "userName", "user_name", "username"],
+    )
+    .unwrap_or_else(|| user_id.clone());
+
+    let started_at = json_field_str(
+        obj,
+        &[
+            "startedAt",
+            "started_at",
+            "started",
+            "viewedAt",
+            "viewed_at",
+            "date",
+        ],
+    )
+    .ok_or_else(|| {
+        StreamingImportError::bad_request(
+            "invalid_plex_export",
+            "Plex export record missing viewedAt / startedAt timestamp",
+        )
+    })?;
+    let ended_at = json_field_str(obj, &["endedAt", "ended_at", "stopped"]);
+
+    let source_event_id = json_field_str(
+        obj,
+        &[
+            "sourceEventId",
+            "source_event_id",
+            "historyKey",
+            "history_key",
+            "reference_id",
+            "row_id",
+            "id",
+        ],
+    )
+    .unwrap_or_else(|| format!("plex:{}:{}:{}", user_id, item_id, started_at));
+
+    let raw_duration = json_field_i64(obj, &["duration_secs", "durationSecs", "duration"]);
+    let duration_secs = raw_duration.and_then(|d| {
+        let secs = if is_native_media_container && d >= 10_000 {
+            d / 1000
+        } else {
+            d
+        };
+        (secs > 0).then_some(secs)
+    });
+
+    let watched_secs = if let Some(explicit_secs) = json_field_i64(
+        obj,
+        &[
+            "watched_secs",
+            "watchedSecs",
+            "play_duration",
+            "watched_duration",
+        ],
+    ) {
+        Some(explicit_secs.max(0))
+    } else if let Some(offset) = json_field_i64(obj, &["viewOffset", "view_offset"]) {
+        Some(if is_native_media_container {
+            (offset / 1000).max(0)
+        } else {
+            offset.max(0)
+        })
+    } else {
+        duration_secs
+    };
+
+    let item_type = json_field_str(obj, &["type", "media_type", "itemType", "item_type"]);
+    let series_name = json_field_str(
+        obj,
+        &[
+            "grandparentTitle",
+            "grandparent_title",
+            "seriesName",
+            "series_name",
+        ],
+    );
+    let series_id = json_field_str(
+        obj,
+        &[
+            "grandparentRatingKey",
+            "grandparent_rating_key",
+            "seriesId",
+            "series_id",
+        ],
+    );
+    let season_number = json_field_i64(
+        obj,
+        &[
+            "parentIndex",
+            "parent_index",
+            "seasonNumber",
+            "season_number",
+        ],
+    );
+    let episode_number = json_field_i64(obj, &["index", "episodeNumber", "episode_number"]);
+    let production_year = json_field_i64(obj, &["year", "productionYear", "production_year"]);
+    let play_method = json_field_str(
+        obj,
+        &[
+            "playMethod",
+            "play_method",
+            "transcode_decision",
+            "videoDecision",
+            "video_decision",
+        ],
+    );
+    let client_name = json_field_str(obj, &["player", "clientName", "client_name", "product"]);
+    let device_name = json_field_str(obj, &["device", "platform", "deviceName", "device_name"]);
+    let device_id = json_field_str(obj, &["machineIdentifier", "deviceId", "device_id"]);
+    let ip_address = json_field_str(obj, &["ip_address", "ipAddress"]);
+    let container = json_field_str(obj, &["container", "stream_container"]);
+    let video_codec = json_field_str(obj, &["videoCodec", "video_codec", "stream_video_codec"]);
+    let video_resolution = json_field_str(
+        obj,
+        &[
+            "videoResolution",
+            "video_resolution",
+            "stream_video_resolution",
+        ],
+    );
+    let audio_codec = json_field_str(obj, &["audioCodec", "audio_codec", "stream_audio_codec"]);
+    let audio_channels = json_field_i64(
+        obj,
+        &["audioChannels", "audio_channels", "stream_audio_channels"],
+    );
+    let subtitle_codec = json_field_str(obj, &["subtitleCodec", "subtitle_codec"]);
+    let hw_accel = json_field_str(obj, &["hwAccel", "hw_accel"]);
+    let bitrate_bps = json_field_i64(obj, &["bitrateBps", "bitrate_bps"]).or_else(|| {
+        json_field_i64(obj, &["bandwidth", "bitrate"]).map(|kbps| kbps.saturating_mul(1000))
+    });
+    let estimated_bytes = json_field_i64(obj, &["estimatedBytes", "estimated_bytes"]);
+
+    let mut libraries = Vec::new();
+    if let Some(sec_id) = json_field_str(obj, &["librarySectionID", "section_id", "library_id"]) {
+        let sec_name = json_field_str(
+            obj,
+            &["librarySectionTitle", "section_name", "library_name"],
+        )
+        .unwrap_or_else(|| sec_id.clone());
+        libraries.push(ImportLabelInput {
+            id: sec_id,
+            name: sec_name,
+        });
+    }
+
+    Ok(ImportedEventInput {
+        source_event_id,
+        user_id,
+        user_name,
+        item_id,
+        item_name,
+        item_type,
+        series_name,
+        series_id,
+        season_number,
+        episode_number,
+        production_year,
+        started_at,
+        ended_at,
+        watched_secs,
+        duration_secs,
+        play_method,
+        client_name,
+        device_name,
+        device_id,
+        ip_address,
+        container,
+        video_codec,
+        video_resolution,
+        audio_codec,
+        audio_channels,
+        subtitle_codec,
+        hw_accel,
+        bitrate_bps,
+        estimated_bytes,
+        libraries,
+        genres: Vec::new(),
+    })
+}
+
+/// Normalizes a native Plex JSON watch-history export (`MediaContainer.Metadata`, Tautulli
+/// `response.data.data`, or JSON array of history objects) into canonical [`ImportedEventInput`] items.
+pub fn parse_plex_json_export(
+    payload: &serde_json::Value,
+) -> ImportResult<Vec<ImportedEventInput>> {
+    let (records, is_native_container) = if let Some(arr) = payload
+        .get("MediaContainer")
+        .or_else(|| payload.get("mediaContainer"))
+        .and_then(|mc| mc.get("Metadata").or_else(|| mc.get("metadata")))
+        .and_then(|m| m.as_array())
+    {
+        (arr, true)
+    } else if let Some(arr) = payload
+        .get("response")
+        .and_then(|r| r.get("data"))
+        .and_then(|d| d.get("data").or(Some(d)))
+        .and_then(|a| a.as_array())
+    {
+        (arr, false)
+    } else if let Some(arr) = payload.as_array() {
+        (arr, false)
+    } else {
+        return Err(StreamingImportError::bad_request(
+            "invalid_plex_json_export",
+            "Expected Plex MediaContainer.Metadata array, Tautulli response.data.data, or JSON array",
+        ));
+    };
+
+    if records.is_empty() || records.len() > MAX_IMPORT_BATCH_EVENTS {
+        return Err(StreamingImportError::bad_request(
+            "invalid_batch_size",
+            format!(
+                "Plex export batch must contain between 1 and {MAX_IMPORT_BATCH_EVENTS} records"
+            ),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(records.len());
+    for rec in records {
+        let obj = rec.as_object().ok_or_else(|| {
+            StreamingImportError::bad_request(
+                "invalid_plex_json_export",
+                "Each Plex export entry must be a JSON object",
+            )
+        })?;
+        out.push(normalize_plex_record_map(obj, is_native_container)?);
+    }
+    Ok(out)
+}
+
+fn parse_csv_rows(csv_text: &str) -> ImportResult<Vec<Vec<String>>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut current_row: Vec<String> = Vec::new();
+    let mut current_field = String::new();
+    let mut in_quotes = false;
+    let mut chars = csv_text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    let _ = chars.next();
+                    current_field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                current_field.push(ch);
+            }
+        } else {
+            match ch {
+                '"' => in_quotes = true,
+                ',' => {
+                    current_row.push(current_field.trim().to_string());
+                    current_field.clear();
+                }
+                '\r' => {
+                    if chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    current_row.push(current_field.trim().to_string());
+                    current_field.clear();
+                    if current_row.iter().any(|c| !c.is_empty()) {
+                        rows.push(std::mem::take(&mut current_row));
+                    } else {
+                        current_row.clear();
+                    }
+                }
+                '\n' => {
+                    current_row.push(current_field.trim().to_string());
+                    current_field.clear();
+                    if current_row.iter().any(|c| !c.is_empty()) {
+                        rows.push(std::mem::take(&mut current_row));
+                    } else {
+                        current_row.clear();
+                    }
+                }
+                _ => current_field.push(ch),
+            }
+        }
+    }
+    if in_quotes {
+        return Err(StreamingImportError::bad_request(
+            "invalid_plex_csv_export",
+            "Unterminated quoted field in CSV export",
+        ));
+    }
+    if !current_field.trim().is_empty() || !current_row.is_empty() {
+        current_row.push(current_field.trim().to_string());
+        if current_row.iter().any(|c| !c.is_empty()) {
+            rows.push(current_row);
+        }
+    }
+    Ok(rows)
+}
+
+/// Normalizes a Plex / Tautulli CSV watch-history export into canonical [`ImportedEventInput`] items.
+pub fn parse_plex_csv_export(csv_text: &str) -> ImportResult<Vec<ImportedEventInput>> {
+    let rows = parse_csv_rows(csv_text.trim_start_matches('\u{feff}'))?;
+    if rows.len() < 2 {
+        return Err(StreamingImportError::bad_request(
+            "invalid_plex_csv_export",
+            "CSV export must contain a header row and at least one event row",
+        ));
+    }
+    if rows.len() - 1 > MAX_IMPORT_BATCH_EVENTS {
+        return Err(StreamingImportError::bad_request(
+            "invalid_batch_size",
+            format!("CSV export batch must contain between 1 and {MAX_IMPORT_BATCH_EVENTS} rows"),
+        ));
+    }
+    let headers = &rows[0];
+    let mut out = Vec::with_capacity(rows.len() - 1);
+    for row in &rows[1..] {
+        if row.len() > headers.len() {
+            return Err(StreamingImportError::bad_request(
+                "invalid_plex_csv_export",
+                "CSV row has more columns than the header row",
+            ));
+        }
+        let mut map = serde_json::Map::new();
+        for (idx, header_name) in headers.iter().enumerate() {
+            let key = header_name.trim();
+            if !key.is_empty() {
+                if let Some(val) = row.get(idx).filter(|s| !s.is_empty()) {
+                    map.insert(key.to_string(), serde_json::Value::String(val.clone()));
+                }
+            }
+        }
+        out.push(normalize_plex_record_map(&map, false)?);
+    }
+    Ok(out)
+}
+
+/// Validates and imports a native JSON or CSV watch-history export via [`import_events_batch`].
+pub fn import_native_export_batch(
+    conn: &Connection,
+    request: NativeExportImportRequest,
+    user: &AuthUser,
+    now: i64,
+) -> ImportResult<ImportEventsBatchResponse> {
+    ensure_admin(user)?;
+    let provider = normalize_provider(&request.provider)?;
+    let fmt = request.format.trim().to_ascii_lowercase();
+    let events = match fmt.as_str() {
+        "json" => parse_plex_json_export(&request.payload)?,
+        "csv" => {
+            let csv_str = request.payload.as_str().ok_or_else(|| {
+                StreamingImportError::bad_request(
+                    "invalid_plex_csv_export",
+                    "CSV export payload must be a string",
+                )
+            })?;
+            parse_plex_csv_export(csv_str)?
+        }
+        _ => {
+            return Err(StreamingImportError::bad_request(
+                "invalid_export_format",
+                "format must be 'json' or 'csv'",
+            ))
+        }
+    };
+
+    import_events_batch(
+        conn,
+        ImportEventsBatchRequest {
+            provider,
+            server_id: request.server_id,
+            server_name: request.server_name,
+            source: request.source,
+            checkpoint: request.checkpoint,
+            expected_checkpoint: request.expected_checkpoint,
+            events,
+        },
+        user,
+        now,
+    )
+}
+
 /// `POST /api/v1/admin/streaming/imports/events`
 pub async fn import_streaming_events_handler(
     Extension(user): Extension<AuthUser>,
-    Json(request): Json<ImportEventsBatchRequest>,
+    Json(raw_body): Json<serde_json::Value>,
 ) -> Response {
     let result = tokio::task::spawn_blocking(move || {
         let conn = acquire_pool_conn(&user)?;
-        import_events_batch(&conn, request, &user, Utc::now().timestamp())
+        let now = Utc::now().timestamp();
+        if raw_body.get("format").is_some() && raw_body.get("events").is_none() {
+            let native_req: NativeExportImportRequest =
+                serde_json::from_value(raw_body).map_err(|err| {
+                    StreamingImportError::bad_request(
+                        "invalid_import_request",
+                        format!("Invalid native export import payload: {err}"),
+                    )
+                })?;
+            import_native_export_batch(&conn, native_req, &user, now)
+        } else {
+            let batch_req: ImportEventsBatchRequest =
+                serde_json::from_value(raw_body).map_err(|err| {
+                    StreamingImportError::bad_request(
+                        "invalid_import_request",
+                        format!("Invalid event batch import payload: {err}"),
+                    )
+                })?;
+            import_events_batch(&conn, batch_req, &user, now)
+        }
     })
     .await
     .map_err(|_| StreamingImportError::internal("Event import task panicked"))
@@ -3534,5 +4053,146 @@ mod tests {
             status.checkpoints[0].last_error.as_deref(),
             Some("Malformed upstream export payload at line 42")
         );
+    }
+
+    #[test]
+    fn plex_native_json_and_csv_exports_import_cleanly_into_canonical_watch_history() {
+        let conn = setup_isolated_db();
+        let admin = admin_user();
+        let now = 1_710_000_000_i64;
+
+        conn.execute(
+            "INSERT INTO streaming_servers (provider, name, server_id) VALUES ('plex', 'Main Plex', 'plex-srv-1')",
+            [],
+        )
+        .unwrap();
+
+        // 1. Native Plex MediaContainer.Metadata JSON export
+        let plex_json = serde_json::json!({
+            "MediaContainer": {
+                "size": 2,
+                "Metadata": [
+                    {
+                        "historyKey": "/status/sessions/history/501",
+                        "ratingKey": "12345",
+                        "title": "Dune: Part Two",
+                        "type": "movie",
+                        "accountID": 7,
+                        "user": "Paul",
+                        "viewedAt": 1709990000,
+                        "duration": 9960000,
+                        "viewOffset": 9900000,
+                        "videoDecision": "directplay",
+                        "player": "Plex for Apple TV",
+                        "platform": "tvOS",
+                        "librarySectionID": "1",
+                        "librarySectionTitle": "Movies"
+                    },
+                    {
+                        "historyKey": "/status/sessions/history/502",
+                        "ratingKey": "67890",
+                        "grandparentRatingKey": "67000",
+                        "grandparentTitle": "Severance",
+                        "title": "Good News About Hell",
+                        "type": "episode",
+                        "parentIndex": 1,
+                        "index": 1,
+                        "accountID": 8,
+                        "user": "Helly",
+                        "viewedAt": 1709995000,
+                        "duration": 3420000,
+                        "viewOffset": 3420000,
+                        "videoDecision": "copy",
+                        "player": "Plex Web"
+                    }
+                ]
+            }
+        });
+
+        let json_resp = import_native_export_batch(
+            &conn,
+            NativeExportImportRequest {
+                provider: "plex".to_string(),
+                server_id: "plex-srv-1".to_string(),
+                server_name: Some("Main Plex".to_string()),
+                source: "plex_native_json_export".to_string(),
+                checkpoint: "plex-json-cp-1".to_string(),
+                expected_checkpoint: None,
+                format: "json".to_string(),
+                payload: plex_json,
+            },
+            &admin,
+            now,
+        )
+        .expect("import plex json");
+        assert_eq!(json_resp.provider, "plex");
+        assert_eq!(json_resp.inserted_included, 2);
+
+        // 2. Native Plex / Tautulli CSV watch-history export
+        let plex_csv = "history_key,user_id,friendly_name,rating_key,title,media_type,started,stopped,play_duration,duration,transcode_decision,player,platform\n\
+plex-csv-901,9,Irving,88801,\"The You You Are\",track,1709998000,1709998240,240,245,transcode,Plexamp,iOS\n";
+
+        let csv_resp = import_native_export_batch(
+            &conn,
+            NativeExportImportRequest {
+                provider: "plex".to_string(),
+                server_id: "plex-srv-1".to_string(),
+                server_name: Some("Main Plex".to_string()),
+                source: "plex_csv_export".to_string(),
+                checkpoint: "plex-csv-cp-1".to_string(),
+                expected_checkpoint: None,
+                format: "csv".to_string(),
+                payload: serde_json::Value::String(plex_csv.to_string()),
+            },
+            &admin,
+            now + 10,
+        )
+        .expect("import plex csv");
+        assert_eq!(csv_resp.inserted_included, 1);
+
+        // Verify canonical rows in `streaming_history`
+        let history = query_history(
+            &conn,
+            HistoryQuery {
+                provider: "plex".to_string(),
+                ..HistoryQuery::default()
+            },
+            &admin,
+            now + 20,
+        )
+        .expect("query plex history");
+        assert_eq!(history.items.len(), 3);
+        assert!(history.items.iter().any(|r| r.item_name == "Dune: Part Two"
+            && r.item_type.as_deref() == Some("Movie")
+            && r.play_method.as_deref() == Some("DirectPlay")
+            && r.watched_secs == Some(9900)));
+        assert!(history
+            .items
+            .iter()
+            .any(|r| r.item_name == "Good News About Hell"
+                && r.series_name.as_deref() == Some("Severance")
+                && r.play_method.as_deref() == Some("DirectStream")));
+        assert!(history
+            .items
+            .iter()
+            .any(|r| r.item_name == "The You You Are"
+                && r.item_type.as_deref() == Some("Audio")
+                && r.play_method.as_deref() == Some("Transcode")
+                && r.watched_secs == Some(240)));
+
+        let status = get_import_status(
+            &conn,
+            ImportStatusQuery {
+                provider: "plex".to_string(),
+                server_id: "plex-srv-1".to_string(),
+            },
+            &admin,
+        )
+        .expect("plex import status");
+        assert_eq!(status.checkpoints.len(), 2);
+        assert!(status
+            .capabilities
+            .iter()
+            .any(|c| c.provider == "plex" && c.real_event_import_supported));
     }
 }

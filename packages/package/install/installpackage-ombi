@@ -63,11 +63,12 @@ OMBI_VERSION="$(github_latest_tag "Ombi-app/Ombi" "4.43.5")"
 OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/${OMBI_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting Ombi ${OMBI_VERSION}..."
-TMP_TAR=$(mktemp /tmp/ombi-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/ombi-XXXXXX.tar.gz")
 af_logged download_file "$OMBI_URL" "$TMP_TAR"
 stage_app_archive "$TMP_TAR" "/opt/Ombi" "Ombi" "/var/lib/ombi" "${PACKAGE_NAME}" "." "/etc/Ombi"
 rm -f "$TMP_TAR"
-chmod +x /opt/Ombi/Ombi
+chmod 0755 /opt/Ombi/Ombi
 queue_app_version /opt/Ombi/.af-version "${OMBI_VERSION#v}"
 
 chown -hRP ombi:ombi /opt/Ombi /etc/Ombi /var/lib/ombi
@@ -91,6 +92,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/ombi.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now ombi

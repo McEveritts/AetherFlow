@@ -153,6 +153,7 @@ impl MarketplaceOps {
             || id.is_empty()
             || package["inventory_authenticated"] == false
             || package["inventory_known"] == false
+            || (action == "install" && retired_uninstalled(&package))
             || self.submitting.with_untracked(|set| set.contains(&id))
             || self
                 .jobs

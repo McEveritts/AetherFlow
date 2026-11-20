@@ -144,7 +144,8 @@ PNGX_URL="https://github.com/paperless-ngx/paperless-ngx/releases/download/v${PN
 
 report_progress 55 "Downloading and extracting Paperless-ngx ${PNGX_VER} in staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.paperless-build.XXXXXX)"
-TMP_XZ=$(mktemp /tmp/paperless-XXXXXX.tar.xz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_XZ=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/paperless-XXXXXX.tar.xz")
 if ! af_logged download_file "$PNGX_URL" "$TMP_XZ"; then
     rm -f "$TMP_XZ"
     log_error "Failed to download or verify SHA-256 for Paperless-ngx ${PNGX_VER}"

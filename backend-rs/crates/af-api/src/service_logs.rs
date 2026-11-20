@@ -22,14 +22,17 @@ const MAX_CAPTURE: usize = 1024 * 1024;
 const LOG_BUDGET: Duration = Duration::from_secs(5);
 static LOG_READERS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(8)));
 
+pub async fn get_admin_logs(
+    axum::Extension(user): axum::Extension<crate::auth::AuthUser>,
+    query: Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(response) = crate::auth::require_admin(&user) {
+        return *response;
+    }
+    crate::intelligence::get_logs(query).await
+}
+
 pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
-    let Ok(_permit) = LOG_READERS.clone().try_acquire_owned() else {
-        return crate::auth::api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "LOG_READ_BUSY",
-            "Log readers are busy; retry shortly",
-        );
-    };
     let source = q
         .get("source")
         .map(|s| s.trim().to_lowercase())
@@ -38,6 +41,20 @@ pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
         .get("unit")
         .map(|s| s.trim().to_owned())
         .unwrap_or_default();
+    if !unit.is_empty() && !af_runner::is_managed_runner_systemd_unit(&unit) {
+        return crate::auth::api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Unit is not managed by AetherFlow",
+        );
+    }
+    let Ok(_permit) = LOG_READERS.clone().try_acquire_owned() else {
+        return crate::auth::api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "LOG_READ_BUSY",
+            "Log readers are busy; retry shortly",
+        );
+    };
     let search = q
         .get("search")
         .or_else(|| q.get("filter"))
@@ -359,6 +376,24 @@ mod tests {
         let pid = fs::read_to_string(pidfile).unwrap();
         assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_units_and_admin_identity_are_validated() {
+        for unit in ["ssh*", "*.service", "unmanaged-fixture.service"] {
+            let response = get_logs(Query(HashMap::from([("unit".into(), unit.into())]))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let user = crate::auth::AuthUser {
+            user_id: 1,
+            username: "member".into(),
+            role: "user".into(),
+            jti: String::new(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let response = get_admin_logs(axum::Extension(user), Query(HashMap::new())).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

@@ -334,6 +334,7 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/af-kasmvnc.service
 
 report_progress 90 "Starting KasmVNC..."
 systemctl daemon-reload

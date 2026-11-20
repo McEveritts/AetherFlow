@@ -19,8 +19,12 @@ function _makedirs() {
 
 # NOTE: _ruconf function removed — ruTorrent user config sunset
 
-# function to install vsftpd
+# function to install vsftpd (explicit opt-in via AETHERFLOW_ENABLE_FTPD=yes)
 function _installftpd() {
+	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
+		1|true|TRUE|yes|YES|y|Y|on|ON) ;;
+		*) return 0 ;;
+	esac
 	apt-get purge -y vsftpd pure-ftpd >>"${OUTTO}" 2>&1
 	apt-get autoremove >>"${OUTTO}" 2>&1
 	apt-get install -y vsftpd >>"${OUTTO}" 2>&1

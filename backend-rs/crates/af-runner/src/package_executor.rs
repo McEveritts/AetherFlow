@@ -898,11 +898,6 @@ pub(crate) async fn terminate_child_process_group(child: &mut tokio::process::Ch
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
 }
 
-#[allow(dead_code)]
-pub(crate) async fn terminate_child_process(child: &mut tokio::process::Child) {
-    terminate_child_process_group(child).await;
-}
-
 /// Production command runner using `tokio::process::Command` with dedicated process group
 /// isolation (`process_group(0)`), bounded output retention, and group-wide cancellation termination.
 #[derive(Debug, Clone)]
@@ -2069,7 +2064,7 @@ fn copy_dir_snapshot_recursive(
             src_dir.display()
         )));
     }
-    fs::create_dir_all(dst_dir)?;
+    create_dir_all_0755(dst_dir)?;
     let _ = fs::set_permissions(dst_dir, src_meta.permissions());
 
     for entry_res in fs::read_dir(src_dir)? {
@@ -2929,10 +2924,20 @@ fn write_file_atomic_with_mode_bounded(
     mode: u32,
     root_bound: Option<&Path>,
 ) -> Result<(), PackageExecutorError> {
+    write_file_atomic_with_file_owner(target, content, mode, root_bound, None)
+}
+
+fn write_file_atomic_with_file_owner(
+    target: &Path,
+    content: &[u8],
+    mode: u32,
+    root_bound: Option<&Path>,
+    owner: Option<(u32, u32)>,
+) -> Result<(), PackageExecutorError> {
     validate_filesystem_path(target, root_bound)?;
     if let Some(parent) = target.parent() {
         validate_filesystem_path(parent, root_bound)?;
-        fs::create_dir_all(parent)?;
+        create_dir_all_0755(parent)?;
         validate_filesystem_path(parent, root_bound)?;
     }
     validate_filesystem_path(target, root_bound)?;
@@ -2945,6 +2950,12 @@ fn write_file_atomic_with_mode_bounded(
     let result = (|| -> Result<(), PackageExecutorError> {
         let mut file = open_new_private_file(&temporary, mode)?;
         file.write_all(content)?;
+        if let Some((uid, gid)) = owner {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
         file.sync_all()?;
         validate_filesystem_path(target, root_bound)?;
         fs::rename(&temporary, target)?;
@@ -2954,6 +2965,27 @@ fn write_file_atomic_with_mode_bounded(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn create_dir_all_0755(path: &Path) -> std::io::Result<()> {
+    if path.as_os_str().is_empty() || path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_dir_all_0755(parent)?;
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let directory = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(path)?;
+            directory.set_permissions(fs::Permissions::from_mode(0o755))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn open_new_private_file(path: &Path, mode: u32) -> std::io::Result<File> {
@@ -3497,7 +3529,6 @@ pub fn resolve_threadfin_target_version() -> String {
             "AETHERFLOW_THREADFIN_VERSION",
             "THREADFIN_VERSION",
             "AF_THREADFIN_VERSION",
-            "AF_TARGET_VERSION",
             "AETHERFLOW_PACKAGE_VERSION_OVERRIDE",
         ] {
             if let Ok(val) = env::var(var_name) {
@@ -5623,20 +5654,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             effective_port
         };
         let initial_version = if recipe.package_id == "threadfin" {
-            if action == PackageAction::Update
-                && resolve_threadfin_sha256_override().is_none()
-                && self.env_cfg.fs_root.is_none()
-                && self.env_cfg.artifact_cache_dir.is_none()
-            {
-                self.resolve_github_tag(
-                    "Threadfin/Threadfin",
-                    &resolve_threadfin_target_version(),
-                    true,
-                )
-                .await
-            } else {
-                resolve_threadfin_target_version()
-            }
+            resolve_threadfin_target_version()
         } else {
             "unknown".to_string()
         };
@@ -6073,7 +6091,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             PackageAction::Install | PackageAction::Reinstall | PackageAction::Update
         ) && self.env_cfg.fs_root.is_none()
         {
-            trigger_certbot_sync_best_effort(&recipe.package_id);
+            trigger_certbot_sync_best_effort();
         }
 
         let done_msg = match action {
@@ -6347,7 +6365,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                             parent,
                                             self.env_cfg.fs_root.as_deref(),
                                         )?;
-                                        fs::create_dir_all(parent)?;
+                                        create_dir_all_0755(parent)?;
                                         validate_filesystem_path(
                                             parent,
                                             self.env_cfg.fs_root.as_deref(),
@@ -6545,6 +6563,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         validate_chown_target_path(logical)?;
                     }
                     let resolved = self.env_cfg.resolve_path(logical)?;
+                    if let Some(parent) = resolved.parent() {
+                        create_dir_all_0755(parent)?;
+                    }
                     fs::create_dir_all(&resolved)?;
                     validate_filesystem_path(&resolved, self.env_cfg.fs_root.as_deref())?;
                     set_path_mode(&resolved, *mode);
@@ -7005,7 +7026,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     PathBuf::from("/usr/local/bin/rclone")
                 };
                 if let Some(parent) = dest_bin.parent() {
-                    fs::create_dir_all(parent)?;
+                    create_dir_all_0755(parent)?;
                 }
 
                 let symlink_path = if let Some(ref root) = self.env_cfg.fs_root {
@@ -7014,7 +7035,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     PathBuf::from("/usr/bin/rclone")
                 };
                 if let Some(parent) = symlink_path.parent() {
-                    fs::create_dir_all(parent)?;
+                    create_dir_all_0755(parent)?;
                 }
 
                 let test_archive_mode = vars.contains_key("RCLONE_ARCHIVE_PATH")
@@ -7431,7 +7452,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     validate_filesystem_symlink_path(&dest_bin, self.env_cfg.fs_root.as_deref())?;
                     if let Some(parent) = dest_bin.parent() {
                         validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
-                        fs::create_dir_all(parent)?;
+                        create_dir_all_0755(parent)?;
                         validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
                     }
                     let bin_filename = dest_bin
@@ -7739,7 +7760,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 let sha256 = verify_artifact_file_for_arch(&tmp_archive, &gz_policy, Some(&arch))?;
 
                 let dest_dir_resolved = self.env_cfg.resolve_path(dest_dir)?;
-                fs::create_dir_all(&dest_dir_resolved)?;
+                create_dir_all_0755(&dest_dir_resolved)?;
                 validate_filesystem_path(&dest_dir_resolved, self.env_cfg.fs_root.as_deref())?;
 
                 extract_binaries_from_targz(
@@ -7968,28 +7989,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     *mode,
                     self.env_cfg.fs_root.as_deref(),
                 )?;
-
-                if path == "/var/lib/znc/configs/znc.conf" {
-                    let creds_path = self
-                        .env_cfg
-                        .resolve_path("/opt/AetherFlow/logs/znc_credentials.txt")?;
-                    journal.stage_file_mutation(&creds_path)?;
-                    let master_user = vars
-                        .get("MASTER_USER")
-                        .map(String::as_str)
-                        .unwrap_or("admin");
-                    let master_pass = vars.get("MASTER_PASS").map(String::as_str).unwrap_or("");
-                    let creds_body = format!(
-                        "ZNC Admin User: {}\nZNC Admin Password: {}\n",
-                        master_user, master_pass
-                    );
-                    write_file_atomic_with_mode_bounded(
-                        &creds_path,
-                        creds_body.as_bytes(),
-                        0o600,
-                        self.env_cfg.fs_root.as_deref(),
-                    )?;
-                }
 
                 if let Some(ref o) = owner {
                     let grp = group.as_deref().unwrap_or(o.as_str());
@@ -9634,23 +9633,17 @@ fn append_log_line(log_file_path: &Path, line: &str) {
     }
 }
 
-/// Best-effort background trigger for `/usr/local/bin/af-certbot-sync <pkg_id>`
-/// to preserve parity with `packages/common.sh::write_lock`.
-fn trigger_certbot_sync_best_effort(pkg_id: &str) {
-    let sync_bin = Path::new("/usr/local/bin/af-certbot-sync");
-    if !sync_bin.is_file() {
+/// Mirrors the legacy installer's certificate expansion after writing the install lock.
+fn trigger_certbot_sync_best_effort() {
+    if !["/usr/local/bin/af-certbot-sync", "/usr/bin/af-certbot-sync"]
+        .iter()
+        .any(|path| Path::new(path).is_file())
+    {
         return;
     }
-    let pkg = pkg_id.to_string();
-    std::thread::spawn(move || {
-        if let Ok(mut child) = std::process::Command::new(sync_bin)
-            .arg(pkg)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let _ = child.wait();
+    tokio::spawn(async {
+        if let Err(err) = crate::sync_certbot_and_managed_ingress().await {
+            tracing::warn!(error = %err, "post-install certbot sync failed");
         }
     });
 }
@@ -9804,7 +9797,7 @@ fn apply_sandbox_in_root_with_journal(
             let _ = fs::remove_file(&dropin_10);
             continue;
         }
-        fs::create_dir_all(&dropin_dir)?;
+        create_dir_all_0755(&dropin_dir)?;
         validate_filesystem_path(&dropin_dir, fs_root)?;
         let content = crate::render_systemd_sandbox_dropin(
             &pkg.sandbox_profile,
@@ -9820,12 +9813,6 @@ fn apply_sandbox_in_root_with_journal(
     }
 
     Ok("sandbox applied".to_string())
-}
-
-#[allow(dead_code)]
-fn apply_sandbox_in_root(pkg_id: &str, systemd_root: &Path) -> anyhow::Result<String> {
-    apply_sandbox_in_root_with_journal(pkg_id, systemd_root, None, None)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 fn collect_package_version_receipt_logical_paths(
@@ -10230,12 +10217,32 @@ pub(crate) fn try_resolve_master_credentials(
                 uuid::Uuid::new_v4().simple()
             );
             let stored_password = af_db::encrypt_secret_if_configured(&generated)?;
+            let ha1 = hex::encode(af_models::md5::md5_digest(
+                format!("{master_user}:Welcome to AetherFlow:{generated}").as_bytes(),
+            ));
             let payload = serde_json::json!({
                 "username": master_user,
                 "password": stored_password,
+                "ha1": af_db::encrypt_secret_if_configured(&ha1)?,
             })
             .to_string();
-            write_file_atomic_with_mode_bounded(&persist_path, payload.as_bytes(), 0o600, fs_root)?;
+            let owner = if fs_root.is_none() && unsafe { libc::geteuid() } == 0 {
+                Some((
+                    crate::lookup_passwd_uid_reentrant("aetherflow")
+                        .ok_or_else(|| anyhow::anyhow!("aetherflow user is unavailable"))?,
+                    crate::lookup_group_gid("aetherflow")
+                        .ok_or_else(|| anyhow::anyhow!("aetherflow group is unavailable"))?,
+                ))
+            } else {
+                None
+            };
+            write_file_atomic_with_file_owner(
+                &persist_path,
+                payload.as_bytes(),
+                0o600,
+                fs_root,
+                owner,
+            )?;
             generated
         }
     };
@@ -10832,13 +10839,18 @@ pub fn try_apply_runner_blueprint_app_config(
     listen_port: i32,
 ) -> Result<(), PackageExecutorError> {
     try_apply_runner_blueprint_app_config_with_ingress(fs_root, pkg_id, listen_port, |canonical| {
-        let conn = af_db::get_conn().map_err(|err| {
+        let load_error = |err| {
             PackageExecutorError::VerificationFailed(format!(
-                "failed to load blueprint ingress for {}: {}",
-                canonical, err
+                "failed to load blueprint ingress for {canonical}: {err}",
             ))
-        })?;
-        load_runner_blueprint_ingress(&conn, canonical)
+        };
+        match af_db::get_conn() {
+            Ok(conn) => load_runner_blueprint_ingress(&conn, canonical),
+            Err(_) => {
+                let conn = crate::open_runner_state_database(fs_root).map_err(load_error)?;
+                load_runner_blueprint_ingress(&conn, canonical)
+            }
+        }
     })
 }
 
@@ -10862,16 +10874,18 @@ struct RunnerBlueprintConfigBackup {
 impl RunnerBlueprintConfigBackup {
     fn read(path: &Path, fs_root: Option<&Path>) -> Result<Self, PackageExecutorError> {
         validate_filesystem_path(path, fs_root)?;
-        let previous = match fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                validate_regular_config_candidate(path, fs_root)?;
-                let content = fs::read(path).map_err(|err| {
-                    PackageExecutorError::VerificationFailed(format!(
-                        "failed to read blueprint config {}: {}",
-                        path.display(),
-                        err
-                    ))
-                })?;
+        let previous = match crate::blueprint::open_mutation_file(path) {
+            Ok(file) => {
+                const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+                let metadata = file.metadata()?;
+                let mut content = Vec::new();
+                file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut content)?;
+                if content.len() as u64 > MAX_CONFIG_BYTES {
+                    return Err(PackageExecutorError::VerificationFailed(format!(
+                        "blueprint config {} exceeds 2 MiB",
+                        path.display()
+                    )));
+                }
                 Some((content, metadata))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
@@ -10924,14 +10938,22 @@ impl RunnerBlueprintConfigBackup {
     }
 }
 
-struct RunnerBlueprintConfigChanges<'a> {
-    fs_root: Option<&'a Path>,
+pub(crate) struct RunnerBlueprintConfigChanges<'a> {
+    pub(crate) fs_root: Option<&'a Path>,
     backups: Vec<RunnerBlueprintConfigBackup>,
     removed_aliases: Vec<(PathBuf, PathBuf)>,
 }
 
-impl RunnerBlueprintConfigChanges<'_> {
-    fn capture(&mut self, path: &Path) -> Result<(), PackageExecutorError> {
+impl<'a> RunnerBlueprintConfigChanges<'a> {
+    pub(crate) fn new(fs_root: Option<&'a Path>) -> Self {
+        Self {
+            fs_root,
+            backups: Vec::new(),
+            removed_aliases: Vec::new(),
+        }
+    }
+
+    pub(crate) fn capture(&mut self, path: &Path) -> Result<(), PackageExecutorError> {
         if !self.backups.iter().any(|backup| backup.path == path) {
             self.backups
                 .push(RunnerBlueprintConfigBackup::read(path, self.fs_root)?);
@@ -10974,7 +10996,7 @@ impl RunnerBlueprintConfigChanges<'_> {
         Ok(())
     }
 
-    fn rollback(self, error: PackageExecutorError) -> PackageExecutorError {
+    pub(crate) fn rollback(self, error: PackageExecutorError) -> PackageExecutorError {
         if self.backups.is_empty() && self.removed_aliases.is_empty() {
             return error;
         }
@@ -11102,11 +11124,7 @@ fn try_apply_runner_blueprint_app_config_with_ingress(
     listen_port: i32,
     load_ingress: impl FnOnce(&str) -> Result<Option<af_models::AppIngressConfig>, PackageExecutorError>,
 ) -> Result<(), PackageExecutorError> {
-    let mut changes = RunnerBlueprintConfigChanges {
-        fs_root,
-        backups: Vec::new(),
-        removed_aliases: Vec::new(),
-    };
+    let mut changes = RunnerBlueprintConfigChanges::new(fs_root);
     apply_runner_blueprint_app_config_changes(&mut changes, pkg_id, listen_port, load_ingress)
         .map_err(|err| changes.rollback(err))
 }
@@ -11496,6 +11514,8 @@ fn apply_runner_blueprint_app_config_changes(
         if modified_any && fs_root.is_none() {
             match fs::metadata("/etc/apache2/apache2.conf") {
                 Ok(metadata) if metadata.is_file() => {
+                    crate::enable_managed_apache_modules(req.tls_enabled || upstream.enabled)
+                        .map_err(|err| PackageExecutorError::VerificationFailed(err.to_string()))?;
                     verify_runner_apache_configtest().map_err(|err| {
                         PackageExecutorError::VerificationFailed(format!(
                             "apache2ctl configtest failed for {}: {}",
@@ -12051,6 +12071,16 @@ fn extract_runner_apache_custom_blocks(
 }
 
 fn collect_apache_custom_blocks(raw: &str, blocks: &mut Vec<String>) {
+    collect_apache_live_custom_blocks(raw, blocks);
+    let pending = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix(TLS_PENDING_COMMENT))
+        .collect::<Vec<_>>()
+        .join("\n");
+    collect_apache_live_custom_blocks(&pending, blocks);
+}
+
+fn collect_apache_live_custom_blocks(raw: &str, blocks: &mut Vec<String>) {
     let mut depth = 0usize;
     let mut section = Vec::new();
     for line in raw.lines() {
@@ -12071,9 +12101,10 @@ fn collect_apache_custom_blocks(raw: &str, blocks: &mut Vec<String>) {
             }
             if depth == 0 && !section.is_empty() {
                 let block = section.join("\n");
-                if !blocks
-                    .iter()
-                    .any(|existing| existing.trim() == block.trim())
+                if !ACME_HTTP_EXEMPTION.contains(block.trim())
+                    && !blocks
+                        .iter()
+                        .any(|existing| existing.trim() == block.trim())
                 {
                     blocks.push(block);
                 }
@@ -12165,6 +12196,14 @@ fn requires_external_basic_auth(app: &str) -> bool {
 }
 
 fn external_auth_policy(app: &str, fs_root: Option<&Path>) -> anyhow::Result<String> {
+    external_auth_policy_for_vhost(app, fs_root, false)
+}
+
+fn external_auth_policy_for_vhost(
+    app: &str,
+    fs_root: Option<&Path>,
+    acme: bool,
+) -> anyhow::Result<String> {
     if !requires_external_basic_auth(app) {
         return Ok(String::new());
     }
@@ -12180,8 +12219,13 @@ fn external_auth_policy(app: &str, fs_root: Option<&Path>) -> anyhow::Result<Str
     );
     // Apache merges <If> after <Location>. And preserves restrictions already applied
     // to an operator location and also requires the managed credentials there.
+    let condition = if acme {
+        "%{REQUEST_URI} !~ m#^/\\.well-known/acme-challenge/#"
+    } else {
+        "true"
+    };
     Ok(format!(
-        "    <If \"true\">
+        "    <If \"{condition}\">
         AuthType Basic
         AuthName \"AetherFlow\"
         AuthBasicProvider file
@@ -12218,7 +12262,10 @@ fn internal_rewrite_guard() -> String {
 }
 
 fn apache_tls_pair(domain: &str, fs_root: Option<&Path>) -> Option<(String, String)> {
-    let exists = |path: &str| {
+    if !af_models::valid_ingress_hostname(domain) || domain.ends_with(".aether.local") {
+        return None;
+    }
+    let resolve = |path: &str| {
         let resolved = fs_root.map_or_else(
             || PathBuf::from(path),
             |root| root.join(path.trim_start_matches('/')),
@@ -12228,16 +12275,45 @@ fn apache_tls_pair(domain: &str, fs_root: Option<&Path>) -> Option<(String, Stri
                 .canonicalize()
                 .is_ok_and(|path| path.starts_with(root))
             {
-                return false;
+                return None;
             }
         }
-        fs::metadata(resolved).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+        fs::metadata(&resolved)
+            .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+            .then_some(resolved)
     };
-    [
+    let live_pair = |name: &str| {
         (
-            format!("/etc/letsencrypt/live/{domain}/fullchain.pem"),
-            format!("/etc/letsencrypt/live/{domain}/privkey.pem"),
-        ),
+            format!("/etc/letsencrypt/live/{name}/fullchain.pem"),
+            format!("/etc/letsencrypt/live/{name}/privkey.pem"),
+        )
+    };
+    let pair_is_valid = |pair: &(String, String)| {
+        let (Some(cert), Some(key)) = (resolve(&pair.0), resolve(&pair.1)) else {
+            return false;
+        };
+        tls_certificate_matches_key(&cert, &key)
+    };
+    let pair = live_pair(domain);
+    if pair_is_valid(&pair) {
+        return Some(pair);
+    }
+    if resolve(&pair.0).is_none() {
+        let mut ancestor = domain;
+        while let Some((_, parent)) = ancestor.split_once('.') {
+            if !parent.contains('.') {
+                break;
+            }
+            ancestor = parent;
+            let pair = live_pair(parent);
+            if let Some(cert) = resolve(&pair.0) {
+                if cert_san_covers_domain(&cert, domain) && pair_is_valid(&pair) {
+                    return Some(pair);
+                }
+            }
+        }
+    }
+    [
         (
             format!("/etc/ssl/AetherFlow/{domain}/fullchain.pem"),
             format!("/etc/ssl/AetherFlow/{domain}/privkey.pem"),
@@ -12248,8 +12324,76 @@ fn apache_tls_pair(domain: &str, fs_root: Option<&Path>) -> Option<(String, Stri
         ),
     ]
     .into_iter()
-    .find(|(cert, key)| exists(cert) && exists(key))
+    .find(pair_is_valid)
 }
+
+fn tls_certificate_matches_key(cert: &Path, key: &Path) -> bool {
+    let cert = std::process::Command::new("openssl")
+        .args(["x509", "-noout", "-checkend", "0", "-pubkey", "-in"])
+        .arg(cert)
+        .output();
+    let Ok(cert) = cert else {
+        return false;
+    };
+    if !cert.status.success() {
+        return false;
+    }
+    let key = std::process::Command::new("openssl")
+        .args(["pkey", "-pubout", "-passin", "pass:", "-in"])
+        .arg(key)
+        .output();
+    let Ok(key) = key else {
+        return false;
+    };
+    key.status.success()
+        && !key.stdout.is_empty()
+        && String::from_utf8_lossy(&cert.stdout)
+            .contains(String::from_utf8_lossy(&key.stdout).trim())
+}
+
+fn cert_san_covers_domain(cert: &Path, domain: &str) -> bool {
+    let Ok(output) = std::process::Command::new("openssl")
+        .args(["x509", "-noout", "-ext", "subjectAltName", "-in"])
+        .arg(cert)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let wildcard = domain
+        .split_once('.')
+        .map(|(_, parent)| format!("*.{parent}"));
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1)
+        .flat_map(|line| line.split(','))
+        .filter_map(|san| san.trim().strip_prefix("DNS:"))
+        .any(|san| {
+            san.eq_ignore_ascii_case(domain)
+                || wildcard
+                    .as_ref()
+                    .is_some_and(|name| san.eq_ignore_ascii_case(name))
+        })
+}
+
+/// Checks whether a public domain can use an installed TLS certificate and key.
+pub fn check_domain_tls_ready(domain: &str, fs_root: Option<&Path>) -> bool {
+    apache_tls_pair(domain, fs_root).is_some()
+}
+
+const TLS_PENDING_COMMENT: &str = "# af-tls-pending: ";
+const ACME_HTTP_EXEMPTION: &str = r#"    Alias /.well-known/acme-challenge /var/www/aetherflow-default/.well-known/acme-challenge
+    <Directory /var/www/aetherflow-default/.well-known/acme-challenge>
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+    ProxyPass /.well-known/acme-challenge/ !
+"#;
+const ACME_REWRITE_GUARD: &str = r"    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+";
 
 pub(crate) fn render_managed_apache_vhost(
     req: &af_models::RunnerApacheVhostRequest,
@@ -12260,33 +12404,40 @@ pub(crate) fn render_managed_apache_vhost(
     existing: &[&str],
     legacy: &[&str],
 ) -> anyhow::Result<String> {
+    let mut blocks = Vec::new();
+    for raw in existing.iter().chain(legacy) {
+        collect_apache_custom_blocks(raw, &mut blocks);
+    }
+    let external = !internal && !domain.ends_with(".aether.local");
+    let mut out = String::new();
+    let (port, downstream_tls) = if external && req.tls_enabled {
+        out.push_str(&format!(
+            "<VirtualHost *:80>\n    ServerName {domain}\n{ACME_HTTP_EXEMPTION}    RewriteEngine On\n{ACME_REWRITE_GUARD}"
+        ));
+        let Some((cert, key)) = apache_tls_pair(domain, fs_root) else {
+            out.push_str("    RewriteRule ^ - [R=503,L]\n    ErrorDocument 503 \"TLS certificate provisioning pending\"\n");
+            for line in blocks.iter().flat_map(|block| block.lines()) {
+                out.push_str(TLS_PENDING_COMMENT);
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push_str("</VirtualHost>\n");
+            return Ok(out);
+        };
+        out.push_str(&format!(
+            "    RewriteRule ^ https://{domain}%{{REQUEST_URI}} [R=308,L]\n</VirtualHost>\n"
+        ));
+        (443, format!("    SSLEngine On\n    SSLCertificateFile {cert}\n    SSLCertificateKeyFile {key}\n"))
+    } else {
+        (80, String::new())
+    };
+    let acme = external && port == 80;
+    let acme_http = if acme { ACME_HTTP_EXEMPTION } else { "" };
+    let acme_rewrite = if acme { ACME_REWRITE_GUARD } else { "" };
     let auth = if internal {
         String::new()
     } else {
-        external_auth_policy(&req.app_name, fs_root)?
-    };
-    let tls = (!internal && req.tls_enabled)
-        .then(|| apache_tls_pair(domain, fs_root))
-        .flatten();
-    let (mut out, port, downstream_tls) = if let Some((cert, key)) = tls {
-        (
-            format!(
-                "<VirtualHost *:80>
-    ServerName {domain}
-    Redirect permanent / https://{domain}/
-</VirtualHost>
-"
-            ),
-            443,
-            format!(
-                "    SSLEngine On
-    SSLCertificateFile {cert}
-    SSLCertificateKeyFile {key}
-"
-            ),
-        )
-    } else {
-        (String::new(), 80, String::new())
+        external_auth_policy_for_vhost(&req.app_name, fs_root, acme)?
     };
     let ssl_proxy = upstream
         .ca_cert_file
@@ -12326,20 +12477,22 @@ pub(crate) fn render_managed_apache_vhost(
     out.push_str(&format!(
         "<VirtualHost *:{port}>
     ServerName {domain}
-{downstream_tls}{ssl_proxy}    ProxyPreserveHost On
+{acme_http}{downstream_tls}{ssl_proxy}    ProxyPreserveHost On
     ProxyRequests Off
     RewriteEngine On
-{guard}    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]
+{guard}{acme_rewrite}    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]
     RewriteRule /(.*) {ws}://127.0.0.1:{listen_port}/$1 [P,L]
     ProxyPass / {http}://127.0.0.1:{listen_port}/
     ProxyPassReverse / {http}://127.0.0.1:{listen_port}/
+    RequestHeader unset X-Real-IP
+    RequestHeader unset X-Forwarded-Host
+    RequestHeader unset X-Aetherflow-User
+    RequestHeader unset Remote-User
+    RequestHeader unset X-Forwarded-User
+    RequestHeader set X-Real-IP \"%{{REMOTE_ADDR}}s\"
     RequestHeader set X-Forwarded-Proto \"{proto}\"
 {ip_policy}"
     ));
-    let mut blocks = Vec::new();
-    for raw in existing.iter().chain(legacy) {
-        collect_apache_custom_blocks(raw, &mut blocks);
-    }
     if req.app_name == "librespeed"
         && !blocks
             .iter()
@@ -12369,6 +12522,44 @@ pub(crate) fn update_legacy_apache_vhost(
     update_legacy_apache_vhost_with_blocks(raw, req, upstream, fs_root, external, &[])
 }
 
+fn strip_legacy_duplicate_public_vhosts(raw: &str, domain: &str) -> String {
+    static VHOST: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?is)<VirtualHost\s+[^>]+>.*?</VirtualHost\s*>").unwrap());
+    VHOST
+        .replace_all(raw, |captures: &regex::Captures<'_>| {
+            let block = &captures[0];
+            let is_domain = |value: &str| value.trim_matches('"').eq_ignore_ascii_case(domain);
+            if block.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                words
+                    .next()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("ServerName"))
+                    && words.next().is_some_and(is_domain)
+            }) {
+                return String::new();
+            }
+            block
+                .lines()
+                .filter_map(|line| {
+                    let mut words = line.split_whitespace();
+                    if words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("ServerAlias"))
+                    {
+                        let aliases: Vec<_> = words.filter(|name| !is_domain(name)).collect();
+                        if aliases.is_empty() {
+                            return None;
+                        }
+                        return Some(format!("    ServerAlias {}", aliases.join(" ")));
+                    }
+                    Some(line.to_owned())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .into_owned()
+}
+
 fn update_legacy_apache_vhost_with_blocks(
     raw: &str,
     req: &af_models::RunnerApacheVhostRequest,
@@ -12387,6 +12578,15 @@ fn update_legacy_apache_vhost_with_blocks(
         upstream.ca_cert_file.as_deref(),
         blocks,
     );
+    let updated = if req.tls_enabled && req.external_access_enabled {
+        if let Some(domain) = req.public_domain.as_deref() {
+            strip_legacy_duplicate_public_vhosts(&updated, domain)
+        } else {
+            updated
+        }
+    } else {
+        updated
+    };
     static VHOST_END: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)</VirtualHost\s*>").unwrap());
     let mut out = String::new();
     let mut start = 0;
@@ -19233,6 +19433,153 @@ int main(int argc, char** argv) {
 
     include!("native_catalog_regressions.rs");
 
+    fn create_apache_test_certificate(directory: &Path, san: &str) {
+        fs::create_dir_all(directory).unwrap();
+        let output = std::process::Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=example.test",
+                "-addext",
+                &format!("subjectAltName={san}"),
+                "-keyout",
+            ])
+            .arg(directory.join("privkey.pem"))
+            .arg("-out")
+            .arg(directory.join("fullchain.pem"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_master_credentials_include_encrypted_digest() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::ENV_TEST_MUTEX.lock().await;
+        let root = create_isolated_test_dir("generated-master-digest");
+        let vars = [
+            "AETHERFLOW_MASTER_PASS",
+            "MASTER_PASS",
+            "AF_PASS",
+            "AETHERFLOW_VNC_PASSWORD",
+            "AETHERFLOW_MASTER_CREDS_FILE",
+            "AES_MASTER_KEY",
+        ];
+        let previous = vars.map(|key| (key, env::var_os(key)));
+        for key in vars {
+            env::remove_var(key);
+        }
+        env::set_var("AES_MASTER_KEY", "11".repeat(32));
+        let result = try_resolve_master_credentials(Some(&root));
+        let path = root.join("var/lib/aetherflow/.master.creds");
+        let stored = fs::read_to_string(&path).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let password = af_db::decrypt_secret_if_needed(stored["password"].as_str().unwrap());
+        let stored_digest = af_db::decrypt_secret_if_needed(stored["ha1"].as_str().unwrap());
+        for (key, value) in previous {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            } else {
+                env::remove_var(key);
+            }
+        }
+        let (user, secret) = result.unwrap();
+        assert_eq!(stored["username"], user);
+        assert!(stored["password"].as_str().unwrap().starts_with("enc:v1:"));
+        assert!(stored["ha1"].as_str().unwrap().starts_with("enc:v1:"));
+        assert!(password.is_ok_and(|password| password == secret));
+        let expected = hex::encode(af_models::md5::md5_digest(
+            format!("{user}:Welcome to AetherFlow:{secret}").as_bytes(),
+        ));
+        assert!(stored_digest.is_ok_and(|digest| digest == expected));
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn threadfin_ignores_unpinned_target_and_catalog_matches_native_recipes() {
+        let _env = crate::ENV_TEST_MUTEX.lock().await;
+        let key = "AF_TARGET_VERSION";
+        let previous = env::var_os(key);
+        env::set_var(key, "99.9.9");
+        let version = resolve_threadfin_target_version();
+        if let Some(value) = previous {
+            env::set_var(key, value);
+        } else {
+            env::remove_var(key);
+        }
+        assert_eq!(version, THREADFIN_PINNED_VERSION);
+        let recipes: HashMap<String, af_models::PackageAutomation> =
+            serde_json::from_str(crate::EMBEDDED_AUTOMATION_JSON).unwrap();
+        assert_eq!(recipes["threadfin"].update_source, "pinned");
+        assert!(recipes["threadfin"].require_download_sha256);
+        assert_eq!(recipes["prometheus"].update_source, "apt");
+        assert_eq!(recipes["prometheus"].update_package, "prometheus");
+        assert!(recipes["prometheus"]
+            .version_command
+            .join(" ")
+            .contains("/usr/bin/prometheus --version"));
+    }
+
+    #[test]
+    fn apache_tls_uses_base_cert_only_for_covered_names() {
+        let root = create_isolated_test_dir("base-san-cert");
+        let base = root.join("etc/letsencrypt/live/example.test");
+        create_apache_test_certificate(&base, "DNS:one.example.test,DNS:two.env.example.test");
+        assert!(check_domain_tls_ready("one.example.test", Some(&root)));
+        assert!(check_domain_tls_ready("two.env.example.test", Some(&root)));
+        assert!(!check_domain_tls_ready("other.example.test", Some(&root)));
+
+        create_apache_test_certificate(&base, "DNS:*.example.test");
+        let pair = apache_tls_pair("other.example.test", Some(&root)).unwrap();
+        assert_eq!(pair.0, "/etc/letsencrypt/live/example.test/fullchain.pem");
+        assert!(!check_domain_tls_ready("two.env.example.test", Some(&root)));
+
+        create_apache_test_certificate(&root.join("different-key"), "DNS:*.example.test");
+        fs::copy(
+            root.join("different-key/privkey.pem"),
+            base.join("privkey.pem"),
+        )
+        .unwrap();
+        assert!(!check_domain_tls_ready("other.example.test", Some(&root)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn newly_created_non_secret_parents_are_traversable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = create_isolated_test_dir("install-parent-permissions");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.join("opt/new-app");
+        create_dir_all_0755(&target).unwrap();
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for path in [target, root.join("opt")] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn managed_apache_vhost_pins_kasm_tls_and_requires_auth_for_public_backends() {
         let root = create_isolated_test_dir("managed-vhost-tls-auth");
@@ -19264,21 +19611,53 @@ int main(int argc, char** argv) {
         req.tls_enabled = true;
         let domain = "metrics.example.test";
         let options = LibreSpeedUpstreamTlsConfig::default();
-        assert!(
-            render_managed_apache_vhost(&req, domain, false, &options, Some(&root), &[], &[])
-                .is_err()
-        );
+        let legacy = "<Location /custom>\n    Require all granted\n</Location>\n";
+        let pending =
+            render_managed_apache_vhost(&req, domain, false, &options, Some(&root), &[], &[legacy])
+                .unwrap();
+        assert!(pending.contains("TLS certificate provisioning pending"));
+        assert!(pending.contains("RewriteRule ^ - [R=503,L]"));
+        assert!(pending.contains("ProxyPass /.well-known/acme-challenge/ !"));
+        assert!(!pending.contains("ProxyPass / http"));
+        assert!(!pending.contains("AuthType Basic"));
+        assert!(!pending.contains("<VirtualHost *:443>"));
+        assert!(pending.contains("# af-tls-pending: <Location /custom>"));
+        assert!(!check_domain_tls_ready(domain, Some(&root)));
         let htpasswd = root.join(APACHE_HTPASSWD.trim_start_matches('/'));
         fs::create_dir_all(htpasswd.parent().unwrap()).unwrap();
         fs::write(&htpasswd, "fixture").unwrap();
         let tls_dir = root.join("etc/letsencrypt/live").join(domain);
-        fs::create_dir_all(&tls_dir).unwrap();
-        fs::write(tls_dir.join("fullchain.pem"), "cert-fixture").unwrap();
-        fs::write(tls_dir.join("privkey.pem"), "key-fixture").unwrap();
-        let managed =
-            render_managed_apache_vhost(&req, domain, false, &options, Some(&root), &[], &[])
-                .unwrap();
-        assert!(managed.contains("Redirect permanent / https://metrics.example.test/"));
+        create_apache_test_certificate(&tls_dir, "DNS:metrics.example.test");
+        let managed = render_managed_apache_vhost(
+            &req,
+            domain,
+            false,
+            &options,
+            Some(&root),
+            &[&pending],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            managed.contains("RewriteRule ^ https://metrics.example.test%{REQUEST_URI} [R=308,L]")
+        );
+        assert!(managed.contains("<Location /custom>"));
+        assert!(
+            managed
+                .find("ProxyPass /.well-known/acme-challenge/ !")
+                .unwrap()
+                < managed.find("[R=308,L]").unwrap()
+        );
+        for header in [
+            "X-Real-IP",
+            "X-Forwarded-Host",
+            "X-Aetherflow-User",
+            "Remote-User",
+            "X-Forwarded-User",
+        ] {
+            assert!(managed.contains(&format!("RequestHeader unset {header}")));
+        }
+        assert!(managed.contains("RequestHeader set X-Real-IP \"%{REMOTE_ADDR}s\""));
         assert!(managed.contains("<VirtualHost *:443>"));
         assert!(managed.contains(
             "SSLCertificateKeyFile /etc/letsencrypt/live/metrics.example.test/privkey.pem"

@@ -42,6 +42,8 @@ use tokio::sync::Mutex;
 pub use af_host;
 pub use af_release;
 
+mod adguard_dns;
+pub mod blueprint;
 pub mod bounded_command;
 mod job_receipts;
 mod legacy_stream_output;
@@ -49,6 +51,7 @@ mod legacy_stream_output;
 mod lifecycle_tests;
 pub mod network;
 pub mod package_executor;
+pub use package_executor::check_domain_tls_ready;
 pub mod package_lifecycle;
 pub mod probe_metadata;
 pub mod quota;
@@ -329,6 +332,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/backup", post(handle_backup))
         .route("/v1/sandbox", post(handle_sandbox))
         .route("/v1/hosts", post(handle_hosts))
+        .route("/v1/blueprint/apply", post(handle_blueprint_apply))
         .route("/v1/network", post(handle_network))
         .route("/v1/quota", post(handle_quota))
         .route("/v1/quota/usage", post(quota::handle))
@@ -409,7 +413,6 @@ pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
                 | "qbittorrent-nox"
                 | "syncthing"
                 | "irssi"
-                | "autodl"
                 | "flood"
         );
     }
@@ -3102,25 +3105,15 @@ pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
     )
     .ok()?;
 
-    let mut pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs).ok()?;
+    let pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs).ok()?;
     let auto_map: HashMap<String, PackageAutomation> =
         serde_json::from_str(&raw_auto).unwrap_or_default();
 
-    for p in &mut pkgs {
-        if let Some(auto) = auto_map.get(&p.name) {
-            p.update_source = auto.update_source.clone();
-            p.update_repo = auto.update_repo.clone();
-            p.update_repo_url = auto.update_repo_url.clone();
-            p.update_package = auto.update_package.clone();
-            p.version_command = auto.version_command.clone();
-            p.version_regex = auto.version_regex.clone();
-            p.sandbox_profile = auto.sandbox_profile.clone();
-            p.sandbox_read_write = auto.sandbox_read_write.clone();
-            p.sandbox_service_ids = auto.sandbox_service_ids.clone();
-        }
+    let mut package = pkgs.into_iter().find(|p| p.name == pkg_id)?;
+    if let Some(automation) = auto_map.get(pkg_id) {
+        af_models::merge_package_automation(&mut package, automation);
     }
-
-    pkgs.into_iter().find(|p| p.name == pkg_id)
+    Some(package)
 }
 
 fn normalize_systemd_unit(unit: &str) -> String {
@@ -3605,6 +3598,12 @@ pub fn validate_hosts_domain(domain: &str) -> Result<String, RunnerError> {
 }
 
 pub async fn apply_hosts_update(req: HostsUpdateRequest) -> Result<RunnerResponse, RunnerError> {
+    tokio::task::spawn_blocking(move || apply_hosts_update_local(req))
+        .await
+        .map_err(anyhow::Error::from)?
+}
+
+fn apply_hosts_update_local(req: HostsUpdateRequest) -> Result<RunnerResponse, RunnerError> {
     let mut domains = req.domains.clone();
     if domains.is_empty() && !req.domain.is_empty() {
         domains.push(req.domain.clone());
@@ -3677,6 +3676,114 @@ pub async fn apply_hosts_update(req: HostsUpdateRequest) -> Result<RunnerRespons
             error: String::new(),
         })
     }
+}
+
+pub(crate) fn open_runner_state_database(
+    root: Option<&Path>,
+) -> anyhow::Result<rusqlite::Connection> {
+    let env_root = resolve_self_update_isolated_root_from_env().map_err(anyhow::Error::msg)?;
+    let root = root.or(env_root.as_deref());
+    let conf = af_release::resolve_release_manager_conf_for_root(root);
+    let config = af_release::ReleaseConfig::load_for_root_from_process_env(root, conf.as_deref())?;
+    let path = af_release::config::try_resolve_db_path(&config, None)?.path;
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+async fn handle_blueprint_apply(
+    Json(req): Json<af_models::RunnerBlueprintApplyRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    if !SAFE_PKG_ID.is_match(&req.app_name) || !(0..=65535).contains(&req.listen_port) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "invalid blueprint app or port".into(),
+            }),
+        );
+    }
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        anyhow::ensure!(
+            get_runner_package_definition(&req.app_name).is_some(),
+            "unknown blueprint package"
+        );
+        let units = package_lifecycle::package_service_units(&req.app_name)?;
+        let conn = open_runner_state_database(None)?;
+        af_release::lifecycle::check_package_reservation(
+            &conn,
+            &req.app_name,
+            &units,
+            &req.lifecycle_job_id,
+            None,
+        )
+        .map_err(|err| err.context(LifecycleBusy))?;
+        if !req.lifecycle_job_id.is_empty() {
+            let action: String = conn.query_row(
+                "SELECT action FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
+                rusqlite::params![req.app_name, req.lifecycle_job_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                matches!(action.as_str(), "install" | "reinstall" | "update"),
+                "removal cannot own blueprint configuration mutations"
+            );
+        }
+        Ok(serde_json::to_string(
+            &blueprint::apply_host_config_with_state(&req, Some(&conn))?,
+        )?)
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output,
+                error: String::new(),
+            }),
+        ),
+        Ok(Err(err)) => {
+            let status = if is_lifecycle_busy(&err) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: af_models::secret_redaction::redact_diagnostic(&err.to_string())
+                        .into_owned(),
+                }),
+            )
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "blueprint config worker failed".into(),
+            }),
+        ),
+    }
+}
+
+pub async fn dispatch_blueprint_apply(
+    req: &af_models::RunnerBlueprintApplyRequest,
+) -> anyhow::Result<af_models::RunnerBlueprintApplyResponse> {
+    let response = post_runner_json("/v1/blueprint/apply", req, Duration::from_secs(45)).await?;
+    anyhow::ensure!(
+        response.success,
+        "runner blueprint apply failed: {}",
+        response.error
+    );
+    Ok(serde_json::from_str(&response.output)?)
 }
 
 async fn handle_hosts(Json(req): Json<HostsRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
@@ -4368,7 +4475,13 @@ pub fn sync_dns_provider_files_with_mode(
             reconcile_pihole_custom_list_content(&existing, &canonical_ip, domains, is_reconcile);
         write_dns_provider_text(&custom_list, &payload, true)?;
     }
+    sync_adguard_dns(&canonical_ip, domains, is_reconcile)?;
     Ok(())
+}
+
+pub fn sync_adguard_dns(ip: &str, domains: &[String], reconcile: bool) -> anyhow::Result<()> {
+    let ip = validate_hosts_ip(ip)?.to_string();
+    adguard_dns::sync(domains, adguard_dns::Change::Update { ip: &ip, reconcile })
 }
 
 pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
@@ -4436,6 +4549,7 @@ pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
             }
         }
     }
+    adguard_dns::sync(domains, adguard_dns::Change::Remove)?;
     Ok(())
 }
 
@@ -4687,10 +4801,31 @@ fn replace_confined_text(
     hosts: bool,
     pihole: bool,
 ) -> std::io::Result<()> {
+    replace_confined_file(path, content.as_bytes(), Some(users), None, hosts, pihole)
+}
+
+fn replace_confined_file(
+    path: &Path,
+    content: &[u8],
+    users: Option<&[&str]>,
+    force_mode: Option<u32>,
+    hosts: bool,
+    pihole: bool,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let (dir, owners) = confined_parent(path, users)?;
+    let (dir, owners) = if let Some(users) = users {
+        confined_parent(path, users)?
+    } else {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let dir = job_receipts::ReceiptDirectory::open_existing(parent)?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        (dir, Vec::new())
+    };
     let name = confined_file_name(path)?;
     let mut previous =
         match dir.open_file(name, if hosts { libc::O_RDWR } else { libc::O_RDONLY }, 0) {
@@ -4707,12 +4842,12 @@ fn replace_confined_text(
         (0o644, root.then_some((0, 0)))
     } else if let Some(metadata) = previous_metadata {
         (
-            metadata.mode() & 0o7777,
+            metadata.mode() & if users.is_some() { 0o7777 } else { 0o777 },
             Some((metadata.uid(), metadata.gid())),
         )
     } else {
         (
-            0o640,
+            if users.is_some() { 0o640 } else { 0o600 },
             root.then(|| {
                 (
                     0,
@@ -4725,13 +4860,17 @@ fn replace_confined_text(
             }),
         )
     };
+    let mode = force_mode.unwrap_or(mode);
     let configure = |file: &fs::File| -> std::io::Result<()> {
         if let Some((uid, gid)) = owner {
             let metadata = file.metadata()?;
             if (uid != metadata.uid() || gid != metadata.gid())
                 && unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0
             {
-                return Err(std::io::Error::last_os_error());
+                let error = std::io::Error::last_os_error();
+                if users.is_some() || root || error.raw_os_error() != Some(libc::EPERM) {
+                    return Err(error);
+                }
             }
         }
         file.set_permissions(fs::Permissions::from_mode(mode))
@@ -4747,7 +4886,7 @@ fn replace_confined_text(
     let temporary_c = job_receipts::c_name(temporary)?;
     let name_c = job_receipts::c_name(name)?;
     let result = (|| {
-        file.write_all(content.as_bytes())?;
+        file.write_all(content)?;
         configure(&file)?;
         file.sync_all()?;
         dir.verify()?;
@@ -4774,7 +4913,7 @@ fn replace_confined_text(
                 job_receipts::verify_entry(dir.file(), name, destination, false)?;
                 configure(destination)?;
                 destination.set_len(0)?;
-                destination.write_all(content.as_bytes())?;
+                destination.write_all(content)?;
                 return destination.sync_all();
             }
         }
@@ -5120,20 +5259,6 @@ fn parse_valid_runner_port(raw: &str) -> i32 {
     }
 }
 
-fn parse_pihole_runner_port(raw: &str) -> i32 {
-    for part in raw.split(',') {
-        let tok = part
-            .trim()
-            .trim_matches(['"', '\''])
-            .trim_end_matches(['o', 'O', 's', 'S']);
-        let p = parse_valid_runner_port(tok);
-        if p > 0 {
-            return p;
-        }
-    }
-    0
-}
-
 fn parse_host_port_or_port(raw: &str) -> i32 {
     let clean = raw.trim().trim_matches(['"', '\'']);
     if clean.is_empty() {
@@ -5402,17 +5527,26 @@ pub fn query_app_metadata_sqlite(
     result
 }
 
-fn query_runner_sqlite_single_string(raw_path: &str, queries: &[&str]) -> String {
-    query_app_metadata_sqlite(
-        &resolve_runner_fs_path(raw_path),
-        Path::new(raw_path),
-        queries,
+pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
+    extract_app_runtime_meta_local_until(
+        app_name,
         std::time::Instant::now() + Duration::from_secs(1),
     )
-    .unwrap_or_default()
 }
 
-pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
+pub fn extract_app_runtime_meta_local_until(
+    app_name: &str,
+    deadline: std::time::Instant,
+) -> AppRuntimeMeta {
+    let query_runner_sqlite_single_string = |raw_path: &str, queries: &[&str]| {
+        query_app_metadata_sqlite(
+            &resolve_runner_fs_path(raw_path),
+            Path::new(raw_path),
+            queries,
+            deadline,
+        )
+        .unwrap_or_default()
+    };
     let canonical = normalize_runner_app_name(app_name);
     let mut meta = AppRuntimeMeta::default();
 
@@ -5945,12 +6079,8 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             if let Some(content) = read_runner_config_text("/etc/pihole/setupVars.conf") {
                 meta.api_key = extract_runner_ini_value(&content, &["WEBPASSWORD"]);
             }
-            if let Some(content) = read_runner_config_text("/etc/pihole/pihole.toml") {
-                let port_val = extract_runner_ini_value(&content, &["port", "webserver.port"]);
-                if !port_val.is_empty() {
-                    meta.configured_port = parse_pihole_runner_port(&port_val);
-                }
-            }
+            meta.configured_port =
+                af_models::app_metadata::pihole_web_port(read_runner_config_text);
         }
 
         "dispatcharr" => {
@@ -6103,7 +6233,6 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "nzbget" => meta = af_models::app_metadata::nzbget_meta(read_runner_config_text),
-        "whisparr" => meta = af_models::app_metadata::whisparr_meta(read_runner_config_text),
 
         "gitea" => {
             let candidates = ["/etc/gitea/app.ini", "/var/lib/gitea/custom/conf/app.ini"];
@@ -6257,28 +6386,6 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         "uptimekuma" => {
             meta.configured_port =
                 af_models::app_metadata::uptime_kuma_port(read_runner_config_text);
-        }
-
-        "immich" => {
-            let candidates = [
-                "/var/lib/immich/.env",
-                "/opt/immich/.env",
-                "/etc/immich/immich.env",
-            ];
-            for raw_path in &candidates {
-                if let Some(content) = read_runner_config_text(raw_path) {
-                    if meta.api_key.is_empty() {
-                        meta.api_key =
-                            extract_runner_ini_value(&content, &["IMMICH_API_KEY", "API_KEY"]);
-                    }
-                    if meta.configured_port <= 0 {
-                        meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
-                            &content,
-                            &["IMMICH_PORT", "SERVER_PORT", "PORT"],
-                        ));
-                    }
-                }
-            }
         }
 
         "maintainerr" => {
@@ -7107,6 +7214,41 @@ fn rollback_ingress_vhost(
     Ok(())
 }
 
+pub(crate) fn enable_managed_apache_modules(downstream_tls: bool) -> anyhow::Result<()> {
+    let mut modules = vec![
+        "proxy",
+        "proxy_http",
+        "proxy_wstunnel",
+        "rewrite",
+        "headers",
+        "alias",
+    ];
+    if downstream_tls {
+        modules.push("ssl");
+    }
+    let apache = Path::new("/etc/apache2");
+    if !apache.join("mods-available").is_dir() {
+        return Ok(());
+    }
+    modules.retain(|module| {
+        !apache
+            .join("mods-enabled")
+            .join(format!("{module}.load"))
+            .is_file()
+    });
+    if !modules.is_empty() {
+        let output = std::process::Command::new("/usr/sbin/a2enmod")
+            .args(modules)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "a2enmod failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 async fn run_apache_configtest_if_present() -> anyhow::Result<()> {
     for bin in [
         "/usr/sbin/apache2ctl",
@@ -7504,9 +7646,14 @@ pub async fn sync_apache_vhost_local(
     req: &RunnerApacheVhostRequest,
     apache_dir: &Path,
 ) -> anyhow::Result<String> {
+    validate_ingress_vhost_request(req).map_err(anyhow::Error::msg)?;
     static VHOST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = VHOST_LOCK.lock().await;
     let live = apache_dir == Path::new("/etc/apache2");
+    if live && !req.remove_only && unsafe { libc::geteuid() } == 0 {
+        let tls = req.tls_enabled || matches!(req.app_name.as_str(), "kasmvnc" | "librespeed");
+        tokio::task::spawn_blocking(move || enable_managed_apache_modules(tls)).await??;
+    }
     apply_ingress_vhost_with_hooks(
         req,
         apache_dir,
@@ -7534,7 +7681,7 @@ pub async fn sync_apache_vhost_via_runner(
     if let Err(msg) = validate_ingress_vhost_request(req) {
         anyhow::bail!("{msg}");
     }
-    let result = post_runner_json("/v1/ingress/vhost", req, Duration::from_secs(30)).await?;
+    let result = post_runner_json("/v1/ingress/vhost", req, Duration::from_secs(45)).await?;
     if !result.success {
         anyhow::bail!("runner ingress vhost error: {}", result.error);
     }
@@ -7627,12 +7774,58 @@ async fn execute_certbot_sync_with_candidates(
     })
 }
 
-async fn handle_certbot_sync() -> (StatusCode, Json<RunnerResponse>) {
+pub async fn sync_certbot_and_managed_ingress() -> anyhow::Result<String> {
+    static CERTBOT_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _lock = CERTBOT_SYNC_LOCK.lock().await;
     let candidates = [
         Path::new("/usr/local/bin/af-certbot-sync"),
         Path::new("/usr/bin/af-certbot-sync"),
     ];
-    match execute_certbot_sync_with_candidates(&candidates, true, Duration::from_secs(120)).await {
+    let output =
+        execute_certbot_sync_with_candidates(&candidates, true, Duration::from_secs(120)).await?;
+    let apache_dir = resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2");
+    let active = apache_dir.join("sites-enabled");
+    if !active.is_dir() {
+        return Ok(output);
+    }
+    let configs = tokio::task::spawn_blocking(|| -> anyhow::Result<Vec<(String, String, i32)>> {
+        let conn = open_runner_state_database(None)?;
+        let mut stmt = conn.prepare(
+            "SELECT app_name, public_domain, listen_port FROM app_ingress_configs \
+             WHERE external_access_enabled = 1 AND tls_enabled = 1 AND public_domain <> '' AND listen_port > 0",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }).await??;
+    for (app_name, domain, listen_port) in configs {
+        if !SAFE_INGRESS_APP_NAME.is_match(&app_name)
+            || !active
+                .join(format!("aetherflow-ext-{app_name}.conf"))
+                .is_file()
+        {
+            continue;
+        }
+        let req = RunnerApacheVhostRequest {
+            internal_domain: active
+                .join(format!("aetherflow-app-{app_name}.conf"))
+                .is_file()
+                .then(|| format!("{app_name}.aether.local")),
+            app_name,
+            public_domain: Some(domain),
+            listen_port,
+            external_access_enabled: true,
+            tls_enabled: true,
+            reload_apache: true,
+            ..Default::default()
+        };
+        validate_ingress_vhost_request(&req).map_err(anyhow::Error::msg)?;
+        sync_apache_vhost_local(&req, &apache_dir).await?;
+    }
+    Ok(output)
+}
+
+async fn handle_certbot_sync() -> (StatusCode, Json<RunnerResponse>) {
+    match sync_certbot_and_managed_ingress().await {
         Ok(output) => (
             StatusCode::OK,
             Json(RunnerResponse {
@@ -7700,13 +7893,15 @@ async fn post_runner_json<T: Serialize + ?Sized>(
 
         let req = hyper::Request::builder()
             .method(hyper::Method::POST)
-            .uri(format!("http://unix{}", endpoint))
+            .uri(endpoint)
             .header("Host", "unix")
             .header("Content-Type", "application/json")
             .body(Full::new(Bytes::from(body_bytes)))?;
 
         let resp = sender.send_request(req).await?;
-        if endpoint == "/v1/systemctl" && resp.status() == StatusCode::CONFLICT {
+        if matches!(endpoint, "/v1/systemctl" | "/v1/blueprint/apply")
+            && resp.status() == StatusCode::CONFLICT
+        {
             return Err(LifecycleBusy.into());
         }
         let collected = resp.into_body().collect().await?.to_bytes();
@@ -8195,7 +8390,7 @@ pub async fn dispatch_sandbox(pkg_id: &str) -> anyhow::Result<()> {
 }
 
 pub async fn dispatch_hosts_request(req: &HostsUpdateRequest) -> anyhow::Result<()> {
-    let result = post_runner_json("/v1/hosts", req, Duration::from_secs(15)).await?;
+    let result = post_runner_json("/v1/hosts", req, Duration::from_secs(45)).await?;
     if !result.success {
         anyhow::bail!("runner hosts error: {}", result.error);
     }
@@ -8404,6 +8599,69 @@ pub fn authorize_runner_peer_credentials(
     ))
 }
 
+#[cfg(unix)]
+fn authorize_runner_socket_peer(
+    uid: u32,
+    gid: u32,
+    pid: Option<i32>,
+    endpoint: &str,
+) -> Result<(), (StatusCode, String)> {
+    authorize_runner_peer_credentials(uid, gid, endpoint)?;
+    #[cfg(target_os = "linux")]
+    if uid != 0 && !pid.is_some_and(trusted_runner_peer_exe) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "untrusted runner peer executable".into(),
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_runner_peer_exe(pid: i32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(exe) = fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    if exe
+        .components()
+        .any(|component| component.as_os_str() == "plugins")
+    {
+        return false;
+    }
+    let Some(name) = exe.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if name.starts_with("python") || matches!(name, "bash" | "sh" | "dash" | "node") {
+        return false;
+    }
+    if env::current_exe()
+        .and_then(fs::canonicalize)
+        .is_ok_and(|path| path == exe)
+    {
+        return true;
+    }
+    #[cfg(test)]
+    if exe
+        .components()
+        .any(|component| component.as_os_str() == "deps")
+    {
+        return true;
+    }
+    // A basename alone can be chosen by an unprivileged caller. Require a
+    // root-owned executable and directory chain for the named control-plane binaries.
+    matches!(name, "aetherflow-api" | "af")
+        && exe.is_absolute()
+        && exe.ancestors().all(|path| {
+            fs::symlink_metadata(path).is_ok_and(|meta| {
+                !meta.file_type().is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
+            })
+        })
+}
+
 /// Register both termination signals before serving requests. Shared by API and runner.
 pub fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
     #[cfg(unix)]
@@ -8465,9 +8723,10 @@ async fn serve_runner_connections(
     app: Router,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    use hyper::service::Service;
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use hyper_util::server::conn::auto::Builder;
-    use tower::Service;
+    use hyper_util::service::TowerToHyperService;
     let mut connections = tokio::task::JoinSet::new();
     let (drain, drain_rx) = tokio::sync::watch::channel(false);
     tokio::pin!(shutdown);
@@ -8480,26 +8739,25 @@ async fn serve_runner_connections(
             }
             accept_res = listener.accept() => {
                 let (stream, _) = accept_res?;
-                let (peer_uid, peer_gid) = match stream.peer_cred() {
-                    Ok(cred) => (cred.uid(), cred.gid()),
+                let (peer_uid, peer_gid, peer_pid) = match stream.peer_cred() {
+                    Ok(cred) => (cred.uid(), cred.gid(), cred.pid()),
                     Err(err) => {
                         tracing::warn!(error = %err, "Rejecting runner connection without SO_PEERCRED");
                         continue;
                     }
                 };
-                if let Err((_, reason)) = authorize_runner_peer_credentials(peer_uid, peer_gid, "/v1/*") {
-                    tracing::warn!(peer_uid, peer_gid, %reason, "Rejected unauthorized UNIX socket peer");
-                    continue;
-                }
+                let initial_auth = authorize_runner_socket_peer(peer_uid, peer_gid, peer_pid, "/v1/*");
                 let io = TokioIo::new(stream);
-                let tower_service = app.clone();
+                let tower_service = TowerToHyperService::new(app.clone());
                 let mut drain_rx = drain_rx.clone();
                 connections.spawn(async move {
                     let hyper_service = hyper::service::service_fn(
                         move |request: hyper::Request<hyper::body::Incoming>| {
                             let req_path = request.uri().path().to_string();
-                            let auth_res = authorize_runner_peer_credentials(peer_uid, peer_gid, &req_path);
-                            let mut svc = tower_service.clone();
+                            let auth_res = initial_auth.clone().and_then(|()| {
+                                authorize_runner_socket_peer(peer_uid, peer_gid, peer_pid, &req_path)
+                            });
+                            let svc = tower_service.clone();
                             async move {
                                 if let Err((code, msg)) = auth_res {
                                     let body = serde_json::to_string(&RunnerResponse {
@@ -8559,6 +8817,127 @@ pub(crate) static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blueprint_apply_route_mutates_native_files_and_arr_routes() {
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let _env = ENV_TEST_MUTEX.lock().await;
+        let root =
+            std::env::temp_dir().join(format!("af-blueprint-route-{}", uuid::Uuid::new_v4()));
+        let app_dir = root.join("var/lib/sonarr");
+        fs::create_dir_all(&app_dir).unwrap();
+        let config = app_dir.join("config.xml");
+        fs::write(&config, b"<Config><Port>8989</Port></Config>\n").unwrap();
+
+        let state_path = root.join("state.sqlite");
+        let state = rusqlite::Connection::open(&state_path).unwrap();
+        af_release::lifecycle::initialize_schema(&state).unwrap();
+        state
+            .execute_batch(
+                "CREATE TABLE app_ingress_configs(app_name TEXT, listen_port INTEGER);
+             INSERT INTO app_ingress_configs VALUES('qbittorrent', 18081);",
+            )
+            .unwrap();
+
+        let clients_path = app_dir.join("sonarr.db");
+        let clients = rusqlite::Connection::open(&clients_path).unwrap();
+        clients.execute_batch(
+            "CREATE TABLE DownloadClients(Id INTEGER PRIMARY KEY, Implementation TEXT, Settings TEXT);"
+        ).unwrap();
+        clients
+            .execute(
+                "INSERT INTO DownloadClients VALUES(1, 'QBittorrent', ?1)",
+                [json!({"host": "127.0.0.1", "port": 8180}).to_string()],
+            )
+            .unwrap();
+        let old_root = env::var_os("AETHERFLOW_CONFIG_ROOT");
+        let old_db = env::var_os("AF_DB_PATH");
+        env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
+        env::set_var("AF_DB_PATH", &state_path);
+
+        let call = |app: &str, port: i32| {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/v1/blueprint/apply")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"app_name": app, "listen_port": port}).to_string(),
+                ))
+                .unwrap();
+            build_runner_router().oneshot(req)
+        };
+        let failed = call("sonarr", 65536).await.unwrap();
+        let applied = call("sonarr", 18989).await.unwrap();
+        let unchanged = call("sonarr", 18989).await.unwrap();
+        clients
+            .execute_batch("DROP TABLE DownloadClients; CREATE TABLE DownloadClients(Id INTEGER);")
+            .unwrap();
+        let rejected = call("sonarr", 18990).await.unwrap();
+
+        for (key, old) in [("AETHERFLOW_CONFIG_ROOT", old_root), ("AF_DB_PATH", old_db)] {
+            if let Some(value) = old {
+                env::set_var(key, value);
+            } else {
+                env::remove_var(key);
+            }
+        }
+        assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let decode = |bytes: hyper::body::Bytes| {
+            let response: RunnerResponse = serde_json::from_slice(&bytes).unwrap();
+            assert!(response.success, "{}", response.error);
+            serde_json::from_str::<af_models::RunnerBlueprintApplyResponse>(&response.output)
+                .unwrap()
+        };
+        let result = decode(applied.into_body().collect().await.unwrap().to_bytes());
+        assert_eq!(result.sqlite_routes_injected, 1);
+        assert_eq!(result.mutated_files.len(), 2);
+        let result = decode(unchanged.into_body().collect().await.unwrap().to_bytes());
+        assert_eq!(result.sqlite_routes_injected, 0);
+        assert!(result.mutated_files.is_empty());
+        let updated = fs::read_to_string(config).unwrap();
+        assert!(updated.contains("<Port>18989</Port>"));
+        assert!(!updated.contains("<Port>18990</Port>"));
+        drop(clients);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_peer_allows_test_executable_and_rejects_same_uid_shell() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let pid = std::process::id() as i32;
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert!(trusted_runner_peer_exe(pid));
+        assert!(authorize_runner_socket_peer(uid, gid, Some(pid), "/v1/health").is_ok());
+        let mut shell = Command::new("/bin/sh")
+            .args(["-c", "echo ready; read keep_open"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(shell.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        let shell_pid = shell.id() as i32;
+        let trusted = trusted_runner_peer_exe(shell_pid);
+        let decision = authorize_runner_socket_peer(uid, gid, Some(shell_pid), "/v1/health");
+        drop(shell.stdin.take());
+        shell.wait().unwrap();
+        assert_eq!(ready.trim(), "ready");
+        assert!(!trusted);
+        if uid != 0 {
+            assert_eq!(decision.unwrap_err().0, StatusCode::FORBIDDEN);
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

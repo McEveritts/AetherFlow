@@ -1124,30 +1124,34 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+pub(crate) fn require_admin(user: &AuthUser) -> Result<(), Box<Response>> {
+    if user.role == "admin" && user.plugin_id.is_none() {
+        return Ok(());
+    }
+    Err(Box::new(api_error(
+        StatusCode::FORBIDDEN,
+        "FORBIDDEN",
+        "Admin access required",
+    )))
+}
+
 pub async fn admin_only_middleware(req: Request, next: Next) -> Response {
-    if let Some(plugin_claims) = req.extensions().get::<crate::plugins::PluginTokenClaims>() {
-        let method = req.method();
-        let path = req
-            .extensions()
-            .get::<axum::extract::OriginalUri>()
-            .map(|u| u.0.path().to_string())
-            .unwrap_or_else(|| req.uri().path().to_string());
-        if crate::plugins::plugin_claims_allow_request(plugin_claims, method, &path) {
-            return next.run(req).await;
-        }
+    if req
+        .extensions()
+        .get::<crate::plugins::PluginTokenClaims>()
+        .is_some()
+    {
         return api_error(
             StatusCode::FORBIDDEN,
             "PLUGIN_SCOPE_DENIED",
-            "Plugin token does not hold scope for this admin endpoint",
+            "Admin endpoints require an administrator session",
         );
     }
-    let is_admin = req
-        .extensions()
-        .get::<AuthUser>()
-        .map(|u| u.role == "admin")
-        .unwrap_or(false);
-    if !is_admin {
+    let Some(user) = req.extensions().get::<AuthUser>() else {
         return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
+    };
+    if let Err(response) = require_admin(user) {
+        return *response;
     }
     next.run(req).await
 }
@@ -1437,7 +1441,7 @@ fn revoke_session_family_in_tx(
 }
 
 pub fn verify_password(password: &str, password_hash: &str) -> bool {
-    if password.is_empty() || password_hash.is_empty() {
+    if password.is_empty() || password.len() > 72 || password_hash.is_empty() {
         return false;
     }
     bcrypt::verify(password, password_hash).unwrap_or(false)
@@ -1610,7 +1614,10 @@ fn setup_admin_blocking(
     headers: HeaderMap,
     req: CredentialsRequest,
 ) -> Response {
-    let Ok(mut conn) = af_db::get_conn() else {
+    if req.password.len() > 72 {
+        return password_too_long();
+    }
+    let Ok(conn) = af_db::get_read_conn() else {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "SERVICE_UNAVAILABLE",
@@ -1692,6 +1699,7 @@ fn setup_admin_blocking(
         );
     }
 
+    drop(conn);
     let Ok(hash) = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST) else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1700,6 +1708,13 @@ fn setup_admin_blocking(
         );
     };
 
+    let Ok(mut conn) = af_db::get_conn() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Database unavailable",
+        );
+    };
     let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
         Ok(tx) => tx,
         Err(_) => {
@@ -1783,11 +1798,24 @@ fn setup_admin_blocking(
     resp
 }
 
+const DUMMY_PASSWORD_HASH: &str = "$2b$12$abcdefghijklmnopqrstuu2gT3wAA4iQTZ8ANQTNQ2enUSBvzvE8a";
+
+pub(crate) fn password_too_long() -> Response {
+    api_error(
+        StatusCode::BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "Password must not exceed 72 bytes",
+    )
+}
+
 pub async fn local_login(headers: HeaderMap, Json(req): Json<CredentialsRequest>) -> Response {
     blocking_response(move || local_login_blocking(headers, req)).await
 }
 
 fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response {
+    if req.password.len() > 72 {
+        return password_too_long();
+    }
     let trimmed_username = req.username.trim();
     if trimmed_username.is_empty() || req.password.is_empty() {
         return api_error(
@@ -1797,10 +1825,11 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         );
     }
     if trimmed_username.to_ascii_lowercase().starts_with("plugin:") {
+        let _ = bcrypt::verify(&req.password, DUMMY_PASSWORD_HASH);
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "Invalid username or password",
+            "Invalid credentials",
         );
     }
 
@@ -1834,10 +1863,12 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
     let Ok((id, _username, _email, _avatar_url, _role, password_hash, _google_id, _totp_enabled)) =
         row
     else {
+        drop(conn);
+        let _ = bcrypt::verify(&req.password, DUMMY_PASSWORD_HASH);
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "Invalid username or password",
+            "Invalid credentials",
         );
     };
 
@@ -1846,10 +1877,11 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
     drop(conn);
 
     if password_hash.is_empty() {
+        let _ = bcrypt::verify(&req.password, DUMMY_PASSWORD_HASH);
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "This account uses Google OAuth. Use the Google login button.",
+            "Invalid credentials",
         );
     }
 
@@ -1858,7 +1890,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "Invalid username or password",
+            "Invalid credentials",
         );
     }
 
@@ -1875,7 +1907,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
             return api_error(
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHORIZED",
-                "Invalid username or password",
+                "Invalid credentials",
             );
         }
         Err(SubjectStatusError::DbError) => {
@@ -1915,7 +1947,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
             return api_error(
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHORIZED",
-                "Invalid username or password",
+                "Invalid credentials",
             );
         }
         Err(SubjectStatusError::DbError) => {
@@ -1949,7 +1981,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "Invalid username or password",
+            "Invalid credentials",
         );
     };
     let current_ver = query_user_credential_version(&tx, id);
@@ -1960,7 +1992,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "Invalid username or password",
+            "Invalid credentials",
         );
     }
 
@@ -2863,6 +2895,10 @@ fn matching_totp_step(secret_b32: &str, code: &str, now_secs: u64) -> Option<i64
     None
 }
 
+pub(crate) fn has_matching_totp_code(secret: &str, code: &str) -> bool {
+    matching_totp_step(secret, code, Utc::now().timestamp().max(0) as u64).is_some()
+}
+
 pub(crate) fn consume_totp_code(
     conn: &rusqlite::Connection,
     user_id: i64,
@@ -2892,8 +2928,7 @@ fn recovery_hash(salt: &[u8], compact: &str) -> String {
 }
 
 pub(crate) fn generate_recovery_codes() -> Vec<String> {
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    const UNBIASED_CEILING: usize = 256 - (256 % CHARSET.len());
+    const UNBIASED_CEILING: usize = 256 - (256 % RECOVERY_CODE_CHARSET.len());
     let mut codes = Vec::with_capacity(8);
     for _ in 0..8 {
         let mut chars = Vec::with_capacity(RECOVERY_CODE_TOTAL_CHARS);
@@ -2902,7 +2937,9 @@ pub(crate) fn generate_recovery_codes() -> Vec<String> {
             rand::rngs::OsRng.fill_bytes(&mut raw);
             for &b in &raw {
                 if (b as usize) < UNBIASED_CEILING {
-                    chars.push(CHARSET[(b as usize) % CHARSET.len()] as char);
+                    chars.push(
+                        RECOVERY_CODE_CHARSET[(b as usize) % RECOVERY_CODE_CHARSET.len()] as char,
+                    );
                     if chars.len() == RECOVERY_CODE_TOTAL_CHARS {
                         break;
                     }
@@ -2919,24 +2956,26 @@ pub(crate) fn generate_recovery_codes() -> Vec<String> {
     codes
 }
 
+pub(crate) fn hash_recovery_codes(codes: &[String]) -> anyhow::Result<Vec<String>> {
+    codes
+        .iter()
+        .map(|code| {
+            let compact: String = code.trim().chars().filter(|c| *c != '-').collect();
+            bcrypt::hash(compact, RECOVERY_BCRYPT_COST).map_err(Into::into)
+        })
+        .collect()
+}
+
 pub(crate) fn store_recovery_codes(
     transaction: &rusqlite::Transaction<'_>,
     user_id: i64,
-    codes: &[String],
+    hashes: &[String],
 ) -> anyhow::Result<()> {
     transaction.execute(
         "DELETE FROM recovery_codes WHERE user_id = ?1",
         params![user_id],
     )?;
-    for code in codes {
-        let compact: String = code
-            .trim()
-            .to_uppercase()
-            .chars()
-            .filter(|c| *c != '-')
-            .collect();
-        let hash = bcrypt::hash(&compact, RECOVERY_BCRYPT_COST)
-            .map_err(|e| anyhow::anyhow!("failed hashing recovery code with bcrypt: {e}"))?;
+    for hash in hashes {
         transaction.execute(
             "INSERT INTO recovery_codes (user_id, code_hash, used) VALUES (?1, ?2, 0)",
             params![user_id, hash],
@@ -2955,62 +2994,104 @@ pub(crate) fn store_recovery_codes(
     Ok(())
 }
 
-pub(crate) fn validate_recovery_code(
+pub(crate) struct RecoveryCodeMatch {
+    id: i64,
+    hash: String,
+}
+
+const RECOVERY_CODE_CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+fn normalized_recovery_code(raw_code: &str) -> Option<(String, bool)> {
+    if raw_code.len() > 64 {
+        return None;
+    }
+    let compact: String = raw_code
+        .trim()
+        .to_ascii_uppercase()
+        .chars()
+        .filter(|&ch| ch != '-')
+        .collect();
+    let legacy = compact.len() == 8 && compact.bytes().all(|ch| ch.is_ascii_hexdigit());
+    // Current issues use four groups of seven characters. Keep their entropy and
+    // accept only the exact alphabet generated for those codes.
+    let current = compact.len() == RECOVERY_CODE_TOTAL_CHARS
+        && compact
+            .bytes()
+            .all(|ch| RECOVERY_CODE_CHARSET.contains(&ch));
+    (legacy || current).then_some((compact, legacy))
+}
+
+fn recovery_candidates(
     conn: &rusqlite::Connection,
     user_id: i64,
-    raw_code: &str,
-) -> bool {
-    let normalized = raw_code.trim().to_uppercase();
-    if normalized.is_empty() {
-        return false;
-    }
-    let normalized_compact: String = normalized.chars().filter(|c| *c != '-').collect();
-    let dashed = if normalized_compact.len() == 8 && normalized_compact.is_ascii() {
-        format!("{}-{}", &normalized_compact[..4], &normalized_compact[4..])
-    } else {
-        normalized.clone()
-    };
-
-    let mut matched_id: Option<i64> = None;
-    if let Ok(mut stmt) = conn.prepare(
+) -> rusqlite::Result<Vec<RecoveryCodeMatch>> {
+    let mut stmt = conn.prepare(
         "SELECT id, code_hash FROM recovery_codes WHERE user_id = ?1 AND COALESCE(used, 0) = 0",
-    ) {
-        if let Ok(rows) = stmt.query_map(params![user_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        }) {
-            for row in rows.flatten() {
-                let (id, stored_hash) = row;
-                let trimmed_hash = stored_hash.trim();
-                let salted_match = trimmed_hash
-                    .strip_prefix("sha256:v1:")
-                    .and_then(|v| v.split_once(':'))
-                    .and_then(|(salt, hash)| hex::decode(salt).ok().map(|salt| (salt, hash)))
-                    .is_some_and(|(salt, hash)| {
-                        salt.len() == 16
-                            && af_services::cluster_daemon::constant_time_eq(
-                                recovery_hash(&salt, &normalized_compact).as_bytes(),
-                                hash.as_bytes(),
-                            )
-                    });
-                let is_match = salted_match
-                    || (trimmed_hash.starts_with("$2")
-                        && (bcrypt::verify(&dashed, trimmed_hash).unwrap_or(false)
-                            || bcrypt::verify(&normalized_compact, trimmed_hash).unwrap_or(false)));
-                if is_match {
-                    matched_id = Some(id);
-                    break;
-                }
-            }
-        }
-    }
+    )?;
+    let rows = stmt.query_map(params![user_id], |row| {
+        Ok(RecoveryCodeMatch {
+            id: row.get(0)?,
+            hash: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
 
-    if let Some(id) = matched_id {
-        return matches!(conn.execute(
-            "UPDATE recovery_codes SET used = 1 WHERE id = ?1 AND user_id = ?2 AND COALESCE(used, 0) = 0",
-            params![id, user_id],
-        ), Ok(1));
-    }
-    false
+fn match_recovery_code(
+    candidates: Vec<RecoveryCodeMatch>,
+    compact: &str,
+    legacy: bool,
+) -> Option<RecoveryCodeMatch> {
+    let dashed = legacy.then(|| format!("{}-{}", &compact[..4], &compact[4..]));
+    candidates.into_iter().find(|candidate| {
+        let hash = candidate.hash.trim();
+        if let Some((salt, expected)) = hash
+            .strip_prefix("sha256:v1:")
+            .and_then(|value| value.split_once(':'))
+        {
+            return hex::decode(salt).ok().is_some_and(|salt| {
+                salt.len() == 16
+                    && af_services::cluster_daemon::constant_time_eq(
+                        recovery_hash(&salt, compact).as_bytes(),
+                        expected.as_bytes(),
+                    )
+            });
+        }
+        hash.starts_with("$2")
+            && (bcrypt::verify(compact, hash).unwrap_or(false)
+                || dashed.as_ref().is_some_and(|dashed| {
+                    dashed != compact && bcrypt::verify(dashed, hash).unwrap_or(false)
+                }))
+    })
+}
+
+pub(crate) fn validate_recovery_code(user_id: i64, raw_code: &str) -> Option<RecoveryCodeMatch> {
+    let (compact, legacy) = normalized_recovery_code(raw_code)?;
+    let conn = af_db::get_read_conn().ok()?;
+    let candidates = recovery_candidates(&conn, user_id).ok()?;
+    drop(conn);
+    match_recovery_code(candidates, &compact, legacy)
+}
+
+pub(crate) fn consume_recovery_code(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    matched: Option<&RecoveryCodeMatch>,
+) -> bool {
+    matched.is_some_and(|matched| matches!(conn.execute(
+        "UPDATE recovery_codes SET used = 1 WHERE id = ?1 AND user_id = ?2 AND code_hash = ?3 AND COALESCE(used, 0) = 0",
+        params![matched.id, user_id, matched.hash],
+    ), Ok(1)))
+}
+
+#[cfg(test)]
+pub(crate) fn match_recovery_in_connection(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    code: &str,
+) -> Option<RecoveryCodeMatch> {
+    let (compact, legacy) = normalized_recovery_code(code)?;
+    match_recovery_code(recovery_candidates(conn, user_id).ok()?, &compact, legacy)
 }
 
 pub async fn setup_2fa(req: Request) -> Response {
@@ -3131,6 +3212,7 @@ pub async fn verify_2fa(req: Request) -> Response {
     };
     let recovery_codes = generate_recovery_codes();
     let result = (|| -> Result<bool, anyhow::Error> {
+        let recovery_hashes = hash_recovery_codes(&recovery_codes)?;
         let conn = af_db::get_conn()?;
         let transaction = rusqlite::Transaction::new_unchecked(
             &conn,
@@ -3153,7 +3235,7 @@ pub async fn verify_2fa(req: Request) -> Response {
             }
             anyhow::bail!("User missing");
         }
-        store_recovery_codes(&transaction, auth_user.user_id, &recovery_codes)?;
+        store_recovery_codes(&transaction, auth_user.user_id, &recovery_hashes)?;
         transaction.commit()?;
         Ok(true)
     })();
@@ -3190,6 +3272,12 @@ pub(crate) fn verify_user_totp_stepup(user_id: i64, code: &str) -> bool {
     if trimmed.is_empty() || trimmed.len() > 64 {
         return false;
     }
+    let recovery = validate_recovery_code(user_id, trimmed);
+    if recovery.is_none()
+        && !(trimmed.len() == 6 && trimmed.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
     let Ok(mut conn) = af_db::get_conn() else {
         return false;
     };
@@ -3210,7 +3298,7 @@ pub(crate) fn verify_user_totp_stepup(user_id: i64, code: &str) -> bool {
         return false;
     };
     let ok = consume_totp_code(&tx, user_id, &secret, trimmed)
-        || validate_recovery_code(&tx, user_id, trimmed);
+        || consume_recovery_code(&tx, user_id, recovery.as_ref());
     ok && tx.commit().is_ok()
 }
 
@@ -3240,7 +3328,7 @@ pub async fn disable_2fa(req: Request) -> Response {
         );
     }
     blocking_auth_work(move || {
-        let Ok(conn) = af_db::get_conn() else {
+        let Ok(conn) = af_db::get_read_conn() else {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Database error");
         };
         let Ok((encrypted_secret, password_hash)) = conn.query_row(
@@ -3267,6 +3355,7 @@ pub async fn disable_2fa(req: Request) -> Response {
         };
         let password_ok = password_hash.is_empty()
             || (!payload.password.is_empty() && verify_password(&payload.password, &password_hash));
+        let recovery = password_ok.then(|| validate_recovery_code(auth_user.user_id, &payload.code)).flatten();
         let result = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
             let mut conn = af_db::get_conn()?;
             let transaction =
@@ -3285,7 +3374,7 @@ pub async fn disable_2fa(req: Request) -> Response {
                 return Ok(None);
             }
             if !consume_totp_code(&transaction, auth_user.user_id, &secret, &payload.code)
-                && !validate_recovery_code(&transaction, auth_user.user_id, &payload.code)
+                && !consume_recovery_code(&transaction, auth_user.user_id, recovery.as_ref())
             {
                 return Ok(None);
             }
@@ -3352,11 +3441,21 @@ enum MfaVerifyOutcome {
     Suspended,
 }
 
+fn mfa_recovery_user(conn: &rusqlite::Connection, token: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT user_id FROM mfa_challenges WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3",
+        params![token, af_db::MAX_MFA_ATTEMPTS, Utc::now().timestamp()],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 fn redeem_mfa_challenge_in_tx(
     transaction: rusqlite::Transaction<'_>,
     token: &str,
     code: &str,
     session_headers: Option<&HeaderMap>,
+    recovery: Option<(i64, RecoveryCodeMatch)>,
 ) -> anyhow::Result<MfaVerifyOutcome> {
     let Some((user_id, challenge_ver)) = af_db::begin_mfa_attempt_with_epoch(&transaction, token)?
     else {
@@ -3403,7 +3502,10 @@ fn redeem_mfa_challenge_in_tx(
         && (af_db::decrypt_key(&encrypted)
             .ok()
             .is_some_and(|secret| consume_totp_code(&transaction, user_id, &secret, code))
-            || validate_recovery_code(&transaction, user_id, code));
+            || recovery.as_ref().is_some_and(|(matched_user, matched)| {
+                *matched_user == user_id
+                    && consume_recovery_code(&transaction, user_id, Some(matched))
+            }));
     if !verified {
         // Commit failed attempts, including the final allowed guess.
         transaction.execute(
@@ -3453,9 +3555,11 @@ fn verify_mfa_factor_outcome(
     token: &str,
     code: &str,
 ) -> anyhow::Result<MfaVerifyOutcome> {
+    let recovery = mfa_recovery_user(conn, token)
+        .and_then(|id| match_recovery_in_connection(conn, id, code).map(|matched| (id, matched)));
     let transaction =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    redeem_mfa_challenge_in_tx(transaction, token, code, None)
+    redeem_mfa_challenge_in_tx(transaction, token, code, None, recovery)
 }
 
 #[cfg(test)]
@@ -3471,10 +3575,16 @@ fn verify_mfa_factor(
 }
 
 fn mfa_login_verify_blocking(headers: HeaderMap, req: MfaVerifyRequest) -> Response {
+    let recovery = normalized_recovery_code(&req.code).and_then(|_| {
+        let conn = af_db::get_read_conn().ok()?;
+        let user_id = mfa_recovery_user(&conn, &req.mfa_token)?;
+        drop(conn);
+        validate_recovery_code(user_id, &req.code).map(|matched| (user_id, matched))
+    });
     let result = (|| -> anyhow::Result<MfaVerifyOutcome> {
         let mut conn = af_db::get_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        redeem_mfa_challenge_in_tx(tx, &req.mfa_token, &req.code, Some(&headers))
+        redeem_mfa_challenge_in_tx(tx, &req.mfa_token, &req.code, Some(&headers), recovery)
     })();
     let (user, token_opt) = match result {
         Ok(MfaVerifyOutcome::Verified(user, token_opt)) => (user, token_opt),
@@ -3720,7 +3830,7 @@ mod tests {
         let conn = mfa_database();
         let codes = generate_recovery_codes();
         let tx = conn.unchecked_transaction().unwrap();
-        store_recovery_codes(&tx, 1, &codes).unwrap();
+        store_recovery_codes(&tx, 1, &hash_recovery_codes(&codes).unwrap()).unwrap();
         tx.commit().unwrap();
         add_challenge(&conn, "totp");
         add_challenge(&conn, "recovery");
@@ -4066,6 +4176,15 @@ mod tests {
         );
     }
 
+    fn validate_recovery_in_test(
+        conn: &rusqlite::Connection,
+        user_id: i64,
+        raw_code: &str,
+    ) -> bool {
+        let matched = match_recovery_in_connection(conn, user_id, raw_code);
+        consume_recovery_code(conn, user_id, matched.as_ref())
+    }
+
     fn recovery_database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -4074,6 +4193,114 @@ mod tests {
              CREATE TABLE recovery_codes (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, code_hash TEXT NOT NULL, used INTEGER DEFAULT 0);",
         ).unwrap();
         conn
+    }
+
+    #[tokio::test]
+    async fn admin_middleware_rejects_scoped_plugin_reads_and_writes() {
+        use axum::{body::Body, middleware, routing::any, Router};
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route(
+                "/api/v1/admin/services",
+                any(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/api/ingress/configs",
+                any(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route_layer(middleware::from_fn(admin_only_middleware));
+        for path in ["/api/v1/admin/services", "/api/ingress/configs"] {
+            for method in ["GET", "POST"] {
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap();
+                request
+                    .extensions_mut()
+                    .insert(crate::plugins::PluginTokenClaims {
+                        typ: "plugin".into(),
+                        iss: "aetherflow-plugin".into(),
+                        aud: "aetherflow-plugin-api".into(),
+                        sub: "plugin:fixture".into(),
+                        plugin_id: "fixture".into(),
+                        jti: "plg-fixture".into(),
+                        iat: 0,
+                        exp: 1,
+                        epoch: 1,
+                        scopes: vec![crate::plugins::PluginScopeRule {
+                            method: method.into(),
+                            route: path.into(),
+                        }],
+                    });
+                assert_eq!(
+                    app.clone().oneshot(request).await.unwrap().status(),
+                    StatusCode::FORBIDDEN
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_format_gate_excludes_totp_and_invalid_codes() {
+        for invalid in [
+            "123456",
+            "ABCDEF",
+            "ABCDEFXY",
+            "123456789",
+            "------",
+            "１２３４５６",
+        ] {
+            assert!(normalized_recovery_code(invalid).is_none(), "{invalid}");
+        }
+        assert_eq!(
+            normalized_recovery_code("ab12-cd34"),
+            Some(("AB12CD34".into(), true))
+        );
+        for code in generate_recovery_codes() {
+            assert!(matches!(normalized_recovery_code(&code), Some((_, false))));
+        }
+    }
+
+    #[tokio::test]
+    async fn login_hides_oauth_only_accounts_and_caps_password_bytes() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        af_db::get_conn().unwrap().execute(
+            "INSERT INTO users (username, role, password_hash, google_id) VALUES ('oauth-only-fixture', 'user', '', 'oauth-id')", [],
+        ).unwrap();
+        for username in ["missing-fixture", "oauth-only-fixture"] {
+            let response = local_login_blocking(
+                HeaderMap::new(),
+                CredentialsRequest {
+                    username: username.into(),
+                    password: "wrong-password".into(),
+                    setup_token: None,
+                },
+            );
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["message"],
+                "Invalid credentials"
+            );
+        }
+        let response = local_login_blocking(
+            HeaderMap::new(),
+            CredentialsRequest {
+                username: "missing-fixture".into(),
+                password: "é".repeat(37),
+                setup_token: None,
+            },
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -4090,7 +4317,7 @@ mod tests {
             );
         }
         let transaction = conn.unchecked_transaction().unwrap();
-        store_recovery_codes(&transaction, 1, &codes).unwrap();
+        store_recovery_codes(&transaction, 1, &hash_recovery_codes(&codes).unwrap()).unwrap();
         transaction.commit().unwrap();
         let legacy: String = conn
             .query_row(
@@ -4110,13 +4337,13 @@ mod tests {
             "stored recovery code hash must use bcrypt KDF, got {hash}"
         );
         assert!(!codes.contains(&hash));
-        assert!(!validate_recovery_code(&conn, 2, &codes[0]));
-        assert!(validate_recovery_code(
+        assert!(!validate_recovery_in_test(&conn, 2, &codes[0]));
+        assert!(validate_recovery_in_test(
             &conn,
             1,
             &codes[0].replace('-', "").to_lowercase()
         ));
-        assert!(!validate_recovery_code(&conn, 1, &codes[0]));
+        assert!(!validate_recovery_in_test(&conn, 1, &codes[0]));
     }
 
     #[test]
@@ -4130,7 +4357,12 @@ mod tests {
         conn.execute_batch("CREATE TRIGGER reject_insert BEFORE INSERT ON recovery_codes BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
         {
             let transaction = conn.unchecked_transaction().unwrap();
-            assert!(store_recovery_codes(&transaction, 1, &generate_recovery_codes()).is_err());
+            assert!(store_recovery_codes(
+                &transaction,
+                1,
+                &hash_recovery_codes(&generate_recovery_codes()).unwrap()
+            )
+            .is_err());
         }
         let hash: String = conn
             .query_row("SELECT code_hash FROM recovery_codes", [], |row| row.get(0))
@@ -4138,14 +4370,14 @@ mod tests {
         assert_eq!(hash, "old-hash");
         conn.execute_batch("DROP TRIGGER reject_insert; DELETE FROM recovery_codes;")
             .unwrap();
-        let unsalted_sha = hex::encode(Sha256::digest(b"ABCD-EFGH"));
+        let unsalted_sha = hex::encode(Sha256::digest(b"ABCD-EF12"));
         conn.execute(
             "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
             params![unsalted_sha],
         )
         .unwrap();
         assert!(
-            !validate_recovery_code(&conn, 1, "abcdefgh"),
+            !validate_recovery_in_test(&conn, 1, "abcdef12"),
             "unsalted 64-hex SHA-256 recovery hashes must be rejected"
         );
         conn.execute("DELETE FROM recovery_codes", []).unwrap();
@@ -4153,7 +4385,7 @@ mod tests {
         let salted_hash = format!(
             "sha256:v1:{}:{}",
             hex::encode(salt),
-            recovery_hash(&salt, "ABCDEFGH")
+            recovery_hash(&salt, "ABCDEF12")
         );
         conn.execute(
             "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
@@ -4161,28 +4393,28 @@ mod tests {
         )
         .unwrap();
         conn.execute_batch("CREATE TRIGGER reject_consume BEFORE UPDATE ON recovery_codes BEGIN SELECT RAISE(IGNORE); END;").unwrap();
-        assert!(!validate_recovery_code(&conn, 1, "abcdefgh"));
+        assert!(!validate_recovery_in_test(&conn, 1, "abcdef12"));
         conn.execute_batch("DROP TRIGGER reject_consume;").unwrap();
-        assert!(validate_recovery_code(&conn, 1, "abcdefgh"));
+        assert!(validate_recovery_in_test(&conn, 1, "abcdef12"));
         conn.execute(
-            "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, 'ABCD-EFGH')",
+            "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, 'ABCD-EF12')",
             [],
         )
         .unwrap();
-        assert!(!validate_recovery_code(&conn, 1, "ABCD-EFGH"));
+        assert!(!validate_recovery_in_test(&conn, 1, "ABCD-EF12"));
     }
 
     #[test]
     fn legacy_bcrypt_recovery_codes_remain_usable() {
         let conn = recovery_database();
-        let hash = bcrypt::hash("ABCD-EFGH", 4).unwrap();
+        let hash = bcrypt::hash("ABCD-EF12", 4).unwrap();
         conn.execute(
             "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
             params![hash],
         )
         .unwrap();
-        assert!(validate_recovery_code(&conn, 1, "abcdefgh"));
-        assert!(!validate_recovery_code(&conn, 1, "ABCD-EFGH"));
+        assert!(validate_recovery_in_test(&conn, 1, "abcdef12"));
+        assert!(!validate_recovery_in_test(&conn, 1, "ABCD-EF12"));
     }
 
     #[tokio::test]

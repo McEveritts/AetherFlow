@@ -748,7 +748,10 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
     }
 
     let full_uri = req
-        .uri()
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|uri| &uri.0)
+        .unwrap_or_else(|| req.uri())
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/api/v1/public/oidc/authorize");
@@ -4545,6 +4548,38 @@ mod hardening_tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn oidc_authorize_login_redirect_preserves_original_nested_uri() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use tower::ServiceExt;
+
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        af_db::get_conn().unwrap().execute(
+            "INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris)
+             VALUES ('authorize-fixture', 'configured', 'Fixture', '[\"https://client.example/cb\"]')",
+            [],
+        ).unwrap();
+        let uri = "/api/v1/public/oidc/authorize?client_id=authorize-fixture&response_type=code&redirect_uri=https%3A%2F%2Fclient.example%2Fcb&scope=openid&state=fixture&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256";
+        let response = crate::routes::build_router()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, "localhost")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers()[header::LOCATION].to_str().unwrap(),
+            format!("/login?return_to={}", urlencoding::encode(uri))
+        );
     }
 
     #[tokio::test]

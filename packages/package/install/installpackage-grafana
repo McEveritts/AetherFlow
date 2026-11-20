@@ -48,8 +48,9 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq apt-transport-ht
 report_progress 35 "Adding official Grafana APT repository..."
 install -m 0755 -d /etc/apt/keyrings
 af_logged install_apt_signing_key https://apt.grafana.com/gpg.key /etc/apt/keyrings/grafana.gpg
-chmod a+r /etc/apt/keyrings/grafana.gpg
+chmod 0644 /etc/apt/keyrings/grafana.gpg
 echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
+chmod 0644 /etc/apt/sources.list.d/grafana.list
 
 report_progress 65 "Installing Grafana server..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq

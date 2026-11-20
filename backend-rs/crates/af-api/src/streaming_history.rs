@@ -294,7 +294,7 @@ pub fn normalize(mut query: HistoryQuery, admin: bool) -> HistoryResult<HistoryQ
         .trim()
         .to_ascii_lowercase()
         .replace([' ', '_'], "");
-    if !["all", "jellyfin", "emby"].contains(&query.provider.as_str()) {
+    if !["all", "jellyfin", "emby", "plex"].contains(&query.provider.as_str()) {
         return Err(HistoryError::invalid("Unsupported history provider"));
     }
     if !["all", "movie", "episode", "audio", "video", "unknown"]

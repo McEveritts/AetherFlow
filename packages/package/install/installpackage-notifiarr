@@ -73,11 +73,16 @@ case "${ARCH}" in
 esac
 
 report_progress 45 "Resolving latest Notifiarr release from GitHub..."
-RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/Notifiarr/notifiarr/releases/latest 2>/dev/null || true)"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    _target_clean="${AF_TARGET_VERSION#[vV]}"
+    RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/Notifiarr/notifiarr/releases/tags/v${_target_clean}" 2>/dev/null || curl -fsSL "https://api.github.com/repos/Notifiarr/notifiarr/releases/tags/${_target_clean}" 2>/dev/null || true)"
+else
+    RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/Notifiarr/notifiarr/releases/latest 2>/dev/null || true)"
+fi
 LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then
     if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
-        LATEST_TAG="v0.7.3"
+        LATEST_TAG="${AF_TARGET_VERSION:-v0.7.3}"
     else
         print_error "Failed to discover latest GitHub release for Notifiarr/notifiarr"
         exit 1
@@ -90,8 +95,9 @@ if [[ -z "${ASSET_URL}" ]]; then
 fi
 
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-TMP_TAR="$(mktemp --suffix=.tar.gz)"
-TMP_DIR="$(mktemp -d)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/notifiarr-XXXXXX.tar.gz")"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/notifiarr-extract-XXXXXX")"
 af_logged download_file "${ASSET_URL}" "${TMP_TAR}"
 
 af_logged tar -xzf "${TMP_TAR}" -C "${TMP_DIR}"
@@ -236,6 +242,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now notifiarr.service

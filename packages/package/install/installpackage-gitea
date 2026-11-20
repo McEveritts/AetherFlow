@@ -83,7 +83,8 @@ GITEA_VERSION="$(github_latest_tag "go-gitea/gitea" "1.22.3")"
 GITEA_URL="https://github.com/go-gitea/gitea/releases/download/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-${GITEA_ARCH}"
 
 report_progress 65 "Downloading Gitea ${GITEA_VERSION} binary..."
-TMP_DIR="$(mktemp -d /tmp/gitea-XXXXXX)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/gitea-XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 af_logged download_file "$GITEA_URL" "$TMP_DIR/gitea"
 if [[ "$(od -An -tx1 -N4 "$TMP_DIR/gitea" | tr -d ' \n')" != "7f454c46" ]]; then
@@ -177,6 +178,7 @@ Environment=USER=gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/gitea.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now gitea

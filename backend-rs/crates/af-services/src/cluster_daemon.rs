@@ -25,7 +25,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::env;
 use std::io::Read;
@@ -72,13 +72,49 @@ pub struct WorkerService {
 }
 
 /// Command queued on the master for delivery to a worker on its next heartbeat.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingWorkerCommand {
     pub id: String,
     #[serde(rename = "type")]
     pub cmd_type: String,
     #[serde(default)]
     pub params: HashMap<String, String>,
+}
+
+/// Durable SQLite representation of a cluster worker command (`cluster_commands`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterCommandRecord {
+    pub id: String,
+    pub node_id: String,
+    pub cmd_type: String,
+    pub target: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leased_until: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Terminal command execution report sent by a worker node on heartbeat or `/cluster/v1/commands/ack`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerCommandAck {
+    pub id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_message: Option<String>,
+}
+
+/// Payload accepted by `/cluster/v1/commands/ack`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkerCommandAckRequest {
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
+    pub psk: String,
+    #[serde(default)]
+    pub acks: Vec<WorkerCommandAck>,
 }
 
 /// Payload accepted by `/cluster/v1/register`.
@@ -137,6 +173,8 @@ pub struct WorkerHeartbeatRequest {
     pub services_error: Option<String>,
     #[serde(default)]
     pub system_info: Option<WorkerSystemInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_acks: Vec<WorkerCommandAck>,
 }
 
 /// Response returned by `/cluster/v1/heartbeat`.
@@ -149,13 +187,13 @@ pub struct WorkerHeartbeatResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// In-Memory Telemetry & Command State
+// In-Memory Telemetry & Durable SQLite Command Queue
 // ─────────────────────────────────────────────────────────────────────────────
 
-static WORKER_METRICS_CACHE: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+const CLUSTER_COMMAND_LEASE_SECS: i64 = 30;
+const MAX_PENDING_COMMANDS_PER_NODE: i64 = 64;
 
-static WORKER_COMMAND_QUEUES: Lazy<RwLock<HashMap<String, VecDeque<PendingWorkerCommand>>>> =
+static WORKER_METRICS_CACHE: Lazy<RwLock<HashMap<String, serde_json::Value>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Returns the most recent rich telemetry payload pushed by a worker node if cached in memory.
@@ -170,36 +208,263 @@ pub fn cache_worker_metrics(node_id: &str, payload: serde_json::Value) {
     }
 }
 
-/// Removes a worker node's cached telemetry and pending commands from memory.
+/// Removes a worker node's cached telemetry and queued commands when a node is removed.
 pub fn remove_cached_worker_metrics(node_id: &str) {
     if let Ok(mut guard) = WORKER_METRICS_CACHE.write() {
         guard.remove(node_id);
     }
-    if let Ok(mut guard) = WORKER_COMMAND_QUEUES.write() {
-        guard.remove(node_id);
+    if let Ok(conn) = af_db::get_conn() {
+        let _ = conn.execute(
+            "DELETE FROM cluster_commands WHERE node_id = ?1",
+            params![node_id],
+        );
     }
 }
 
-/// Queues a remote command for delivery to a worker node on its next heartbeat response.
+/// Enqueues a validated remote command into durable SQLite `cluster_commands`.
+pub fn enqueue_cluster_command(
+    node_id: &str,
+    cmd_type: &str,
+    target: &str,
+) -> anyhow::Result<ClusterCommandRecord> {
+    ensure_cluster_schema();
+    let clean_node = node_id.trim();
+    let clean_type = cmd_type.trim();
+    let clean_target = target.trim();
+    anyhow::ensure!(
+        !clean_node.is_empty() && clean_node.len() <= 128,
+        "valid node_id is required"
+    );
+    anyhow::ensure!(
+        matches!(
+            clean_type,
+            "restart_service" | "start_service" | "stop_service" | "reload_service"
+        ),
+        "unsupported cluster command type (allowed: restart_service, start_service, stop_service, reload_service)"
+    );
+    anyhow::ensure!(
+        !clean_target.is_empty()
+            && clean_target.len() <= 128
+            && clean_target
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@')),
+        "invalid command target identifier"
+    );
+
+    let conn = af_db::get_conn().context("database unavailable")?;
+    let active_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cluster_commands WHERE node_id = ?1 AND status IN ('queued', 'leased')",
+            params![clean_node],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    anyhow::ensure!(
+        active_count < MAX_PENDING_COMMANDS_PER_NODE,
+        "worker command queue is full for node '{}'",
+        clean_node
+    );
+
+    let cmd_id = format!("cmd-{}", uuid::Uuid::new_v4().simple());
+    let now_iso = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, result_message, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, NULL, ?5, ?5)",
+        params![cmd_id, clean_node, clean_type, clean_target, now_iso],
+    )
+    .context("failed to persist cluster command")?;
+
+    Ok(ClusterCommandRecord {
+        id: cmd_id,
+        node_id: clean_node.to_string(),
+        cmd_type: clean_type.to_string(),
+        target: clean_target.to_string(),
+        status: "queued".to_string(),
+        leased_until: None,
+        result_message: None,
+        created_at: now_iso.clone(),
+        updated_at: now_iso,
+    })
+}
+
+/// Queues a remote command for delivery to a worker node on its next heartbeat response (durable SQLite wrapper).
 pub fn queue_worker_command(node_id: &str, cmd: PendingWorkerCommand) -> bool {
-    let Ok(mut guard) = WORKER_COMMAND_QUEUES.write() else {
+    ensure_cluster_schema();
+    let clean_node = node_id.trim();
+    let clean_type = cmd.cmd_type.trim();
+    let target = cmd
+        .params
+        .get("service")
+        .or_else(|| cmd.params.get("target"))
+        .map(String::as_str)
+        .unwrap_or("")
+        .trim();
+    if clean_node.is_empty() || clean_type.is_empty() {
+        return false;
+    }
+    let cmd_id = if cmd.id.trim().is_empty() {
+        format!("cmd-{}", uuid::Uuid::new_v4().simple())
+    } else {
+        cmd.id.trim().to_string()
+    };
+    let Ok(conn) = af_db::get_conn() else {
         return false;
     };
-    let q = guard.entry(node_id.to_string()).or_default();
-    if q.len() >= 16 {
+    let active_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cluster_commands WHERE node_id = ?1 AND status IN ('queued', 'leased')",
+            params![clean_node],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if active_count >= MAX_PENDING_COMMANDS_PER_NODE {
         return false;
     }
-    q.push_back(cmd);
-    true
+    let now_iso = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, result_message, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, NULL, ?5, ?5)",
+        params![cmd_id, clean_node, clean_type, target, now_iso],
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
 }
 
-/// Pops the next pending remote command for a worker node, if any.
+/// Leases the next queued (or lease-expired) command for `node_id` from SQLite `cluster_commands`.
+pub fn lease_next_worker_command(
+    node_id: &str,
+    now_unix: i64,
+    lease_secs: i64,
+) -> Option<PendingWorkerCommand> {
+    ensure_cluster_schema();
+    let mut conn = af_db::get_conn().ok()?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .ok()?;
+    let candidate: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT id, cmd_type, target
+             FROM cluster_commands
+             WHERE node_id = ?1
+               AND (status = 'queued' OR (status = 'leased' AND COALESCE(leased_until, 0) <= ?2))
+             ORDER BY created_at ASC, rowid ASC
+             LIMIT 1",
+            params![node_id, now_unix],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let (id, cmd_type, target) = candidate?;
+    let lease_until = now_unix.saturating_add(lease_secs.max(5));
+    let now_iso = Utc::now().to_rfc3339();
+    let updated = tx
+        .execute(
+            "UPDATE cluster_commands
+             SET status = 'leased', leased_until = ?1, updated_at = ?2
+             WHERE id = ?3 AND node_id = ?4
+               AND (status = 'queued' OR (status = 'leased' AND COALESCE(leased_until, 0) <= ?5))",
+            params![lease_until, now_iso, id, node_id, now_unix],
+        )
+        .ok()?;
+    if updated == 0 {
+        return None;
+    }
+    tx.commit().ok()?;
+
+    let mut params_map = HashMap::new();
+    if !target.is_empty() {
+        params_map.insert("service".to_string(), target.clone());
+        params_map.insert("target".to_string(), target);
+    }
+    Some(PendingWorkerCommand {
+        id,
+        cmd_type,
+        params: params_map,
+    })
+}
+
+/// Compatibility alias leasing the next durable worker command using default lease duration.
 pub fn pop_worker_command(node_id: &str) -> Option<PendingWorkerCommand> {
-    WORKER_COMMAND_QUEUES
-        .write()
-        .ok()?
-        .get_mut(node_id)?
-        .pop_front()
+    lease_next_worker_command(node_id, Utc::now().timestamp(), CLUSTER_COMMAND_LEASE_SECS)
+}
+
+/// Records terminal execution status (`executed` or `failed`) reported by `node_id`.
+pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyhow::Result<bool> {
+    ensure_cluster_schema();
+    let clean_id = ack.id.trim();
+    let clean_status = ack.status.trim().to_ascii_lowercase();
+    anyhow::ensure!(!clean_id.is_empty(), "command id is required");
+    anyhow::ensure!(
+        matches!(clean_status.as_str(), "executed" | "failed"),
+        "command ack status must be 'executed' or 'failed'"
+    );
+    let msg = ack
+        .result_message
+        .as_deref()
+        .map(|s| {
+            let trimmed = s.trim();
+            if trimmed.len() > 1024 {
+                trimmed[..1024].to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .filter(|s| !s.is_empty());
+    let now_iso = Utc::now().to_rfc3339();
+    let conn = af_db::get_conn().context("database unavailable")?;
+    let changed = conn.execute(
+        "UPDATE cluster_commands
+         SET status = ?1,
+             leased_until = NULL,
+             result_message = ?2,
+             updated_at = ?3
+         WHERE id = ?4 AND node_id = ?5 AND status IN ('queued', 'leased')",
+        params![clean_status, msg, now_iso, clean_id, node_id.trim()],
+    )?;
+    if changed > 0 {
+        return Ok(true);
+    }
+    let already_terminal: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM cluster_commands WHERE id = ?1 AND node_id = ?2 AND status IN ('executed', 'failed'))",
+            params![clean_id, node_id.trim()],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    Ok(already_terminal)
+}
+
+/// Lists durable cluster commands (optionally filtered by `node_id`), newest first.
+pub fn list_cluster_commands(
+    node_id_filter: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<ClusterCommandRecord>> {
+    ensure_cluster_schema();
+    let effective_limit = limit.clamp(1, 200) as i64;
+    let clean_filter = node_id_filter.map(str::trim).filter(|s| !s.is_empty());
+    let conn = af_db::get_conn().context("database unavailable")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, node_id, cmd_type, target, status, leased_until, result_message, created_at, updated_at
+         FROM cluster_commands
+         WHERE (?1 IS NULL OR node_id = ?1)
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![clean_filter, effective_limit], |r| {
+            Ok(ClusterCommandRecord {
+                id: r.get(0)?,
+                node_id: r.get(1)?,
+                cmd_type: r.get(2)?,
+                target: r.get(3)?,
+                status: r.get(4)?,
+                leased_until: r.get(5)?,
+                result_message: r.get(6)?,
+                created_at: r.get(7)?,
+                updated_at: r.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +602,18 @@ pub fn ensure_cluster_schema() {
             expires_at INTEGER NOT NULL,
             consumed_by TEXT
         );",
+        "CREATE TABLE IF NOT EXISTS cluster_commands (
+            id TEXT PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            cmd_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL,
+            leased_until INTEGER,
+            result_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+        "CREATE INDEX IF NOT EXISTS idx_cluster_commands_node_status ON cluster_commands(node_id, status, created_at);",
     ];
     for sql in migrations {
         let _ = conn.execute_batch(sql);
@@ -886,7 +1163,11 @@ pub fn process_worker_heartbeat_with_peer(
 
     cache_worker_metrics(&node_id, snapshot);
 
-    let command = pop_worker_command(&node_id);
+    for ack in &req.command_acks {
+        let _ = acknowledge_worker_command(&node_id, ack);
+    }
+
+    let command = lease_next_worker_command(&node_id, ts, CLUSTER_COMMAND_LEASE_SECS);
     Ok(WorkerHeartbeatResponse {
         timestamp: ts,
         acknowledged: true,
@@ -2768,6 +3049,105 @@ fn route_cluster_http_request(
                 ),
             }
         }
+        ("POST", "/cluster/v1/commands/ack") => {
+            let mut req: WorkerCommandAckRequest =
+                serde_json::from_slice(body_bytes).unwrap_or_default();
+            if req.psk.is_empty() && !header_psk.is_empty() {
+                req.psk = header_psk.to_string();
+            }
+            let node_id = req.node_id.trim();
+            if node_id.is_empty() {
+                return (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "acknowledged": false, "error": "node_id is required" }),
+                );
+            }
+            if let Err(msg) = verify_cluster_psk(node_id, &req.psk) {
+                return (
+                    401,
+                    "Unauthorized",
+                    serde_json::json!({ "acknowledged": false, "error": msg }),
+                );
+            }
+            if let Some(incoming_fp) = peer_auth.mtls_cert_sha256() {
+                if let Ok(conn) = af_db::get_conn() {
+                    let pinned: String = conn
+                        .query_row(
+                            "SELECT COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
+                            params![node_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or_default();
+                    if !pinned.is_empty()
+                        && !constant_time_eq(pinned.as_bytes(), incoming_fp.as_bytes())
+                    {
+                        return (
+                            401,
+                            "Unauthorized",
+                            serde_json::json!({ "acknowledged": false, "error": "peer certificate mismatch" }),
+                        );
+                    }
+                }
+            }
+            let mut processed = 0usize;
+            for ack in &req.acks {
+                if acknowledge_worker_command(node_id, ack).unwrap_or(false) {
+                    processed += 1;
+                }
+            }
+            (
+                200,
+                "OK",
+                serde_json::json!({
+                    "acknowledged": true,
+                    "processed": processed,
+                }),
+            )
+        }
+        ("POST", "/cluster/v1/commands") => {
+            if let Err(msg) = authorize_cluster_control_plane(header_psk, peer_auth) {
+                return (401, "Unauthorized", serde_json::json!({ "error": msg }));
+            }
+            let val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap_or_default();
+            let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd_type = val
+                .get("cmd_type")
+                .or_else(|| val.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let target = val
+                .get("target")
+                .or_else(|| val.get("service"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match enqueue_cluster_command(node_id, cmd_type, target) {
+                Ok(rec) => (200, "OK", serde_json::to_value(rec).unwrap_or_default()),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
+        ("GET", "/cluster/v1/commands") => {
+            if let Err(msg) = authorize_cluster_control_plane(header_psk, peer_auth) {
+                return (401, "Unauthorized", serde_json::json!({ "error": msg }));
+            }
+            let node_id = raw_target.split_once('?').and_then(|(_, q)| {
+                url::form_urlencoded::parse(q.as_bytes())
+                    .find(|(k, _)| k == "node_id" || k == "id")
+                    .map(|(_, v)| v.into_owned())
+            });
+            match list_cluster_commands(node_id.as_deref(), 100) {
+                Ok(items) => (200, "OK", serde_json::json!({ "commands": items })),
+                Err(e) => (
+                    500,
+                    "Internal Server Error",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
         ("GET", "/cluster/v1/metrics") => {
             let node_id = raw_target
                 .split_once('?')
@@ -3229,27 +3609,335 @@ fn build_worker_heartbeat_payload(
         services_observed_at: inventory.observed_at,
         services_error: inventory.error.clone(),
         system_info: Some(sys_info.clone()),
+        command_acks: Vec::new(),
     };
 
     (hb, sys_info)
 }
 
-async fn execute_remote_worker_command(cmd: PendingWorkerCommand) {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedWorkerRegistrationState {
+    pub node_id: String,
+    pub master_authority: String,
+    pub credential: String,
+    pub registered_at: String,
+}
+
+pub fn resolve_worker_registration_state_path() -> std::path::PathBuf {
+    if let Ok(explicit) = env::var("CLUSTER_WORKER_STATE_FILE") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    if let Ok(root) = env::var("AETHERFLOW_FS_ROOT") {
+        let trimmed = root.trim();
+        if !trimmed.is_empty() && trimmed != "/" {
+            return Path::new(trimmed).join("var/lib/aetherflow/cluster_worker_state.json");
+        }
+    }
+    if let Ok(data_dir) = env::var("DATA_DIR") {
+        let trimmed = data_dir.trim();
+        if !trimmed.is_empty() {
+            return Path::new(trimmed).join("cluster_worker_state.json");
+        }
+    }
+    std::path::PathBuf::from("/var/lib/aetherflow/cluster_worker_state.json")
+}
+
+/// Atomically persists worker registration state & credential with `0600` permissions and `O_NOFOLLOW`.
+pub fn persist_worker_registration_state_atomic(
+    path: &Path,
+    state: &PersistedWorkerRegistrationState,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("worker state path must have a parent directory");
+    };
+    if let Ok(pmeta) = std::fs::symlink_metadata(parent) {
+        if pmeta.file_type().is_symlink() {
+            anyhow::bail!("refusing symlink parent directory for worker registration state");
+        }
+    } else {
+        std::fs::create_dir_all(parent).context("creating worker state parent directory")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to overwrite symlink worker registration state file");
+        }
+    }
+
+    let payload = serde_json::to_vec_pretty(state)?;
+    let tmp_name = format!(
+        ".cluster_worker_state.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    );
+    let tmp_path = parent.join(tmp_name);
+
+    #[cfg(unix)]
+    let mut tmp_file = {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::FromRawFd;
+
+        let c_tmp = CString::new(tmp_path.as_os_str().as_bytes())
+            .context("worker state temp path contains interior NUL")?;
+        let fd = unsafe {
+            libc::open(
+                c_tmp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("opening exclusive 0600 worker registration temp file");
+        }
+        unsafe {
+            let _ = libc::fchmod(fd, 0o600);
+            std::fs::File::from_raw_fd(fd)
+        }
+    };
+    #[cfg(not(unix))]
+    let mut tmp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)?;
+
+    if let Err(err) = tmp_file
+        .write_all(&payload)
+        .and_then(|_| tmp_file.sync_all())
+    {
+        drop(tmp_file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err).context("writing worker registration state temp file");
+    }
+    drop(tmp_file);
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&tmp_path);
+            anyhow::bail!("worker registration state target turned into a symlink");
+        }
+    }
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err).context("atomically activating worker registration state file");
+    }
+    if let Ok(dir_f) = std::fs::File::open(parent) {
+        let _ = dir_f.sync_all();
+    }
+    Ok(())
+}
+
+/// Loads persisted worker registration state safely with `O_NOFOLLOW`.
+pub fn load_worker_registration_state_nofollow(
+    path: &Path,
+) -> Option<PersistedWorkerRegistrationState> {
+    #[cfg(unix)]
+    let file = {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::FromRawFd;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        let f = unsafe { std::fs::File::from_raw_fd(fd) };
+        if !f.metadata().ok()?.is_file() {
+            return None;
+        }
+        f
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(path).ok()?;
+
+    let mut raw = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut raw).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+async fn execute_remote_worker_command_with_result(cmd: PendingWorkerCommand) -> WorkerCommandAck {
     tracing::info!(
         command_id = %cmd.id,
         cmd_type = %cmd.cmd_type,
         "cluster worker executing remote command from master"
     );
-    if cmd.cmd_type == "restart_service" {
-        if let Some(service_name) = cmd.params.get("service") {
-            if let Err(e) = crate::control_service(service_name, "restart").await {
-                tracing::warn!(
-                    service = %service_name,
-                    error = %e,
-                    "cluster worker service restart failed"
-                );
+    let action = match cmd.cmd_type.as_str() {
+        "restart_service" => Some("restart"),
+        "start_service" => Some("start"),
+        "stop_service" => Some("stop"),
+        "reload_service" => Some("reload"),
+        _ => None,
+    };
+    let Some(svc_action) = action else {
+        return WorkerCommandAck {
+            id: cmd.id,
+            status: "failed".to_string(),
+            result_message: Some(format!("unsupported command type '{}'", cmd.cmd_type)),
+        };
+    };
+    let service_name = cmd
+        .params
+        .get("service")
+        .or_else(|| cmd.params.get("target"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(service) = service_name else {
+        return WorkerCommandAck {
+            id: cmd.id,
+            status: "failed".to_string(),
+            result_message: Some("missing target service parameter".to_string()),
+        };
+    };
+    match crate::control_service(&service, svc_action).await {
+        Ok(()) => WorkerCommandAck {
+            id: cmd.id,
+            status: "executed".to_string(),
+            result_message: Some(format!("{svc_action} {service} succeeded")),
+        },
+        Err(err) => {
+            tracing::warn!(
+                service = %service,
+                action = %svc_action,
+                error = %err,
+                "cluster worker command failed"
+            );
+            WorkerCommandAck {
+                id: cmd.id,
+                status: "failed".to_string(),
+                result_message: Some(err.to_string()),
             }
         }
+    }
+}
+
+fn resolve_live_enrollment_credential(fallback: &str) -> String {
+    env::var("CLUSTER_ENROLL_TOKEN")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            env::var("CLUSTER_PSK")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or_else(|| fallback.trim().to_string())
+}
+
+async fn register_worker_with_bounded_backoff(
+    endpoint: &WorkerTargetEndpoint,
+    security: &WorkerTransportSecurity,
+    credential: &str,
+    preferred_node_id: &str,
+    hostname: &str,
+    worker_address: &str,
+    state_path: &Path,
+) -> String {
+    let initial_ms = env::var("CLUSTER_REGISTER_INITIAL_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1000);
+    let max_ms = env::var("CLUSTER_REGISTER_MAX_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n >= initial_ms)
+        .unwrap_or(30_000);
+
+    let (_, sys_info) = build_worker_heartbeat_payload(
+        preferred_node_id,
+        hostname,
+        worker_address,
+        "",
+        &WorkerServiceInventory::default(),
+    );
+    let reg_payload = RegisterWorkerRequest {
+        node_id: preferred_node_id.to_string(),
+        hostname: hostname.to_string(),
+        address: worker_address.to_string(),
+        psk: String::new(),
+        version: "4.0.0".to_string(),
+        system_info: Some(sys_info),
+    };
+    let reg_bytes = serde_json::to_vec(&reg_payload).unwrap_or_default();
+    let register_paths = ["/cluster/v1/register", "/api/v1/admin/cluster/enroll"];
+
+    let mut backoff_ms = initial_ms;
+    loop {
+        let live_cred = resolve_live_enrollment_credential(credential);
+        for path in &register_paths {
+            match send_worker_json_post(endpoint, security, path, &live_cred, reg_bytes.clone())
+                .await
+            {
+                Ok((status, resp_bytes)) if status.is_success() => {
+                    if let Ok(parsed) =
+                        serde_json::from_slice::<RegisterWorkerResponse>(&resp_bytes)
+                    {
+                        if parsed.accepted {
+                            let assigned = if parsed.node_id.trim().is_empty() {
+                                preferred_node_id.to_string()
+                            } else {
+                                parsed.node_id.trim().to_string()
+                            };
+                            let persisted = PersistedWorkerRegistrationState {
+                                node_id: assigned.clone(),
+                                master_authority: endpoint.authority.clone(),
+                                credential: live_cred,
+                                registered_at: Utc::now().to_rfc3339(),
+                            };
+                            if let Err(err) =
+                                persist_worker_registration_state_atomic(state_path, &persisted)
+                            {
+                                tracing::warn!(
+                                    path = %state_path.display(),
+                                    error = %err,
+                                    "failed persisting worker registration state"
+                                );
+                            }
+                            tracing::info!(
+                                node_id = %assigned,
+                                master = %endpoint.authority,
+                                "cluster worker registered with master"
+                            );
+                            return assigned;
+                        }
+                    }
+                }
+                Ok((status, _)) => {
+                    tracing::warn!(
+                        endpoint = %path,
+                        status = %status,
+                        backoff_ms = backoff_ms,
+                        "cluster registration endpoint returned non-success; backing off"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %path,
+                        error = %e,
+                        backoff_ms = backoff_ms,
+                        "cluster worker registration attempt failed; backing off"
+                    );
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_ms = backoff_ms.saturating_mul(2).min(max_ms);
     }
 }
 
@@ -3261,65 +3949,53 @@ async fn run_worker_registration_and_heartbeat_loop(
     let hostname = resolve_local_hostname();
     let local_port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let worker_address = format!("{}:{}", hostname, local_port);
+    let state_path = resolve_worker_registration_state_path();
+
+    let mut active_cred = resolve_live_enrollment_credential(&psk);
     let mut assigned_node_id = format!("node-{}", hostname);
 
-    let (_, sys_info) = build_worker_heartbeat_payload(
-        &assigned_node_id,
-        &hostname,
-        &worker_address,
-        "",
-        &WorkerServiceInventory::default(),
-    );
-    let reg_payload = RegisterWorkerRequest {
-        node_id: assigned_node_id.clone(),
-        hostname: hostname.clone(),
-        address: worker_address.clone(),
-        psk: String::new(),
-        version: "4.0.0".to_string(),
-        system_info: Some(sys_info),
-    };
-    let reg_bytes = serde_json::to_vec(&reg_payload).unwrap_or_default();
-
-    // Register with master via `/cluster/v1/register` (or fallback `/api/v1/admin/cluster/enroll`)
-    let register_paths = ["/cluster/v1/register", "/api/v1/admin/cluster/enroll"];
-
-    for path in &register_paths {
-        match send_worker_json_post(&endpoint, &security, path, &psk, reg_bytes.clone()).await {
-            Ok((status, resp_bytes)) if status.is_success() => {
-                if let Ok(parsed) = serde_json::from_slice::<RegisterWorkerResponse>(&resp_bytes) {
-                    if parsed.accepted && !parsed.node_id.is_empty() {
-                        assigned_node_id = parsed.node_id;
-                    }
-                }
-                tracing::info!(
-                    node_id = %assigned_node_id,
-                    master = %endpoint.authority,
-                    "cluster worker registered with master"
-                );
-                break;
-            }
-            Ok((status, _)) => {
-                tracing::warn!(
-                    endpoint = %path,
-                    status = %status,
-                    "cluster registration endpoint returned non-success"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    endpoint = %path,
-                    error = %e,
-                    "cluster worker registration attempt failed"
-                );
+    if let Some(saved) = load_worker_registration_state_nofollow(&state_path)
+        .filter(|s| s.master_authority == endpoint.authority && !s.node_id.trim().is_empty())
+    {
+        assigned_node_id = saved.node_id;
+        if active_cred.is_empty() && !saved.credential.trim().is_empty() {
+            active_cred = saved.credential;
+        }
+    } else {
+        assigned_node_id = register_worker_with_bounded_backoff(
+            &endpoint,
+            &security,
+            &active_cred,
+            &assigned_node_id,
+            &hostname,
+            &worker_address,
+            &state_path,
+        )
+        .await;
+        if let Some(saved) = load_worker_registration_state_nofollow(&state_path) {
+            if !saved.credential.trim().is_empty() {
+                active_cred = saved.credential;
             }
         }
     }
 
-    // 5-second metric heartbeat loop pushing `af_hardware::get_system_metrics_core()`
-    let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    let hb_interval_ms = env::var("CLUSTER_HEARTBEAT_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n >= 20)
+        .unwrap_or(5000);
+    let mut ticker = tokio::time::interval(Duration::from_millis(hb_interval_ms));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut inventory = WorkerServiceInventory::default();
     let mut inventory_task = None;
+
+    let completed_cmds: Arc<std::sync::Mutex<HashMap<String, WorkerCommandAck>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let in_flight_cmds: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let pending_acks: Arc<std::sync::Mutex<Vec<WorkerCommandAck>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
     loop {
         ticker.tick().await;
         poll_worker_service_inventory(&mut inventory_task, &mut inventory, Utc::now().timestamp())
@@ -3332,6 +4008,12 @@ async fn run_worker_registration_and_heartbeat_loop(
             &inventory,
         );
         hb_payload.psk.clear();
+        let batch_acks: Vec<WorkerCommandAck> = pending_acks
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default();
+        hb_payload.command_acks = batch_acks.clone();
+
         let Ok(hb_bytes) = serde_json::to_vec(&hb_payload) else {
             continue;
         };
@@ -3340,7 +4022,7 @@ async fn run_worker_registration_and_heartbeat_loop(
             &endpoint,
             &security,
             "/cluster/v1/heartbeat",
-            &psk,
+            &active_cred,
             hb_bytes,
         )
         .await
@@ -3348,17 +4030,111 @@ async fn run_worker_registration_and_heartbeat_loop(
             Ok((status, resp_bytes)) if status.is_success() => {
                 if let Ok(pong) = serde_json::from_slice::<WorkerHeartbeatResponse>(&resp_bytes) {
                     if let Some(cmd) = pong.command {
-                        tokio::spawn(execute_remote_worker_command(cmd));
+                        let cached_ack = completed_cmds
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&cmd.id).cloned());
+                        if let Some(done_ack) = cached_ack {
+                            if let Ok(mut q) = pending_acks.lock() {
+                                if !q.iter().any(|a| a.id == done_ack.id) {
+                                    q.push(done_ack);
+                                }
+                            }
+                            continue;
+                        }
+                        let should_run = in_flight_cmds
+                            .lock()
+                            .map(|mut s| s.insert(cmd.id.clone()))
+                            .unwrap_or(false);
+                        if should_run {
+                            let ep_clone = endpoint.clone();
+                            let sec_clone = security.clone();
+                            let cred_clone = active_cred.clone();
+                            let node_clone = assigned_node_id.clone();
+                            let done_map = Arc::clone(&completed_cmds);
+                            let flight_set = Arc::clone(&in_flight_cmds);
+                            let ack_queue = Arc::clone(&pending_acks);
+                            tokio::spawn(async move {
+                                let cmd_id = cmd.id.clone();
+                                let ack = execute_remote_worker_command_with_result(cmd).await;
+                                if let Ok(mut m) = done_map.lock() {
+                                    if m.len() >= 256 {
+                                        if let Some(k) = m.keys().next().cloned() {
+                                            m.remove(&k);
+                                        }
+                                    }
+                                    m.insert(cmd_id.clone(), ack.clone());
+                                }
+                                if let Ok(mut s) = flight_set.lock() {
+                                    s.remove(&cmd_id);
+                                }
+                                let ack_req = WorkerCommandAckRequest {
+                                    node_id: node_clone,
+                                    psk: String::new(),
+                                    acks: vec![ack.clone()],
+                                };
+                                let ack_sent = if let Ok(bytes) = serde_json::to_vec(&ack_req) {
+                                    matches!(
+                                        send_worker_json_post(
+                                            &ep_clone,
+                                            &sec_clone,
+                                            "/cluster/v1/commands/ack",
+                                            &cred_clone,
+                                            bytes,
+                                        )
+                                        .await,
+                                        Ok((st, _)) if st.is_success()
+                                    )
+                                } else {
+                                    false
+                                };
+                                if !ack_sent {
+                                    if let Ok(mut q) = ack_queue.lock() {
+                                        q.push(ack);
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
             }
             Ok((status, _)) => {
+                if !batch_acks.is_empty() {
+                    if let Ok(mut q) = pending_acks.lock() {
+                        q.extend(batch_acks);
+                    }
+                }
                 tracing::warn!(
                     status = %status,
                     "cluster master rejected heartbeat"
                 );
+                if status == StatusCode::UNAUTHORIZED {
+                    let fresh_cred = resolve_live_enrollment_credential(&active_cred);
+                    if !fresh_cred.is_empty() {
+                        tracing::info!(
+                            node_id = %assigned_node_id,
+                            "heartbeat received 401 with credential available; re-triggering worker registration"
+                        );
+                        active_cred = fresh_cred;
+                        assigned_node_id = register_worker_with_bounded_backoff(
+                            &endpoint,
+                            &security,
+                            &active_cred,
+                            &assigned_node_id,
+                            &hostname,
+                            &worker_address,
+                            &state_path,
+                        )
+                        .await;
+                    }
+                }
             }
             Err(e) => {
+                if !batch_acks.is_empty() {
+                    if let Ok(mut q) = pending_acks.lock() {
+                        q.extend(batch_acks);
+                    }
+                }
                 tracing::debug!(
                     error = %e,
                     master = %endpoint.authority,
@@ -4463,5 +5239,150 @@ mod tests {
 
             server_task.abort();
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_sqlite_command_queue_leasing_ack_and_worker_backoff_registration() {
+        let name =
+            "cluster_daemon::tests::durable_sqlite_command_queue_leasing_ack_and_worker_backoff_registration";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = env::temp_dir().join(format!("af-cluster-p3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("cluster.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        env::set_var("CLUSTER_PSK", "master-secret-psk-1234567890");
+        env::set_var("CLUSTER_REGISTER_INITIAL_BACKOFF_MS", "15");
+        env::set_var("CLUSTER_REGISTER_MAX_BACKOFF_MS", "40");
+        af_db::init_db().unwrap();
+        ensure_cluster_schema();
+
+        // 1. Enqueue durable command in SQLite
+        let queued = enqueue_cluster_command("node-alpha", "restart_service", "sonarr").unwrap();
+        assert_eq!(queued.status, "queued");
+
+        // First lease succeeds; second lease before lease expiry returns None
+        let first_lease = lease_next_worker_command("node-alpha", 1000, 30).unwrap();
+        assert_eq!(first_lease.id, queued.id);
+        assert_eq!(first_lease.cmd_type, "restart_service");
+        assert_eq!(
+            first_lease.params.get("service").map(String::as_str),
+            Some("sonarr")
+        );
+        assert!(lease_next_worker_command("node-alpha", 1015, 30).is_none());
+
+        // After lease expires (`now >= 1030`), command is re-leased cleanly
+        let released = lease_next_worker_command("node-alpha", 1031, 30).unwrap();
+        assert_eq!(released.id, queued.id);
+
+        // Heartbeat carrying `command_acks` marks command terminal (`executed`) with message
+        let hb_resp = process_worker_heartbeat(&WorkerHeartbeatRequest {
+            node_id: "node-alpha".to_string(),
+            hostname: "alpha".to_string(),
+            address: "127.0.0.1:8080".to_string(),
+            psk: "master-secret-psk-1234567890".to_string(),
+            timestamp: 1035,
+            command_acks: vec![WorkerCommandAck {
+                id: queued.id.clone(),
+                status: "executed".to_string(),
+                result_message: Some("restart sonarr succeeded".to_string()),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(hb_resp.acknowledged);
+        assert!(hb_resp.command.is_none());
+
+        let listed = list_cluster_commands(Some("node-alpha"), 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, "executed");
+        assert_eq!(
+            listed[0].result_message.as_deref(),
+            Some("restart sonarr succeeded")
+        );
+
+        // 2. Worker registration retries bounded exponential backoff and persists 0600 O_NOFOLLOW state
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let attempts_srv = Arc::clone(&attempts);
+
+            let srv = tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let n = attempts_srv.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                        let (st, body) = if n < 2 {
+                            (
+                                "503 Service Unavailable",
+                                r#"{"accepted":false,"message":"starting"}"#,
+                            )
+                        } else {
+                            (
+                                "200 OK",
+                                r#"{"node_id":"node-backed-off-ok","accepted":true,"message":"enrolled"}"#,
+                            )
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {st}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+
+            let state_file = root.join("state/worker_reg.json");
+            let ep = WorkerTargetEndpoint {
+                scheme: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: addr.port(),
+                authority: addr.to_string(),
+            };
+            let assigned = register_worker_with_bounded_backoff(
+                &ep,
+                &WorkerTransportSecurity::InsecureLoopback,
+                "master-secret-psk-1234567890",
+                "node-initial",
+                "worker-host",
+                "127.0.0.1:8080",
+                &state_file,
+            )
+            .await;
+            assert_eq!(assigned, "node-backed-off-ok");
+            assert!(attempts.load(Ordering::SeqCst) >= 3);
+
+            let mode = std::fs::symlink_metadata(&state_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+            let loaded = load_worker_registration_state_nofollow(&state_file).unwrap();
+            assert_eq!(loaded.node_id, "node-backed-off-ok");
+
+            // Symlink state target must be rejected
+            let sym_path = root.join("state/symlink_reg.json");
+            std::os::unix::fs::symlink(&state_file, &sym_path).unwrap();
+            assert!(persist_worker_registration_state_atomic(&sym_path, &loaded).is_err());
+            assert!(load_worker_registration_state_nofollow(&sym_path).is_none());
+
+            srv.abort();
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

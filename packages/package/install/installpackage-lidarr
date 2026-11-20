@@ -56,8 +56,13 @@ esac
 
 report_progress 35 "Downloading Lidarr (${LIDARR_ARCH})..."
 LIDARR_VERSION="$(github_latest_tag "Lidarr/Lidarr" "2.8.2.4493")"
-TMP_TAR=$(mktemp /tmp/lidarr-XXXXXX.tar.gz)
-af_logged download_file "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" "$TMP_TAR"
+LIDARR_URL="https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}"
+if [[ -n "${LIDARR_VERSION:-}" ]]; then
+    LIDARR_URL="https://lidarr.servarr.com/v1/update/master/updatefile?version=${LIDARR_VERSION#v}&os=linux&runtime=netcore&arch=${LIDARR_ARCH}"
+fi
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/lidarr-XXXXXX.tar.gz")"
+af_logged download_file "$LIDARR_URL" "$TMP_TAR"
 
 report_progress 65 "Extracting Lidarr to /opt/Lidarr..."
 stage_app_archive "$TMP_TAR" "/opt/Lidarr" "Lidarr" "/var/lib/lidarr" "${PACKAGE_NAME}"
@@ -89,6 +94,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/lidarr.service
 
 
 af_logged systemctl daemon-reload

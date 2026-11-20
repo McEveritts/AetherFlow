@@ -595,85 +595,429 @@ fn query_app_update_target_version_from_sqlite(db_path: &Path, pkg_id: &str) -> 
     let conn =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
-    let sql = "SELECT COALESCE(latest_version, ''), COALESCE(installed_version, '') FROM app_updates WHERE LOWER(package_name) = LOWER(?1) LIMIT 1";
-    let (latest, installed) = conn
-        .query_row(sql, [pkg_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .ok()?;
-    for candidate in [latest, installed] {
-        let trimmed = candidate.trim();
-        if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
-            return Some(trimmed.to_string());
-        }
+    let with_err_sql = "SELECT COALESCE(latest_version, ''), COALESCE(last_error, '') FROM app_updates WHERE LOWER(package_name) = LOWER(?1) LIMIT 1";
+    let fallback_sql = "SELECT COALESCE(latest_version, ''), '' FROM app_updates WHERE LOWER(package_name) = LOWER(?1) LIMIT 1";
+    let (latest, last_error) = match conn.query_row(with_err_sql, [pkg_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    }) {
+        Ok(pair) => pair,
+        Err(err) if err.to_string().contains("no such column") => conn
+            .query_row(fallback_sql, [pkg_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .ok()?,
+        Err(_) => return None,
+    };
+    if !last_error.trim().is_empty() {
+        return None;
     }
-    None
+    normalize_discovered_target_version(&latest)
 }
 
-fn parse_version_from_lockfile_content(raw: &str) -> Option<String> {
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+fn normalize_discovered_target_version(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = if (trimmed.starts_with('v') || trimmed.starts_with('V'))
+        && trimmed[1..].starts_with(|c: char| c.is_ascii_digit())
+    {
+        &trimmed[1..]
+    } else {
+        trimmed
+    };
+    if af_release::lifecycle::validate_target_version(stripped) {
+        Some(stripped.to_string())
+    } else if af_release::lifecycle::validate_target_version(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn decode_chunked_http_body(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < raw.len() {
+        let Some(rel_end) = raw[idx..].windows(2).position(|w| w == b"\r\n") else {
+            break;
+        };
+        let line = String::from_utf8_lossy(&raw[idx..idx + rel_end]);
+        let size_hex = line.split(';').next().unwrap_or("").trim();
+        let Ok(chunk_len) = usize::from_str_radix(size_hex, 16) else {
+            break;
+        };
+        idx += rel_end + 2;
+        if chunk_len == 0 || idx + chunk_len > raw.len() {
+            break;
         }
-        if let Some((lhs, rhs)) = trimmed.split_once('=') {
-            let key = lhs.trim();
-            if matches!(
-                key,
-                "TARGET_VERSION" | "AF_TARGET_VERSION" | "VERSION" | "version"
-            ) {
-                let clean_rhs = rhs.trim().trim_matches('"').trim_matches('\'').trim();
-                if !clean_rhs.is_empty()
-                    && af_release::lifecycle::validate_target_version(clean_rhs)
-                {
-                    return Some(clean_rhs.to_string());
+        out.extend_from_slice(&raw[idx..idx + chunk_len]);
+        idx += chunk_len;
+        if raw[idx..].starts_with(b"\r\n") {
+            idx += 2;
+        }
+    }
+    out
+}
+
+fn http_get_text(url: &str) -> Result<String, String> {
+    if let Some(rest) = url.strip_prefix("http://") {
+        use std::io::{Read, Write};
+        use std::net::{TcpStream, ToSocketAddrs};
+        use std::time::Duration;
+
+        let (authority, path_part) = match rest.find('/') {
+            Some(pos) => (&rest[..pos], &rest[pos..]),
+            None => (rest, "/"),
+        };
+        let host_port = if authority.contains(':') {
+            authority.to_string()
+        } else {
+            format!("{authority}:80")
+        };
+        let addr = host_port
+            .to_socket_addrs()
+            .map_err(|e| format!("failed to resolve {host_port}: {e}"))?
+            .next()
+            .ok_or_else(|| format!("no socket address resolved for {host_port}"))?;
+        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+            .map_err(|e| format!("failed to connect to {host_port}: {e}"))?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let req = format!(
+            "GET {path_part} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: AetherFlow-CLI\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| format!("failed writing HTTP request to {host_port}: {e}"))?;
+        let mut buf = Vec::new();
+        stream
+            .take(2 * 1024 * 1024)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("failed reading HTTP response from {host_port}: {e}"))?;
+        let Some(hdr_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return Err(format!("malformed HTTP response from {host_port}"));
+        };
+        let headers = String::from_utf8_lossy(&buf[..hdr_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        let status_code = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+        if !(200..300).contains(&status_code) {
+            return Err(format!("upstream HTTP {status_code} from {url}"));
+        }
+        let body_bytes = &buf[hdr_end + 4..];
+        let decoded = if headers.lines().any(|l| {
+            l.to_ascii_lowercase()
+                .contains("transfer-encoding: chunked")
+        }) {
+            decode_chunked_http_body(body_bytes)
+        } else {
+            body_bytes.to_vec()
+        };
+        return String::from_utf8(decoded)
+            .map_err(|e| format!("non-UTF8 upstream response from {url}: {e}"));
+    }
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "--max-time",
+        "8",
+        "-H",
+        "Accept: application/json",
+        "-A",
+        "AetherFlow-CLI",
+    ]);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() && url.contains("github.com") {
+            cmd.arg("-H")
+                .arg(format!("Authorization: Bearer {trimmed}"));
+        }
+    }
+    let output = cmd
+        .arg(url)
+        .output()
+        .map_err(|e| format!("failed to execute curl for upstream discovery: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "upstream request to {url} failed ({})",
+            stderr.trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|e| format!("invalid UTF-8 from upstream {url}: {e}"))
+}
+
+fn load_package_automation_spec(
+    global: &GlobalOptions,
+    pkg_id: &str,
+) -> Result<serde_json::Value, String> {
+    let mut candidate_paths = Vec::new();
+    if let Some(ref root) = global.root {
+        candidate_paths.push(root.join("opt/AetherFlow/config/package_automation.json"));
+        candidate_paths.push(root.join("etc/aetherflow/package_automation.json"));
+        candidate_paths.push(root.join("config/package_automation.json"));
+    } else {
+        if let Ok(custom) = std::env::var("AETHERFLOW_PACKAGE_AUTOMATION_PATH") {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                candidate_paths.push(PathBuf::from(trimmed));
+            }
+        }
+        candidate_paths.push(PathBuf::from(
+            "/opt/AetherFlow/config/package_automation.json",
+        ));
+        candidate_paths.push(PathBuf::from("/etc/aetherflow/package_automation.json"));
+        candidate_paths.push(PathBuf::from("config/package_automation.json"));
+    }
+
+    let raw_catalog = candidate_paths
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .or_else(|| {
+            if global.root.is_none() {
+                Some(include_str!("../../../../config/package_automation.json").to_string())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "no package_automation.json catalog available".to_string())?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&raw_catalog)
+        .map_err(|e| format!("invalid package_automation.json: {e}"))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| "package_automation.json root must be an object".to_string())?;
+
+    let lock_name = resolve_package_lock_name(pkg_id);
+    for candidate_key in [pkg_id, lock_name] {
+        if let Some((_, v)) = obj
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(candidate_key))
+        {
+            return Ok(v.clone());
+        }
+    }
+    Err(format!(
+        "package '{}' has no upstream automation entry",
+        pkg_id
+    ))
+}
+
+fn discover_live_upstream_target_version(
+    global: &GlobalOptions,
+    pkg_id: &str,
+) -> Result<String, String> {
+    let spec = load_package_automation_spec(global, pkg_id)?;
+    let source = spec
+        .get("update_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let api_base = spec
+        .get("api_base_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("AETHERFLOW_GITHUB_API_BASE")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+
+    match source {
+        "retired" => Err(format!(
+            "package '{}' is retired upstream and has no active update feed",
+            pkg_id
+        )),
+        "github" | "github_release" => {
+            let repo = spec
+                .get("update_repo")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("missing update_repo for '{}'", pkg_id))?;
+            let release_url = format!("{api_base}/repos/{repo}/releases/latest");
+            if let Ok(body) = http_get_text(&release_url) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(tag) = val.get("tag_name").and_then(|v| v.as_str()) {
+                        if let Some(ver) = normalize_discovered_target_version(tag) {
+                            return Ok(ver);
+                        }
+                    }
                 }
             }
+            let tags_url = format!("{api_base}/repos/{repo}/tags?per_page=1");
+            let body = http_get_text(&tags_url)?;
+            let val: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("invalid JSON from {tags_url}: {e}"))?;
+            let tag = val
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|item| item.get("name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("no upstream release or tag found for {repo}"))?;
+            normalize_discovered_target_version(tag)
+                .ok_or_else(|| format!("invalid upstream tag {:?} for {repo}", tag))
         }
-    }
-    None
-}
-
-fn resolve_local_version_marker(global: &GlobalOptions, pkg_id: &str) -> Option<String> {
-    let lock_name = resolve_package_lock_name(pkg_id);
-    let install_dir = resolve_install_lock_dir(global);
-    let mut marker_files = vec![
-        install_dir.join(format!(".{}.version", lock_name)),
-        install_dir.join(format!(".{}.version", pkg_id)),
-    ];
-    let opt_dir = if let Some(ref r) = global.root {
-        r.join("opt")
-    } else {
-        PathBuf::from("/opt")
-    };
-    marker_files.push(opt_dir.join(lock_name).join(".af-version"));
-    marker_files.push(opt_dir.join(pkg_id).join(".af-version"));
-
-    for path in marker_files {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
-                return Some(trimmed.to_string());
+        "git_tags" => {
+            let repo = spec
+                .get("update_repo")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("missing update_repo for '{}'", pkg_id))?;
+            let tags_url = format!("{api_base}/repos/{repo}/tags?per_page=1");
+            let body = http_get_text(&tags_url)?;
+            let val: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("invalid JSON from {tags_url}: {e}"))?;
+            let tag = val
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|item| item.get("name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("no upstream git tags found for {repo}"))?;
+            normalize_discovered_target_version(tag)
+                .ok_or_else(|| format!("invalid upstream git tag {:?} for {repo}", tag))
+        }
+        "pypi" => {
+            let pypi_pkg = spec
+                .get("update_package")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(pkg_id);
+            let pypi_base = spec
+                .get("api_base_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    std::env::var("AETHERFLOW_PYPI_API_BASE")
+                        .ok()
+                        .map(|s| s.trim().trim_end_matches('/').to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_else(|| "https://pypi.org".to_string());
+            let url = format!("{pypi_base}/pypi/{pypi_pkg}/json");
+            let body = http_get_text(&url)?;
+            let val: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| format!("invalid PyPI JSON: {e}"))?;
+            let ver = val
+                .get("info")
+                .and_then(|i| i.get("version"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("missing info.version from PyPI for {pypi_pkg}"))?;
+            normalize_discovered_target_version(ver)
+                .ok_or_else(|| format!("invalid PyPI version {:?} for {pypi_pkg}", ver))
+        }
+        "git" => {
+            if let Some(repo) = spec
+                .get("update_repo")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let url = format!("{api_base}/repos/{repo}/commits/HEAD");
+                if let Ok(body) = http_get_text(&url) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(sha) = val.get("sha").and_then(|v| v.as_str()) {
+                            let short = if sha.len() > 12 { &sha[..12] } else { sha };
+                            if let Some(ver) = normalize_discovered_target_version(short) {
+                                return Ok(ver);
+                            }
+                        }
+                    }
+                }
+            }
+            let repo_url = spec
+                .get("update_repo_url")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("missing update_repo_url for '{}'", pkg_id))?;
+            let out = std::process::Command::new("git")
+                .args(["ls-remote", repo_url, "HEAD"])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .map_err(|e| format!("git ls-remote failed for {repo_url}: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("git ls-remote returned error for {repo_url}"));
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let sha = stdout
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| format!("empty git ls-remote output for {repo_url}"))?;
+            let short = if sha.len() > 12 { &sha[..12] } else { sha };
+            normalize_discovered_target_version(short)
+                .ok_or_else(|| format!("invalid git commit SHA {:?} for {repo_url}", sha))
+        }
+        "apt" => {
+            if global.root.is_some() {
+                return Err(format!(
+                    "live apt candidate discovery is disabled under isolated --root for '{}'",
+                    pkg_id
+                ));
+            }
+            let apt_pkg = spec
+                .get("update_package")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(pkg_id);
+            let out = std::process::Command::new("apt-cache")
+                .args(["policy", apt_pkg])
+                .output()
+                .map_err(|e| format!("apt-cache policy failed for {apt_pkg}: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("apt-cache policy returned non-zero for {apt_pkg}"));
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if let Some(cand) = line.trim().strip_prefix("Candidate:") {
+                    let cand = cand.trim();
+                    if !cand.is_empty() && cand != "(none)" {
+                        if let Some(ver) = normalize_discovered_target_version(cand) {
+                            return Ok(ver);
+                        }
+                    }
+                }
+            }
+            Err(format!("no apt candidate version available for {apt_pkg}"))
+        }
+        "pinned" => {
+            if let Some(pinned_ver) = spec
+                .get("update_package")
+                .and_then(|v| v.as_str())
+                .and_then(normalize_discovered_target_version)
+            {
+                Ok(pinned_ver)
+            } else {
+                Err(format!(
+                    "package '{}' uses a pinned upstream source with no dynamic target version",
+                    pkg_id
+                ))
             }
         }
+        other => Err(format!(
+            "unsupported upstream update_source {:?} for '{}'",
+            other, pkg_id
+        )),
     }
-
-    let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lock_name);
-    for lock_path in [install_lock, swizzin_lock] {
-        if let Ok(raw) = std::fs::read_to_string(&lock_path) {
-            if let Some(ver) = parse_version_from_lockfile_content(&raw) {
-                return Some(ver);
-            }
-        }
-    }
-    None
 }
 
 fn resolve_cli_package_target_version(
     global: &GlobalOptions,
     pkg_id: &str,
     explicit_target: Option<&str>,
-    transport: &dyn RunnerClientTransport,
+    _transport: &dyn RunnerClientTransport,
 ) -> CliResult<String> {
     if let Some(explicit) = explicit_target {
         let trimmed = explicit.trim();
@@ -688,7 +1032,13 @@ fn resolve_cli_package_target_version(
 
     if let Ok(env_target) = std::env::var("AF_TARGET_VERSION") {
         let trimmed = env_target.trim();
-        if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
+        if !trimmed.is_empty() {
+            if !af_release::lifecycle::validate_target_version(trimmed) {
+                return Err(CliError::Validation(format!(
+                    "invalid AF_TARGET_VERSION {:?} (must be a concrete version, commit SHA, or component manifest)",
+                    env_target
+                )));
+            }
             return Ok(trimmed.to_string());
         }
     }
@@ -702,24 +1052,12 @@ fn resolve_cli_package_target_version(
         }
     }
 
-    if let Some(ver) = resolve_local_version_marker(global, pkg_id) {
-        return Ok(ver);
-    }
-
-    if !global.dry_run {
-        if let Ok(Some(probed)) = transport.probe_package_version(pkg_id) {
-            let trimmed = probed.trim();
-            if !trimmed.is_empty() && af_release::lifecycle::validate_target_version(trimmed) {
-                return Ok(trimmed.to_string());
-            }
-        }
-    }
-
-    if pkg_id.eq_ignore_ascii_case("readarr") {
-        return Ok("0.4.18.2805".to_string());
-    }
-
-    Ok("0.0.0".to_string())
+    discover_live_upstream_target_version(global, pkg_id).map_err(|reason| {
+        CliError::PreflightOrIntegrity(format!(
+            "unable to resolve upstream target version for package '{}' ({}); run an update check first to populate app_updates.latest_version or pass '--target-version <version>' explicitly when offline",
+            pkg_id, reason
+        ))
+    })
 }
 
 fn resolve_cli_package_port(
@@ -1030,9 +1368,6 @@ fn execute_package_command(
             let mut entries = Vec::new();
             for &raw_id in KNOWN_CLI_PACKAGE_IDS {
                 let id = raw_id.trim();
-                if id == "autodl" {
-                    continue; // Avoid duplicate row with canonical `autodlirssi`
-                }
                 if let Some(def) = get_runner_package_definition(id) {
                     let lock_name = resolve_package_lock_name(id).to_string();
                     let (install_lock, swizzin_lock) =
@@ -2668,3 +3003,181 @@ fn execute_provision_command(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod p3_target_resolution_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn update_target_resolution_rejects_installed_and_marker_fallbacks_and_discovers_live_upstream()
+    {
+        let root = std::env::temp_dir().join(format!(
+            "af-cli-p3-target-res-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("var/lib/aetherflow")).unwrap();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::create_dir_all(root.join("opt/sonarr")).unwrap();
+
+        // Populate `.af-version` and lockfile VERSION markers — must NEVER be used as update targets!
+        std::fs::write(root.join("opt/sonarr/.af-version"), "4.0.1.999\n").unwrap();
+        std::fs::write(root.join("install/.sonarr.version"), "4.0.1.999\n").unwrap();
+        std::fs::write(root.join("install/.sonarr.lock"), "VERSION=4.0.1.999\n").unwrap();
+
+        // Populate `app_updates` with `installed_version` ONLY (`latest_version` empty) — must NEVER fall back to `installed_version`!
+        let db_path = root.join("var/lib/aetherflow/aetherflow.sqlite");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_updates (
+                package_name TEXT PRIMARY KEY,
+                installed_version TEXT DEFAULT '',
+                latest_version TEXT DEFAULT '',
+                last_error TEXT DEFAULT ''
+            );
+            INSERT INTO app_updates (package_name, installed_version, latest_version, last_error)
+            VALUES ('sonarr', '4.0.1.999', '', '');
+            INSERT INTO app_updates (package_name, installed_version, latest_version, last_error)
+            VALUES ('prowlarr', '1.20.0', '1.28.1.4900', '');
+            INSERT INTO app_updates (package_name, installed_version, latest_version, last_error)
+            VALUES ('radarr', '5.10.0', '5.12.0', 'HTTP 500 upstream failure');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let root_str = root.to_string_lossy().to_string();
+        let client = UnixSocketRunnerClient::new(Path::new("/nonexistent/af-runner.sock"));
+
+        // 1. Offline & empty `latest_version` fails fast with actionable message (never 4.0.1.999 or 0.0.0)
+        let inv_offline = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "update",
+            "sonarr",
+        ])
+        .unwrap();
+        let env_offline = execute_invocation(&inv_offline, &client);
+        assert_eq!(env_offline.status, "error");
+        assert!(
+            env_offline.message.contains("--target-version"),
+            "expected actionable --target-version guidance, got: {}",
+            env_offline.message
+        );
+
+        // 2. Readarr without `--target-version` also fails fast instead of returning hardcoded 0.4.18.2805
+        let inv_readarr = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "update",
+            "readarr",
+        ])
+        .unwrap();
+        let env_readarr = execute_invocation(&inv_readarr, &client);
+        assert_eq!(env_readarr.status, "error");
+
+        // 3. Valid `app_updates.latest_version` with empty `last_error` is used directly
+        let inv_prowlarr = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "update",
+            "prowlarr",
+        ])
+        .unwrap();
+        let env_prowlarr = execute_invocation(&inv_prowlarr, &client);
+        assert_eq!(env_prowlarr.status, "ok", "{}", env_prowlarr.message);
+        assert_eq!(
+            env_prowlarr.data.as_ref().unwrap()["request"]["expected_target_version"],
+            "1.28.1.4900"
+        );
+
+        // 4. Stale `latest_version` accompanied by non-empty `last_error` is rejected when offline
+        let inv_radarr = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "update",
+            "radarr",
+        ])
+        .unwrap();
+        let env_radarr = execute_invocation(&inv_radarr, &client);
+        assert_eq!(env_radarr.status, "error");
+
+        // 5. Explicit `--target-version` always succeeds when valid
+        let inv_explicit = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "update",
+            "sonarr",
+            "--target-version",
+            "4.0.11.2680",
+        ])
+        .unwrap();
+        let env_explicit = execute_invocation(&inv_explicit, &client);
+        assert_eq!(env_explicit.status, "ok", "{}", env_explicit.message);
+        assert_eq!(
+            env_explicit.data.as_ref().unwrap()["request"]["expected_target_version"],
+            "4.0.11.2680"
+        );
+
+        // 6. Live upstream discovery resolves latest tag when `latest_version` is absent
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut req_buf = [0u8; 1024];
+                let _ = stream.read(&mut req_buf);
+                let body = r#"{"tag_name":"v4.0.12.2800"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/package_automation.json"),
+            serde_json::to_string(&json!({
+                "sonarr": {
+                    "update_source": "github",
+                    "update_repo": "Sonarr/Sonarr",
+                    "api_base_url": format!("http://{}", addr)
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let inv_live = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "update",
+            "sonarr",
+        ])
+        .unwrap();
+        let env_live = execute_invocation(&inv_live, &client);
+        server_handle.join().unwrap();
+        assert_eq!(env_live.status, "ok", "{}", env_live.message);
+        assert_eq!(
+            env_live.data.as_ref().unwrap()["request"]["expected_target_version"],
+            "4.0.12.2800"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

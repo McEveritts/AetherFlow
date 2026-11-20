@@ -119,6 +119,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/rtorrent.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now rtorrent

@@ -2218,21 +2218,96 @@ fn get_upload_dir() -> PathBuf {
     )
 }
 
-fn fileshare_directory(root: &StdPath, raw_sub_path: &str) -> anyhow::Result<af_files::BrowserFs> {
+fn fileshare_directory(root: &StdPath, raw_sub_path: &str) -> std::io::Result<af_files::BrowserFs> {
+    let browser = af_files::BrowserFs::open(root)?;
+    let relative = raw_sub_path.trim().trim_start_matches('/');
+    if relative.is_empty() || relative == "." {
+        return Ok(browser);
+    }
+    browser.scoped(relative)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn fileshare_reads_do_not_create_upload_directories() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let root = env::temp_dir().join(format!("af-fileshare-read-{}", uuid::Uuid::new_v4()));
+    env::set_var("AETHERFLOW_UPLOAD_DIR", &root);
+    let query = || Query(HashMap::from([("path".into(), "missing/nested".into())]));
+    let listing = get_files_list(query()).await;
+    assert_eq!(listing.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(listing.into_body(), 4096)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"[]"
+    );
+    assert_eq!(
+        download_file(Path("missing.txt".into()), query())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(!root.exists());
+    fs::create_dir(&root).unwrap();
+    assert_eq!(get_files_list(query()).await.status(), StatusCode::OK);
+    assert!(!root.join("missing").exists());
+    fs::remove_dir(root).unwrap();
+}
+
+fn create_fileshare_directory(
+    root: &StdPath,
+    raw_sub_path: &str,
+) -> std::io::Result<af_files::BrowserFs> {
     fs::create_dir_all(root)?;
     let browser = af_files::BrowserFs::open(root)?;
     let relative = raw_sub_path.trim().trim_start_matches('/');
     if relative.is_empty() || relative == "." {
         return Ok(browser);
     }
-    // Resolve all user-selected components through the same no-follow directory
-    // capability as McBrowser, rather than validating a path and reopening it.
     browser.create_directory_all(relative)?;
-    Ok(browser.scoped(relative)?)
+    browser.scoped(relative)
 }
 
-fn resolve_upload_subdir(raw_sub_path: &str) -> anyhow::Result<af_files::BrowserFs> {
-    fileshare_directory(&get_upload_dir(), raw_sub_path)
+pub(crate) async fn lock_fileshare_mutations() -> tokio::sync::OwnedMutexGuard<()> {
+    accounting::MUTATIONS.clone().lock_owned().await
+}
+
+pub(crate) fn discard_fileshare_uploads(user_id: i64) {
+    if let Ok(mut sessions) = FILESHARE_UPLOADS.lock() {
+        sessions.retain(|(owner, _), _| *owner != user_id);
+    }
+}
+
+pub(crate) fn cleanup_fileshare_object(
+    root: &str,
+    directory: &str,
+    filename: &str,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let relative_root = root
+        .strip_prefix('/')
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid fileshare storage root"))?;
+    if filename.contains('/') || filename.is_empty() || filename == "." || filename == ".." {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Invalid fileshare object name",
+        ));
+    }
+    let browser = af_files::BrowserFs::open(StdPath::new("/"))?
+        .scoped(relative_root)?
+        .scoped(directory)?;
+    if browser.metadata(filename)?.kind != "file" {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Fileshare object is not a regular file",
+        ));
+    }
+    browser.remove(filename)
 }
 
 fn sanitize_filename(name: &str) -> anyhow::Result<String> {
@@ -2267,14 +2342,13 @@ fn is_blocked_executable_magic(bytes: &[u8]) -> Option<&'static str> {
 
 pub async fn get_files_list(Query(q): Query<HashMap<String, String>>) -> Response {
     let raw_path = q.get("path").cloned().unwrap_or_default();
-    let listing = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        resolve_upload_subdir(&raw_path)?
-            .list("")
-            .map_err(Into::into)
+    let listing = tokio::task::spawn_blocking(move || {
+        fileshare_directory(&get_upload_dir(), &raw_path).and_then(|browser| browser.list(""))
     })
     .await;
     let entries = match listing {
         Ok(Ok(entries)) => entries,
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         _ => {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -2375,7 +2449,7 @@ fn append_fileshare_chunk_with(
             "Upload session already exists"
         );
         anyhow::ensure!(sessions.len() < 64, "Too many pending uploads");
-        let browser = fileshare_directory(root, directory)?;
+        let browser = create_fileshare_directory(root, directory)?;
         let original = match browser.open_file(filename) {
             Ok(file) => Some(file),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -2596,6 +2670,8 @@ pub async fn upload_file(
             let _shared = shared;
             let root = get_upload_dir();
             let conn = af_db::get_conn()?;
+            crate::auth::load_active_human_subject(&conn, user.user_id)
+                .map_err(|_| anyhow::anyhow!("Fileshare account is no longer active"))?;
             if chunked {
                 let mut sessions = FILESHARE_UPLOADS
                     .lock()
@@ -2613,7 +2689,7 @@ pub async fn upload_file(
                     |session| accounting::publish(&conn, &root, user.user_id, session),
                 )
             } else {
-                let browser = resolve_upload_subdir(&directory)?;
+                let browser = create_fileshare_directory(&root, &directory)?;
                 let original = match browser.open_file(&filename) {
                     Ok(file) => Some(file),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -2670,7 +2746,7 @@ pub async fn download_file(
     let name = filename.clone();
     let directory = q.get("path").cloned().unwrap_or_default();
     let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let file = resolve_upload_subdir(&directory)?.open_file(&name)?;
+        let file = fileshare_directory(&get_upload_dir(), &directory)?.open_file(&name)?;
         let size = file.metadata()?.len();
         Ok((file, size))
     })

@@ -21,8 +21,9 @@ const ARCHIVE_FORMAT: &str = "aetherflow.streaming-history";
 const ARCHIVE_FORMAT_VERSION: u16 = 1;
 const DATABASE_SCHEMA_VERSION: u16 = 20;
 const PROVENANCE_VERSION: u16 = 1;
-const MAX_ARCHIVE_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_ARCHIVE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PORTABILITY_BODY_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_REQUEST_BODY_BYTES: usize = MAX_PORTABILITY_BODY_BYTES;
 const MAX_BODY_BYTES: usize = MAX_ARCHIVE_BYTES;
 const MAX_PORTABLE_ROWS: usize = 100_000;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -1823,13 +1824,21 @@ fn restore_connection(
 }
 
 async fn read_request_body(request: Request<Body>) -> PortabilityResult<Vec<u8>> {
-    let bytes = to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
+    let bytes = to_bytes(request.into_body(), MAX_PORTABILITY_BODY_BYTES)
         .await
         .map_err(|_| PortabilityError::too_large())?;
-    if bytes.len() > MAX_REQUEST_BODY_BYTES {
+    if bytes.len() > MAX_PORTABILITY_BODY_BYTES {
         return Err(PortabilityError::too_large());
     }
     Ok(bytes.to_vec())
+}
+
+fn ensure_archive_within_byte_limit(archive: &StreamingArchive) -> PortabilityResult<()> {
+    let encoded = serde_json::to_vec(archive).map_err(|_| PortabilityError::invalid())?;
+    if encoded.len() > MAX_ARCHIVE_BYTES {
+        return Err(PortabilityError::too_large());
+    }
+    Ok(())
 }
 
 pub async fn export_handler(Extension(user): Extension<AuthUser>) -> Response {
@@ -1880,6 +1889,9 @@ pub async fn preview_handler(
         Ok(request) => request,
         Err(_) => return PortabilityError::invalid().into_response(),
     };
+    if let Err(error) = ensure_archive_within_byte_limit(&request.archive) {
+        return error.into_response();
+    }
     if let Err(error) = request.archive.validate() {
         return error.into_response();
     }
@@ -1944,6 +1956,9 @@ pub async fn restore_handler(
         Ok(request) => request,
         Err(_) => return PortabilityError::invalid().into_response(),
     };
+    if let Err(error) = ensure_archive_within_byte_limit(&request.archive) {
+        return error.into_response();
+    }
     if let Err(error) = request.archive.validate() {
         return error.into_response();
     }
@@ -2599,5 +2614,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.resulting_counts.bandwidth_samples, 1);
+    }
+
+    #[tokio::test]
+    async fn archive_boundary_near_seven_point_five_mib_succeeds_and_above_eight_mib_is_rejected() {
+        assert_eq!(MAX_ARCHIVE_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_PORTABILITY_BODY_BYTES, 10 * 1024 * 1024);
+        assert_eq!(MAX_REQUEST_BODY_BYTES, MAX_PORTABILITY_BODY_BYTES);
+
+        let source = disposable_db();
+        seed_sensitive_data(&source.connection);
+        let base_archive = export_archive(&source.connection);
+        let template_row = base_archive.data.history[0].clone();
+
+        // Build a valid ~7.5 MiB archive (~7,864,320 bytes)
+        let mut near_limit = base_archive.clone();
+        near_limit.data.history.clear();
+        near_limit.data.labels.clear();
+        near_limit.data.session_samples.clear();
+        let pad = "x".repeat(15_200);
+        for idx in 1..=500_i64 {
+            let mut row = template_row.clone();
+            row.id = idx;
+            row.session_key = format!("plex:srv-1:sess-{idx}");
+            row.provider = "plex".to_string();
+            row.source_event_id = Some(format!("plex-evt-{idx}"));
+            row.item_name = pad.clone();
+            near_limit.data.history.push(row);
+        }
+        near_limit.manifest.record_counts = near_limit.data.counts();
+        near_limit.manifest.sha256 = near_limit.digest().unwrap();
+
+        let near_bytes = serde_json::to_vec(&near_limit).unwrap();
+        assert!(
+            near_bytes.len() >= 7 * 1024 * 1024 && near_bytes.len() <= MAX_ARCHIVE_BYTES,
+            "expected ~7.5 MiB archive, got {} bytes",
+            near_bytes.len()
+        );
+        ensure_archive_within_byte_limit(&near_limit).unwrap();
+        validate_archive_bytes(&near_bytes).unwrap();
+
+        // Request wrapper (`{"mode":"merge","archive":...}`) fits well within 10 MiB body limit
+        let envelope = serde_json::json!({
+            "mode": "merge",
+            "archive": near_limit,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+        assert!(envelope_bytes.len() <= MAX_PORTABILITY_BODY_BYTES);
+        let req = Request::builder()
+            .method("POST")
+            .uri(PREVIEW_ROUTE)
+            .body(Body::from(envelope_bytes))
+            .unwrap();
+        let read_back = read_request_body(req).await.unwrap();
+        let parsed_req: PreviewRequest = serde_json::from_slice(&read_back).unwrap();
+        ensure_archive_within_byte_limit(&parsed_req.archive).unwrap();
+
+        // Exceeding 8 MiB archive limit (~8.3 MiB) is rejected even though < 10 MiB body limit
+        let mut over_archive = parsed_req.archive;
+        for idx in 501..=555_i64 {
+            let mut row = template_row.clone();
+            row.id = idx;
+            row.session_key = format!("plex:srv-1:sess-{idx}");
+            row.provider = "plex".to_string();
+            row.source_event_id = Some(format!("plex-evt-{idx}"));
+            row.item_name = pad.clone();
+            over_archive.data.history.push(row);
+        }
+        over_archive.manifest.record_counts = over_archive.data.counts();
+        over_archive.manifest.sha256 = over_archive.digest().unwrap();
+        assert!(ensure_archive_within_byte_limit(&over_archive).is_err());
+
+        // Exceeding 10 MiB body limit is rejected by `read_request_body`
+        let over_body_req = Request::builder()
+            .method("POST")
+            .uri(PREVIEW_ROUTE)
+            .body(Body::from(vec![b' '; MAX_PORTABILITY_BODY_BYTES + 1]))
+            .unwrap();
+        assert!(read_request_body(over_body_req).await.is_err());
     }
 }

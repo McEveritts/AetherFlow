@@ -1882,18 +1882,6 @@ fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
     }
 }
 
-fn is_private_or_link_local(ip: &std::net::IpAddr) -> bool {
-    match ip.to_canonical() {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
-        }
-        std::net::IpAddr::V6(v6) => {
-            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
-
 pub fn is_trusted_proxy_peer(ip: std::net::IpAddr) -> bool {
     let ip = ip.to_canonical();
     if let Ok(raw) = std::env::var("TRUSTED_PROXIES") {
@@ -1909,9 +1897,6 @@ pub fn is_trusted_proxy_peer(ip: std::net::IpAddr) -> bool {
         if f.eq_ignore_ascii_case("false") || f == "0" {
             return false;
         }
-        if f.eq_ignore_ascii_case("true") || f == "1" {
-            return ip.is_loopback() || is_private_or_link_local(&ip);
-        }
     }
     ip.is_loopback()
 }
@@ -1926,16 +1911,7 @@ fn is_trusted_proxy_hop(ip: &std::net::IpAddr) -> bool {
                 .any(|entry| ip_matches_cidr_or_host(ip, entry));
         }
     }
-    if ip.is_loopback() || ip.is_unspecified() {
-        return true;
-    }
-    let trust_private = std::env::var("TRUST_PROXY_HEADERS")
-        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
-        .unwrap_or(false);
-    if !trust_private {
-        return false;
-    }
-    is_private_or_link_local(&ip)
+    ip.is_loopback()
 }
 
 fn extract_forwarded_ip_from_trusted_headers(headers: &HeaderMap) -> Option<std::net::IpAddr> {

@@ -155,7 +155,11 @@ trap 'exit 143' TERM
 report_progress 50 "Downloading and extracting latest Nextcloud Server..."
 BUILD_DIR="$(mktemp -d /var/www/.nextcloud-build.XXXXXX)"
 TMP_ZIP="$BUILD_DIR/nextcloud.zip"
-af_logged download_file "https://download.nextcloud.com/server/releases/latest.zip" "$TMP_ZIP"
+NEXTCLOUD_URL="https://download.nextcloud.com/server/releases/latest.zip"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    NEXTCLOUD_URL="https://download.nextcloud.com/server/releases/nextcloud-${AF_TARGET_VERSION#v}.zip"
+fi
+af_logged download_file "$NEXTCLOUD_URL" "$TMP_ZIP"
 mkdir -p /var/www
 af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
 stop_systemd_unit apache2
@@ -255,17 +259,6 @@ fi
 NC_VER="$(grep -oE "OC_VersionString = '[^']+'" /var/www/nextcloud/version.php 2>/dev/null | cut -d"'" -f2 || true)"
 if [[ -n "$NC_VER" ]]; then
     queue_app_version /var/www/nextcloud/.af-version "$NC_VER"
-fi
-
-if [[ "$EXISTING_INSTALL" == 0 ]]; then
-(umask 077; install -d -m 0700 /opt/AetherFlow/logs && chmod 0700 /opt/AetherFlow/logs && write_config_file /opt/AetherFlow/logs/nextcloud_credentials.txt 0600 <<EOF
-Nextcloud Admin User: ${ADMIN_USER}
-Nextcloud Admin Pass: ${ADMIN_PASS}
-Database Name: nextcloud
-Database User: nextclouduser
-Database Pass: ${DB_PASS}
-EOF
-)
 fi
 
 report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."

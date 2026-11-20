@@ -15,6 +15,11 @@ const ACCOUNT_TABLES: &[(&str, &str)] = &[
     ("oidc_consents", "user_id"),
     ("recovery_codes", "user_id"),
     ("fileshare_objects", "user_id"),
+    ("log_bookmarks", "user_id"),
+    ("notification_reads", "user_id"),
+    ("notifications", "user_id"),
+    ("login_history", "user_id"),
+    ("mcbrowser_audit_events", "user_id"),
     ("user_quotas", "user_id"),
 ];
 
@@ -103,11 +108,17 @@ fn require_other_usable_admin(
     Ok(())
 }
 
+#[derive(Debug)]
+struct AccountDeletion {
+    revoked_jtis: Vec<String>,
+    fileshare_objects: Vec<(String, String, String)>,
+}
+
 fn delete_account_with_conn(
     connection: &mut Connection,
     caller: &AuthUser,
     target_user_id: i64,
-) -> Result<(), McBrowserError> {
+) -> Result<AccountDeletion, McBrowserError> {
     let transaction = account_mutation_transaction(connection, caller, target_user_id)?;
     let target_role: Option<String> = transaction
         .query_row(
@@ -163,6 +174,7 @@ fn delete_account_with_conn(
             }
         }
     }
+    let mut fileshare_objects = Vec::new();
     for (table, owner_column) in ACCOUNT_TABLES {
         let exists: bool = transaction
             .query_row(
@@ -172,6 +184,22 @@ fn delete_account_with_conn(
             )
             .map_err(database_error)?;
         if exists {
+            if *table == "fileshare_objects" {
+                let mut statement = transaction.prepare(
+                    "SELECT storage_root, directory, filename FROM fileshare_objects WHERE user_id = ?1"
+                ).map_err(database_error)?;
+                fileshare_objects = statement
+                    .query_map([target_user_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(database_error)?
+                    .collect::<Result<_, _>>()
+                    .map_err(database_error)?;
+            }
             transaction
                 .execute(
                     &format!("DELETE FROM {table} WHERE {owner_column} = ?1"),
@@ -204,9 +232,86 @@ fn delete_account_with_conn(
     transaction
         .execute("DELETE FROM users WHERE id = ?1", [target_user_id])
         .map_err(database_error)?;
+    let mut unreferenced = Vec::with_capacity(fileshare_objects.len());
+    for (root, directory, filename) in fileshare_objects {
+        let referenced: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fileshare_objects WHERE storage_root = ?1 AND directory = ?2 AND filename = ?3)",
+            rusqlite::params![root, directory, filename], |row| row.get(0),
+        ).map_err(database_error)?;
+        if !referenced {
+            unreferenced.push((root, directory, filename));
+        }
+    }
     transaction.commit().map_err(database_error)?;
+    Ok(AccountDeletion {
+        revoked_jtis,
+        fileshare_objects: unreferenced,
+    })
+}
+
+fn finish_account_deletion(target_user_id: i64, deleted: AccountDeletion) {
+    crate::auth::finalize_user_credential_revocation(target_user_id, &deleted.revoked_jtis);
     super::media::invalidate_thumbnail_cache(target_user_id, "");
-    crate::auth::finalize_user_credential_revocation(target_user_id, &revoked_jtis);
+    crate::storage::discard_fileshare_uploads(target_user_id);
+    if let Err(error) = cleanup_mcbrowser_root(target_user_id) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(user_id = target_user_id, %error, "Could not remove McBrowser account storage");
+        }
+    }
+    for (root, directory, filename) in deleted.fileshare_objects {
+        if let Err(error) = crate::storage::cleanup_fileshare_object(&root, &directory, &filename) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(user_id = target_user_id, %error, "Could not remove unreferenced FileShare object");
+            }
+        }
+    }
+}
+
+fn cleanup_mcbrowser_root(user_id: i64) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    let configured = std::env::var("AF_MCBROWSER_ROOT").ok();
+    let base = super::resolve_configured_base_root(configured.as_deref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid McBrowser storage root"))?;
+    let relative = base
+        .strip_prefix("/")
+        .ok()
+        .and_then(Path::to_str)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid McBrowser storage path"))?;
+    let browser = af_files::BrowserFs::open(Path::new("/"))?.scoped(relative)?;
+    let metadata = browser.directory_metadata()?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "Unsafe McBrowser storage root",
+        ));
+    }
+    let child = format!("user-{user_id}");
+    let staging_child = format!(".af-upload-staging/user-{user_id}");
+    for rel in [child.as_str(), staging_child.as_str()] {
+        let scoped = match browser.scoped(rel) {
+            Ok(s) => s,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        let metadata = match scoped.directory_metadata() {
+            Ok(m) => m,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "Unsafe McBrowser user directory",
+            ));
+        }
+        browser
+            .remove_tree_with_size_allowing_symlinks(rel)
+            .map_err(|error| error.error)?;
+    }
     Ok(())
 }
 
@@ -285,13 +390,18 @@ pub(crate) async fn delete_account(
     caller: AuthUser,
     target_user_id: i64,
 ) -> Result<(), McBrowserError> {
+    let shared_guard = crate::storage::lock_fileshare_mutations().await;
     let mutation_guard = user_mutation_stripe(target_user_id).lock_owned().await;
     tokio::task::spawn_blocking(move || {
+        let _shared_guard = shared_guard;
         let _mutation_guard = mutation_guard;
         let mut connection = af_db::get_conn().map_err(|_| {
             McBrowserError::Internal("Account deletion database unavailable".to_owned())
         })?;
-        delete_account_with_conn(&mut connection, &caller, target_user_id)
+        let deleted = delete_account_with_conn(&mut connection, &caller, target_user_id)?;
+        drop(connection);
+        finish_account_deletion(target_user_id, deleted);
+        Ok(())
     })
     .await
     .map_err(|_| McBrowserError::Internal("Account deletion worker failed".to_owned()))?
@@ -446,6 +556,59 @@ mod tests {
     }
 
     #[test]
+    fn deletion_cleans_unreferenced_files_and_private_root() {
+        use std::fs;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join(format!("account-delete-{}", uuid::Uuid::new_v4()));
+        let browser_root = tmp.join("mcbrowser");
+        let alice = browser_root.join("user-2");
+        let bob = browser_root.join("user-3");
+        let shared = tmp.join("fileshare");
+        for dir in [&alice, &bob, &shared] {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::set_permissions(&browser_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(alice.join("private"), "delete").unwrap();
+        fs::write(bob.join("private"), "keep").unwrap();
+        symlink(&bob, alice.join("linked-user")).unwrap();
+        for file in ["alice.txt", "bob.txt", "joint.txt"] {
+            fs::write(shared.join(file), "file").unwrap();
+        }
+        std::env::set_var("AF_MCBROWSER_ROOT", &browser_root);
+
+        let mut connection = database();
+        connection.execute_batch(
+            "CREATE TABLE fileshare_objects (user_id INTEGER, storage_root TEXT, directory TEXT, filename TEXT);"
+        ).unwrap();
+        for (owner, name) in [
+            (2, "alice.txt"),
+            (2, "joint.txt"),
+            (3, "joint.txt"),
+            (3, "bob.txt"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO fileshare_objects VALUES (?1, ?2, '', ?3)",
+                    rusqlite::params![owner, shared.to_str().unwrap(), name],
+                )
+                .unwrap();
+        }
+        let deleted = delete_account_with_conn(&mut connection, &caller(), 2).unwrap();
+        finish_account_deletion(2, deleted);
+        assert!(!alice.exists());
+        assert!(bob.join("private").exists());
+        assert!(!shared.join("alice.txt").exists());
+        assert!(shared.join("bob.txt").exists());
+        assert!(shared.join("joint.txt").exists());
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
     fn deletion_cleans_only_target_metadata_and_never_reuses_identity() {
         let mut connection = database();
         for (table, column) in ACCOUNT_TABLES {
@@ -456,6 +619,11 @@ mod tests {
                         [],
                     )
                     .unwrap();
+            } else if *table == "fileshare_objects" {
+                connection.execute_batch(
+                    "CREATE TABLE fileshare_objects (user_id INTEGER, storage_root TEXT, directory TEXT, filename TEXT);
+                     INSERT INTO fileshare_objects VALUES (2, '/nonexistent-fixture', '', 'alice.txt'), (3, '/nonexistent-fixture', '', 'bob.txt');"
+                ).unwrap();
             } else {
                 connection
                     .execute_batch(&format!(

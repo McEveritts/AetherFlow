@@ -93,7 +93,8 @@ report_progress 30 "Downloading latest Prometheus (${PROM_ARCH})..."
 PROM_VERSION="$(github_latest_tag "prometheus/prometheus" "2.53.1")"
 PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz"
 
-TMP_DIR="$(mktemp -d /tmp/prometheus-extract-XXXXXX)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/prometheus-extract-XXXXXX")"
 TMP_TAR="$TMP_DIR/prometheus.tar.gz"
 af_logged download_file "$PROM_URL" "$TMP_TAR"
 af_logged tar -xzf "$TMP_TAR" -C "$TMP_DIR"
@@ -136,7 +137,7 @@ if [[ -d "${PROM_EXTRACTED}/console_libraries" ]]; then
     cp -r "${PROM_EXTRACTED}/console_libraries" /etc/prometheus/
 fi
 rm -rf "$PROM_EXTRACTED"
-chmod +x /usr/local/bin/prometheus /usr/local/bin/promtool
+chmod 0755 /usr/local/bin/prometheus /usr/local/bin/promtool
 
 report_progress 60 "Installing Node Exporter..."
 install_binary_atomic "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}/node_exporter" /usr/local/bin/node_exporter
@@ -144,7 +145,7 @@ if [[ ! -e /usr/bin/prometheus-node-exporter && ! -L /usr/bin/prometheus-node-ex
     ln -s /usr/local/bin/node_exporter /usr/bin/prometheus-node-exporter
 fi
 rm -rf "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}"
-chmod +x /usr/local/bin/node_exporter
+chmod 0755 /usr/local/bin/node_exporter
 
 if [[ ! -f /etc/prometheus/prometheus.yml ]]; then
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/prometheus/prometheus.yml
@@ -188,6 +189,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/prometheus.service
 
 cat <<'EOF' > /etc/systemd/system/node_exporter.service
 [Unit]
@@ -206,6 +208,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/node_exporter.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now node_exporter

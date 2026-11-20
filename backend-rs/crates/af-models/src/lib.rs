@@ -273,6 +273,21 @@ pub struct PackageAutomation {
     pub sandbox_service_ids: Vec<String>,
 }
 
+/// Applies the automation policy for a catalog entry, if one is defined.
+pub fn merge_package_automation(package: &mut Package, automation: &PackageAutomation) {
+    package.update_source = automation.update_source.clone();
+    package.require_download_sha256 = automation.require_download_sha256;
+    package.update_repo = automation.update_repo.clone();
+    package.update_repo_url = automation.update_repo_url.clone();
+    package.update_package = automation.update_package.clone();
+    package.update_channel = automation.update_channel.clone();
+    package.version_command = automation.version_command.clone();
+    package.version_regex = automation.version_regex.clone();
+    package.sandbox_profile = automation.sandbox_profile.clone();
+    package.sandbox_read_write = automation.sandbox_read_write.clone();
+    package.sandbox_service_ids = automation.sandbox_service_ids.clone();
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MarketplaceApp {
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -650,6 +665,22 @@ pub struct QuotaRunnerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppMetaRunnerRequest {
     pub app_name: String,
+}
+
+/// Applies server-defined native app configuration through the privileged runner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerBlueprintApplyRequest {
+    pub app_name: String,
+    pub listen_port: i32,
+    #[serde(default)]
+    pub lifecycle_job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerBlueprintApplyResponse {
+    pub mutated_files: Vec<String>,
+    pub sqlite_routes_injected: usize,
 }
 
 /// Validates the ASCII RFC 1123 labels used in ingress hostnames.
@@ -1740,6 +1771,32 @@ fn is_false(val: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_automation_merge_preserves_all_policy_fields() {
+        let automation = PackageAutomation {
+            update_source: "apt".into(),
+            require_download_sha256: true,
+            update_repo: "owner/repo".into(),
+            update_repo_url: "https://example.test".into(),
+            update_package: "package".into(),
+            update_channel: "nightly".into(),
+            version_command: vec!["probe".into()],
+            version_regex: "pattern".into(),
+            sandbox_profile: "strict".into(),
+            sandbox_read_write: vec!["/var/lib/pkg".into()],
+            sandbox_service_ids: vec!["pkg.service".into()],
+        };
+        let mut package = Package {
+            name: "pkg".into(),
+            ..Default::default()
+        };
+        merge_package_automation(&mut package, &automation);
+        let merged: PackageAutomation =
+            serde_json::from_value(serde_json::to_value(&package).unwrap()).unwrap();
+        assert_eq!(merged, automation);
+        assert_eq!(package.name, "pkg");
+    }
 
     #[test]
     fn test_system_metrics_wire_format() {

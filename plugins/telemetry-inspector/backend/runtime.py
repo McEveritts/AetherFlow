@@ -16,7 +16,15 @@ def read_env_config():
         os.environ.get("AETHERFLOW_API_BASE_URL", "http://127.0.0.1:8080").strip().rstrip("/")
         or "http://127.0.0.1:8080"
     )
-    plugin_token = os.environ.get("AETHERFLOW_PLUGIN_TOKEN", "").strip()
+    token_file = os.environ.get("AETHERFLOW_PLUGIN_TOKEN_FILE")
+    if token_file:
+        try:
+            with open(token_file, encoding="utf-8") as token_source:
+                plugin_token = token_source.read().strip()
+        except (OSError, UnicodeError):
+            plugin_token = ""
+    else:
+        plugin_token = os.environ.get("AETHERFLOW_PLUGIN_TOKEN", "").strip()
     return {
         "bind_addr": bind_addr,
         "port": port,

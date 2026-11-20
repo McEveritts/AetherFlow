@@ -3,7 +3,7 @@
 
 
 # Strict firewall enforcement during bootstrap.
-# Allows ONLY: SSH (22), HTTP (80), HTTPS (443), FTP passive (10090:10100), and optionally direct API (8080).
+# Allows ONLY: SSH (22), HTTP (80), HTTPS (443), optional FTP (21 + passive 10090:10100 when AETHERFLOW_ENABLE_FTPD=yes), and optionally direct API (8080).
 # Uses UFW as preferred firewall, with iptables fallback.
 #
 # This replaces the old _ssdpblock() which only blocked port 1900.
@@ -15,7 +15,12 @@ function _ssdpblock() {
 }
 
 _fw_allowed_ports() {
-	local ports="22/tcp 80/tcp 443/tcp 10090:10100/tcp"
+	local ports="22/tcp 80/tcp 443/tcp"
+	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
+		1|true|TRUE|yes|YES|y|Y|on|ON)
+			ports="${ports} 21/tcp 10090:10100/tcp"
+			;;
+	esac
 	if [[ "${AF_ALLOW_DIRECT_8080:-0}" == "1" || "${AF_ALLOW_DIRECT_8080:-false}" == "true" ]]; then
 		ports="${ports} 8080/tcp"
 	fi
@@ -156,11 +161,7 @@ function _lshell() {
 			return 1
 		fi
 	fi
-	if [[ "${CODENAME}" == "focal" || "${CODENAME}" == "bionic" ]]; then
-		\cp -f ${local_setup}templates/lshell.conf-focal.template /etc/lshell.conf
-	else
-		\cp -f ${local_setup}templates/lshell.conf.template /etc/lshell.conf
-	fi
+	\cp -f "${local_setup}templates/lshell.conf.template" /etc/lshell.conf
 	grep -qxF "/usr/bin/lshell" /etc/shells 2>/dev/null || echo "/usr/bin/lshell" >>/etc/shells
 	groupadd -f lshell
 	mkdir -p /var/log/lshell
@@ -208,7 +209,7 @@ function _apacheconf() {
 	fi
 	sed -i "s/ServerTokens OS/ServerTokens Prod/g" /etc/apache2/conf-enabled/security.conf
 	sed -i "s/ServerSignature On/ServerSignature Off/g" /etc/apache2/conf-enabled/security.conf
-	\cp -f ${local_setup}templates/fileshare.conf.template /etc/apache2/sites-enabled/fileshare.conf
+	rm -f /etc/apache2/sites-enabled/fileshare.conf 2>/dev/null || true
 
 	# ── PHP ini hardening ─────────────────────────────────────────────────
 	# Dynamically detect PHP version if the codename-mapped version is missing

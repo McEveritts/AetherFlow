@@ -48,10 +48,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node with pinned older version for installer npm regression testing (distinct from frontend engine >=22.19)
+      # Minimum supported Node.js LTS floor matching root package.json engines (>=22.19.0 vs .nvmrc 24.22.2).
+      - name: Setup Node at minimum supported engine floor (22.19.0)
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 22.12.0
+          node-version: 22.19.0
 
       - name: Install Python & Shell Test Dependencies
         run: |
@@ -119,6 +120,30 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_release_manager.py' -v
           python3 -m unittest discover -s tests -p 'test_v4_release_bootstrap_ci.py' -v
           python3 tests/check_shell_hygiene.py
+
+  website:
+    name: Website Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Monorepo Dependencies
+        run: npm ci
+
+      - name: Lint and Build Marketing Website
+        run: |
+          npm --prefix apps/website run lint
+          npm --prefix apps/website run build
 
   frontend-rs:
     name: Frontend (Rust WASM & Tests)

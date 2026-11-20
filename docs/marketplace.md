@@ -18,7 +18,7 @@ AetherFlow manages 77 native services across multiple infrastructure domains.
 ### Media & Downloaders
 - **Video & IPTV**: Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Tautulli, Overseerr, Jellyseerr, Maintainerr, Requestrr, FileBot, Unmanic.
 - **Experimental YouTube Frontends**: Piped and Invidious. See [native installation requirements and limitations](experimental-youtube.md).
-- **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Readarr, Listenarr, Bazarr, Prowlarr, Notifiarr.
+- **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Readarr *(retired upstream)*, Listenarr, Bazarr, Prowlarr, Notifiarr.
 - **Downloaders**: qBittorrent, Qui, Autobrr, Flood, SeedCross, pyLoad, Deluge, Transmission, Sabnzbd, NZBGet, rTorrent, ruTorrent.
 
 ### System & Utilities

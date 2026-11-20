@@ -107,6 +107,7 @@ TimeoutStopSec=300
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/deluged.service
 
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/deluge-web.service
 [Unit]
@@ -125,6 +126,7 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/deluge-web.service
 
 report_progress 85 "Starting deluged and deluge-web services..."
 af_logged systemctl daemon-reload

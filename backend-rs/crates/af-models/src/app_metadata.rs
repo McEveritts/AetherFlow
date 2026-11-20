@@ -109,6 +109,53 @@ fn ini_value(content: &str, keys: &[&str]) -> String {
     String::new()
 }
 
+/// Reads only the Pi-hole v6 webserver table, with a Pi-hole v5 lighttpd fallback.
+pub fn pihole_web_port(mut read: impl FnMut(&str) -> Option<String>) -> i32 {
+    if let Some(content) = read("/etc/pihole/pihole.toml") {
+        let mut webserver = false;
+        for line in content.lines() {
+            let line = line.split('#').next().unwrap_or_default().trim();
+            if line.starts_with('[') {
+                webserver = line
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .is_some_and(|section| section.trim() == "webserver");
+                continue;
+            }
+            if let Some(("port", value)) = line.split_once('=').map(|(key, val)| (key.trim(), val))
+            {
+                if webserver {
+                    let port = pihole_listener_port(value);
+                    if port > 0 {
+                        return port;
+                    }
+                }
+            }
+        }
+    }
+    read("/etc/lighttpd/lighttpd.conf")
+        .map(|content| valid_port(&ini_value(&content, &["server.port"])))
+        .unwrap_or(0)
+}
+
+fn pihole_listener_port(value: &str) -> i32 {
+    let mut first = 0;
+    for listener in value.trim().trim_matches(['"', '\'']).split(',') {
+        let listener = listener.trim().rsplit(':').next().unwrap_or_default();
+        let number = listener.trim_end_matches(['o', 'O', 's', 'S', 'r', 'R']);
+        let port = valid_port(number);
+        if port > 0 {
+            if !listener[number.len()..].contains(['s', 'S']) {
+                return port;
+            }
+            if first == 0 {
+                first = port;
+            }
+        }
+    }
+    first
+}
+
 pub fn uptime_kuma_port(mut read: impl FnMut(&str) -> Option<String>) -> i32 {
     let keys = ["UPTIME_KUMA_PORT", "PORT"];
     for path in UPTIME_KUMA_UNITS {
@@ -177,4 +224,30 @@ pub fn whisparr_meta(mut read: impl FnMut(&str) -> Option<String>) -> AppRuntime
         }
     }
     meta
+}
+
+#[cfg(test)]
+mod pihole_tests {
+    use super::*;
+
+    #[test]
+    fn selects_http_listener_in_webserver_section() {
+        let config = "[dns]\nport = 53\n[webserver] # v6\nport = \"8089o,8443os\"\n";
+        assert_eq!(pihole_web_port(|_| Some(config.into())), 8089);
+        assert_eq!(pihole_listener_port("\"443os,[::]:8080o\""), 8080);
+        assert_eq!(pihole_listener_port("443os,8443s"), 443);
+    }
+
+    #[test]
+    fn ignores_other_tables_and_falls_back_to_lighttpd() {
+        assert_eq!(
+            pihole_web_port(|path| match path {
+                "/etc/pihole/pihole.toml" =>
+                    Some("[dns]\nport = 53\n[webserver.api]\nport = 99".into()),
+                "/etc/lighttpd/lighttpd.conf" => Some("server.port = 8082".into()),
+                _ => None,
+            }),
+            8082
+        );
+    }
 }

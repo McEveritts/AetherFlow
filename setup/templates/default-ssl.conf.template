@@ -3,6 +3,12 @@
         ProxyRequests Off
         ProxyPreserveHost On
         ProxyTimeout 3600
+        RequestHeader unset X-Real-IP
+        RequestHeader unset X-Forwarded-Host
+        RequestHeader unset X-Aetherflow-User
+        RequestHeader unset Remote-User
+        RequestHeader unset X-Forwarded-User
+        RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
         RewriteEngine On
         RewriteCond %{HTTP_HOST} \.aether\.local(:[0-9]+)?$ [NC]
         RewriteCond %{HTTP:Upgrade} websocket [NC]
@@ -44,10 +50,7 @@
         <Directory "/var/www/aetherflow-default/">
                 Options -Indexes -Includes -ExecCGI
                 AllowOverride None
-                AuthType Digest
-                AuthName "REALM"
-                AuthUserFile "/etc/htpasswd"
-                Require valid-user
+                Require all granted
         </Directory>
         <Location "/.well-known/acme-challenge/">
                 Require all granted
@@ -56,6 +59,12 @@
         ProxyRequests Off
         ProxyPreserveHost On
         ProxyTimeout 3600
+        RequestHeader unset X-Real-IP
+        RequestHeader unset X-Forwarded-Host
+        RequestHeader unset X-Aetherflow-User
+        RequestHeader unset Remote-User
+        RequestHeader unset X-Forwarded-User
+        RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
         RequestHeader set X-Forwarded-Proto "https"
         RequestHeader set X-Forwarded-Port "443"
 
@@ -66,8 +75,6 @@
 
         ProxyPass /.well-known/acme-challenge/ !
         ProxyPass /downloads !
-        ProxyPass /USERNAME.rtorrent.downloads !
-        ProxyPass /USERNAME.deluge.downloads !
 
         ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=3600 keepalive=On
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/

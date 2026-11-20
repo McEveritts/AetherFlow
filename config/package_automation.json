@@ -347,9 +347,8 @@
     ]
   },
   "threadfin": {
-    "update_source": "github",
+    "update_source": "pinned",
     "require_download_sha256": true,
-    "update_repo": "Threadfin/Threadfin",
     "version_command": [
       "bash",
       "-lc",
@@ -705,12 +704,13 @@
     ]
   },
   "prometheus": {
-    "update_source": "github",
+    "update_source": "apt",
     "require_download_sha256": true,
-    "update_repo": "prometheus/prometheus",
+    "update_package": "prometheus",
     "version_command": [
-      "/usr/local/bin/prometheus",
-      "--version"
+      "sh",
+      "-c",
+      "/usr/bin/prometheus --version || /usr/local/bin/prometheus --version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [

@@ -58,16 +58,17 @@ report_progress 40 "Downloading latest File Browser (${FB_ARCH})..."
 FB_VERSION="$(github_latest_tag "filebrowser/filebrowser" "v2.31.2" "false")"
 FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSION}/${FB_ARCH}-filebrowser.tar.gz"
 
-TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebrowser-XXXXXX.tar.gz")"
 af_logged download_file "$FB_URL" "$TMP_TAR"
-TMP_DIR="$(mktemp -d /tmp/filebrowser-extract-XXXXXX)"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebrowser-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
 af_logged tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser
 rm -f "$TMP_TAR"
-chmod 755 "$TMP_DIR/filebrowser"
+chmod 0755 "$TMP_DIR/filebrowser"
 stage_app_archive "$TMP_DIR" /usr/local/bin/filebrowser filebrowser /opt/filebrowser "$PACKAGE_NAME" "." "" "" binary
 TMP_DIR=""
-chmod +x /usr/local/bin/filebrowser
+chmod 0755 /usr/local/bin/filebrowser
 
 report_progress 70 "Initializing File Browser database on port ${APP_PORT}..."
 mkdir -p /opt/filebrowser /srv
@@ -96,7 +97,6 @@ safe_write_text(sys.argv[1], json.dumps([{'id': 0, 'username': os.environ['AF_SE
 PYEOF
 af_logged /usr/local/bin/filebrowser users import "$FB_USERS_FILE" --database /opt/filebrowser/filebrowser.db
 rm -f -- "$FB_USERS_FILE"
-(umask 077; install -d -m 0700 /opt/AetherFlow/logs && chmod 0700 /opt/AetherFlow/logs && printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" | write_config_file /opt/AetherFlow/logs/filebrowser_credentials.txt 0600)
 fi
 
 chown -hRP filebrowser:filebrowser /opt/filebrowser
@@ -117,6 +117,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/filebrowser.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now filebrowser

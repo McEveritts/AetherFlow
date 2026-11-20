@@ -58,7 +58,8 @@ report_progress 35 "Downloading Prowlarr (${PROWLARR_ARCH})..."
 PROWLARR_VERSION="$(github_latest_tag "Prowlarr/Prowlarr" "1.28.2.4885")"
 PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?version=${PROWLARR_VERSION#v}&os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
 
-TMP_TAR=$(mktemp /tmp/prowlarr-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/prowlarr-XXXXXX.tar.gz")
 af_logged download_file "$PROWLARR_URL" "$TMP_TAR"
 
 report_progress 65 "Extracting Prowlarr to /opt/Prowlarr..."
@@ -130,6 +131,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/prowlarr.service
 
 
 af_logged systemctl daemon-reload

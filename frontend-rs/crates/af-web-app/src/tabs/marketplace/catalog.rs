@@ -84,11 +84,40 @@ impl Drop for InFlightRequest {
         self.0.set(self.0.get().saturating_sub(1));
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PackageActionState {
+    ManageInstalled,
+    RetiredUpstream,
+    Installable,
+}
+
 pub(super) fn installed(value: &Value) -> bool {
     matches!(
         value["status"].as_str(),
-        Some("installed" | "running" | "active" | "stopped")
+        Some("installed" | "running" | "active" | "inactive" | "stopped")
     ) || !field(value, &["installed_version"]).is_empty()
+}
+
+pub(super) fn retired_uninstalled(value: &Value) -> bool {
+    !installed(value)
+        && (value["status"]
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("retired"))
+            || (field(value, &["id"]).eq_ignore_ascii_case("readarr")
+                && matches!(
+                    value["status"].as_str(),
+                    None | Some("" | "uninstalled" | "available" | "not_installed")
+                )))
+}
+
+pub(super) fn action_state(value: &Value) -> PackageActionState {
+    if installed(value) {
+        PackageActionState::ManageInstalled
+    } else if retired_uninstalled(value) {
+        PackageActionState::RetiredUpstream
+    } else {
+        PackageActionState::Installable
+    }
 }
 pub(super) fn lifecycle(status: &str) -> bool {
     matches!(
@@ -114,12 +143,13 @@ pub(super) fn phase(action: &str) -> &'static str {
 }
 pub(super) fn status_label(status: &str) -> &'static str {
     match status {
-        "installed" | "running" | "active" | "stopped" => "Installed",
+        "installed" | "running" | "active" | "inactive" | "stopped" => "Installed",
         "installing" | "reinstalling" | "queued" => "Installing",
         "updating" => "Updating",
         "uninstalling" | "removing" => "Uninstalling",
         "failed" | "install_failed" | "error" => "Failed",
         "unconfirmed" => "Outcome unconfirmed",
+        "retired" => "Retired upstream",
         _ => "Available",
     }
 }
@@ -248,7 +278,13 @@ pub(super) fn PackageCard(
         {
             status_label(&job.status).to_string()
         } else {
-            package.with(|p| status_label(p["status"].as_str().unwrap_or_default()).to_string())
+            package.with(|p| {
+                if retired_uninstalled(p) {
+                    "Retired upstream".to_string()
+                } else {
+                    status_label(p["status"].as_str().unwrap_or_default()).to_string()
+                }
+            })
         }
     });
     let link = Signal::derive(move || {
@@ -284,7 +320,7 @@ pub(super) fn PackageCard(
                     view! {
                         <Badge
                             label=status.get()
-                            tone=if busy.get() {
+                            tone=if busy.get() || package.with(retired_uninstalled) {
                                 "warning"
                             } else if package.with(installed) {
                                 "success"
@@ -402,7 +438,7 @@ pub(super) fn PackageCard(
                                     && p["inventory_authenticated"] != false
                             })
                 }>
-                    <Show when=move || !package.with(installed)>
+                    <Show when=move || package.with(|p| action_state(p) == PackageActionState::Installable)>
                         <button
                             type="button"
                             class="glass-button-primary px-4 py-2 min-h-11 text-xs"
@@ -419,6 +455,20 @@ pub(super) fn PackageCard(
                             }
                         >
                             {move || tt(context, "Install")}
+                        </button>
+                    </Show>
+                    <Show when=move || package.with(|p| action_state(p) == PackageActionState::RetiredUpstream)>
+                        <button
+                            type="button"
+                            class="glass-button px-4 py-2 min-h-11 text-xs opacity-60 cursor-not-allowed text-amber-200 border border-amber-500/30"
+                            disabled=true
+                            aria-disabled="true"
+                            title=move || tt(
+                                context,
+                                "Retired upstream; new installs require a pinned local archive or an existing installation.",
+                            )
+                        >
+                            {move || tt(context, "Retired upstream (pinned archive required)")}
                         </button>
                     </Show>
                     <Show when=move || package.with(installed)>
@@ -585,5 +635,46 @@ pub(super) fn DeploymentStatus(ops: MarketplaceOps) -> impl IntoView {
                 </p>
             </Show>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retired_vs_uninstalled_vs_active_action_states() {
+        let retired = json!({"id": "readarr", "status": "retired"});
+        assert!(!installed(&retired));
+        assert!(retired_uninstalled(&retired));
+        assert_eq!(action_state(&retired), PackageActionState::RetiredUpstream);
+        assert_eq!(status_label("retired"), "Retired upstream");
+
+        let retired_backend_uninstalled = json!({"id": "readarr", "status": "uninstalled"});
+        assert!(!installed(&retired_backend_uninstalled));
+        assert!(retired_uninstalled(&retired_backend_uninstalled));
+        assert_eq!(
+            action_state(&retired_backend_uninstalled),
+            PackageActionState::RetiredUpstream
+        );
+
+        let uninstalled = json!({"id": "sonarr", "status": "uninstalled"});
+        assert!(!installed(&uninstalled));
+        assert!(!retired_uninstalled(&uninstalled));
+        assert_eq!(action_state(&uninstalled), PackageActionState::Installable);
+        assert_eq!(status_label("uninstalled"), "Available");
+
+        for active_status in ["active", "inactive", "installed", "stopped"] {
+            let active_readarr = json!({"id": "readarr", "status": active_status});
+            assert!(installed(&active_readarr), "{active_status}");
+            assert!(!retired_uninstalled(&active_readarr), "{active_status}");
+            assert_eq!(
+                action_state(&active_readarr),
+                PackageActionState::ManageInstalled,
+                "{active_status}"
+            );
+            assert_eq!(status_label(active_status), "Installed", "{active_status}");
+        }
     }
 }

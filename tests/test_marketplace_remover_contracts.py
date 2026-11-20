@@ -525,7 +525,8 @@ write_lock() { mkdir -p "$TEST_ROOT/install"; touch "$TEST_ROOT/install/.$1.lock
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
     def test_installer_template_uses_common_lifecycle_and_allocated_port_contracts(self):
-        template = (ROOT / "packages/package/install/installpackage-template").read_text()
+        template = (ROOT / "docs/installpackage-template.sh").read_text()
+        self.assertFalse((ROOT / "packages/package/install/installpackage-template").exists())
         self.assertIn('APP_PORT="${AF_APP_PORT:-8080}"', template)
         for helper in ("report_progress", "write_lock", "queue_app_version", "commit_app_versions", "stage_app_archive", "finish_app_archive_update"):
             self.assertIn(helper, template)

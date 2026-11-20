@@ -128,6 +128,18 @@ pub fn default_host_targets_for_root(
             required: false,
         },
         HostBackupTargetSpec {
+            archive_relative_path: "var/lib/aetherflow/.master.creds".to_string(),
+            source_path: fs_root.join("var/lib/aetherflow/.master.creds"),
+            logical_fhs_path: Some("/var/lib/aetherflow/.master.creds".to_string()),
+            required: false,
+        },
+        HostBackupTargetSpec {
+            archive_relative_path: "var/lib/aetherflow/oidc_rsa.pem".to_string(),
+            source_path: fs_root.join("var/lib/aetherflow/oidc_rsa.pem"),
+            logical_fhs_path: Some("/var/lib/aetherflow/oidc_rsa.pem".to_string()),
+            required: false,
+        },
+        HostBackupTargetSpec {
             archive_relative_path: "home/owner/.rtorrent.rc".to_string(),
             source_path: owner_home.join(".rtorrent.rc"),
             logical_fhs_path: Some("~/.rtorrent.rc".to_string()),
@@ -621,13 +633,21 @@ fn append_verified_file_to_tar(
         let staged_member_path = staging_dir.join("members").join(&norm_rel);
         let (digest, byte_len, src_mode, src_uid, src_gid, staged_dev_ino) =
             snapshot_file_once_into_staging(disk_path, &staged_member_path, trusted_metadata_uid)?;
+        let effective_mode = if matches!(
+            archive_rel_path,
+            "var/lib/aetherflow/.master.creds" | "var/lib/aetherflow/oidc_rsa.pem"
+        ) {
+            Some(0o600)
+        } else {
+            src_mode
+        };
         let entry = BackupManifestEntry {
             relative_path: archive_rel_path.to_string(),
             logical_target_path,
             kind,
             sha256: digest.clone(),
             size_bytes: byte_len,
-            unix_mode: src_mode,
+            unix_mode: effective_mode,
             unix_uid: src_uid,
             unix_gid: src_gid,
             required,
@@ -638,7 +658,7 @@ fn append_verified_file_to_tar(
             staged_member_path,
             digest,
             byte_len,
-            src_mode,
+            effective_mode,
             src_uid,
             src_gid,
             staged_dev_ino,
@@ -1474,4 +1494,156 @@ pub const fn maintenance_helper_ownership_registry() -> &'static [MaintenanceHel
             rationale: "Pure-Rust directory disk usage calculator and human-formatted report generator for /home/<user> entries.",
         },
     ]
+}
+
+#[cfg(test)]
+mod p3_backup_tests {
+    use super::*;
+    use crate::restore::{
+        execute_staged_restore, NoopQuiescenceController, RestoreExecutionOptions,
+    };
+
+    #[test]
+    fn default_host_targets_preserve_master_creds_and_oidc_rsa_pem_with_0600_mode() {
+        let tmp_root =
+            std::env::temp_dir().join(format!("af-host-p3-creds-oidc-{}", uuid::Uuid::new_v4()));
+        let host_root = tmp_root.join("host");
+        let var_lib = host_root.join("var/lib/aetherflow");
+        let etc_af = host_root.join("etc/aetherflow");
+        fs::create_dir_all(&var_lib).unwrap();
+        fs::create_dir_all(&etc_af).unwrap();
+
+        let db_path = var_lib.join("aetherflow.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA user_version = 14;
+                 CREATE TABLE settings (id INTEGER PRIMARY KEY, domain TEXT NOT NULL);
+                 INSERT INTO settings (id, domain) VALUES (1, 'aether.local');",
+            )
+            .unwrap();
+        }
+        fs::write(etc_af.join("aetherflow.env"), b"PORT=8080\n").unwrap();
+
+        let targets = default_host_targets_for_root(&host_root, &host_root.join("home/aetherflow"));
+        let creds_spec = targets
+            .iter()
+            .find(|t| t.archive_relative_path == "var/lib/aetherflow/.master.creds")
+            .expect(".master.creds target must be present");
+        assert!(!creds_spec.required);
+        assert_eq!(creds_spec.source_path, var_lib.join(".master.creds"));
+
+        let oidc_spec = targets
+            .iter()
+            .find(|t| t.archive_relative_path == "var/lib/aetherflow/oidc_rsa.pem")
+            .expect("oidc_rsa.pem target must be present");
+        assert!(!oidc_spec.required);
+        assert_eq!(oidc_spec.source_path, var_lib.join("oidc_rsa.pem"));
+
+        // 1. Optional when missing: archive backup succeeds cleanly without .master.creds or oidc_rsa.pem
+        let cfg = HostBackupConfig::for_isolated_root(&host_root, "v4.0.0");
+        let receipt_without = create_host_archive_backup(&cfg, Some("2026-11-20-missing")).unwrap();
+        assert!(!receipt_without
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.relative_path == "var/lib/aetherflow/.master.creds"));
+        assert!(!receipt_without
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.relative_path == "var/lib/aetherflow/oidc_rsa.pem"));
+
+        // 2. When present on disk (even if initially 0644), archive records 0600 and staged restore preserves 0600
+        let creds_payload = b"af-admin:super-secret-master-pw\n";
+        let oidc_payload = b"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n-----END PRIVATE KEY-----\n";
+        fs::write(var_lib.join(".master.creds"), creds_payload).unwrap();
+        fs::write(var_lib.join("oidc_rsa.pem"), oidc_payload).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                var_lib.join(".master.creds"),
+                fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            fs::set_permissions(
+                var_lib.join("oidc_rsa.pem"),
+                fs::Permissions::from_mode(0o640),
+            )
+            .unwrap();
+        }
+
+        let receipt_with = create_host_archive_backup(&cfg, Some("2026-11-20-present")).unwrap();
+        let creds_entry = receipt_with
+            .manifest
+            .entries
+            .iter()
+            .find(|e| e.relative_path == "var/lib/aetherflow/.master.creds")
+            .expect(".master.creds manifest entry");
+        let oidc_entry = receipt_with
+            .manifest
+            .entries
+            .iter()
+            .find(|e| e.relative_path == "var/lib/aetherflow/oidc_rsa.pem")
+            .expect("oidc_rsa.pem manifest entry");
+        assert_eq!(creds_entry.unix_mode, Some(0o600));
+        assert_eq!(oidc_entry.unix_mode, Some(0o600));
+
+        let stage_root = tmp_root.join("restore-stage");
+        fs::create_dir_all(&stage_root).unwrap();
+        let archive_filename = receipt_with
+            .primary_artifact_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let exec_opts = RestoreExecutionOptions {
+            host_app_version: "v4.0.0".to_string(),
+            allow_overwrite: true,
+            confirm_destructive_restore: true,
+            ..Default::default()
+        };
+        let report = execute_staged_restore(
+            &cfg.backup_dir,
+            archive_filename,
+            &stage_root,
+            &exec_opts,
+            &NoopQuiescenceController,
+        )
+        .unwrap();
+        assert!(report
+            .restored_files
+            .contains(&stage_root.join("var/lib/aetherflow/.master.creds")));
+        assert!(report
+            .restored_files
+            .contains(&stage_root.join("var/lib/aetherflow/oidc_rsa.pem")));
+        assert_eq!(
+            fs::read(stage_root.join("var/lib/aetherflow/.master.creds")).unwrap(),
+            creds_payload
+        );
+        assert_eq!(
+            fs::read(stage_root.join("var/lib/aetherflow/oidc_rsa.pem")).unwrap(),
+            oidc_payload
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let creds_mode = fs::metadata(stage_root.join("var/lib/aetherflow/.master.creds"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            let oidc_mode = fs::metadata(stage_root.join("var/lib/aetherflow/oidc_rsa.pem"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(creds_mode, 0o600);
+            assert_eq!(oidc_mode, 0o600);
+        }
+
+        let _ = fs::remove_dir_all(&tmp_root);
+    }
 }

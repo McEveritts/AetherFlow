@@ -4563,7 +4563,7 @@ sync_node_global_bins() {
 }
 
 ensure_node() {
-    local want_major="${1:-20}"
+    local want_major="${1:-22}"
     local have_major=0
     # Native addons and Git prepare scripts need these on already-provisioned
     # Node hosts too, not just when Node itself is first installed.
@@ -5326,7 +5326,7 @@ PYEOF
     export MASTER_HA1="$h"
     if [[ "$generated" == true ]]; then
         python3 - "$primary_creds_file" <<'PYEOF'
-import base64, ctypes, ctypes.util, errno, json, os, stat, sys, tempfile
+import base64, ctypes, ctypes.util, errno, grp, json, os, pwd, stat, sys, tempfile
 username, password, ha1 = (os.environ[name] for name in ('MASTER_USER', 'MASTER_PASS', 'MASTER_HA1'))
 destination = sys.argv[1]
 directory = os.path.dirname(destination) or '.'
@@ -5490,11 +5490,24 @@ stored_password = maybe_encrypt(password, raw_key, key)
 stored_ha1 = maybe_encrypt(ha1, raw_key, key)
 temporary = None
 try:
+    aetherflow_owner = None
+    if os.geteuid() == 0 and destination == '/var/lib/aetherflow/.master.creds':
+        try:
+            pw = pwd.getpwnam('aetherflow')
+            try:
+                gid = grp.getgrnam('aetherflow').gr_gid
+            except KeyError:
+                gid = pw.pw_gid
+            aetherflow_owner = (pw.pw_uid, gid)
+        except KeyError:
+            aetherflow_owner = None
     _ensure_no_symlink_ancestors(directory)
     os.makedirs(directory, mode=0o700, exist_ok=True)
     dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
     try:
         os.fchmod(dir_fd, 0o700)
+        if aetherflow_owner is not None:
+            os.fchown(dir_fd, *aetherflow_owner)
     finally:
         os.close(dir_fd)
     if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
@@ -5502,6 +5515,8 @@ try:
     descriptor, temporary = tempfile.mkstemp(prefix='.master.creds.', dir=directory)
     with os.fdopen(descriptor, 'w') as output:
         os.fchmod(output.fileno(), 0o600)
+        if aetherflow_owner is not None:
+            os.fchown(output.fileno(), *aetherflow_owner)
         json.dump({'username': username, 'password': stored_password, 'ha1': stored_ha1}, output)
         output.write('\n')
         output.flush()

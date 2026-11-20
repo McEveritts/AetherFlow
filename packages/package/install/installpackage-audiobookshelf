@@ -114,7 +114,8 @@ ABS_VERSION="$(github_latest_tag "advplyr/audiobookshelf" "2.37.2")"
 ABS_URL="https://advplyr.github.io/audiobookshelf-ppa/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
 
 report_progress 60 "Downloading and installing Audiobookshelf ${ABS_VERSION}..."
-TMP_DEB=$(mktemp /tmp/abs-XXXXXX.deb)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_DEB=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/abs-XXXXXX.deb")
 if af_logged download_file "$ABS_URL" "$TMP_DEB"; then
     install_deb_verified "$TMP_DEB" audiobookshelf
     rm -f "$TMP_DEB"
@@ -123,8 +124,9 @@ else
     # Fallback to official Audiobookshelf PPA repository
     install -m 0755 -d /etc/apt/keyrings
     af_logged install_apt_signing_key https://advplyr.github.io/audiobookshelf-ppa/KEY.gpg /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
-    chmod a+r /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
+    chmod 0644 /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/audiobookshelf-archive-keyring.gpg] https://advplyr.github.io/audiobookshelf-ppa ./" > /etc/apt/sources.list.d/audiobookshelf.list
+    chmod 0644 /etc/apt/sources.list.d/audiobookshelf.list
     DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
     DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq audiobookshelf
 fi

@@ -7,7 +7,7 @@ AetherFlow v4.0.0 implements defense-in-depth across authentication, encryption 
 1. **Mandatory TOTP 2FA**: Enforced for administrator accounts (`af-api::auth`) with hashed recovery codes.
 2. **Hardened JWT Sessions**: `HttpOnly`, `Secure` HS256 session cookies (`aetherflow_session`) backed by SQLite `revoked_tokens` and `active_sessions` verification, paired with CSRF token/origin validation on all state-mutating endpoints.
 3. **Perimeter Gateway (True SSO)**: The streaming Subdomain Gateway and `/api/v1/public/auth/verify` validate session tokens, check JWT revocation and session bindings, and inject verified `X-Aetherflow-User` identity headers into downstream applications while stripping untrusted client-supplied headers.
-4. **Plugin-Scoped RBAC**: Third-party plugins receive bounded tokens (`POST /api/v1/admin/plugins/:id/token`) restricted to segment-boundary `api_scopes` declared in `plugin.manifest.json`.
+4. **Plugin-Scoped RBAC**: Third-party plugins receive bounded tokens (`POST /api/v1/admin/plugins/:id/token` and `0600` rotating `AETHERFLOW_PLUGIN_TOKEN_FILE`) restricted to domain-matched `api_scopes` declared in `plugin.manifest.json`, with `/api/v1/admin/*` and `/api/v1/ingress/*` default-denied.
 
 ---
 
@@ -27,8 +27,8 @@ Rather than granting the web API unrestricted `sudo` or disabling `ProtectSystem
 1. **`aetherflow-api.service` (Unprivileged Web Control Plane — `af-api`)**:
    - Runs as `User=aetherflow` with `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectControlGroups=yes`, `ProtectKernelTunables=yes`, `RestrictSUIDSGID=yes`, and `MemoryMax=512M`.
 2. **`aetherflow-runner.service` (Root UNIX Socket Helper — `af-runner`)**:
-   - Runs `/opt/AetherFlow/current/aetherflow-api runner` and listens exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
-   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (12 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.
+   - Runs `/opt/AetherFlow/current/aetherflow-api runner` and listens exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`), verifying caller `SO_PEERCRED` and `/proc/<pid>/exe` against trusted control-plane/CLI binaries (blocking plugin processes and scripting interpreters).
+   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (12 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), blueprint/ingress mutations, WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.
 
 ---
 

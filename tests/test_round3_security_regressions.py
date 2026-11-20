@@ -14,9 +14,21 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _resolve_openable_tmp_root() -> str:
+    cand = Path(tempfile.gettempdir()).resolve()
+    if all(os.access(p, os.R_OK | os.X_OK) for p in (cand, *cand.parents)):
+        return str(cand)
+    if Path("/tmp").is_dir() and os.access("/tmp", os.R_OK | os.W_OK | os.X_OK):
+        return str(Path("/tmp").resolve())
+    return str(cand)
+
+
+RESOLVED_TMP_ROOT = _resolve_openable_tmp_root()
+
+
 class Round3SecurityRegressionTests(unittest.TestCase):
     def test_common_sh_64hex_aes_ctypes_openssl_fallback_and_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="af-r3-creds-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-r3-creds-", dir=RESOLVED_TMP_ROOT) as tmp:
             tmp_path = Path(tmp)
             fake_pkg_dir = tmp_path / "shadow_py"
             fake_pkg_dir.mkdir()
@@ -110,7 +122,7 @@ class Round3SecurityRegressionTests(unittest.TestCase):
         self.assertNotIn("Password_ha1", sab)
 
     def test_log_retention_drains_multi_chunk_backlog_in_single_pass_under_flock(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="af-r3-logret-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-r3-logret-", dir=RESOLVED_TMP_ROOT) as tmp:
             log_dir = Path(tmp) / "logs"
             log_dir.mkdir(mode=0o750)
             target_log = log_dir / "install-sonarr.log"
@@ -141,7 +153,14 @@ class Round3SecurityRegressionTests(unittest.TestCase):
 
     def test_runner_systemd_sandboxing_parity_and_sudo_compatibility(self) -> None:
         pkg_unit = (ROOT / "deploy/systemd/aetherflow-runner.service").read_text(encoding="utf-8")
-        tpl_unit = (ROOT / "setup/templates/sysd/aetherflow-runner.template").read_text(encoding="utf-8")
+        self.assertFalse(
+            (ROOT / "setup/templates/sysd/aetherflow-runner.template").exists(),
+            "Duplicate aetherflow-runner.template must be retired in favor of deploy/systemd/aetherflow-runner.service",
+        )
+        self.assertFalse(
+            (ROOT / "setup/templates/sysd/aetherflow-api.template").exists(),
+            "Duplicate aetherflow-api.template must be retired in favor of deploy/systemd/aetherflow-api.service",
+        )
         rm_sh = (ROOT / "deploy/release-manager.sh").read_text(encoding="utf-8")
         health_rs = (ROOT / "backend-rs/crates/af-release/src/health.rs").read_text(encoding="utf-8")
 
@@ -158,18 +177,16 @@ class Round3SecurityRegressionTests(unittest.TestCase):
         )
         for directive in required_directives:
             self.assertIn(directive, pkg_unit)
-            self.assertIn(directive, tpl_unit)
             self.assertIn(directive, rm_sh)
             self.assertIn(directive, health_rs)
 
-        for unit_text in (pkg_unit, tpl_unit):
-            active_lines = [
-                ln.strip()
-                for ln in unit_text.splitlines()
-                if ln.strip() and not ln.lstrip().startswith("#")
-            ]
-            self.assertNotIn("NoNewPrivileges=yes", active_lines)
-            self.assertNotIn("RestrictSUIDSGID=yes", active_lines)
+        active_lines = [
+            ln.strip()
+            for ln in pkg_unit.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        self.assertNotIn("NoNewPrivileges=yes", active_lines)
+        self.assertNotIn("RestrictSUIDSGID=yes", active_lines)
 
     def test_kasmvnc_display_probe_honors_proc_net_unix_under_private_tmp(self) -> None:
         kasm = (ROOT / "packages/package/install/installpackage-kasmvnc").read_text(encoding="utf-8")
@@ -218,7 +235,7 @@ class Round3SecurityRegressionTests(unittest.TestCase):
         import tarfile
         import io
 
-        with tempfile.TemporaryDirectory(prefix="af-r5-common-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-r5-common-", dir=RESOLVED_TMP_ROOT) as tmp:
             root = Path(tmp)
             env_file = root / "aetherflow.env"
             stale_hex = bytes([0x11] * 32).hex()
@@ -298,7 +315,7 @@ class Round3SecurityRegressionTests(unittest.TestCase):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        with tempfile.TemporaryDirectory(prefix="af-r5-logret-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-r5-logret-", dir=RESOLVED_TMP_ROOT) as tmp:
             log_dir = Path(tmp)
             os.chmod(log_dir, 0o750)
             log_path = log_dir / "install-test.log"
@@ -426,7 +443,7 @@ false || cleanup
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        with tempfile.TemporaryDirectory(prefix="af-r6-loglock-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-r6-loglock-", dir=RESOLVED_TMP_ROOT) as tmp:
             log_dir = Path(tmp)
             os.chmod(log_dir, 0o750)
             log_path = log_dir / "install-sabnzbd.log"
@@ -591,7 +608,7 @@ false || cleanup
     def test_round8_common_sh_af_logged_nofollow_and_log_retention_self_healing_and_setup_hygiene(self) -> None:
         import importlib.util
 
-        with tempfile.TemporaryDirectory(prefix="af-r8-common-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="af-r8-common-", dir=RESOLVED_TMP_ROOT) as tmp:
             tmp_path = Path(tmp)
             lock_dir = tmp_path / "locks"
             lock_dir.mkdir()
@@ -739,6 +756,69 @@ state_snapshot
             proc = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=10)
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("Failed to write snapshot SHA-256 manifest", proc.stderr)
+
+    def test_pass3_seedbox_hardening_apache_headers_vsftpd_opt_in_and_dropin_alignment(self) -> None:
+        ssl_tpl = (ROOT / "setup/templates/default-ssl.conf.template").read_text(encoding="utf-8")
+        for header_dir in (
+            "RequestHeader unset X-Real-IP",
+            "RequestHeader unset X-Forwarded-Host",
+            "RequestHeader unset X-Aetherflow-User",
+            "RequestHeader unset Remote-User",
+            "RequestHeader unset X-Forwarded-User",
+            'RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"',
+        ):
+            self.assertIn(header_dir, ssl_tpl)
+        self.assertNotIn("USERNAME.rtorrent.downloads", ssl_tpl)
+        self.assertNotIn("USERNAME.deluge.downloads", ssl_tpl)
+        self.assertNotIn("/etc/htpasswd", ssl_tpl)
+
+        aliases_tpl = (ROOT / "setup/templates/aliases-seedbox.conf.template").read_text(encoding="utf-8")
+        self.assertNotIn("Options Indexes FollowSymLinks", aliases_tpl)
+        self.assertIn("Options -Indexes -FollowSymLinks", aliases_tpl)
+
+        vsftpd_tpl = (ROOT / "setup/templates/vsftpd.conf.template").read_text(encoding="utf-8")
+        for directive in (
+            "ssl_tlsv1=NO",
+            "ssl_tlsv1_1=NO",
+            "ssl_tlsv1_2=YES",
+            "seccomp_sandbox=YES",
+        ):
+            self.assertIn(directive, vsftpd_tpl)
+
+        sec_sh = (ROOT / "setup/modules/04-security.sh").read_text(encoding="utf-8")
+        default_ports = subprocess.check_output(
+            ["bash", "-c", 'source "$1"; _fw_allowed_ports', "bash", str(ROOT / "setup/modules/04-security.sh")],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            text=True,
+        ).strip()
+        self.assertEqual(default_ports, "22/tcp 80/tcp 443/tcp")
+
+        ftpd_ports = subprocess.check_output(
+            ["bash", "-c", 'source "$1"; _fw_allowed_ports', "bash", str(ROOT / "setup/modules/04-security.sh")],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "AETHERFLOW_ENABLE_FTPD": "yes"},
+            text=True,
+        ).strip()
+        self.assertEqual(ftpd_ports, "22/tcp 80/tcp 443/tcp 21/tcp 10090:10100/tcp")
+        self.assertNotIn("fileshare.conf.template", sec_sh)
+        self.assertNotIn("lshell.conf-focal.template", sec_sh)
+
+        fin_sh = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
+        self.assertIn("chmod 0600 /etc/ssl/private/vsftpd.pem", fin_sh)
+        self.assertIn("AETHERFLOW_ENABLE_FTPD", fin_sh)
+        for cli_cmd in ("af health", "af service status", "af service restart"):
+            self.assertIn(cli_cmd, fin_sh)
+        for old_cmd in ("aetherflow logs", "aetherflow restart", "aetherflow status"):
+            self.assertNotIn(old_cmd, fin_sh)
+
+        setup_sh = (ROOT / "setup/AetherFlow-Setup").read_text(encoding="utf-8")
+        for retired_tok in ("AUTODLPASSWORD", "AUTODLPORT", "_lshell"):
+            self.assertNotIn(retired_tok, setup_sh)
+        self.assertIn("AETHERFLOW_ENABLE_FTPD", setup_sh)
+        for retired_tpl in (
+            "setup/templates/lshell.conf-focal.template",
+            "setup/templates/fileshare.conf.template",
+        ):
+            self.assertFalse((ROOT / retired_tpl).exists(), f"Orphan template {retired_tpl} must be deleted")
 
 
 if __name__ == "__main__":

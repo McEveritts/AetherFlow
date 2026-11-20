@@ -19,7 +19,6 @@ use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::task::JoinSet;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,7 +27,6 @@ use uuid::Uuid;
 
 const PLUGIN_PORT_RANGE_START: u16 = 21000;
 const PLUGIN_PORT_RANGE_END: u16 = 21999;
-const MAX_CONCURRENT_HEALTH_PROBES: usize = 8;
 const MAX_PLUGIN_PROXY_BODY_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 const DEFAULT_PLUGIN_TOKEN_TTL_SECS: i64 = 300; // 5 minutes
 const MAX_PLUGIN_TOKEN_TTL_SECS: i64 = 900; // 15 minutes
@@ -40,6 +38,10 @@ static PLUGIN_ID_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9-_]{1,62}$").expect("valid regex"));
 
 const DEFAULT_DENY_ROUTE_PREFIXES: &[&str] = &[
+    "/api/v1/admin",
+    "/api/admin",
+    "/api/v1/ingress",
+    "/api/ingress",
     "/api/v1/auth/session",
     "/api/v1/auth/sessions",
     "/api/v1/auth/refresh",
@@ -49,13 +51,6 @@ const DEFAULT_DENY_ROUTE_PREFIXES: &[&str] = &[
     "/api/v1/auth/user/2fa",
     "/api/v1/auth/oidc",
     "/api/v1/auth/plugins",
-    "/api/v1/admin/users",
-    "/api/v1/admin/settings",
-    "/api/v1/admin/backup",
-    "/api/v1/admin/oidc",
-    "/api/v1/admin/actions",
-    "/api/v1/admin/audit-log",
-    "/api/v1/admin/plugins",
     "/api/v1/plugins",
     "/plugins",
     "/api/auth/session",
@@ -67,13 +62,6 @@ const DEFAULT_DENY_ROUTE_PREFIXES: &[&str] = &[
     "/api/auth/user/2fa",
     "/api/auth/oidc",
     "/api/auth/plugins",
-    "/api/admin/users",
-    "/api/admin/settings",
-    "/api/admin/backup",
-    "/api/admin/oidc",
-    "/api/admin/actions",
-    "/api/admin/audit-log",
-    "/api/admin/plugins",
     "/api/plugins",
 ];
 
@@ -251,11 +239,17 @@ struct ActivePluginProcess {
     child: Child,
     port: u16,
     pgid: Option<i32>,
+    token_file: Option<PathBuf>,
+    runtime_id: Option<Uuid>,
+    monitor: Option<tokio::task::JoinHandle<()>>,
 }
 
 static ACTIVE_PROCESSES: Lazy<Mutex<HashMap<String, ActivePluginProcess>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static ACTIVE_PLUGIN_JTIS: Lazy<Mutex<HashMap<String, HashSet<String>>>> =
+static PLUGIN_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PLUGIN_HEALTH: Lazy<Mutex<HashMap<String, (u16, bool)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static ACTIVE_PLUGIN_JTIS: Lazy<Mutex<HashMap<String, HashMap<String, i64>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -315,65 +309,46 @@ fn route_is_within(path: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn is_package_update_check(method: &str, path: &str) -> bool {
-    if method != "POST" {
-        return false;
-    }
-    let canonical = canonical_plugin_route(path);
-    if canonical == "/api/v1/admin/packages/updates/check" {
-        return true;
-    }
-    canonical
-        .strip_prefix("/api/v1/admin/packages/")
-        .and_then(|suffix| suffix.strip_suffix("/check-update"))
-        .is_some_and(|package| {
-            !package.is_empty() && !package.contains('/') && !package.contains('*')
-        })
-}
-
 pub fn is_plugin_request_denied(method: &Method, path: &str) -> bool {
-    if is_route_default_denied(path) {
-        return true;
-    }
-    if matches!(*method, Method::GET | Method::HEAD)
-        || is_package_update_check(method.as_str(), path)
-    {
-        return false;
-    }
-    let canonical = canonical_plugin_route(path);
-    ADMIN_USER_ONLY_WRITE_PREFIXES
-        .iter()
-        .any(|prefix| route_is_within(&canonical, prefix))
+    is_route_default_denied(path)
+        || (!matches!(*method, Method::GET | Method::HEAD)
+            && ADMIN_USER_ONLY_WRITE_PREFIXES
+                .iter()
+                .any(|prefix| route_is_within(&canonical_plugin_route(path), prefix)))
 }
 
-fn scope_delegates_admin_user_write(method: &str, route: &str) -> bool {
-    if matches!(method, "GET" | "HEAD") || is_package_update_check(method, route) {
-        return false;
+fn permission_route_prefixes(permission: &str, read: bool) -> &[&str] {
+    match (permission, read) {
+        ("telemetry:read" | "system:read", true) => &[
+            "/api/v1/auth/system/metrics",
+            "/api/v1/auth/system/hardware",
+            "/api/v1/auth/services",
+        ],
+        ("system:metrics:read", true) => &["/api/v1/auth/system/metrics"],
+        ("system:hardware:read", true) => &["/api/v1/auth/system/hardware"],
+        ("services:read", true) => &["/api/v1/auth/services"],
+        ("packages:read", true) => &["/api/v1/auth/packages"],
+        ("marketplace:read", true) => &["/api/v1/public/marketplace"],
+        ("notifications:read", true) | ("notifications:write", false) => {
+            &["/api/v1/auth/notifications"]
+        }
+        _ => &[],
     }
-    [route.to_string(), canonical_plugin_route(route)]
-        .iter()
-        .any(|pattern| {
-            if let Some(prefix) = pattern.strip_suffix('*') {
-                ADMIN_USER_ONLY_WRITE_PREFIXES.iter().any(|protected| {
-                    protected.starts_with(prefix)
-                        || route_is_within(prefix.trim_end_matches('/'), protected)
-                })
-            } else {
-                ADMIN_USER_ONLY_WRITE_PREFIXES
-                    .iter()
-                    .any(|prefix| route_is_within(pattern, prefix))
-            }
-        })
+}
+
+fn plugin_requires_admin(permissions: &[String]) -> bool {
+    permissions.iter().any(|permission| {
+        matches!(
+            permission.trim().rsplit(':').next(),
+            Some("write" | "control" | "admin")
+        )
+    })
 }
 
 pub fn normalize_scope_entry(
     raw: &RawScopeEntry,
     permissions: &[String],
 ) -> Result<Vec<PluginScopeRule>, String> {
-    let can_write_permission = permissions
-        .iter()
-        .any(|p| p.ends_with(":write") || p.ends_with(":admin") || p.ends_with(":control"));
-
     let (raw_method, raw_route) = match raw {
         RawScopeEntry::Structured(rule) => (
             rule.method.trim().to_uppercase(),
@@ -403,31 +378,28 @@ pub fn normalize_scope_entry(
         ));
     }
 
-    let methods: Vec<String> = match raw_method.as_str() {
+    let read = matches!(raw_method.as_str(), "GET" | "HEAD");
+    let methods = match raw_method.as_str() {
         "GET" | "HEAD" => vec!["GET".to_string(), "HEAD".to_string()],
-        "POST" | "PUT" | "PATCH" | "DELETE" => {
-            if !can_write_permission {
-                return Err(format!(
-                    "Mutating method '{}' on '{}' requires an explicit *:write permission in manifest",
-                    raw_method, raw_route
-                ));
-            }
-            vec![raw_method]
-        }
+        "POST" | "PUT" | "PATCH" | "DELETE" => vec![raw_method],
         _ => {
             return Err(format!(
-            "Unsupported or wildcard HTTP method '{}' in plugin scope (explicit method required)",
-            raw_method
-        ))
+                "Unsupported HTTP method '{}' in plugin scope",
+                raw_method
+            ))
         }
     };
 
-    if methods
-        .iter()
-        .any(|method| scope_delegates_admin_user_write(method, &raw_route))
+    let route = raw_route.strip_suffix("/*").unwrap_or(&raw_route);
+    if route.contains(['*', '?', '#', '%', '\\'])
+        || !permissions.iter().any(|permission| {
+            permission_route_prefixes(permission.trim(), read)
+                .iter()
+                .any(|prefix| route_is_within(&canonical_plugin_route(route), prefix))
+        })
     {
         return Err(format!(
-            "Plugin API scope '{}' delegates an admin-user-only destructive HTTP capability",
+            "Plugin API scope '{}' is outside its manifest permissions",
             raw_route
         ));
     }
@@ -791,12 +763,8 @@ pub fn discover_plugins_in_dir(
 // Database Persistence & Port Allocation
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn get_or_init_registry_state(plugin_id: &str) -> PluginRegistryState {
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
-            "INSERT OR IGNORE INTO plugins_registry (plugin_id, enabled, allocated_port, token_epoch, status) VALUES (?1, 0, 0, 1, 'stopped')",
-            params![plugin_id],
-        );
+fn read_registry_state(plugin_id: &str) -> PluginRegistryState {
+    if let Ok(conn) = af_db::get_read_conn() {
         if let Ok(state) = conn.query_row(
             "SELECT plugin_id, enabled, allocated_port, token_epoch, status, last_health_at, COALESCE(last_error, '') \
              FROM plugins_registry WHERE plugin_id = ?1",
@@ -854,7 +822,7 @@ pub(crate) fn update_registry_state(
             );
         }
     }
-    get_or_init_registry_state(plugin_id)
+    read_registry_state(plugin_id)
 }
 
 fn allocate_plugin_port(plugin_id: &str, preferred: u16) -> Result<u16, String> {
@@ -909,7 +877,7 @@ pub fn mint_scoped_plugin_token(
     manifest: &ValidatedPluginManifest,
     requested_ttl_secs: Option<i64>,
 ) -> Result<(String, PluginTokenClaims), String> {
-    let reg = get_or_init_registry_state(&manifest.id);
+    let reg = read_registry_state(&manifest.id);
     if !reg.enabled && reg.status != "running" {
         return Err(format!(
             "Plugin '{}' must be enabled before minting a scoped runtime token",
@@ -917,12 +885,30 @@ pub fn mint_scoped_plugin_token(
         ));
     }
 
+    let (token, claims) = sign_plugin_token(manifest, reg.token_epoch, requested_ttl_secs, None)?;
+    if let Ok(mut map) = ACTIVE_PLUGIN_JTIS.lock() {
+        let jtis = map.entry(manifest.id.clone()).or_default();
+        jtis.retain(|_, expiry| *expiry >= claims.iat);
+        jtis.insert(claims.jti.clone(), claims.exp);
+    }
+    Ok((token, claims))
+}
+
+fn sign_plugin_token(
+    manifest: &ValidatedPluginManifest,
+    epoch: i64,
+    requested_ttl_secs: Option<i64>,
+    runtime_id: Option<Uuid>,
+) -> Result<(String, PluginTokenClaims), String> {
     let now = Utc::now().timestamp();
     let ttl = requested_ttl_secs
         .unwrap_or(DEFAULT_PLUGIN_TOKEN_TTL_SECS)
         .clamp(30, MAX_PLUGIN_TOKEN_TTL_SECS);
     let exp = now + ttl;
-    let jti = format!("plg-{}-{}", manifest.id, Uuid::new_v4());
+    let jti = match runtime_id {
+        Some(id) => format!("plg-runtime:{id}:{}", Uuid::new_v4()),
+        None => format!("plg-{}-{}", manifest.id, Uuid::new_v4()),
+    };
 
     let claims = PluginTokenClaims {
         typ: PLUGIN_TOKEN_TYP.to_string(),
@@ -930,10 +916,10 @@ pub fn mint_scoped_plugin_token(
         aud: PLUGIN_TOKEN_AUDIENCE.to_string(),
         sub: format!("plugin:{}", manifest.id),
         plugin_id: manifest.id.clone(),
-        jti: jti.clone(),
+        jti,
         iat: now,
         exp,
-        epoch: reg.token_epoch,
+        epoch,
         scopes: manifest.granted_scopes.clone(),
     };
 
@@ -944,16 +930,13 @@ pub fn mint_scoped_plugin_token(
     )
     .map_err(|e| format!("Failed to encode plugin token: {}", e))?;
 
-    if let Ok(mut map) = ACTIVE_PLUGIN_JTIS.lock() {
-        map.entry(manifest.id.clone()).or_default().insert(jti);
-    }
-
     Ok((token, claims))
 }
 
 pub fn decode_and_verify_plugin_token(token: &str) -> Result<PluginTokenClaims, String> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&[PLUGIN_TOKEN_AUDIENCE]);
+    validation.leeway = 0;
 
     let data = decode::<PluginTokenClaims>(
         token,
@@ -972,38 +955,52 @@ pub fn decode_and_verify_plugin_token(token: &str) -> Result<PluginTokenClaims, 
     if !is_valid_plugin_id(&claims.plugin_id) {
         return Err("Invalid plugin_id in token".to_string());
     }
+    if let Some(runtime_jti) = claims.jti.strip_prefix("plg-runtime:") {
+        let run = runtime_jti
+            .split_once(':')
+            .and_then(|(id, _)| Uuid::parse_str(id).ok());
+        let active = ACTIVE_PROCESSES.lock().ok().and_then(|processes| {
+            processes
+                .get(&claims.plugin_id)
+                .and_then(|process| process.runtime_id)
+        });
+        if run.is_none() || run != active {
+            return Err("Managed plugin process is no longer active".to_string());
+        }
+    }
     if af_db::is_token_revoked(&claims.jti) {
         return Err("Plugin token has been revoked".to_string());
     }
 
-    let reg = get_or_init_registry_state(&claims.plugin_id);
+    let reg = read_registry_state(&claims.plugin_id);
     if !reg.enabled || reg.status == "stopped" || reg.token_epoch != claims.epoch {
         return Err(
             "Plugin token is no longer active for the current plugin lifecycle epoch".to_string(),
         );
     }
 
-    // Intersect token scopes with the live verified manifest on disk if discoverable
     let (manifests, _) = discover_plugins();
-    if let Some(live_manifest) = manifests.into_iter().find(|m| m.id == claims.plugin_id) {
-        claims
-            .scopes
-            .retain(|s| live_manifest.granted_scopes.contains(s));
-    }
+    let live_manifest = manifests
+        .into_iter()
+        .find(|m| m.id == claims.plugin_id)
+        .ok_or_else(|| "Plugin manifest is unavailable".to_string())?;
+    claims
+        .scopes
+        .retain(|scope| live_manifest.granted_scopes.contains(scope));
 
     Ok(claims)
 }
 
 pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
-    if let Ok(mut map) = ACTIVE_PLUGIN_JTIS.lock() {
-        if let Some(jtis) = map.remove(plugin_id) {
-            for jti in jtis {
-                let _ = af_db::revoke_token(
-                    &jti,
-                    Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60),
-                );
-            }
-        }
+    let jtis = ACTIVE_PLUGIN_JTIS
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(plugin_id));
+    for (jti, _) in jtis.into_iter().flatten() {
+        let _ = af_db::revoke_token(
+            &jti,
+            Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60),
+        );
     }
 }
 
@@ -1139,42 +1136,183 @@ pub async fn probe_plugin_health(port: u16, health_path: &str) -> Result<bool, S
     }
 }
 
+#[cfg(unix)]
+fn write_runtime_token(path: &StdPath, token: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+
+    let dir = path.parent().expect("runtime token has a parent");
+    fs::create_dir_all(dir.parent().expect("runtime directory has a parent"))?;
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    };
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.is_dir()
+        || metadata.mode() & 0o777 != 0o700
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "Unsafe plugin token directory",
+        ));
+    }
+
+    let temp = dir.join(format!(".{}.tmp", Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp)?;
+    let result = file
+        .write_all(token.as_bytes())
+        .and_then(|_| fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn write_runtime_token(_path: &StdPath, _token: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Private plugin token files require Unix",
+    ))
+}
+
+fn runtime_token_path(plugin_id: &str) -> Result<PathBuf, String> {
+    if !is_valid_plugin_id(plugin_id) {
+        return Err("Invalid plugin identifier".into());
+    }
+    let data_dir = env::var_os("DATA_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/aetherflow"));
+    let data_dir = std::path::absolute(data_dir).map_err(|error| error.to_string())?;
+    Ok(data_dir
+        .join("plugin-tokens")
+        .join(format!("{plugin_id}.token")))
+}
+
+// The lifecycle lock serializes publication of a new token with stop/restart.
+async fn monitor_plugin(
+    manifest: ValidatedPluginManifest,
+    port: u16,
+    token_file: PathBuf,
+    runtime_id: Uuid,
+    mut epoch: i64,
+) {
+    let mut rotated_at = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let healthy = probe_plugin_health(port, &manifest.backend.health_path)
+            .await
+            .unwrap_or(false);
+        let lifecycle = PLUGIN_LIFECYCLE.lock().await;
+        let manifest = manifest.clone();
+        let token_file = token_file.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _lifecycle = lifecycle;
+            let mut processes = ACTIVE_PROCESSES.lock().unwrap_or_else(|e| e.into_inner());
+            let process = processes.get_mut(&manifest.id)?;
+            if process.runtime_id != Some(runtime_id) {
+                return None;
+            }
+            if !matches!(process.child.try_wait(), Ok(None)) {
+                let pgid = process.pgid;
+                processes.remove(&manifest.id);
+                drop(processes);
+                #[cfg(unix)]
+                send_signal_to_process_group(pgid, libc::SIGKILL);
+                let _ = fs::remove_file(&token_file);
+                PLUGIN_HEALTH.lock().unwrap_or_else(|e| e.into_inner()).remove(&manifest.id);
+                update_registry_state(&manifest.id, false, port, "error", "Plugin process exited", true);
+                revoke_all_tokens_for_plugin(&manifest.id);
+                return None;
+            }
+            drop(processes);
+            PLUGIN_HEALTH.lock().unwrap_or_else(|e| e.into_inner()).insert(manifest.id.clone(), (port, healthy));
+            let state = read_registry_state(&manifest.id);
+            if state.enabled && (state.token_epoch != epoch || rotated_at.elapsed() >= Duration::from_secs(180)) {
+                let result = sign_plugin_token(&manifest, state.token_epoch, None, Some(runtime_id))
+                    .and_then(|(token, _)| write_runtime_token(&token_file, &token).map_err(|error| error.to_string()));
+                match result {
+                    Ok(()) => return Some((state.token_epoch, std::time::Instant::now())),
+                    Err(error) => tracing::warn!(plugin = %manifest.id, %error, "Plugin token rotation failed"),
+                }
+            }
+            Some((epoch, rotated_at))
+        }).await;
+        match result {
+            Ok(Some((next_epoch, at))) => {
+                epoch = next_epoch;
+                rotated_at = at;
+            }
+            _ => return,
+        }
+    }
+}
+
 pub async fn start_plugin_instance(
     manifest: &ValidatedPluginManifest,
 ) -> Result<PluginRuntimeView, String> {
     let resolved_exec = resolve_plugin_executable(manifest);
-    if resolved_exec.is_some() {
-        stop_running_process(&manifest.id).await;
-    }
-    let existing = get_or_init_registry_state(&manifest.id);
+    stop_running_process(&manifest.id).await;
+    let existing = read_registry_state(&manifest.id);
     let port = allocate_plugin_port(&manifest.id, existing.allocated_port)?;
 
-    let _ = update_registry_state(&manifest.id, true, port, "running", "", false);
-    let (scoped_token, _) =
-        mint_scoped_plugin_token(manifest, Some(DEFAULT_PLUGIN_TOKEN_TTL_SECS))?;
-
-    let mut spawned_managed = false;
+    let state = update_registry_state(&manifest.id, true, port, "running", "", true);
+    if !state.enabled || state.allocated_port != port || state.token_epoch == existing.token_epoch {
+        return Err("Could not enable plugin registry entry".into());
+    }
+    let spawned_managed = resolved_exec.is_some();
     if let Some((program, args)) = resolved_exec {
-        let mut cmd = Command::new(&program);
-        cmd.args(&args);
-        configure_unprivileged_command(&mut cmd, manifest, port, &scoped_token);
-        match cmd.spawn() {
-            Ok(child) => {
-                spawned_managed = true;
-                let pgid = child.id().and_then(|id| i32::try_from(id).ok());
-                if let Ok(mut map) = ACTIVE_PROCESSES.lock() {
-                    map.insert(
-                        manifest.id.clone(),
-                        ActivePluginProcess { child, port, pgid },
-                    );
-                }
-            }
-            Err(err) => {
-                let err_msg = format!("Failed to spawn plugin binary: {}", err);
-                let _ = update_registry_state(&manifest.id, false, port, "error", &err_msg, true);
-                revoke_all_tokens_for_plugin(&manifest.id);
-                return Err(err_msg);
-            }
+        let outcome = (|| -> Result<(), String> {
+            let token_file = runtime_token_path(&manifest.id)?;
+            let runtime_id = Uuid::new_v4();
+            let (token, _) =
+                sign_plugin_token(manifest, state.token_epoch, None, Some(runtime_id))?;
+            write_runtime_token(&token_file, &token).map_err(|error| error.to_string())?;
+            let mut cmd = Command::new(&program);
+            cmd.args(&args);
+            configure_unprivileged_command(&mut cmd, manifest, port, "");
+            cmd.env_remove("AETHERFLOW_PLUGIN_TOKEN")
+                .env("AETHERFLOW_PLUGIN_TOKEN_FILE", &token_file);
+            let child = cmd.spawn().map_err(|error| {
+                let _ = fs::remove_file(&token_file);
+                format!("Failed to spawn plugin binary: {error}")
+            })?;
+            let pgid = child.id().and_then(|id| i32::try_from(id).ok());
+            let monitor = tokio::spawn(monitor_plugin(
+                manifest.clone(),
+                port,
+                token_file.clone(),
+                runtime_id,
+                state.token_epoch,
+            ));
+            ACTIVE_PROCESSES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    manifest.id.clone(),
+                    ActivePluginProcess {
+                        child,
+                        port,
+                        pgid,
+                        token_file: Some(token_file),
+                        runtime_id: Some(runtime_id),
+                        monitor: Some(monitor),
+                    },
+                );
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            update_registry_state(&manifest.id, false, port, "error", &error, true);
+            revoke_all_tokens_for_plugin(&manifest.id);
+            return Err(error);
         }
     }
 
@@ -1192,7 +1330,11 @@ pub async fn start_plugin_instance(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    let state = get_or_init_registry_state(&manifest.id);
+    PLUGIN_HEALTH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(manifest.id.clone(), (port, healthy));
+    let state = read_registry_state(&manifest.id);
     Ok(build_runtime_view(manifest, &state, healthy))
 }
 
@@ -1212,7 +1354,18 @@ async fn stop_running_process(plugin_id: &str) {
         .lock()
         .ok()
         .and_then(|mut map| map.remove(plugin_id));
+    PLUGIN_HEALTH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(plugin_id);
     if let Some(mut proc_entry) = maybe_proc {
+        if let Some(monitor) = proc_entry.monitor.take() {
+            monitor.abort();
+            let _ = monitor.await;
+        }
+        if let Some(path) = proc_entry.token_file.take() {
+            let _ = fs::remove_file(path);
+        }
         #[cfg(unix)]
         send_signal_to_process_group(proc_entry.pgid, libc::SIGTERM);
         let exited = tokio::time::timeout(Duration::from_secs(2), proc_entry.child.wait())
@@ -1266,11 +1419,11 @@ async fn run_plugin_stop_hook(manifest: &ValidatedPluginManifest, port: u16) {
 pub async fn stop_plugin_instance(
     manifest: &ValidatedPluginManifest,
 ) -> Result<PluginRuntimeView, String> {
-    let existing = get_or_init_registry_state(&manifest.id);
+    let existing = read_registry_state(&manifest.id);
     run_plugin_stop_hook(manifest, existing.allocated_port).await;
     stop_running_process(&manifest.id).await;
     revoke_all_tokens_for_plugin(&manifest.id);
-    let existing = get_or_init_registry_state(&manifest.id);
+    let existing = read_registry_state(&manifest.id);
     let state = update_registry_state(
         &manifest.id,
         false,
@@ -1279,13 +1432,16 @@ pub async fn stop_plugin_instance(
         "",
         true,
     );
+    if state.enabled || state.token_epoch == existing.token_epoch {
+        return Err("Could not disable plugin registry entry".into());
+    }
     Ok(build_runtime_view(manifest, &state, false))
 }
 
 pub async fn restart_plugin_instance(
     manifest: &ValidatedPluginManifest,
 ) -> Result<PluginRuntimeView, String> {
-    let _ = stop_plugin_instance(manifest).await;
+    stop_plugin_instance(manifest).await?;
     start_plugin_instance(manifest).await
 }
 
@@ -1357,64 +1513,46 @@ fn find_validated_plugin(plugin_id: &str) -> Result<ValidatedPluginManifest, Box
 // HTTP Handlers: Discovery, Control, Token Minting, UI & Reverse Proxy
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn collect_plugin_runtime_views(
-    manifests: &[ValidatedPluginManifest],
-) -> Vec<PluginRuntimeView> {
-    let mut ordered_views: Vec<Option<PluginRuntimeView>> = vec![None; manifests.len()];
-    let mut join_set: JoinSet<(usize, bool)> = JoinSet::new();
-
-    for (index, manifest) in manifests.iter().enumerate() {
-        let state = get_or_init_registry_state(&manifest.id);
-        if !state.enabled || state.allocated_port == 0 {
-            ordered_views[index] = Some(build_runtime_view(manifest, &state, false));
-            continue;
-        }
-        while join_set.len() >= MAX_CONCURRENT_HEALTH_PROBES {
-            let Some(joined) = join_set.join_next().await else {
-                break;
-            };
-            if let Ok((done_index, healthy)) = joined {
-                let done_manifest = &manifests[done_index];
-                let refreshed_state = get_or_init_registry_state(&done_manifest.id);
-                ordered_views[done_index] =
-                    Some(build_runtime_view(done_manifest, &refreshed_state, healthy));
-            }
-        }
-        let allocated_port = state.allocated_port;
-        let health_path = manifest.backend.health_path.clone();
-        join_set.spawn(async move {
-            let healthy = probe_plugin_health(allocated_port, &health_path)
-                .await
-                .unwrap_or(false);
-            (index, healthy)
-        });
-    }
-
-    while let Some(joined) = join_set.join_next().await {
-        if let Ok((done_index, healthy)) = joined {
-            let done_manifest = &manifests[done_index];
-            let refreshed_state = get_or_init_registry_state(&done_manifest.id);
-            ordered_views[done_index] =
-                Some(build_runtime_view(done_manifest, &refreshed_state, healthy));
-        }
-    }
-
-    ordered_views.into_iter().flatten().collect()
-}
-
-pub async fn list_plugins_handler() -> Response {
-    let (manifests, rejected) = discover_plugins();
-    let views = collect_plugin_runtime_views(&manifests).await;
-    let rejected_items: Vec<serde_json::Value> = rejected
-        .into_iter()
-        .map(|(id, error)| serde_json::json!({ "id": id, "error": error }))
-        .collect();
-
-    Json(serde_json::json!({
-        "plugins": views,
-        "rejected": rejected_items,
-    }))
-    .into_response()
+pub async fn list_plugins_handler(Extension(user): Extension<AuthUser>) -> Response {
+    let admin = user.role == "admin";
+    tokio::task::spawn_blocking(move || {
+        let (manifests, rejected) = discover_plugins();
+        let health = PLUGIN_HEALTH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let views: Vec<_> = manifests
+            .iter()
+            .map(|manifest| {
+                let state = read_registry_state(&manifest.id);
+                let healthy = state.enabled
+                    && health.get(&manifest.id) == Some(&(state.allocated_port, true));
+                let view = build_runtime_view(manifest, &state, healthy);
+                let mut value = serde_json::json!(view);
+                if !admin {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.remove("allocated_port");
+                        fields.remove("last_error");
+                    }
+                }
+                value
+            })
+            .collect();
+        let rejected: Vec<_> = rejected
+            .into_iter()
+            .filter(|_| admin)
+            .map(|(id, error)| serde_json::json!({ "id": id, "error": error }))
+            .collect();
+        Json(serde_json::json!({ "plugins": views, "rejected": rejected })).into_response()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PLUGIN_DISCOVERY_ERROR",
+            "Plugin discovery failed",
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1430,6 +1568,10 @@ pub async fn control_plugin_handler(
     headers: HeaderMap,
     Json(req): Json<PluginControlRequest>,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
+    let _lifecycle = PLUGIN_LIFECYCLE.lock().await;
     let manifest = match find_validated_plugin(&id) {
         Ok(m) => m,
         Err(response) => return *response,
@@ -1446,7 +1588,7 @@ pub async fn control_plugin_handler(
                 ),
             );
         }
-        let existing = get_or_init_registry_state(&manifest.id);
+        let existing = read_registry_state(&manifest.id);
         let _ = update_registry_state(
             &manifest.id,
             existing.enabled,
@@ -1464,7 +1606,7 @@ pub async fn control_plugin_handler(
         "restart" => restart_plugin_instance(&manifest).await,
         "revoke_tokens" => {
             revoke_all_tokens_for_plugin(&manifest.id);
-            let existing = get_or_init_registry_state(&manifest.id);
+            let existing = read_registry_state(&manifest.id);
             let updated = update_registry_state(
                 &manifest.id,
                 existing.enabled,
@@ -1527,6 +1669,9 @@ pub async fn mint_plugin_token_handler(
     headers: HeaderMap,
     body: Option<Json<MintPluginTokenRequest>>,
 ) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     let manifest = match find_validated_plugin(&id) {
         Ok(m) => m,
         Err(response) => return *response,
@@ -1565,12 +1710,21 @@ pub async fn mint_plugin_token_handler(
     }
 }
 
-pub async fn serve_plugin_ui_handler(Path(id): Path<String>) -> Response {
+pub async fn serve_plugin_ui_handler(
+    Path(id): Path<String>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Response {
     let manifest = match find_validated_plugin(&id) {
         Ok(m) => m,
         Err(response) => return *response,
     };
-    let state = get_or_init_registry_state(&manifest.id);
+    if plugin_requires_admin(&manifest.permissions) {
+        if let Err(response) = crate::auth::require_admin(&auth_user) {
+            return *response;
+        }
+    }
+
+    let state = read_registry_state(&manifest.id);
     if !state.enabled {
         return api_error(
             StatusCode::FORBIDDEN,
@@ -1710,9 +1864,9 @@ fn render_default_sandboxed_plugin_ui(
         pluginId,
         path: 'status',
         method: 'GET'
-      }}, '*');
+      }}, window.location.origin);
     }});
-    window.parent.postMessage({{ type: 'AF_PLUGIN_READY', pluginId }}, '*');
+    window.parent.postMessage({{ type: 'AF_PLUGIN_READY', pluginId }}, window.location.origin);
   </script>
 </body>
 </html>"#,
@@ -1837,7 +1991,13 @@ async fn proxy_plugin_request_inner(
         Err(response) => return *response,
     };
 
-    let state = get_or_init_registry_state(&manifest.id);
+    if plugin_requires_admin(&manifest.permissions) {
+        if let Err(response) = crate::auth::require_admin(&auth_user) {
+            return *response;
+        }
+    }
+
+    let state = read_registry_state(&manifest.id);
     if !state.enabled || state.status == "stopped" {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2217,52 +2377,29 @@ pub(crate) mod tests {
             }
         }
         for route in [
-            "/api/v1/auth/services",
             "/api/v1/admin/services/restart/status",
             "/api/admin/system/update/status",
-            "/api/v1/auth/packages/demo/progress",
+            "/api/v1/ingress/configs",
             "/api/v1/admin/*",
-        ] {
-            for method in ["GET", "HEAD"] {
-                assert!(
-                    normalize_scope_entry(
-                        &RawScopeEntry::Structured(PluginScopeRule {
-                            method: method.into(),
-                            route: route.into()
-                        }),
-                        &["system:read".into()]
-                    )
-                    .is_ok(),
-                    "{method} {route}"
-                );
-            }
-        }
-        assert!(normalize_scope_entry(
-            &RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".into()),
-            &["system:read".into()]
-        )
-        .is_err());
-        assert!(normalize_scope_entry(
-            &RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".into()),
-            &["notifications:write".into()]
-        )
-        .is_ok());
-        assert!(normalize_scope_entry(
-            &RawScopeEntry::Simple("POST /api/v1/admin/services-extra/action".into()),
-            &["demo:write".into()]
-        )
-        .is_ok());
-        for route in [
-            "/api/v1/admin/packages/demo/check-update",
-            "/api/admin/packages/updates/check",
+            "/api/v1/auth/*",
         ] {
             assert!(normalize_scope_entry(
-                &RawScopeEntry::Simple(format!("POST {route}")),
-                &["packages:write".into()]
+                &RawScopeEntry::Simple(format!("GET {route}")),
+                &["telemetry:read".into()],
             )
-            .is_ok());
-            assert!(!is_plugin_request_denied(&Method::POST, route));
-            assert!(is_plugin_request_denied(&Method::DELETE, route));
+            .is_err());
+        }
+        assert!(normalize_scope_entry(
+            &RawScopeEntry::Simple("GET /api/auth/services".into()),
+            &["telemetry:read".into()],
+        )
+        .is_ok());
+        for permission in ["system:read", "demo:write", "services:control"] {
+            assert!(normalize_scope_entry(
+                &RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".into()),
+                &[permission.into()],
+            )
+            .is_err());
         }
     }
 
@@ -2302,20 +2439,66 @@ pub(crate) mod tests {
                 }
             }
         }
-        for path in [
-            "/api/v1/auth/services",
-            "/api/v1/admin/services/restart/status",
-            "/api/admin/system/update/status",
-            "/api/v1/auth/packages/demo/progress",
+        for (path, allowed) in [
+            ("/api/v1/auth/services", true),
+            ("/api/v1/admin/services/restart/status", false),
+            ("/api/admin/system/update/status", false),
+            ("/api/v1/ingress/configs", false),
+            ("/api/ingress/configs", false),
+            ("/api/v1/auth/packages/demo/progress", true),
         ] {
             for method in [Method::GET, Method::HEAD] {
                 claims.scopes = vec![PluginScopeRule {
                     method: method.to_string(),
                     route: "/api/*".into(),
                 }];
-                assert!(plugin_claims_allow_request(&claims, &method, path));
+                assert_eq!(
+                    plugin_claims_allow_request(&claims, &method, path),
+                    allowed,
+                    "{path}"
+                );
             }
         }
+        assert!(plugin_requires_admin(&["services:control".into()]));
+        assert!(plugin_requires_admin(&["unknown:admin".into()]));
+        assert!(!plugin_requires_admin(&["telemetry:read".into()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_runtime_token_replace_is_private_and_does_not_follow_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = env::temp_dir().join(format!("af-runtime-token-{}", Uuid::new_v4()));
+        let dir = root.join("plugin-tokens");
+        let path = dir.join("fixture.token");
+        write_runtime_token(&path, "first").unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let mut old_reader = fs::File::open(&path).unwrap();
+        write_runtime_token(&path, "rotated").unwrap();
+        let mut old_contents = String::new();
+        std::io::Read::read_to_string(&mut old_reader, &mut old_contents).unwrap();
+        assert_eq!(old_contents, "first");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "rotated");
+
+        let outside = root.join("untouched");
+        fs::write(&outside, "original").unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+        write_runtime_token(&path, "replacement").unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "original");
+        assert!(!fs::symlink_metadata(path).unwrap().is_symlink());
+        let symlink_dir = root.join("linked");
+        symlink(&dir, &symlink_dir).unwrap();
+        assert!(write_runtime_token(&symlink_dir.join("fixture.token"), "rejected").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2371,7 +2554,7 @@ pub(crate) mod tests {
         assert!(normalize_scope_entry(&post_scope, &read_only_perms).is_err());
 
         // Write permissions allow explicit POST scope on non-denied route
-        let write_perms = vec!["services:control:write".to_string()];
+        let write_perms = vec!["notifications:write".to_string()];
         let valid_post =
             RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".to_string());
         let rules = normalize_scope_entry(&valid_post, &write_perms).unwrap();
@@ -2420,90 +2603,71 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_plugins_concurrent_health_probing_preserves_order_and_bounds_latency() {
+    async fn plugin_listing_uses_cached_health_and_redacts_operator_details() {
         if run_plugin_test_in_subprocess() {
             return;
         }
-        use axum::routing::get as axum_get;
-        use std::time::Instant;
-
-        let _env_guard = test_env_lock().lock().await;
-        let _ = ensure_shared_test_db();
-
-        let tmp = std::env::temp_dir().join(format!("af-plugin-concurrent-{}", Uuid::new_v4()));
-        fs::create_dir_all(&tmp).unwrap();
-
-        let plugin_ids = [
-            "plugin-alpha",
-            "plugin-beta",
-            "plugin-gamma",
-            "plugin-delta",
-        ];
-        let mut manifests = Vec::new();
-        let mut next_candidate_port = 21200u16;
-
-        for plugin_id in plugin_ids {
-            let mut bound_listener = None;
-            let start_port = next_candidate_port;
-            let mut allocated_port = start_port;
-            for candidate in start_port..=21400 {
-                if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", candidate)).await
-                {
-                    allocated_port = candidate;
-                    next_candidate_port = candidate + 1;
-                    bound_listener = Some(listener);
-                    break;
-                }
-            }
-            let listener = bound_listener.expect("bind concurrent test listener");
-            tokio::spawn(async move {
-                let app = axum::Router::new().route(
-                    "/healthz",
-                    axum_get(|| async {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        Json(serde_json::json!({"status": "ok"}))
-                    }),
-                );
-                let _ = axum::serve(listener, app).await;
-            });
-
-            let _ = update_registry_state(plugin_id, true, allocated_port, "running", "", false);
-            manifests.push(ValidatedPluginManifest {
-                id: plugin_id.to_string(),
-                name: plugin_id.to_string(),
-                version: "1.0.0".to_string(),
-                sdk: "rust".to_string(),
-                contract_version: "v1".to_string(),
-                runtime_status: "managed".to_string(),
-                description: String::new(),
-                author: String::new(),
-                permissions: Vec::new(),
-                granted_scopes: Vec::new(),
-                lifecycle_hooks: PluginLifecycleHooks::default(),
-                backend: PluginBackendSpec {
-                    health_path: "/healthz".to_string(),
-                    port_allocation: "dynamic".to_string(),
-                    ..Default::default()
-                },
-                frontend: PluginFrontendSpec::default(),
-                plugin_dir: tmp.join(plugin_id),
-            });
-        }
-
-        let started_at = Instant::now();
-        let views = collect_plugin_runtime_views(&manifests).await;
-        let elapsed = started_at.elapsed();
-
-        let returned_ids: Vec<&str> = views.iter().map(|view| view.id.as_str()).collect();
-        assert_eq!(returned_ids, plugin_ids);
-        assert!(views.iter().all(|view| view.healthy));
-        assert!(
-            elapsed < Duration::from_millis(700),
-            "expected concurrent health probes to complete under 700ms, took {:?}",
-            elapsed
+        let db = ensure_shared_test_db();
+        let root = db.parent().unwrap().join("list-plugins");
+        let plugin = root.join("test-plugin");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.manifest.json"),
+            r#"{
+            "id": "test-plugin", "name": "Fixture", "version": "1.0.0", "sdk": "rust",
+            "backend": {"health_path": "/healthz"}
+        }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("rejected-plugin")).unwrap();
+        fs::write(root.join("rejected-plugin/plugin.manifest.json"), "invalid").unwrap();
+        env::set_var("AETHERFLOW_PLUGINS_DIR", &root);
+        update_registry_state(
+            "test-plugin",
+            true,
+            21099,
+            "running",
+            "private diagnostic",
+            false,
         );
+        PLUGIN_HEALTH
+            .lock()
+            .unwrap()
+            .insert("test-plugin".into(), (21099, true));
 
-        let _ = fs::remove_dir_all(&tmp);
+        let writer = af_db::get_conn().unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for role in ["user", "admin"] {
+            let user = AuthUser {
+                user_id: 1,
+                username: "fixture".into(),
+                role: role.into(),
+                jti: String::new(),
+                plugin_id: None,
+                plugin_scopes: Vec::new(),
+            };
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                list_plugins_handler(Extension(user)),
+            )
+            .await
+            .expect("plugin listing does not wait on the writer");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let plugin = &result["plugins"][0];
+            assert_eq!(plugin["id"], "test-plugin");
+            assert_eq!(plugin["healthy"], true);
+            assert_eq!(plugin.get("allocated_port").is_some(), role == "admin");
+            assert_eq!(plugin.get("last_error").is_some(), role == "admin");
+            assert_eq!(
+                result["rejected"].as_array().unwrap().is_empty(),
+                role != "admin"
+            );
+        }
+        writer.execute_batch("ROLLBACK").unwrap();
     }
 
     #[cfg(unix)]
@@ -2545,6 +2709,9 @@ pub(crate) mod tests {
                     child,
                     port: 21111,
                     pgid,
+                    token_file: None,
+                    runtime_id: None,
+                    monitor: None,
                 },
             );
         }

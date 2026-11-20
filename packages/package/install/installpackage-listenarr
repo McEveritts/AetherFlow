@@ -109,7 +109,8 @@ if [[ -z "${ASSET_URL}" ]]; then
     exit 1
 fi
 
-TMP_ZIP="$(mktemp --suffix=.zip)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_ZIP="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/listenarr-XXXXXX.zip")"
 TMP_EXTRACT="$(mktemp -d /opt/.listenarr-build.XXXXXX)"
 chmod 755 "$TMP_EXTRACT"
 BACKUP_DIR=""
@@ -166,7 +167,7 @@ if [[ ! -s "$STAGE_SRC/Listenarr.Api" && ! -s "$STAGE_SRC/Listenarr.dll" ]]; the
     STAGE_SRC="${RELEASE_DIRS[0]}"
 fi
 [[ -s "$STAGE_SRC/Listenarr.Api" || -s "$STAGE_SRC/Listenarr.dll" ]] || { print_error "Listenarr release is missing its runtime"; exit 1; }
-chmod +x "${STAGE_SRC}/Listenarr.Api" 2>/dev/null || true
+chmod 0755 "${STAGE_SRC}/Listenarr.Api" 2>/dev/null || true
 queue_app_version "$INSTALL_DIR/.af-version" "${LATEST_TAG#v}"
 
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-listenarr.XXXXXX)"
@@ -218,6 +219,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now listenarr.service

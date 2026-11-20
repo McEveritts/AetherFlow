@@ -213,7 +213,7 @@ bash scripts/run_embedded_e2e.sh --binary backend-rs/target/release/aetherflow-a
 | **F30** | Modernize Package Dependencies | `setup/modules/02-packages.sh` removes `software-properties-common`, updates `pcregrep` -> `pcre2-utils`, `libncurses-dev`, drops dead packages. |
 | **F31** | Keyring Migration Across packages/ | Zero `apt-key` occurrences. Package scripts use `/usr/share/keyrings/*.gpg` with `[signed-by=...]`. |
 | **F32** | Rust API & External WASM Build Pipeline | `scripts/build_wasm_frontend.sh --stage` + `modern_stack.sh` stage `web/dist/` alongside `aetherflow-api`, `af`, and `speedtest-backend` (`backend-rs/crates/af-api/src/embed.rs` resolves `STATIC_DIR` or executable-adjacent `web/dist`). |
-| **F33** | Systemd Privilege Units | `setup/templates/sysd/` contains `aetherflow-api.template` (`ProtectSystem=strict`, `NoNewPrivileges=yes`, user `aetherflow`) and `aetherflow-runner.template` (user `root`). |
+| **F33** | Systemd Privilege Units | `deploy/systemd/` contains canonical `aetherflow-api.service` (`ProtectSystem=strict`, `NoNewPrivileges=yes`, user `aetherflow`) and `aetherflow-runner.service` (user `root`). |
 | **F34** | Sudoers & PM2 Purge | No `/etc/sudoers.d/aetherflow` with `NOPASSWD: ALL`. No root PM2 commands. |
 | **F35** | Shell Script Line Endings & Syntax | 100% of shell scripts in `setup/`, `deploy/`, `packages/` use LF line endings and pass `bash -n` syntax validation. |
 | **F36** | Automated E2E Test Suite | 4-tier automated test suite covering all 37 features across category-partition, boundary, pairwise, and real-world scenarios. |

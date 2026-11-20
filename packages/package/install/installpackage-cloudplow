@@ -215,6 +215,7 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/cloudplow.service
 UNIT_WRITTEN=1
 
 af_logged systemctl daemon-reload

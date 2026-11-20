@@ -274,6 +274,59 @@ fn package_lock_installed(package: &Package) -> anyhow::Result<bool> {
     }
 }
 
+fn is_tls_cert_ready_for_domain(raw_domain: &str) -> bool {
+    let domain = raw_domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || domain.contains('/') || domain.contains("..") {
+        return false;
+    }
+
+    let mut candidate_domains = vec![domain.clone()];
+    let base_domain = resolve_base_domain()
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if !base_domain.is_empty()
+        && base_domain != domain
+        && domain.ends_with(&format!(".{base_domain}"))
+    {
+        candidate_domains.push(base_domain);
+    }
+    if let Some((_, parent)) = domain.split_once('.') {
+        if parent.contains('.') && !candidate_domains.iter().any(|d| d == parent) {
+            candidate_domains.push(parent.to_string());
+        }
+    }
+
+    for cand in &candidate_domains {
+        let le_rel = format!("/etc/letsencrypt/live/{cand}/fullchain.pem");
+        if mutators::resolve_config_path(&le_rel).is_file()
+            || resolve_filesystem_path(&le_rel).is_file()
+        {
+            return true;
+        }
+    }
+
+    for ssl_dir in [
+        mutators::resolve_config_path("/etc/ssl/AetherFlow"),
+        resolve_filesystem_path("/etc/ssl/AetherFlow"),
+    ] {
+        if let Ok(entries) = fs::read_dir(&ssl_dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if candidate_domains
+                    .iter()
+                    .any(|cand| fname.starts_with(cand.as_str()))
+                    && entry.path().is_file()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn launch_target(
     app: &str,
     port: i32,
@@ -286,21 +339,39 @@ fn launch_target(
     } else {
         ""
     };
+    let enabled_vhost = mutators::resolve_config_path(&format!(
+        "/etc/apache2/sites-enabled/aetherflow-app-{app}.conf"
+    ));
     if let Some(ingress) = ingress.filter(|ing| {
         ing.external_access_enabled
             && af_models::valid_ingress_hostname(&ing.public_domain)
             && (1..=65535).contains(&ing.listen_port)
     }) {
-        let scheme = if ingress.tls_enabled { "https" } else { "http" };
         let domain = &ingress.public_domain;
+        if !ingress.tls_enabled {
+            return (
+                Some(format!("http://{domain}{path}")),
+                Some("public".to_string()),
+            );
+        }
+        if is_tls_cert_ready_for_domain(domain) {
+            return (
+                Some(format!("https://{domain}{path}")),
+                Some("public".to_string()),
+            );
+        }
+        if enabled_vhost.is_file() {
+            let internal = resolve_app_internal_domain(app);
+            return (
+                Some(format!("http://{internal}{path}")),
+                Some("internal".to_string()),
+            );
+        }
         return (
-            Some(format!("{scheme}://{domain}{path}")),
+            Some(format!("http://{domain}{path}")),
             Some("public".to_string()),
         );
     }
-    let enabled_vhost = mutators::resolve_config_path(&format!(
-        "/etc/apache2/sites-enabled/aetherflow-app-{app}.conf"
-    ));
     if enabled_vhost.is_file() {
         let internal = resolve_app_internal_domain(app);
         return (
@@ -333,7 +404,7 @@ fn launch_target(
     };
     if ip.is_loopback() || ip.is_unspecified() {
         return (None, None);
-    }
+    };
     let address = std::net::SocketAddr::new(ip, port as u16);
     (
         Some(format!("{scheme}://{address}{path}")),
@@ -345,7 +416,7 @@ fn populate_package_statuses(
     pkgs: &mut [Package],
     jobs: &PackageJobSnapshot,
 ) -> anyhow::Result<()> {
-    let update_map = get_package_update_map();
+    let update_map = workers::get_package_update_map();
     let ingress: HashMap<_, _> = af_db::get_all_app_ingress_configs()
         .unwrap_or_default()
         .into_iter()
@@ -359,6 +430,8 @@ fn populate_package_statuses(
             p.status = job.status.clone();
         } else if installed {
             p.status = "installed".to_string();
+        } else if p.status.eq_ignore_ascii_case("retired") {
+            p.status = "retired".to_string();
         } else {
             p.status = "uninstalled".to_string();
         }
@@ -378,55 +451,12 @@ fn populate_package_statuses(
             p.latest_version = u.latest_version.clone();
             p.update_available = u.update_available;
             p.update_checked_at = u.checked_at.clone();
-            p.update_url = u.update_url.clone();
-            p.update_error = u.last_error.clone();
+            p.update_url = u.release_url.clone();
+            p.update_error = workers::public_update_error(&u.error);
         }
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AppUpdateRecord {
-    pub package_name: String,
-    pub installed_version: String,
-    pub latest_version: String,
-    pub update_available: bool,
-    pub update_url: String,
-    pub checked_at: String,
-    pub last_error: String,
-    pub source_key: String,
-}
-
-pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
-    let mut map = HashMap::new();
-    let Ok(conn) = af_db::get_conn() else {
-        return map;
-    };
-    let _ = conn
-        .execute_batch("ALTER TABLE app_updates ADD COLUMN source_key TEXT NOT NULL DEFAULT '';");
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT package_name, installed_version, latest_version, update_available, update_url, COALESCE(CAST(checked_at AS TEXT), ''), last_error, COALESCE(source_key, '') FROM app_updates",
-    ) else {
-        return map;
-    };
-    if let Ok(rows) = stmt.query_map([], |r| {
-        Ok(AppUpdateRecord {
-            package_name: r.get(0)?,
-            installed_version: r.get(1)?,
-            latest_version: r.get(2)?,
-            update_available: r.get(3)?,
-            update_url: r.get(4)?,
-            checked_at: r.get(5)?,
-            last_error: r.get(6)?,
-            source_key: r.get(7)?,
-        })
-    }) {
-        for r in rows.flatten() {
-            map.insert(r.package_name.clone(), r);
-        }
-    }
-    map
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -698,89 +728,6 @@ fn package_is_physically_installed(app: &str) -> bool {
 
 pub fn is_package_installed(app: &str) -> bool {
     package_is_physically_installed(app)
-}
-
-pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
-    let host = host_header
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    if host.is_empty() || host == "localhost" || host == "127.0.0.1" {
-        return None;
-    }
-
-    // 1. Check `<app>.aether.local`
-    if let Some(app_prefix) = host.strip_suffix(".aether.local") {
-        if !app_prefix.is_empty() && !app_prefix.contains('.') {
-            if let Some(bp) = get_blueprint(app_prefix) {
-                let active_config = af_db::get_app_ingress_config(&bp.app_name).ok().flatten();
-                if active_config.is_none() && !package_is_physically_installed(&bp.app_name) {
-                    return None;
-                }
-                let port = match active_config {
-                    Some(c) => {
-                        if !(1..=65535).contains(&c.listen_port) {
-                            return None;
-                        }
-                        c.listen_port
-                    }
-                    None => {
-                        let meta = mutators::get_app_runtime_meta(&bp.app_name);
-                        if meta.configured_port > 0 {
-                            meta.configured_port
-                        } else {
-                            bp.default_port
-                        }
-                    }
-                };
-                if (1..=65535).contains(&port) {
-                    return Some((bp.app_name, port));
-                }
-            }
-        }
-        return None;
-    }
-
-    // 2. Check configured `public_domain`
-    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
-    for cfg in &configs {
-        if cfg.external_access_enabled
-            && !cfg.public_domain.trim().is_empty()
-            && cfg.public_domain.trim().eq_ignore_ascii_case(&host)
-            && (1..=65535).contains(&cfg.listen_port)
-        {
-            return Some((cfg.app_name.clone(), cfg.listen_port));
-        }
-    }
-
-    // 3. Check `<app>.<baseDomain>`: fail closed unless an active config explicitly enables external access.
-    let base = resolve_base_domain();
-    if !base.is_empty() {
-        let suffix = format!(".{}", base);
-        if let Some(app_prefix) = host.strip_suffix(&suffix) {
-            if !app_prefix.is_empty() && !app_prefix.contains('.') {
-                if let Some(bp) = get_blueprint(app_prefix) {
-                    let active_config = configs
-                        .into_iter()
-                        .find(|c| c.app_name.eq_ignore_ascii_case(&bp.app_name))
-                        .or_else(|| af_db::get_app_ingress_config(&bp.app_name).ok().flatten());
-                    let cfg = active_config?;
-                    if !cfg.external_access_enabled || !(1..=65535).contains(&cfg.listen_port) {
-                        return None;
-                    }
-                    let pub_dom = cfg.public_domain.trim();
-                    if !pub_dom.is_empty() && !pub_dom.eq_ignore_ascii_case(&host) {
-                        return None;
-                    }
-                    return Some((cfg.app_name, cfg.listen_port));
-                }
-            }
-        }
-    }
-
-    None
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2681,8 +2628,9 @@ pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDas
         provider: "plex".to_string(),
         name: "Plex Media Server".to_string(),
         url: "http://127.0.0.1:32400".to_string(),
-        status: "coming_soon".to_string(),
-        support_stage: "coming_soon".to_string(),
+        enabled: true,
+        status: "unconfigured".to_string(),
+        support_stage: "active".to_string(),
         ..Default::default()
     };
 
@@ -2923,16 +2871,34 @@ mod tests {
             launch_target("qbittorrent", 8080, "/", None, "192.168.1.9"),
             (None, None)
         );
-        let ingress = af_models::AppIngressConfig {
+        let ingress_http = af_models::AppIngressConfig {
             public_domain: "qbit.example.test".to_owned(),
+            external_access_enabled: true,
+            tls_enabled: false,
+            listen_port: 8080,
+            ..Default::default()
+        };
+        let launch_http =
+            launch_target("qbittorrent", 8080, "/", Some(&ingress_http), "192.168.1.9");
+        assert_eq!(launch_http.0.as_deref(), Some("http://qbit.example.test"));
+        assert_eq!(launch_http.1.as_deref(), Some("public"));
+
+        // When tls_enabled=true and no cert exists on disk yet, keep accurate http:// scheme instead of broken https://
+        let ingress_tls = af_models::AppIngressConfig {
+            public_domain: "qbit-unprovisioned.example.test".to_owned(),
             external_access_enabled: true,
             tls_enabled: true,
             listen_port: 8080,
             ..Default::default()
         };
-        let launch = launch_target("qbittorrent", 8080, "/", Some(&ingress), "192.168.1.9");
-        assert_eq!(launch.0.as_deref(), Some("https://qbit.example.test"));
-        assert_eq!(launch.1.as_deref(), Some("public"));
+        let launch_unready =
+            launch_target("qbittorrent", 8080, "/", Some(&ingress_tls), "192.168.1.9");
+        assert_eq!(
+            launch_unready.0.as_deref(),
+            Some("http://qbit-unprovisioned.example.test")
+        );
+        assert_eq!(launch_unready.1.as_deref(), Some("public"));
+
         let launch = launch_target("direct-launch-test", 8989, "/app", None, "192.168.1.9");
         assert_eq!(launch.0.as_deref(), Some("http://192.168.1.9:8989/app"));
         assert_eq!(launch.1.as_deref(), Some("network"));
@@ -3563,31 +3529,48 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_app_target_for_host_enforces_external_access_toggle() {
-        let name = "tests::test_resolve_app_target_for_host_enforces_external_access_toggle";
+    fn test_retired_status_tls_readiness_and_sanitized_update_map() {
+        let name = "tests::test_retired_status_tls_readiness_and_sanitized_update_map";
         if !crate::inventory_regressions::isolated(name) {
             return;
         }
-        let root = env::temp_dir().join(format!("af-ingress-toggle-{}", uuid::Uuid::new_v4()));
+        let root = env::temp_dir().join(format!("af-retired-tls-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("install")).unwrap();
         fs::create_dir_all(root.join("var/lib/aetherflow")).unwrap();
+        fs::create_dir_all(root.join("etc/apache2/sites-enabled")).unwrap();
+        fs::create_dir_all(root.join("etc/letsencrypt/live/sonarr.example.com")).unwrap();
+
         let catalog = root.join("packages.json");
         fs::write(
             &catalog,
-            serde_json::json!([{
-                "name": "sonarr",
-                "label": "Sonarr",
-                "description": "fixture",
-                "category": "Media",
-                "lock_file": "/install/.sonarr.lock",
-                "default_port": 8989,
-                "service_type": "systemd",
-                "service_name": "sonarr"
-            }])
+            serde_json::json!([
+                {
+                    "name": "readarr",
+                    "label": "Readarr",
+                    "description": "Retired eBook manager",
+                    "category": "Media",
+                    "lock_file": "/install/.readarr.lock",
+                    "default_port": 8787,
+                    "service_type": "systemd",
+                    "service_name": "readarr",
+                    "status": "retired"
+                },
+                {
+                    "name": "sonarr",
+                    "label": "Sonarr",
+                    "description": "Series manager",
+                    "category": "Media",
+                    "lock_file": "/install/.sonarr.lock",
+                    "default_port": 8989,
+                    "service_type": "systemd",
+                    "service_name": "sonarr",
+                    "status": "uninstalled"
+                }
+            ])
             .to_string(),
         )
         .unwrap();
-        fs::write(root.join("install/.sonarr.lock"), "installed").unwrap();
+
         let db = root.join("var/lib/aetherflow/aetherflow.sqlite");
         env::set_var("AETHERFLOW_FS_ROOT", &root);
         env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
@@ -3598,45 +3581,81 @@ mod tests {
         }
         af_db::init_db().unwrap();
 
-        // 1. No ingress config yet: .aether.local resolves for installed app, external fails closed
-        assert_eq!(
-            resolve_app_target_for_host("sonarr.aether.local"),
-            Some(("sonarr".to_string(), 8989))
-        );
-        assert_eq!(resolve_app_target_for_host("sonarr.example.com"), None);
+        // Seed raw internal SQLite error into `app_updates` to prove `public_update_error` sanitizes it
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO app_updates (package_name, installed_version, latest_version, update_available, update_url, last_error)
+                 VALUES ('sonarr', '4.0.1', '4.0.9', 1, 'https://github.com/Sonarr/Sonarr/releases/tag/v4.0.9', 'reqwest connect error at /var/lib/secret/internal.sock: ECONNREFUSED')",
+                [],
+            )
+            .unwrap();
+        }
 
-        // 2. Active ingress config with external_access_enabled: false blocks external domain
-        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
-            app_name: "sonarr".to_string(),
-            public_domain: "sonarr.example.com".to_string(),
-            external_access_enabled: false,
-            listen_port: 18989,
-            ..Default::default()
-        })
+        // 1. Uninstalled Readarr preserves `status = "retired"` while Sonarr is `"uninstalled"`
+        fs::write(root.join("install/.sonarr.lock"), "installed").unwrap();
+        let pkgs = get_packages().unwrap();
+        let readarr = pkgs.iter().find(|p| p.name == "readarr").unwrap();
+        let sonarr = pkgs.iter().find(|p| p.name == "sonarr").unwrap();
+        assert_eq!(readarr.status, "retired");
+        assert_eq!(sonarr.status, "installed");
+        assert!(
+            !sonarr.update_error.contains("/var/lib/secret"),
+            "update_error must be sanitized by public_update_error, got: {}",
+            sonarr.update_error
+        );
+
+        // 2. TLS cert NOT ready + internal vhost present -> falls back to internal `.aether.local`
+        fs::write(
+            root.join("etc/apache2/sites-enabled/aetherflow-app-sonarr.conf"),
+            "# vhost",
+        )
         .unwrap();
+        let ing_unready = af_models::AppIngressConfig {
+            app_name: "sonarr".to_string(),
+            public_domain: "unprovisioned.example.com".to_string(),
+            external_access_enabled: true,
+            tls_enabled: true,
+            listen_port: 8989,
+            ..Default::default()
+        };
+        let fallback_launch = launch_target("sonarr", 8989, "/", Some(&ing_unready), "192.168.1.9");
         assert_eq!(
-            resolve_app_target_for_host("sonarr.aether.local"),
-            Some(("sonarr".to_string(), 18989))
+            fallback_launch,
+            (
+                Some("http://sonarr.aether.local".to_string()),
+                Some("internal".to_string())
+            )
         );
-        assert_eq!(resolve_app_target_for_host("sonarr.example.com"), None);
 
-        // 3. Explicit external_access_enabled: true allows external domain
-        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+        // 3. Provisioning `fullchain.pem` promotes external launch URL to `https://`
+        fs::write(
+            root.join("etc/letsencrypt/live/sonarr.example.com/fullchain.pem"),
+            "-----BEGIN CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let ing_ready = af_models::AppIngressConfig {
             app_name: "sonarr".to_string(),
             public_domain: "sonarr.example.com".to_string(),
             external_access_enabled: true,
-            listen_port: 18989,
+            tls_enabled: true,
+            listen_port: 8989,
             ..Default::default()
-        })
-        .unwrap();
+        };
+        let https_launch = launch_target("sonarr", 8989, "/", Some(&ing_ready), "192.168.1.9");
         assert_eq!(
-            resolve_app_target_for_host("sonarr.example.com"),
-            Some(("sonarr".to_string(), 18989))
+            https_launch,
+            (
+                Some("https://sonarr.example.com".to_string()),
+                Some("public".to_string())
+            )
         );
-        assert_eq!(
-            resolve_app_target_for_host("sonarr.aether.local"),
-            Some(("sonarr".to_string(), 18989))
-        );
+
+        // 4. Installing Readarr on disk transitions status to `"installed"` (so Services reports active/inactive)
+        fs::write(root.join("install/.readarr.lock"), "installed").unwrap();
+        let pkgs_installed = get_packages().unwrap();
+        let readarr_installed = pkgs_installed.iter().find(|p| p.name == "readarr").unwrap();
+        assert_eq!(readarr_installed.status, "installed");
 
         let _ = fs::remove_dir_all(&root);
     }

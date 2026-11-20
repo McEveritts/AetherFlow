@@ -100,7 +100,8 @@ fi
 report_progress 35 "Resolving McVNC release tag..."
 MCVNC_REPO="McEveritts/McVNC"
 REPO_URL="https://github.com/${MCVNC_REPO}.git"
-TMP_DIR="$(mktemp -d /tmp/af-mcvnc-XXXXXX)"
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/af-mcvnc-XXXXXX")"
 chmod 755 "$TMP_DIR"
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     TAG="${AF_TARGET_VERSION}"
@@ -212,6 +213,7 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/af-mcvnc.service
 
 report_progress 90 "Starting McVNC..."
 systemctl daemon-reload

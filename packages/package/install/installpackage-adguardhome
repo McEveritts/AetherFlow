@@ -67,7 +67,8 @@ AGH_VERSION="$(github_latest_tag "AdguardTeam/AdGuardHome" "0.107.56")"
 AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/v${AGH_VERSION}/AdGuardHome_${AGH_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting AdGuard Home ${AGH_VERSION}..."
-TMP_TAR=$(mktemp /tmp/agh-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/agh-XXXXXX.tar.gz")"
 if ! af_logged download_file "$AGH_URL" "$TMP_TAR"; then
     # Fallback to static cdn URL
     STATIC_URL="https://static.adguard.com/adguardhome/release/AdGuardHome_${AGH_ARCH}.tar.gz"
@@ -78,12 +79,16 @@ validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
 stage_app_archive "$TMP_TAR" "/opt/AdGuardHome" "AdGuardHome" "/etc/systemd/resolved.conf" "${PACKAGE_NAME}" "AdGuardHome" "/etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf" "preserve"
 rm -f "$TMP_TAR"
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
-chmod +x /opt/AdGuardHome/AdGuardHome
-af_logged setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /opt/AdGuardHome/AdGuardHome || true
+chmod 0755 /opt/AdGuardHome/AdGuardHome
 queue_app_version /opt/AdGuardHome/.af-version "${AGH_VERSION#v}"
 
 if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
-    AGH_BCRYPT="$(printf '%s\n' "$MASTER_PASS" | htpasswd -niB "${MASTER_USER}" 2>/dev/null | cut -d: -f2- || true)"
+    AGH_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}"
+    AGH_BCRYPT="$(printf '%s\n' "$AGH_PASS" | htpasswd -niB "${MASTER_USER}" 2>/dev/null | cut -d: -f2- || true)"
+    if [[ -z "${AGH_BCRYPT:-}" ]]; then
+        print_error "Failed to generate bcrypt password hash for AdGuard Home."
+        exit 1
+    fi
     write_config_file /opt/AdGuardHome/AdGuardHome.yaml 0600 <<EOF
 bind_host: 127.0.0.1
 bind_port: ${APP_PORT}
@@ -154,6 +159,7 @@ fi
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
 chown -hRP adguardhome:adguardhome /opt/AdGuardHome
 set_config_file_mode 0600 /opt/AdGuardHome/AdGuardHome.yaml
+af_logged setcap 'cap_net_bind_service=+ep' /opt/AdGuardHome/AdGuardHome || true
 
 if [[ "$DNS_PORT" == "53" ]]; then
 AGH_RESOLVED_CHANGED="$(safe_config_python /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf <<'PYEOF'
@@ -198,6 +204,7 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/adguardhome.service
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now adguardhome

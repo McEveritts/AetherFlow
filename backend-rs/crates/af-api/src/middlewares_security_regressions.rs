@@ -445,3 +445,180 @@ async fn security_gateway_disabled_external_subdomain_fails_closed_without_servi
         .unwrap();
     assert_eq!(ok_resp.status(), StatusCode::OK);
 }
+
+#[test]
+fn proxy_forwarding_uses_rightmost_untrusted_hop_and_validated_host() {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    let name = "middlewares::security_regressions::proxy_forwarding_uses_rightmost_untrusted_hop_and_validated_host";
+    if !isolated(name) {
+        return;
+    }
+    env::remove_var("TRUSTED_PROXIES");
+    env::set_var("TRUST_PROXY_HEADERS", "true");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("203.0.113.7, 192.168.1.17, 127.0.0.1"),
+    );
+    headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.8"));
+    headers.insert(
+        "x-forwarded-host",
+        HeaderValue::from_static("spoofed.example.test"),
+    );
+    let forwarded: HeaderMap = super::canonical_forwarded_headers(
+        &headers,
+        "app.example.test:443",
+        Some("127.0.0.1".parse().unwrap()),
+        true,
+    )
+    .into_iter()
+    .collect();
+    assert_eq!(forwarded["x-real-ip"], "192.168.1.17");
+    assert_eq!(forwarded["x-forwarded-for"], "192.168.1.17");
+    assert_eq!(forwarded["x-forwarded-host"], "app.example.test:443");
+    assert!(!crate::ws::is_trusted_proxy_peer(
+        "192.168.1.17".parse().unwrap()
+    ));
+}
+
+#[test]
+fn rate_limiter_evicts_oldest_at_capacity() {
+    let limiter = super::SlidingWindowLimiter::new(1, std::time::Duration::from_secs(60));
+    for index in 0..super::RATE_LIMIT_KEY_CAPACITY {
+        assert!(limiter.allow(&format!("client-{index}")));
+    }
+    assert!(!limiter.allow("client-0"));
+    assert!(limiter.allow("new-client"));
+    let guard = limiter.visitors.lock().unwrap();
+    assert_eq!(guard.timestamps.len(), super::RATE_LIMIT_KEY_CAPACITY);
+    assert_eq!(guard.oldest_first.len(), super::RATE_LIMIT_KEY_CAPACITY);
+    assert!(!guard.timestamps.contains_key("client-0"));
+}
+
+#[tokio::test]
+async fn control_plane_requests_bypass_saturated_proxy_resolver() {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    let _saturation = super::PROXY_RESOLVE_LIMIT.acquire_many(16).await.unwrap();
+    let router = Router::new()
+        .fallback(get(|| async { StatusCode::OK }))
+        .layer(middleware::from_fn(app_subdomain_proxy_middleware));
+    for path in ["/health", "/health/live", "/health/ready", "/static/app.js"] {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            router.clone().oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(header::HOST, "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn protected_external_upstream_requires_auth_before_http_or_websocket() {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    let name = "middlewares::security_regressions::protected_external_upstream_requires_auth_before_http_or_websocket";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    env::set_var("AETHERFLOW_BASE_DOMAIN", "review.test");
+    env::set_var("ALLOWED_HOSTS", "localhost,prometheus.review.test");
+    af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+        app_name: "prometheus".into(),
+        public_domain: "prometheus.review.test".into(),
+        external_access_enabled: true,
+        listen_port: 19090,
+        ..Default::default()
+    })
+    .unwrap();
+    let app = Router::new()
+        .fallback(get(|| async { StatusCode::OK }))
+        .layer(middleware::from_fn(app_subdomain_proxy_middleware));
+    let writer = af_db::get_conn().unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for websocket in [false, true] {
+        let mut request = Request::builder()
+            .uri("/")
+            .header(header::HOST, "prometheus.review.test");
+        if websocket {
+            request = request
+                .header(header::UPGRADE, "websocket")
+                .header(header::CONNECTION, "Upgrade");
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+    }
+    assert!(is_host_trusted(
+        "prometheus.review.test",
+        &std::collections::HashSet::new()
+    ));
+    assert!(!is_host_trusted(
+        "unknown.review.test",
+        &std::collections::HashSet::new()
+    ));
+    assert!(!is_host_trusted(
+        "a.b.review.test",
+        &std::collections::HashSet::new()
+    ));
+    writer.execute_batch("ROLLBACK").unwrap();
+    drop(writer);
+    drop(fixture);
+}
+
+#[test]
+fn librespeed_tls_requires_a_readable_pem_when_enabled() {
+    let name =
+        "middlewares::security_regressions::librespeed_tls_requires_a_readable_pem_when_enabled";
+    if !isolated(name) {
+        return;
+    }
+    let root = env::temp_dir().join(format!("af-librespeed-tls-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let settings = root.join("settings.toml");
+    env::set_var("AETHERFLOW_LIBRESPEED_SETTINGS_PATH", &settings);
+    fs::write(&settings, "enable_tls = false\n").unwrap();
+    assert!(super::librespeed_tls_client().unwrap().is_none());
+
+    let cert = root.join("upstream.pem");
+    fs::write(
+        &settings,
+        format!(
+            "enable_tls = true\ntls_cert_file = \"{}\"\n",
+            cert.display()
+        ),
+    )
+    .unwrap();
+    assert!(super::librespeed_tls_client().is_err());
+    fs::write(&cert, "invalid PEM").unwrap();
+    assert!(super::librespeed_tls_client().is_err());
+    fs::remove_dir_all(root).unwrap();
+}

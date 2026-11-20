@@ -194,7 +194,7 @@ class TestF03PasswordBcryptVerification(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         routes = inspector.read_file(ROUTES_RS)
-        self.assert_true(bool(routes and "bcrypt::verify" in routes and "update_password" in routes), "F03: update_password must verify current password with bcrypt")
+        self.assert_true(bool(routes and ("bcrypt::verify" in routes or "verify_password" in routes) and "update_password" in routes), "F03: update_password must verify current password with bcrypt")
 
 
 class TestF03PasswordMinLengthEnforcement(TestCase):

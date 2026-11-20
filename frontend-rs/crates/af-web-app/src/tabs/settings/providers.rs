@@ -1,5 +1,35 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeyFieldState {
+    Unconfigured,
+    StoredPreserved,
+    ReplacementEntered,
+    MarkedForClear,
+}
+
+fn is_masked_or_encrypted_key(value: &str) -> bool {
+    value.starts_with("****") || value.starts_with("enc:v1:")
+}
+
+fn api_key_field_state(baseline: &Value, current: &Value, field: &str) -> ApiKeyFieldState {
+    let base = text(baseline, field);
+    let curr = text(current, field);
+    if base.is_empty() {
+        if curr.is_empty() {
+            ApiKeyFieldState::Unconfigured
+        } else {
+            ApiKeyFieldState::ReplacementEntered
+        }
+    } else if curr.is_empty() {
+        ApiKeyFieldState::MarkedForClear
+    } else if is_masked_or_encrypted_key(&curr) {
+        ApiKeyFieldState::StoredPreserved
+    } else {
+        ApiKeyFieldState::ReplacementEntered
+    }
+}
+
 #[component]
 pub(super) fn ProviderSettings(
     draft: JsonDraft,
@@ -103,59 +133,121 @@ pub(super) fn ProviderSettings(
                     .into_iter()
                     .map(move |(field, label)| {
                         let visible = RwSignal::new(false);
+                        let key_state = Signal::derive(move || {
+                            draft.with(|d| {
+                                api_key_field_state(
+                                    d.baseline(),
+                                    &d.value().unwrap_or(Value::Null),
+                                    field,
+                                )
+                            })
+                        });
+                        let has_saved_key = Signal::derive(move || {
+                            draft.with(|d| !text(d.baseline(), field).is_empty())
+                        });
                         view! {
-                            <label class="block text-sm space-y-2">
-                                <span>
-                                    {move || {
-                                        if field == "geminiApiKey" {
-                                            tt(context, "Settings.apiKeyTitle")
-                                        } else {
-                                            tt(context, label)
+                            <div class="block text-sm space-y-2">
+                                <label class="block space-y-2">
+                                    <span>
+                                        {move || {
+                                            if field == "geminiApiKey" {
+                                                tt(context, "Settings.apiKeyTitle")
+                                            } else {
+                                                tt(context, label)
+                                            }
+                                        }}
+                                    </span>
+                                    <input
+                                        type=move || if visible.get() { "text" } else { "password" }
+                                        autocomplete="new-password"
+                                        class="glass-input w-full px-3 py-2"
+                                        placeholder=move || {
+                                            if field == "geminiApiKey" {
+                                                tt(context, "Settings.apiKeyPlaceholder")
+                                            } else {
+                                                tt(context, "Leave unchanged to keep the stored key")
+                                            }
                                         }
-                                    }}
-                                </span>
-                                <input
-                                    type=move || if visible.get() { "text" } else { "password" }
-                                    autocomplete="new-password"
-                                    class="glass-input w-full px-3 py-2"
-                                    placeholder=move || {
-                                        if field == "geminiApiKey" {
-                                            tt(context, "Settings.apiKeyPlaceholder")
-                                        } else {
-                                            tt(context, "Leave unchanged to keep the stored key")
+                                        prop:value=move || {
+                                            let value = text(&draft_value(draft), field);
+                                            if is_masked_or_encrypted_key(&value) {
+                                                String::new()
+                                            } else {
+                                                value
+                                            }
                                         }
-                                    }
-                                    prop:value=move || {
-                                        let value = text(&draft_value(draft), field);
-                                        if value.starts_with("****") || value.starts_with("enc:v1:")
-                                        {
-                                            String::new()
-                                        } else {
-                                            value
-                                        }
-                                    }
-                                    on:input=move |event| edit(
-                                        draft,
-                                        field,
-                                        json!(event_target_value(&event)),
-                                    )
-                                />
-                                <button type="button" aria-pressed=move || visible.get().to_string()
-                                    class="glass-button px-2 py-1"
-                                    on:click=move |_| visible.update(|v| *v = !*v)>{move || tt(context, "Show entered key")}</button>
-                                <span class="block text-xs text-slate-400">
-                                    {move || {
-                                        draft
-                                            .with(|d| {
-                                                if text(d.baseline(), field).is_empty() {
-                                                    tt(context, "No saved key")
-                                                } else {
-                                                    tt(context, "enc:v1: encrypted key configured")
+                                        on:input=move |event| edit(
+                                            draft,
+                                            field,
+                                            json!(event_target_value(&event)),
+                                        )
+                                    />
+                                </label>
+                                <div class="flex flex-wrap gap-2">
+                                    <button
+                                        type="button"
+                                        aria-pressed=move || visible.get().to_string()
+                                        class="glass-button px-2 py-1"
+                                        on:click=move |_| visible.update(|v| *v = !*v)
+                                    >
+                                        {move || tt(context, "Show entered key")}
+                                    </button>
+                                    <Show when=move || has_saved_key.get()>
+                                        {move || {
+                                            if key_state.get() == ApiKeyFieldState::MarkedForClear {
+                                                view! {
+                                                    <button
+                                                        type="button"
+                                                        class="glass-button px-2 py-1 text-amber-200"
+                                                        disabled=move || busy.get()
+                                                        on:click=move |_| {
+                                                            let saved = draft.with_untracked(|d| {
+                                                                text(d.baseline(), field)
+                                                            });
+                                                            edit(draft, field, json!(saved));
+                                                        }
+                                                    >
+                                                        {move || tt(context, "Keep saved key")}
+                                                    </button>
                                                 }
-                                            })
+                                                .into_any()
+                                            } else {
+                                                view! {
+                                                    <button
+                                                        type="button"
+                                                        class="glass-button px-2 py-1 text-rose-300"
+                                                        disabled=move || busy.get()
+                                                        on:click=move |_| edit(draft, field, json!(""))
+                                                    >
+                                                        {move || tt(context, "Clear saved key")}
+                                                    </button>
+                                                }
+                                                .into_any()
+                                            }
+                                        }}
+                                    </Show>
+                                </div>
+                                <span
+                                    class=move || {
+                                        if key_state.get() == ApiKeyFieldState::MarkedForClear {
+                                            "block text-xs text-amber-300"
+                                        } else {
+                                            "block text-xs text-slate-400"
+                                        }
+                                    }
+                                >
+                                    {move || match key_state.get() {
+                                        ApiKeyFieldState::Unconfigured => tt(context, "No saved key"),
+                                        ApiKeyFieldState::MarkedForClear => {
+                                            tt(context, "Saved key will be cleared on save")
+                                        }
+                                        ApiKeyFieldState::StoredPreserved
+                                        | ApiKeyFieldState::ReplacementEntered => {
+                                            tt(context, "enc:v1: encrypted key configured")
+                                        }
                                     }}
                                 </span>
-                            </label>
+                            </div>
                         }
                     })
                     .collect_view()}
@@ -217,5 +309,71 @@ pub(super) fn ProviderSettings(
                 saving_label=move || tt(context, "Settings.saving")
             />
         </ObsCard>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_api_keys_can_be_preserved_replaced_or_explicitly_cleared() {
+        let baseline = json!({
+            "geminiApiKey": "****1234",
+            "openaiApiKey": "****5678",
+            "anthropicApiKey": ""
+        });
+        let mut draft = FormDraft::new(baseline.clone());
+
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &draft.value().unwrap(), "geminiApiKey"),
+            ApiKeyFieldState::StoredPreserved
+        );
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &draft.value().unwrap(), "openaiApiKey"),
+            ApiKeyFieldState::StoredPreserved
+        );
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &draft.value().unwrap(), "anthropicApiKey"),
+            ApiKeyFieldState::Unconfigured
+        );
+        assert!(!draft.is_dirty());
+
+        // Clearing geminiApiKey marks only geminiApiKey dirty with "" while preserving openaiApiKey
+        draft.edit("geminiApiKey", json!("")).unwrap();
+        assert!(draft.is_dirty());
+        let val = draft.value().unwrap();
+        assert_eq!(val["geminiApiKey"], "");
+        assert_eq!(val["openaiApiKey"], "****5678");
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &val, "geminiApiKey"),
+            ApiKeyFieldState::MarkedForClear
+        );
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &val, "openaiApiKey"),
+            ApiKeyFieldState::StoredPreserved
+        );
+        assert_eq!(
+            draft.dirty_fields().collect::<Vec<_>>(),
+            vec!["/geminiApiKey"]
+        );
+
+        // Reverting back to baseline keeps the stored key untouched and cleans the draft
+        let saved_gemini = text(draft.baseline(), "geminiApiKey");
+        draft.edit("geminiApiKey", json!(saved_gemini)).unwrap();
+        assert!(!draft.is_dirty());
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &draft.value().unwrap(), "geminiApiKey"),
+            ApiKeyFieldState::StoredPreserved
+        );
+
+        // Entering a fresh anthropicApiKey transitions to ReplacementEntered
+        draft
+            .edit("anthropicApiKey", json!("sk-ant-fresh"))
+            .unwrap();
+        assert_eq!(
+            api_key_field_state(draft.baseline(), &draft.value().unwrap(), "anthropicApiKey"),
+            ApiKeyFieldState::ReplacementEntered
+        );
     }
 }

@@ -1903,7 +1903,7 @@ fn package_update_target_version_parsing_probing_and_admit_fallback() {
     assert!(parse_cli_args(["update", "sonarr", "--target-version=../etc/passwd"]).is_err());
     assert!(parse_cli_args(["update", "--target-version", "4.0.10"]).is_err());
 
-    // 3. Omitted `--target-version`: resolves from runner probe when available
+    // 3. Omitted `--target-version`: never falls back to local installed probe version
     let probe_transport = MockRunnerTransport::default();
     probe_transport
         .probed_versions
@@ -1912,17 +1912,10 @@ fn package_update_target_version_parsing_probing_and_admit_fallback() {
         .insert("lidarr".to_string(), "2.8.2.4493".to_string());
     let inv_probe = parse_cli_args(["--json", "--root", &root_str, "update", "lidarr"]).unwrap();
     let env_probe = execute_invocation(&inv_probe, &probe_transport);
-    assert_eq!(env_probe.status, "ok", "{}", env_probe.message);
-    let probe_target = probe_transport.package_calls.lock().unwrap()[0]
-        .expected_target_version
-        .clone()
-        .expect("probed target version must be populated");
-    assert_eq!(probe_target, "2.8.2.4493");
-    assert!(af_release::lifecycle::validate_target_version(
-        &probe_target
-    ));
+    assert_eq!(env_probe.status, "error");
+    assert!(probe_transport.package_calls.lock().unwrap().is_empty());
 
-    // 4. Omitted `--target-version`: resolves from SQLite `app_updates.latest_version`
+    // 4. Omitted `--target-version`: resolves strictly from SQLite `app_updates.latest_version`
     let db_path = root.join("var/lib/aetherflow/aetherflow.sqlite");
     let conn = Connection::open(&db_path).unwrap();
     conn.execute_batch(
@@ -1951,21 +1944,12 @@ fn package_update_target_version_parsing_probing_and_admit_fallback() {
     assert_eq!(db_target, "1.26.2.4852");
     assert!(af_release::lifecycle::validate_target_version(&db_target));
 
-    // 5. Omitted `--target-version` with no DB/probe/marker falls back to a token valid for `CoordinatedOperation::admit`
+    // 5. Omitted `--target-version` with no upstream source fails closed instead of fabricating "0.0.0"
     let fallback_transport = MockRunnerTransport::default();
     let inv_fallback = parse_cli_args(["--json", "--root", &root_str, "update", "bazarr"]).unwrap();
     let env_fallback = execute_invocation(&inv_fallback, &fallback_transport);
-    assert_eq!(env_fallback.status, "ok", "{}", env_fallback.message);
-    let fallback_target = fallback_transport.package_calls.lock().unwrap()[0]
-        .expected_target_version
-        .clone()
-        .expect("fallback target version must be populated");
-    assert!(!fallback_target.is_empty());
-    assert!(
-        af_release::lifecycle::validate_target_version(&fallback_target),
-        "fallback target {:?} must satisfy CoordinatedOperation::admit",
-        fallback_target
-    );
+    assert_eq!(env_fallback.status, "error");
+    assert!(fallback_transport.package_calls.lock().unwrap().is_empty());
 }
 
 #[test]

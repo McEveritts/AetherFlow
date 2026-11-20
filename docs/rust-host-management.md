@@ -90,4 +90,4 @@ To keep crate boundaries clean and avoid privilege escalation inside unprivilege
 
 ## Validation
 
-The crate passes all 18 unit tests with `cargo test -p af-host` in an isolated Linux checkout, covering ancestor symlink rejection, private filesystem permissions, manifest/archive/chunk tampering, staged restore extraction and SQLite `quick_check` verification, `sentinel_scan_auth_log`, `apply_network_tuning`, `clean_system_logs`, `inspect_home_disk_space`, and concurrent atomic writes.
+The crate passes all 51 unit tests with `cargo test -p af-host` in an isolated Linux checkout, covering ancestor symlink rejection, private filesystem permissions, `.master.creds` and `oidc_rsa.pem` host preservation, manifest/archive/chunk tampering, staged restore extraction and SQLite `quick_check` verification, `sentinel_scan_auth_log`, `apply_network_tuning`, `clean_system_logs`, `inspect_home_disk_space`, and concurrent atomic writes.

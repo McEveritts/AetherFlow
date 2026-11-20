@@ -64,11 +64,12 @@ ND_VERSION="$(github_latest_tag "navidrome/navidrome" "0.53.3")"
 ND_URL="https://github.com/navidrome/navidrome/releases/download/v${ND_VERSION}/navidrome_${ND_VERSION}_${ND_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting Navidrome ${ND_VERSION}..."
-TMP_TAR=$(mktemp /tmp/navidrome-XXXXXX.tar.gz)
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/navidrome-XXXXXX.tar.gz")
 af_logged download_file "$ND_URL" "$TMP_TAR"
 stage_app_archive "$TMP_TAR" "/opt/navidrome" "navidrome" "/var/lib/navidrome/navidrome.toml" "${PACKAGE_NAME}" "." "$ND_DATABASE" ""
 rm -f "$TMP_TAR"
-chmod +x /opt/navidrome/navidrome
+chmod 0755 /opt/navidrome/navidrome
 queue_app_version /opt/navidrome/.af-version "${ND_VERSION#v}"
 
 if [[ ! -s /var/lib/navidrome/navidrome.toml ]]; then
@@ -105,6 +106,7 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/navidrome.service
 
 
 af_logged systemctl daemon-reload

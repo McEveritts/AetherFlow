@@ -188,6 +188,7 @@ ExecStart=/opt/jellyseerr/.runtime/bin/node dist/index.js
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/jellyseerr.service
 af_logged systemctl daemon-reload
 af_logged systemctl restart jellyseerr
 

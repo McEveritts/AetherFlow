@@ -68,30 +68,25 @@ acceptance, localization/accessibility, production build and restart/crash exerc
 See the integration audit for checkpoint-specific evidence rather than inferring
 that a mounted module satisfies every upstream edge case.
 
-### Account deletion and storage retention
+### Account deletion and storage cleanup
 
 Admin account deletion serializes with the target user's McBrowser mutations and
 uses one immediate SQLite transaction for live admin/lifecycle checks, last-admin
-protection, session/OIDC credential removal, McBrowser policy/preferences/share/
-upload metadata cleanup, and quota/user removal. A database error rolls back the
-entire deletion; a missing optional McBrowser table does not prevent deletion.
-Existing audit history is retained.
+protection, session/OIDC credential revocation, McBrowser policy/preferences/share/
+upload metadata cleanup, `sqlite_sequence` monotonic advancement (preventing ID reuse),
+and quota/user removal. A database error rolls back the entire deletion; a missing
+optional McBrowser table does not prevent deletion.
 
 Last-admin protection counts remaining usable non-plugin admin accounts rather
 than allowing a suspended/plugin admin row to strand administration. Existing
-OIDC access-token introspection and new WebSocket upgrades also check that the
-token/ticket owner still exists. This does not recall offline-validated OIDC
-tokens at third-party services or terminate already-established WebSocket
-connections; those platform-wide revocation semantics need separate acceptance.
+OIDC access-token introspection and WebSocket sessions/upgrades also verify live
+owner authorization.
 
-As in the pinned upstream account deletion workflow, deleting an account does
-**not** delete its filesystem data. Published files and private resumable-upload
-staging files remain for operator-managed retention, backup and eventual purge.
-They become inaccessible through the deleted identity; old public shares and
-upload sessions no longer resolve. AUTOINCREMENT IDs must not be manually reused
-or reset, and an operator purge must target the verified retired user's storage,
-never a path supplied by a client. Physical purge and retention automation remain
-separate operational acceptance gates.
+After the database transaction commits, `finish_account_deletion` removes the
+retired user's capability-confined `user-<id>` storage directory, private
+`.af-upload-staging/user-<id>` resumable upload chunks, cached media thumbnails,
+active FileShare uploads, and any unreferenced FileShare objects on disk. Old
+public shares and upload sessions no longer resolve.
 
 ### Host filesystem path-picker policy
 

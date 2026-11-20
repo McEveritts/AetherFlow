@@ -170,7 +170,7 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         result = self.install(AF_APP_PORT='17008')
         values = dict(line.split('=', 1) for line in self.config.read_text().splitlines())
         self.assertEqual(values['PORT'], '17008')
-        self.assertEqual(values['NEXTAUTH_URL'], 'https://palate.example.test')
+        self.assertEqual(values['NEXTAUTH_URL'], 'http://127.0.0.1:17008')
         self.assertEqual(values['JELLYFIN_INTERNAL_URL'], 'http://jellyfin.aether.local')
         secrets = [values[key] for key in ('NEXTAUTH_SECRET', 'PALATE_ENCRYPTION_SECRET', 'PALATE_RATE_LIMIT_SECRET', 'CRON_SECRET')]
         self.assertEqual(len(set(secrets)), 4)
@@ -194,9 +194,34 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         self.assertEqual((self.vault / 'recipe.md').read_text(), 'my-recipe')
         self.assertIn('USDA_API_KEY=my-custom-value', self.config.read_text())
         for line in original.splitlines():
-            if not line.startswith('PORT='):
+            if not line.startswith(('PORT=', 'NEXTAUTH_URL=')):
                 self.assertIn(line, self.config.read_text())
         self.assertIn('PORT=17009', self.config.read_text())
+        self.assertIn('NEXTAUTH_URL=http://127.0.0.1:17009', self.config.read_text())
+
+        # Verify enabled external ingress updates managed NEXTAUTH_URL while explicit custom NEXTAUTH_URL is preserved
+        import sqlite3
+        db_file = self.root / 'var/lib/aetherflow/aetherflow.sqlite'
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_file))
+        conn.execute(
+            'CREATE TABLE app_ingress_configs (app_name TEXT PRIMARY KEY, external_access_enabled INTEGER, public_domain TEXT, tls_enabled INTEGER)'
+        )
+        conn.execute(
+            "INSERT INTO app_ingress_configs VALUES ('palate', 1, '', 1)"
+        )
+        conn.commit()
+        conn.close()
+        self.install(AF_APP_PORT='17009')
+        self.assertIn('NEXTAUTH_URL=https://palate.example.test', self.config.read_text())
+
+        custom_cfg = self.config.read_text().replace(
+            'NEXTAUTH_URL=https://palate.example.test',
+            'NEXTAUTH_URL=https://recipes.custom.example',
+        )
+        self.config.write_text(custom_cfg)
+        self.install(AF_APP_PORT='17011')
+        self.assertIn('NEXTAUTH_URL=https://recipes.custom.example', self.config.read_text())
         backups = list((self.root / 'var/backups').glob('aetherflow-palate.*'))
         self.assertFalse(backups)
 

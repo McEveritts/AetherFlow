@@ -675,6 +675,7 @@ ReadWritePaths=/var/lib/maintainerr
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/af-maintainerr.service
 af_logged bash "$SANDBOX_HELPER" apply --profile node --rw /var/lib/maintainerr --rw /tmp --rw -/mnt/unionfs af-maintainerr.service
 af_logged systemctl daemon-reload
 af_logged systemctl restart af-maintainerr

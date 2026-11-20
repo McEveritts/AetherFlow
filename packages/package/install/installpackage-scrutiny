@@ -67,10 +67,10 @@ af_logged download_file "$WEB_URL" "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_AR
 af_logged download_file "$COLLECTOR_URL" "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
 test -s "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}"
 test -s "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
-chmod +x "$BUILD_DIR/bin/"*
+chmod 0755 "$BUILD_DIR/bin/"*
 stage_app_archive "$BUILD_DIR" /opt/scrutiny "bin/scrutiny-web-linux-${SCRUT_ARCH}" /etc/scrutiny "$PACKAGE_NAME" "." /var/lib/scrutiny
 
-chmod +x "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" \
+chmod 0755 "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" \
          "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
 
 ln -sfn "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-web
@@ -156,6 +156,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/scrutiny.service
 
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/scrutiny-collector.service
 [Unit]
@@ -167,6 +168,7 @@ Type=oneshot
 User=root
 ExecStart=/opt/scrutiny/bin/scrutiny-collector run --api-endpoint "http://127.0.0.1:@AF_APP_PORT@"
 EOF
+chmod 0644 /etc/systemd/system/scrutiny-collector.service
 
 cat <<'EOF' > /etc/systemd/system/scrutiny-collector.timer
 [Unit]
@@ -179,6 +181,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+chmod 0644 /etc/systemd/system/scrutiny-collector.timer
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now scrutiny

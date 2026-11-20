@@ -68,18 +68,33 @@ if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
         HOSTS_LOCK="/run/aetherflow/hosts.lock"
         if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
             mkdir -p -m 0750 /run/aetherflow
-            exec 8>"$HOSTS_LOCK"
-            flock -x -w 30 8 || {
-                echo "[af-certbot-sync] Timed out acquiring ${HOSTS_LOCK}" >&2
-                exit 1
-            }
-        elif mkdir -p -m 0750 /run/aetherflow 2>/dev/null && [[ -w /run/aetherflow ]]; then
-            exec 8>"$HOSTS_LOCK"
-            flock -x -w 30 8 || {
-                echo "[af-certbot-sync] Timed out acquiring ${HOSTS_LOCK}" >&2
-                exit 1
-            }
         fi
+        [[ ! -L /run/aetherflow && ! -L "$HOSTS_LOCK" ]] &&
+            [[ ! -e "$HOSTS_LOCK" || -f "$HOSTS_LOCK" ]] &&
+            [[ "$(stat -c '%u' /run/aetherflow)" == 0 ]] &&
+            (( (8#$(stat -c '%a' /run/aetherflow) & 0022) == 0 )) || {
+            echo "[af-certbot-sync] Refusing unsafe hosts lock path" >&2
+            exit 1
+        }
+        exec 8>>"$HOSTS_LOCK"
+        HOSTS_LOCK_FD="/proc/${BASHPID}/fd/8"
+        [[ ! -L "$HOSTS_LOCK" && "$HOSTS_LOCK" -ef "$HOSTS_LOCK_FD" ]] &&
+            [[ "$(stat -Lc '%h' "$HOSTS_LOCK_FD")" == 1 ]] || {
+            echo "[af-certbot-sync] Refusing replaced or hard-linked hosts lock" >&2
+            exit 1
+        }
+        if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+            chown root:aetherflow "$HOSTS_LOCK_FD"
+            chmod 0660 "$HOSTS_LOCK_FD"
+        fi
+        [[ "$(stat -Lc '%a %U:%G' "$HOSTS_LOCK_FD")" == "660 root:aetherflow" ]] || {
+            echo "[af-certbot-sync] Hosts lock must be 0660 root:aetherflow" >&2
+            exit 1
+        }
+        flock -x -w 30 8 || {
+            echo "[af-certbot-sync] Timed out acquiring ${HOSTS_LOCK}" >&2
+            exit 1
+        }
         # Preserve any non-.aether.local custom domains previously written inside AetherFlow's managed block
         while IFS= read -r existing_entry; do
             [[ -n "$existing_entry" ]] && HOSTS_DOMAINS+=("$existing_entry")
@@ -148,7 +163,12 @@ if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
     BASE_DOMAIN="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
 fi
 if [[ -z "$BASE_DOMAIN" && -f /etc/aetherflow/aetherflow.env ]]; then
-    BASE_DOMAIN="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+    BASE_DOMAIN="$(grep -E '^AETHERFLOW_BASE_DOMAIN=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+    case "$BASE_DOMAIN" in
+        \"*\") BASE_DOMAIN="${BASE_DOMAIN:1:${#BASE_DOMAIN}-2}" ;;
+        \'*\') BASE_DOMAIN="${BASE_DOMAIN:1:${#BASE_DOMAIN}-2}" ;;
+    esac
+    BASE_DOMAIN="${BASE_DOMAIN#\*.}"
 fi
 DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'
 if [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "localhost" || "$BASE_DOMAIN" == *.local ]] || [[ ! "$BASE_DOMAIN" =~ $DOMAIN_REGEX ]]; then
@@ -156,21 +176,26 @@ if [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "localhost" || "$BASE_DOMAIN" == *.
 fi
 
 public_dns_resolves() {
-    local host="$1"
-    if command -v dig >/dev/null 2>&1; then
-        [[ -n "$(dig +short +time=2 +tries=1 A "$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.' || true)" ]] && return 0
-        [[ -n "$(dig +short +time=2 +tries=1 A "$host" @8.8.8.8 2>/dev/null | grep -E '^[0-9]+\.' || true)" ]] && return 0
-        return 1
-    elif command -v host >/dev/null 2>&1; then
-        host -W 2 -t A "$host" 1.1.1.1 >/dev/null 2>&1 && return 0
-        host -W 2 -t A "$host" 8.8.8.8 >/dev/null 2>&1 && return 0
-        return 1
-    elif command -v nslookup >/dev/null 2>&1; then
-        nslookup -timeout=2 "$host" 1.1.1.1 >/dev/null 2>&1 && return 0
-        nslookup -timeout=2 "$host" 8.8.8.8 >/dev/null 2>&1 && return 0
-        return 1
-    fi
-    getent ahosts "$host" 2>/dev/null | awk '{print $1}' | grep -qvE '^(127\.|::1$)'
+    local host="$1" resolver rr
+    for resolver in 1.1.1.1 8.8.8.8; do
+        for rr in A AAAA; do
+            if command -v dig >/dev/null 2>&1; then
+                dig +short +time=2 +tries=1 -t "$rr" "$host" "@$resolver" 2>/dev/null |
+                    grep -Eq '^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F]*:[0-9a-fA-F:.]+)$' && return 0
+            elif command -v host >/dev/null 2>&1; then
+                host -W 2 -t "$rr" "$host" "$resolver" 2>/dev/null |
+                    grep -Eq ' has (IPv6 )?address ' && return 0
+            elif command -v nslookup >/dev/null 2>&1; then
+                nslookup -timeout=2 "-type=$rr" "$host" "$resolver" 2>/dev/null |
+                    awk '/^Name:/ { answer=1 } answer && /^Address/ { found=1 } END { exit !found }' && return 0
+            else
+                { getent ahostsv4 "$host" || true; getent ahostsv6 "$host" || true; } 2>/dev/null |
+                    awk '$1 !~ /^(127\.|::1$|::ffff:127\.)/ { found=1 } END { exit !found }'
+                return $?
+            fi
+        done
+    done
+    return 1
 }
 
 CERT_FILE="/etc/letsencrypt/live/${BASE_DOMAIN}/fullchain.pem"
@@ -179,9 +204,12 @@ if [[ ! -f "$CERT_FILE" ]]; then
     exit 0
 fi
 
-CURRENT_SANS="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/dev/null || true)"
-ESCAPED_BASE="${BASE_DOMAIN//./\.}"
-if echo "$CURRENT_SANS" | grep -qE "DNS:\*\.${ESCAPED_BASE}(,|$| )"; then
+CURRENT_SAN_DNS="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/dev/null |
+    tr ',' '\n' | sed -nE 's/^[[:space:]]*DNS:([^[:space:]]+)[[:space:]]*$/\1/p' || true)"
+cert_has_san() {
+    grep -Fxiq -- "$1" <<< "$CURRENT_SAN_DNS"
+}
+if cert_has_san "*.${BASE_DOMAIN}"; then
     # Wildcard certificate already covers all subdomains
     exit 0
 fi
@@ -209,12 +237,15 @@ for lock in /install/.*.lock; do
     app="${app#.}"
     app="${app%.lock}"
     is_allowed_web_app "$app" || continue
+    [[ "$app" =~ ^[a-z0-9_-]+$ ]] || continue
+    cand="${app}.${BASE_DOMAIN}"
     ext_enabled=""
     if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
-        ext_enabled="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND external_access_enabled = 1 AND (public_domain = '' OR LOWER(public_domain) = LOWER('${app}.${BASE_DOMAIN}')) LIMIT 1;" 2>/dev/null || true)"
+        ext_enabled="$(sqlite3 -readonly -cmd ".timeout 5000" -cmd ".parameter init" \
+            -cmd ".parameter set @app \"'$app'\"" -cmd ".parameter set @domain \"'$cand'\"" "$DB" \
+            "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER(@app) AND external_access_enabled = 1 AND (public_domain = '' OR LOWER(public_domain) = LOWER(@domain)) LIMIT 1;" 2>/dev/null || true)"
     fi
     [[ -n "$ext_enabled" ]] || continue
-    cand="${app}.${BASE_DOMAIN}"
     if public_dns_resolves "$cand"; then
         DOMAINS+=("$cand")
     fi
@@ -226,23 +257,15 @@ NEED_EXPAND=0
 CERT_ARGS=()
 for d in "${UNIQUE_DOMAINS[@]}"; do
     CERT_ARGS+=("-d" "$d")
-    escaped_d="${d//./\.}"
-    if ! echo "$CURRENT_SANS" | grep -qE "DNS:${escaped_d}(,|$| )"; then
+    if ! cert_has_san "$d"; then
         NEED_EXPAND=1
     fi
 done
 
 if [[ "$NEED_EXPAND" -eq 1 ]]; then
     WEBROOT="/var/www/aetherflow-default"
-    if [[ -f /etc/apache2/sites-enabled/default-ssl.conf ]]; then
-        detected_docroot="$(awk '/DocumentRoot/ {gsub(/"/, "", $2); print $2; exit}' /etc/apache2/sites-enabled/default-ssl.conf 2>/dev/null || true)"
-        if [[ -n "$detected_docroot" && "$detected_docroot" != "/opt/AetherFlow"* ]]; then
-            WEBROOT="$detected_docroot"
-        fi
-    fi
     echo "[af-certbot-sync] Expanding TLS certificate SANs for ${BASE_DOMAIN}: ${UNIQUE_DOMAINS[*]} (webroot=${WEBROOT})" >&2
-    mkdir -p "${WEBROOT}/.well-known/acme-challenge"
-    if certbot certonly --webroot -w "${WEBROOT}" --cert-name "$BASE_DOMAIN" --expand --non-interactive --agree-tos "${CERT_ARGS[@]}"; then
-        systemctl reload apache2
-    fi
+    (umask 022; mkdir -p "${WEBROOT}/.well-known/acme-challenge")
+    certbot certonly --webroot -w "${WEBROOT}" --cert-name "$BASE_DOMAIN" --expand --non-interactive --agree-tos "${CERT_ARGS[@]}"
+    systemctl reload apache2
 fi

@@ -1286,11 +1286,8 @@ async fn account_deletion_serializes_metadata_cleanup_retains_disk_and_revokes_a
         .unwrap()
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::OK);
-    assert_eq!(
-        fs::read(fixture.user_root().join("retained.txt")).unwrap(),
-        b"retained"
-    );
-    assert!(staging_files.iter().all(|path| path.is_file()));
+    assert!(!fixture.user_root().exists());
+    assert!(!staging_directory.exists());
     {
         let connection = af_db::get_conn().unwrap();
         for query in [

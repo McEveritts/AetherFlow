@@ -726,6 +726,7 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 cat > "${CELERY_SERVICE_FILE}" <<EOF
 [Unit]
@@ -748,6 +749,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${CELERY_SERVICE_FILE}"
 
 cat > "${BEAT_SERVICE_FILE}" <<EOF
 [Unit]
@@ -770,6 +772,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${BEAT_SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now dispatcharr.service dispatcharr-celery.service dispatcharr-celerybeat.service
