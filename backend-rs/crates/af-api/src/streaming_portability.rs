@@ -17,6 +17,10 @@ pub const EXPORT_ROUTE: &str = "/streaming/portability/export";
 pub const PREVIEW_ROUTE: &str = "/streaming/portability/preview";
 pub const RESTORE_ROUTE: &str = "/streaming/portability/restore";
 
+pub(crate) const HEADER_ARCHIVE_TELEMETRY: &str = "x-aetherflow-archive-telemetry";
+pub(crate) const HEADER_OMITTED_SESSION_SAMPLES: &str = "x-aetherflow-omitted-session-samples";
+pub(crate) const HEADER_OMITTED_BANDWIDTH_SAMPLES: &str = "x-aetherflow-omitted-bandwidth-samples";
+
 const ARCHIVE_FORMAT: &str = "aetherflow.streaming-history";
 const ARCHIVE_FORMAT_VERSION: u16 = 1;
 const DATABASE_SCHEMA_VERSION: u16 = 20;
@@ -270,6 +274,28 @@ impl ArchiveData {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct OmittedSamples {
+    session_samples: usize,
+    bandwidth_samples: usize,
+}
+
+impl OmittedSamples {
+    fn is_empty(&self) -> bool {
+        self.session_samples == 0 && self.bandwidth_samples == 0
+    }
+}
+
+fn deserialize_present_omitted_samples<'de, D>(
+    deserializer: D,
+) -> Result<Option<OmittedSamples>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    OmittedSamples::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ArchiveManifest {
@@ -279,6 +305,12 @@ struct ArchiveManifest {
     provenance_version: u16,
     exported_at: String,
     record_counts: RecordCounts,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_omitted_samples",
+        skip_serializing_if = "Option::is_none"
+    )]
+    omitted_samples: Option<OmittedSamples>,
     redacted_fields: Vec<String>,
     omitted_tables: Vec<String>,
     sha256: String,
@@ -300,6 +332,8 @@ struct ArchiveDigestView<'a> {
     provenance_version: u16,
     exported_at: &'a str,
     record_counts: &'a RecordCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted_samples: Option<&'a OmittedSamples>,
     redacted_fields: &'a [String],
     omitted_tables: &'a [String],
     data: &'a ArchiveData,
@@ -314,6 +348,7 @@ impl StreamingArchive {
             provenance_version: self.manifest.provenance_version,
             exported_at: &self.manifest.exported_at,
             record_counts: &self.manifest.record_counts,
+            omitted_samples: self.manifest.omitted_samples.as_ref(),
             redacted_fields: &self.manifest.redacted_fields,
             omitted_tables: &self.manifest.omitted_tables,
             data: &self.data,
@@ -341,6 +376,11 @@ impl StreamingArchive {
         if self.manifest.redacted_fields != expected_redactions
             || self.manifest.omitted_tables != expected_omitted
             || DateTimeCheck::is_invalid(&self.manifest.exported_at)
+            || self
+                .manifest
+                .omitted_samples
+                .as_ref()
+                .is_some_and(OmittedSamples::is_empty)
         {
             return Err(PortabilityError::invalid());
         }
@@ -588,6 +628,10 @@ struct PreviewResponse {
     plan: PlanCounts,
     replacement_counts: Option<RecordCounts>,
     replacement_notice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omitted_samples: Option<OmittedSamples>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partial_telemetry_notice: Option<String>,
     conflicts: Vec<Conflict>,
     approval_token: String,
 }
@@ -602,6 +646,10 @@ struct RestoreResponse {
     archive_counts: RecordCounts,
     resulting_counts: RecordCounts,
     plan: PlanCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omitted_samples: Option<OmittedSamples>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partial_telemetry_notice: Option<String>,
     conflicts: Vec<Conflict>,
 }
 
@@ -735,17 +783,30 @@ impl PortableSnapshot {
     }
 }
 
-fn load_snapshot(conn: &Connection) -> PortabilityResult<PortableSnapshot> {
-    ensure_snapshot_bounds(conn)?;
+struct LoadedSnapshot {
+    snapshot: PortableSnapshot,
+    omitted_samples: Option<OmittedSamples>,
+}
+
+fn load_snapshot(conn: &Connection) -> PortabilityResult<LoadedSnapshot> {
+    load_snapshot_with_budget(conn, MAX_PORTABLE_ROWS)
+}
+
+fn load_snapshot_with_budget(
+    conn: &Connection,
+    max_portable_rows: usize,
+) -> PortabilityResult<LoadedSnapshot> {
+    let budget = max_portable_rows.min(MAX_PORTABLE_ROWS);
+    ensure_snapshot_bounds(conn, budget)?;
     let history = load_rows(conn, "SELECT id,session_key,provider,server_name,user_id,user_name,client_name,item_id,item_name,item_type,series_name,series_id,season_number,episode_number,production_year,play_method,container,video_codec,video_resolution,audio_codec,audio_channels,subtitle_codec,hw_accel,transcode_reasons,bitrate_bps,duration_secs,watched_secs,data_used_bytes,completion_pct,started_at,last_seen_at,ended_at,is_active,provenance,server_id,source_event_id,timestamp_certainty,byte_accuracy,policy_status FROM streaming_history ORDER BY id", read_history)?;
     let labels = load_rows(conn, "SELECT history_id,kind,value,name FROM streaming_history_labels ORDER BY history_id,kind,value", read_label)?;
     let base_used = history
         .len()
         .checked_add(labels.len())
         .and_then(|n| n.checked_add(1))
-        .filter(|&n| n <= MAX_PORTABLE_ROWS)
+        .filter(|&n| n <= budget)
         .ok_or_else(PortabilityError::too_large)?;
-    let remaining_sample_budget = MAX_PORTABLE_ROWS - base_used;
+    let remaining_sample_budget = budget - base_used;
     let half_budget = remaining_sample_budget / 2;
 
     let session_count: usize = conn
@@ -797,7 +858,7 @@ fn load_snapshot(conn: &Connection) -> PortabilityResult<PortableSnapshot> {
         load_rows(
             conn,
             &format!(
-                "SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM (SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM streaming_bandwidth_samples ORDER BY id DESC LIMIT {bw_cap}) ORDER BY id"
+                "SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM (SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM streaming_bandwidth_samples ORDER BY julianday(timestamp) DESC, id DESC LIMIT {bw_cap}) ORDER BY id"
             ),
             read_bandwidth_sample,
         )?
@@ -812,6 +873,13 @@ fn load_snapshot(conn: &Connection) -> PortabilityResult<PortableSnapshot> {
             reconnect_window_secs: row.get(3)?,
         }),
     )?;
+    let omitted_session_samples = session_count.saturating_sub(session_samples.len());
+    let omitted_bandwidth_samples = bw_count.saturating_sub(bandwidth_samples.len());
+    let omitted_samples =
+        (omitted_session_samples > 0 || omitted_bandwidth_samples > 0).then_some(OmittedSamples {
+            session_samples: omitted_session_samples,
+            bandwidth_samples: omitted_bandwidth_samples,
+        });
     let snapshot = PortableSnapshot {
         history,
         labels,
@@ -822,15 +890,18 @@ fn load_snapshot(conn: &Connection) -> PortabilityResult<PortableSnapshot> {
     if snapshot
         .counts()
         .total()
-        .filter(|total| *total <= MAX_PORTABLE_ROWS)
+        .filter(|total| *total <= budget)
         .is_none()
     {
         return Err(PortabilityError::too_large());
     }
-    Ok(snapshot)
+    Ok(LoadedSnapshot {
+        snapshot,
+        omitted_samples,
+    })
 }
 
-fn ensure_snapshot_bounds(conn: &Connection) -> PortabilityResult<()> {
+fn ensure_snapshot_bounds(conn: &Connection, max_portable_rows: usize) -> PortabilityResult<()> {
     let (history_rows, label_rows, policy_rows) = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM streaming_history),(SELECT COUNT(*) FROM streaming_history_labels),(SELECT COUNT(*) FROM streaming_tracking_policies)",
         [],
@@ -848,7 +919,7 @@ fn ensure_snapshot_bounds(conn: &Connection) -> PortabilityResult<()> {
     if history_rows
         .checked_add(label_rows)
         .and_then(|n| n.checked_add(policy_rows))
-        .filter(|total| *total <= MAX_PORTABLE_ROWS)
+        .filter(|total| *total <= max_portable_rows)
         .is_none()
     {
         return Err(PortabilityError::too_large());
@@ -963,9 +1034,17 @@ fn read_bandwidth_sample(row: &Row<'_>) -> rusqlite::Result<BandwidthSample> {
 }
 
 fn build_archive(conn: &Connection, now: i64) -> PortabilityResult<StreamingArchive> {
+    build_archive_with_budget(conn, now, MAX_PORTABLE_ROWS)
+}
+
+fn build_archive_with_budget(
+    conn: &Connection,
+    now: i64,
+    max_portable_rows: usize,
+) -> PortabilityResult<StreamingArchive> {
     let tx = conn.unchecked_transaction()?;
-    let snapshot = load_snapshot(&tx)?;
-    let data = snapshot.into_data();
+    let loaded = load_snapshot_with_budget(&tx, max_portable_rows)?;
+    let data = loaded.snapshot.into_data();
     let record_counts = data.counts();
     let mut archive = StreamingArchive {
         manifest: ArchiveManifest {
@@ -979,6 +1058,7 @@ fn build_archive(conn: &Connection, now: i64) -> PortabilityResult<StreamingArch
                 .ok_or_else(PortabilityError::invalid)?
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
             record_counts,
+            omitted_samples: loaded.omitted_samples,
             redacted_fields: REDACTED_FIELDS
                 .iter()
                 .map(|value| (*value).to_owned())
@@ -999,6 +1079,16 @@ fn build_archive(conn: &Connection, now: i64) -> PortabilityResult<StreamingArch
     }
     tx.commit()?;
     Ok(archive)
+}
+
+#[cfg(test)]
+pub(crate) fn export_archive_json_with_budget(
+    conn: &Connection,
+    now: i64,
+    max_portable_rows: usize,
+) -> serde_json::Value {
+    let archive = build_archive_with_budget(conn, now, max_portable_rows).unwrap();
+    serde_json::to_value(&archive).unwrap()
 }
 
 #[cfg(test)]
@@ -1043,6 +1133,7 @@ struct RestorePreview {
     target_counts: RecordCounts,
     plan: PlanCounts,
     replacement_counts: Option<RecordCounts>,
+    omitted_samples: Option<OmittedSamples>,
     conflicts: Vec<Conflict>,
     merge_plan: Option<MergePlan>,
 }
@@ -1166,7 +1257,7 @@ fn inspect_restore_in_snapshot(
     let (target_counts, target_snapshot_sha256, plan, conflicts, replacement_counts, merge_plan) =
         match mode {
             RestoreMode::Merge => {
-                let target = load_snapshot(conn)?;
+                let target = load_snapshot(conn)?.snapshot;
                 let target_counts = target.counts();
                 let target_snapshot_sha256 = target_snapshot_digest(conn, &target)?;
                 let merge = plan_merge(&target, &archive.data);
@@ -1215,6 +1306,7 @@ fn inspect_restore_in_snapshot(
         target_counts,
         plan,
         replacement_counts,
+        omitted_samples: archive.manifest.omitted_samples.clone(),
         conflicts,
         merge_plan,
     })
@@ -1556,6 +1648,19 @@ fn plan_merge(target: &PortableSnapshot, archive: &ArchiveData) -> MergePlan {
     result
 }
 
+fn partial_telemetry_notice(mode: RestoreMode, omitted: &OmittedSamples) -> String {
+    match mode {
+        RestoreMode::Replace => format!(
+            "Partial telemetry archive: {} earlier session sample(s) and {} earlier bandwidth sample(s) were omitted during export. Replacement deletes existing destination samples and restores only the retained sample subset.",
+            omitted.session_samples, omitted.bandwidth_samples
+        ),
+        RestoreMode::Merge => format!(
+            "Partial telemetry archive: {} earlier session sample(s) and {} earlier bandwidth sample(s) were omitted during export. Merge will not restore those omitted earlier samples.",
+            omitted.session_samples, omitted.bandwidth_samples
+        ),
+    }
+}
+
 fn response_from_preview(
     preview: &RestorePreview,
     approval_token: String,
@@ -1575,8 +1680,20 @@ fn response_from_preview(
         plan: preview.plan.clone(),
         replacement_counts: preview.replacement_counts.clone(),
         replacement_notice: preview.replacement_counts.as_ref().map(|_| {
-            "Replacement clears destination device names, device IDs, and IP addresses because they are intentionally omitted from this archive. Server credentials, local identity links, import checkpoints, and existing audit records are not replaced; a restore audit entry is added.".to_owned()
+            let base = "Replacement clears destination device names, device IDs, and IP addresses because they are intentionally omitted from this archive. Server credentials, local identity links, import checkpoints, and existing audit records are not replaced; a restore audit entry is added.";
+            match &preview.omitted_samples {
+                Some(omitted) => format!(
+                    "{base} {}",
+                    partial_telemetry_notice(RestoreMode::Replace, omitted)
+                ),
+                None => base.to_owned(),
+            }
         }),
+        omitted_samples: preview.omitted_samples.clone(),
+        partial_telemetry_notice: preview
+            .omitted_samples
+            .as_ref()
+            .map(|omitted| partial_telemetry_notice(preview.mode, omitted)),
         conflicts: preview.conflicts.clone(),
         approval_token,
     }
@@ -1799,7 +1916,7 @@ fn restore_connection(
     }
     let (before_counts, before_hash) = match mode {
         RestoreMode::Merge => {
-            let before = load_snapshot(&tx)?;
+            let before = load_snapshot(&tx)?.snapshot;
             (before.counts(), before.digest()?)
         }
         RestoreMode::Replace => query_target_counts_and_digest_sql(&tx)?,
@@ -1825,7 +1942,7 @@ fn restore_connection(
     }
     let (after_counts, after_hash) = match mode {
         RestoreMode::Merge => {
-            let after = load_snapshot(&tx)?;
+            let after = load_snapshot(&tx)?.snapshot;
             (after.counts(), after.digest()?)
         }
         RestoreMode::Replace => query_target_counts_and_digest_sql(&tx)?,
@@ -1859,6 +1976,11 @@ fn restore_connection(
         archive_counts: archive.data.counts(),
         resulting_counts: after_counts,
         plan: current_preview.plan,
+        omitted_samples: current_preview.omitted_samples.clone(),
+        partial_telemetry_notice: current_preview
+            .omitted_samples
+            .as_ref()
+            .map(|omitted| partial_telemetry_notice(mode, omitted)),
         conflicts: current_preview.conflicts,
     })
 }
@@ -1881,6 +2003,51 @@ fn ensure_archive_within_byte_limit(archive: &StreamingArchive) -> PortabilityRe
     Ok(())
 }
 
+fn build_export_response(archive: &StreamingArchive) -> Response {
+    let bytes = match serde_json::to_vec(archive) {
+        Ok(bytes) => bytes,
+        Err(_) => return PortabilityError::invalid().into_response(),
+    };
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"streaming-history-backup.json\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Body::from(bytes),
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    if let Some(omitted) = &archive.manifest.omitted_samples {
+        headers.insert(
+            header::HeaderName::from_static(HEADER_ARCHIVE_TELEMETRY),
+            header::HeaderValue::from_static("partial"),
+        );
+        if let Ok(value) = header::HeaderValue::from_str(&omitted.session_samples.to_string()) {
+            headers.insert(
+                header::HeaderName::from_static(HEADER_OMITTED_SESSION_SAMPLES),
+                value,
+            );
+        }
+        if let Ok(value) = header::HeaderValue::from_str(&omitted.bandwidth_samples.to_string()) {
+            headers.insert(
+                header::HeaderName::from_static(HEADER_OMITTED_BANDWIDTH_SAMPLES),
+                value,
+            );
+        }
+    } else {
+        headers.insert(
+            header::HeaderName::from_static(HEADER_ARCHIVE_TELEMETRY),
+            header::HeaderValue::from_static("complete"),
+        );
+    }
+    response
+}
+
 pub async fn export_handler(Extension(user): Extension<AuthUser>) -> Response {
     if user.role != "admin" {
         return PortabilityError::forbidden().into_response();
@@ -1895,23 +2062,7 @@ pub async fn export_handler(Extension(user): Extension<AuthUser>) -> Response {
         Ok(Err(error)) => return error.into_response(),
         Err(_) => return PortabilityError::unavailable().into_response(),
     };
-    let bytes = match serde_json::to_vec(&archive) {
-        Ok(bytes) => bytes,
-        Err(_) => return PortabilityError::invalid().into_response(),
-    };
-    (
-        [
-            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"streaming-history-backup.json\"",
-            ),
-            (header::CACHE_CONTROL, "no-store"),
-            (header::PRAGMA, "no-cache"),
-        ],
-        Body::from(bytes),
-    )
-        .into_response()
+    build_export_response(&archive)
 }
 
 pub async fn preview_handler(
@@ -2332,7 +2483,7 @@ mod tests {
             .unwrap();
         assert_eq!(label_parent, mapped_id);
         assert_eq!(sample_parent, mapped_id);
-        let target_snapshot = load_snapshot(&target.connection).unwrap();
+        let target_snapshot = load_snapshot(&target.connection).unwrap().snapshot;
         let repeat = plan_merge(&target_snapshot, &archive.data);
         assert_eq!(repeat.counts.insert.history, 0);
         assert_eq!(repeat.counts.exact_duplicate.history, 1);
@@ -2818,5 +2969,388 @@ mod tests {
             inspect_restore(&target.connection, &archive, RestoreMode::Merge).unwrap();
         assert_eq!(repeat_preview.plan.insert.bandwidth_samples, 0);
         assert_eq!(repeat_preview.plan.exact_duplicate.bandwidth_samples, 3);
+    }
+
+    #[test]
+    fn legacy_full_v1_archive_keeps_exact_digest_and_omits_partial_fields() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyV1DigestView<'a> {
+            format: &'a str,
+            format_version: u16,
+            schema_version: u16,
+            provenance_version: u16,
+            exported_at: &'a str,
+            record_counts: &'a RecordCounts,
+            redacted_fields: &'a [String],
+            omitted_tables: &'a [String],
+            data: &'a ArchiveData,
+        }
+
+        let source = disposable_db();
+        seed_sensitive_data(&source.connection);
+        let archive = export_archive(&source.connection);
+        assert_eq!(archive.manifest.omitted_samples, None);
+
+        let encoded = serde_json::to_vec(&archive).unwrap();
+        let encoded_json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(encoded_json["manifest"].get("omittedSamples").is_none());
+
+        let legacy_digest_input = LegacyV1DigestView {
+            format: &archive.manifest.format,
+            format_version: archive.manifest.format_version,
+            schema_version: archive.manifest.schema_version,
+            provenance_version: archive.manifest.provenance_version,
+            exported_at: &archive.manifest.exported_at,
+            record_counts: &archive.manifest.record_counts,
+            redacted_fields: &archive.manifest.redacted_fields,
+            omitted_tables: &archive.manifest.omitted_tables,
+            data: &archive.data,
+        };
+        let expected_sha256 = hex::encode(Sha256::digest(
+            serde_json::to_vec(&legacy_digest_input).unwrap(),
+        ));
+        assert_eq!(archive.manifest.sha256, expected_sha256);
+
+        let parsed = validate_archive_bytes(&encoded).unwrap();
+        assert_eq!(parsed, archive);
+
+        // Explicit null omission metadata is rejected; only absent metadata is valid for full archives.
+        let mut with_null = encoded_json.clone();
+        with_null["manifest"]["omittedSamples"] = serde_json::Value::Null;
+        assert!(validate_archive_bytes(&serde_json::to_vec(&with_null).unwrap()).is_err());
+
+        let export_resp = build_export_response(&archive);
+        assert_eq!(
+            export_resp.headers().get(HEADER_ARCHIVE_TELEMETRY).unwrap(),
+            "complete"
+        );
+        assert!(export_resp
+            .headers()
+            .get(HEADER_OMITTED_SESSION_SAMPLES)
+            .is_none());
+        assert!(export_resp
+            .headers()
+            .get(HEADER_OMITTED_BANDWIDTH_SAMPLES)
+            .is_none());
+
+        let mut target = disposable_db();
+        let (preview, token) =
+            preview_and_token(&target.connection, &parsed, RestoreMode::Replace, 44, 6000);
+        let preview_resp = response_from_preview(&preview, token.clone(), 6300);
+        let preview_json = serde_json::to_value(&preview_resp).unwrap();
+        assert!(preview_json.get("omittedSamples").is_none());
+        assert!(preview_json.get("partialTelemetryNotice").is_none());
+
+        let restored = restore_connection(
+            &mut target.connection,
+            target.database_path.to_str().unwrap(),
+            44,
+            RestoreMode::Replace,
+            &parsed,
+            &token,
+            6001,
+        )
+        .unwrap();
+        let restored_json = serde_json::to_value(&restored).unwrap();
+        assert!(restored_json.get("omittedSamples").is_none());
+        assert!(restored_json.get("partialTelemetryNotice").is_none());
+        assert_private_backup_exists(&target.root);
+    }
+
+    #[test]
+    fn truncated_export_binds_omitted_samples_and_surfaces_in_export_preview_and_restore() {
+        let source = disposable_db();
+        seed_sensitive_data(&source.connection);
+        for ts in [
+            1_790_856_060_i64,
+            1_790_856_120,
+            1_790_856_180,
+            1_790_856_240,
+        ] {
+            source
+                .connection
+                .execute(
+                    "INSERT INTO streaming_session_samples(history_id,sampled_at,observed_secs,playing,bitrate_bps) VALUES (7,?1,30,1,1200000)",
+                    [ts],
+                )
+                .unwrap();
+        }
+        source
+            .connection
+            .execute(
+                "UPDATE streaming_bandwidth_samples SET timestamp = '2026-10-01 12:30:00' WHERE id = 4",
+                [],
+            )
+            .unwrap();
+        for (id, timestamp) in [
+            (5_i64, "2026-10-01T12:20:00Z"),
+            (6, "2026-10-01 12:10:00"),
+            (7, "2026-10-01T12:00:00Z"),
+        ] {
+            source
+                .connection
+                .execute(
+                    "INSERT INTO streaming_bandwidth_samples(id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta) VALUES (?1,?2,'jellyfin',1,1,0,0,1200000,1024)",
+                    params![id, timestamp],
+                )
+                .unwrap();
+        }
+
+        // Total rows = 1 history + 1 label + 1 policy + 5 session + 4 bw = 12.
+        // With budget = 8: remaining_sample_budget = 5, half_budget = 2 -> retains 2 session + 3 bw.
+        let archive = build_archive_with_budget(&source.connection, 1_798_876_800, 8).unwrap();
+        assert_eq!(
+            archive.manifest.omitted_samples,
+            Some(OmittedSamples {
+                session_samples: 3,
+                bandwidth_samples: 1,
+            })
+        );
+        assert_eq!(archive.manifest.record_counts.total(), Some(8));
+        assert_eq!(archive.manifest.record_counts.history, 1);
+        assert_eq!(archive.manifest.record_counts.labels, 1);
+        assert_eq!(
+            archive
+                .data
+                .bandwidth_samples
+                .iter()
+                .map(|sample| sample.id)
+                .collect::<Vec<_>>(),
+            [4, 5, 6]
+        );
+
+        let encoded_str = serde_json::to_string(&archive).unwrap();
+        for secret in [
+            "provider-secret-should-never-export",
+            "device-secret-should-never-export",
+            "Living Room",
+            "192.0.2.8",
+        ] {
+            assert!(!encoded_str.contains(secret));
+        }
+
+        let export_resp = build_export_response(&archive);
+        assert_eq!(
+            export_resp.headers().get(HEADER_ARCHIVE_TELEMETRY).unwrap(),
+            "partial"
+        );
+        assert_eq!(
+            export_resp
+                .headers()
+                .get(HEADER_OMITTED_SESSION_SAMPLES)
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            export_resp
+                .headers()
+                .get(HEADER_OMITTED_BANDWIDTH_SAMPLES)
+                .unwrap(),
+            "1"
+        );
+
+        // Integrity checks on omittedSamples: stripping, nulling, tampering, zeroing, unknown fields all fail.
+        let encoded = serde_json::to_vec(&archive).unwrap();
+        let mut stripped: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        stripped["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("omittedSamples");
+        assert!(validate_archive_bytes(&serde_json::to_vec(&stripped).unwrap()).is_err());
+
+        let mut nulled: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        nulled["manifest"]["omittedSamples"] = serde_json::Value::Null;
+        assert!(validate_archive_bytes(&serde_json::to_vec(&nulled).unwrap()).is_err());
+
+        let mut tampered = archive.clone();
+        tampered.manifest.omitted_samples = Some(OmittedSamples {
+            session_samples: 1,
+            bandwidth_samples: 1,
+        });
+        assert!(tampered.validate().is_err());
+
+        let mut zeroed = archive.clone();
+        zeroed.manifest.omitted_samples = Some(OmittedSamples {
+            session_samples: 0,
+            bandwidth_samples: 0,
+        });
+        zeroed.manifest.sha256 = zeroed.digest().unwrap();
+        assert!(zeroed.validate().is_err());
+
+        let mut with_extra: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        with_extra["manifest"]["omittedSamples"]["extra"] = serde_json::json!(1);
+        assert!(validate_archive_bytes(&serde_json::to_vec(&with_extra).unwrap()).is_err());
+
+        // Merge preview + restore explicitly surface omitted samples, notice, and backup verification.
+        let mut merge_target = disposable_db();
+        let (merge_preview, merge_token) = preview_and_token(
+            &merge_target.connection,
+            &archive,
+            RestoreMode::Merge,
+            44,
+            7000,
+        );
+        let merge_preview_resp = response_from_preview(&merge_preview, merge_token.clone(), 7300);
+        assert_eq!(
+            merge_preview_resp.omitted_samples,
+            archive.manifest.omitted_samples
+        );
+        assert!(merge_preview_resp
+            .partial_telemetry_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("3 earlier session") && n.contains("1 earlier bandwidth")));
+        // Approval issued for merge cannot be replayed in replace mode.
+        assert!(restore_connection(
+            &mut merge_target.connection,
+            merge_target.database_path.to_str().unwrap(),
+            44,
+            RestoreMode::Replace,
+            &archive,
+            &merge_token,
+            7001,
+        )
+        .is_err());
+        let merge_restored = restore_connection(
+            &mut merge_target.connection,
+            merge_target.database_path.to_str().unwrap(),
+            44,
+            RestoreMode::Merge,
+            &archive,
+            &merge_token,
+            7001,
+        )
+        .unwrap();
+        assert!(merge_restored.backup_verified);
+        assert_eq!(
+            merge_restored.omitted_samples,
+            archive.manifest.omitted_samples
+        );
+        assert!(merge_restored.partial_telemetry_notice.is_some());
+        assert_private_backup_exists(&merge_target.root);
+
+        // Replace preview + restore explicitly warn about deleting destination samples & restoring retained subset.
+        let mut replace_target = disposable_db();
+        let (replace_preview, replace_token) = preview_and_token(
+            &replace_target.connection,
+            &archive,
+            RestoreMode::Replace,
+            44,
+            8000,
+        );
+        let replace_preview_resp =
+            response_from_preview(&replace_preview, replace_token.clone(), 8300);
+        assert_eq!(
+            replace_preview_resp.omitted_samples,
+            archive.manifest.omitted_samples
+        );
+        assert!(replace_preview_resp
+            .partial_telemetry_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Replacement deletes existing destination samples")));
+        assert!(replace_preview_resp
+            .replacement_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("3 earlier session")));
+        let replace_restored = restore_connection(
+            &mut replace_target.connection,
+            replace_target.database_path.to_str().unwrap(),
+            44,
+            RestoreMode::Replace,
+            &archive,
+            &replace_token,
+            8001,
+        )
+        .unwrap();
+        assert!(replace_restored.backup_verified);
+        assert_eq!(
+            replace_restored.omitted_samples,
+            archive.manifest.omitted_samples
+        );
+        assert!(replace_restored.partial_telemetry_notice.is_some());
+        assert_private_backup_exists(&replace_target.root);
+    }
+
+    #[test]
+    fn history_and_labels_are_never_dropped_when_budget_is_exhausted() {
+        let source = disposable_db();
+        seed_sensitive_data(&source.connection);
+        // Base rows = 1 history + 1 label + 1 policy = 3.
+        // Budget = 3 leaves zero sample budget: preserves history/labels and explicitly omits all samples.
+        let zero_sample_archive =
+            build_archive_with_budget(&source.connection, 1_798_876_800, 3).unwrap();
+        assert_eq!(zero_sample_archive.manifest.record_counts.history, 1);
+        assert_eq!(zero_sample_archive.manifest.record_counts.labels, 1);
+        assert_eq!(
+            zero_sample_archive.manifest.record_counts.session_samples,
+            0
+        );
+        assert_eq!(
+            zero_sample_archive.manifest.record_counts.bandwidth_samples,
+            0
+        );
+        assert_eq!(
+            zero_sample_archive.manifest.omitted_samples,
+            Some(OmittedSamples {
+                session_samples: 1,
+                bandwidth_samples: 1,
+            })
+        );
+
+        // Budget below history + labels + policy fails closed rather than dropping history or labels.
+        let err = build_archive_with_budget(&source.connection, 1_798_876_800, 2).unwrap_err();
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(err.code, "streaming_archive_too_large");
+    }
+
+    #[test]
+    fn real_hundred_thousand_row_cap_marks_omitted_session_samples_and_preserves_history() {
+        let source = disposable_db();
+        source
+            .connection
+            .execute(
+                "INSERT INTO streaming_history(id,session_key,provider,server_name,user_id,user_name,item_id,item_name,provenance,server_id,timestamp_certainty,byte_accuracy,policy_status) VALUES (1,'s-1','plex','Plex','u1','Alice','i1','Film','observed_session','srv-1','observed','estimated','included')",
+                [],
+            )
+            .unwrap();
+        source
+            .connection
+            .execute(
+                "INSERT INTO streaming_history_labels(history_id,kind,value,name) VALUES (1,'library','lib-1','Movies')",
+                [],
+            )
+            .unwrap();
+        let tx = source.connection.unchecked_transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO streaming_session_samples(history_id,sampled_at,observed_secs,playing,bitrate_bps) VALUES (1,?1,1,1,0)")
+                .unwrap();
+            for ts in 1..=100_005_i64 {
+                stmt.execute([ts]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let archive = build_archive(&source.connection, 1_798_876_800).unwrap();
+        assert_eq!(archive.manifest.record_counts.history, 1);
+        assert_eq!(archive.manifest.record_counts.labels, 1);
+        assert_eq!(
+            archive.manifest.record_counts.session_samples,
+            MAX_PORTABLE_ROWS - 3
+        );
+        assert_eq!(
+            archive.manifest.omitted_samples,
+            Some(OmittedSamples {
+                session_samples: 8,
+                bandwidth_samples: 0,
+            })
+        );
+        // Oldest 8 samples (1..=8) were dropped; newest 99,997 (9..=100,005) are retained.
+        assert_eq!(archive.data.session_samples.first().unwrap().sampled_at, 9);
+        assert_eq!(
+            archive.data.session_samples.last().unwrap().sampled_at,
+            100_005
+        );
+        assert!(ensure_archive_within_byte_limit(&archive).is_ok());
     }
 }

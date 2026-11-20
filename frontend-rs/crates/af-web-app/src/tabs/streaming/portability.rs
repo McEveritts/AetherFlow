@@ -1,11 +1,12 @@
 //! Native archive export, typed summaries, and reviewed restore.
 use super::common::*;
 use super::types::*;
-use crate::state::app;
+use crate::state::{app, AppContext};
 use crate::tabs::contracts;
 use crate::tabs::l10n::{tt, tt_with, ConfirmDialog};
 use af_web_core::api::{current_auth_epoch, ApiClient};
 use leptos::prelude::*;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -36,6 +37,121 @@ fn validate_request_envelope(body: &Value) -> Result<(), &'static str> {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportManifestOmitted {
+    #[serde(default)]
+    omitted_samples: Option<OmittedSamples>,
+}
+
+#[derive(Deserialize)]
+struct ExportArchiveOmitted {
+    manifest: ExportManifestOmitted,
+}
+
+fn parse_omitted_headers(
+    telemetry: Option<&str>,
+    session: Option<&str>,
+    bandwidth: Option<&str>,
+) -> Option<Option<OmittedSamples>> {
+    let status = telemetry?.trim();
+    if status.eq_ignore_ascii_case("complete") {
+        return Some(None);
+    }
+    if !status.eq_ignore_ascii_case("partial") {
+        return None;
+    }
+    let session_samples = session?.trim().parse::<u64>().ok()?;
+    let bandwidth_samples = bandwidth?.trim().parse::<u64>().ok()?;
+    let omitted = OmittedSamples {
+        session_samples,
+        bandwidth_samples,
+        extra: Default::default(),
+    };
+    omitted.has_omissions().then_some(Some(omitted))
+}
+
+fn extract_omitted_samples_from_json(raw: &str) -> Option<OmittedSamples> {
+    serde_json::from_str::<ExportArchiveOmitted>(raw)
+        .ok()
+        .and_then(|archive| archive.manifest.omitted_samples)
+        .filter(OmittedSamples::has_omissions)
+}
+
+fn preview_summary_json(summary: &ArchivePreview) -> Value {
+    let mut object = json!({
+        "mode": summary.mode,
+        "archiveCounts": summary.archive_counts,
+        "targetCounts": summary.target_counts,
+        "plan": summary.plan,
+        "replacementCounts": summary.replacement_counts,
+        "replacementNotice": summary.replacement_notice,
+        "conflicts": summary.conflicts,
+        "expiresAt": summary.expires_at
+    });
+    if let Some(map) = object.as_object_mut() {
+        if let Some(omitted) = summary
+            .omitted_samples
+            .as_ref()
+            .filter(|omitted| omitted.has_omissions())
+        {
+            map.insert("omittedSamples".into(), json!(omitted));
+        }
+        if let Some(notice) = &summary.partial_telemetry_notice {
+            map.insert("partialTelemetryNotice".into(), json!(notice));
+        }
+    }
+    object
+}
+
+fn partial_preview_warning(context: AppContext, summary: &ArchivePreview) -> Option<String> {
+    if let Some(omitted) = summary
+        .omitted_samples
+        .as_ref()
+        .filter(|omitted| omitted.has_omissions())
+    {
+        let session = omitted.session_samples.to_string();
+        let bandwidth = omitted.bandwidth_samples.to_string();
+        Some(if summary.mode == "replace" {
+            tt_with(
+                context,
+                "Partial telemetry archive: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted during export. Replacing history will delete destination samples and restore only the retained subset.",
+                &[("session", &session), ("bandwidth", &bandwidth)],
+            )
+        } else {
+            tt_with(
+                context,
+                "Partial telemetry archive: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted during export. Merging will not restore those omitted earlier samples.",
+                &[("session", &session), ("bandwidth", &bandwidth)],
+            )
+        })
+    } else {
+        summary.partial_telemetry_notice.clone()
+    }
+}
+
+fn confirm_restore_message(context: AppContext, summary: &ArchivePreview) -> String {
+    if summary.mode == "replace" {
+        if let Some(omitted) = summary
+            .omitted_samples
+            .as_ref()
+            .filter(|omitted| omitted.has_omissions())
+        {
+            let session = omitted.session_samples.to_string();
+            let bandwidth = omitted.bandwidth_samples.to_string();
+            return tt_with(
+                context,
+                "This partial archive omitted {session} earlier session samples and {bandwidth} earlier bandwidth samples; replacement mode will delete destination samples and restore only the retained subset. Confirm only the exact server-generated plan you reviewed; the signed token and archive are sent unchanged.",
+                &[("session", &session), ("bandwidth", &bandwidth)],
+            );
+        }
+    }
+    tt(
+        context,
+        "Replacement mode can remove existing history. Confirm only the exact server-generated plan you reviewed; the signed token and archive are sent unchanged.",
+    )
+}
+
 fn prepare_preview_request(mode: &str, content: &str) -> Result<Value, &'static str> {
     validate_raw_archive_len(content.len())?;
     let archive = match serde_json::from_str::<Value>(content) {
@@ -63,6 +179,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
     let approved = RwSignal::new(false);
     let confirm = RwSignal::new(false);
     let result = RwSignal::new(None::<String>);
+    let export_omitted = RwSignal::new(None::<OmittedSamples>);
     let generation = RwSignal::new(0u64);
     let export_abort = StoredValue::new_local(web_sys::AbortController::new().ok());
     on_cleanup(move || {
@@ -87,6 +204,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
         let auth_epoch = current_auth_epoch();
         let signal = export_abort
             .with_value(|controller| controller.as_ref().map(web_sys::AbortController::signal));
+        export_omitted.set(None);
         busy.set(true);
         spawn_local(async move {
             let is_current = || {
@@ -124,11 +242,53 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                         )],
                     ));
                 }
+                let headers = response.headers();
+                let telemetry_header = headers
+                    .get("x-aetherflow-archive-telemetry")
+                    .ok()
+                    .flatten();
+                let omitted_session_header = headers
+                    .get("x-aetherflow-omitted-session-samples")
+                    .ok()
+                    .flatten();
+                let omitted_bw_header = headers
+                    .get("x-aetherflow-omitted-bandwidth-samples")
+                    .ok()
+                    .flatten();
+                let header_omitted = parse_omitted_headers(
+                    telemetry_header.as_deref(),
+                    omitted_session_header.as_deref(),
+                    omitted_bw_header.as_deref(),
+                );
                 let blob = response.blob().await.map_err(|error| error.message)?;
                 if !is_current() {
                     return Ok(());
                 }
-                download_blob(&blob, "aetherflow-streaming-archive.json")
+                download_blob(&blob, "aetherflow-streaming-archive.json")?;
+                let omitted = match header_omitted {
+                    Some(omitted) => omitted,
+                    None => match JsFuture::from(blob.text()).await {
+                        Ok(text) if is_current() => text
+                            .as_string()
+                            .as_deref()
+                            .and_then(extract_omitted_samples_from_json),
+                        _ => None,
+                    },
+                };
+                if !is_current() {
+                    return Ok(());
+                }
+                if let Some(omitted) = omitted {
+                    let session = omitted.session_samples.to_string();
+                    let bandwidth = omitted.bandwidth_samples.to_string();
+                    export_omitted.set(Some(omitted));
+                    context.toast_with(
+                        "Partial telemetry archive exported: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted to fit the 100,000-record archive limit.",
+                        &[("session", &session), ("bandwidth", &bandwidth)],
+                        false,
+                    );
+                }
+                Ok(())
             }
             .await;
             if !is_current() {
@@ -239,6 +399,31 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             >
                 {move || tt(context, "Export native JSON archive")}
             </button>
+            <p class="text-xs text-slate-400">
+                {move || tt(
+                    context,
+                    "Native JSON export preserves all playback history, labels, and tracking policy up to 100,000 total records and 8 MiB. Routine session and bandwidth samples beyond remaining capacity are truncated (oldest omitted) and flagged in the archive manifest.",
+                )}
+            </p>
+            {move || {
+                export_omitted.get().map(|omitted| {
+                    view! {
+                        <p
+                            role="alert"
+                            class="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200"
+                        >
+                            {move || tt_with(
+                                context,
+                                "Partial telemetry archive exported: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted to fit the 100,000-record archive limit.",
+                                &[
+                                    ("session", &omitted.session_samples.to_string()),
+                                    ("bandwidth", &omitted.bandwidth_samples.to_string()),
+                                ],
+                            )}
+                        </p>
+                    }
+                })
+            }}
             <label class="block text-sm">
                 {move || tt(context, "Restore mode")}
                 <select
@@ -305,16 +490,28 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             </button>
             <Show when=move || preview.with(|p| !contracts::decode::<ArchivePreview>(p).approval_token.is_empty())>
                 <div class="space-y-3 rounded-xl border border-amber-500/30 p-3">
+                    {move || {
+                        let warning = preview.with(|p| {
+                            let summary = contracts::decode::<ArchivePreview>(p);
+                            partial_preview_warning(context, &summary)
+                        });
+                        warning.map(|text| {
+                            view! {
+                                <p
+                                    role="alert"
+                                    class="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200"
+                                >
+                                    {text}
+                                </p>
+                            }
+                        })
+                    }}
                     <pre class="text-xs whitespace-pre-wrap break-all max-h-80 overflow-auto">
                         {move || {
                             preview
                                 .with(|p| {
                                     let summary = contracts::decode::<ArchivePreview>(p);
-                                    serde_json::to_string_pretty(
-                                            &json!(
-                                                {"mode":summary.mode,"archiveCounts":summary.archive_counts,"targetCounts":summary.target_counts,"plan":summary.plan,"replacementCounts":summary.replacement_counts,"replacementNotice":summary.replacement_notice,"conflicts":summary.conflicts,"expiresAt":summary.expires_at}
-                                            ),
-                                        )
+                                    serde_json::to_string_pretty(&preview_summary_json(&summary))
                                         .unwrap_or_default()
                                 })
                         }}
@@ -357,7 +554,12 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             <ConfirmDialog
                 open=confirm
                 title="Restore the reviewed streaming archive?"
-                message="Replacement mode can remove existing history. Confirm only the exact server-generated plan you reviewed; the signed token and archive are sent unchanged."
+                message=Signal::derive(move || {
+                    preview.with(|p| {
+                        let summary = contracts::decode::<ArchivePreview>(p);
+                        confirm_restore_message(context, &summary)
+                    })
+                })
                 busy=Signal::derive(move || busy.get())
                 on_confirm=restore
             />
@@ -468,5 +670,122 @@ mod tests {
             validate_request_envelope(&oversized_envelope),
             Err(ERR_REQUEST_ENVELOPE_SIZE)
         );
+    }
+
+    #[test]
+    fn partial_telemetry_headers_json_and_preview_summary_disclose_omitted_samples() {
+        assert_eq!(parse_omitted_headers(None, None, None), None);
+        assert_eq!(
+            parse_omitted_headers(Some(" complete "), None, None),
+            Some(None)
+        );
+        assert_eq!(
+            parse_omitted_headers(Some("partial"), Some("12"), Some("3")),
+            Some(Some(OmittedSamples {
+                session_samples: 12,
+                bandwidth_samples: 3,
+                extra: Default::default(),
+            }))
+        );
+        assert_eq!(
+            parse_omitted_headers(Some("partial"), Some("0"), Some("0")),
+            None
+        );
+        assert_eq!(
+            parse_omitted_headers(Some("partial"), None, Some("3")),
+            None
+        );
+        assert_eq!(
+            parse_omitted_headers(Some("partial"), Some("bad"), Some("3")),
+            None
+        );
+        assert_eq!(
+            parse_omitted_headers(Some("unexpected"), Some("12"), Some("3")),
+            None
+        );
+
+        let full_raw = r#"{"manifest":{"format":"aetherflow.streaming-history","recordCounts":{"history":1}},"data":{}}"#;
+        assert_eq!(extract_omitted_samples_from_json(full_raw), None);
+
+        let zeroed_raw = r#"{"manifest":{"format":"aetherflow.streaming-history","omittedSamples":{"sessionSamples":0,"bandwidthSamples":0}},"data":{}}"#;
+        assert_eq!(extract_omitted_samples_from_json(zeroed_raw), None);
+
+        let partial_raw = r#"{"manifest":{"format":"aetherflow.streaming-history","recordCounts":{"history":1},"omittedSamples":{"sessionSamples":42,"bandwidthSamples":7}},"data":{"history":[]}}"#;
+        assert_eq!(
+            extract_omitted_samples_from_json(partial_raw),
+            Some(OmittedSamples {
+                session_samples: 42,
+                bandwidth_samples: 7,
+                extra: Default::default(),
+            })
+        );
+
+        let full_preview: ArchivePreview = serde_json::from_value(json!({
+            "mode": "replace",
+            "approvalToken": "tok",
+            "archiveCounts": {"history": 1},
+            "targetCounts": {"history": 0},
+            "plan": {"insert": {"history": 1}},
+            "conflicts": [],
+            "expiresAt": "2026-11-20T00:00:00Z"
+        }))
+        .unwrap();
+        let full_summary = preview_summary_json(&full_preview);
+        assert!(full_summary.get("omittedSamples").is_none());
+        assert!(full_summary.get("partialTelemetryNotice").is_none());
+
+        let partial_replace_preview: ArchivePreview = serde_json::from_value(json!({
+            "mode": "replace",
+            "approvalToken": "tok",
+            "archiveCounts": {"history": 1},
+            "targetCounts": {"history": 0},
+            "plan": {"insert": {"history": 1}},
+            "omittedSamples": {"sessionSamples": 42, "bandwidthSamples": 7},
+            "partialTelemetryNotice": "Partial telemetry archive",
+            "conflicts": [],
+            "expiresAt": "2026-11-20T00:00:00Z"
+        }))
+        .unwrap();
+        let partial_summary = preview_summary_json(&partial_replace_preview);
+        assert_eq!(partial_summary["omittedSamples"]["sessionSamples"], 42);
+        assert_eq!(partial_summary["omittedSamples"]["bandwidthSamples"], 7);
+        assert_eq!(
+            partial_summary["partialTelemetryNotice"],
+            "Partial telemetry archive"
+        );
+
+        let partial_merge_preview: ArchivePreview = serde_json::from_value(json!({
+            "mode": "merge",
+            "approvalToken": "tok",
+            "archiveCounts": {"history": 1},
+            "targetCounts": {"history": 0},
+            "plan": {"insert": {"history": 1}},
+            "omittedSamples": {"sessionSamples": 42, "bandwidthSamples": 7},
+            "conflicts": [],
+            "expiresAt": "2026-11-20T00:00:00Z"
+        }))
+        .unwrap();
+
+        let owner = Owner::new();
+        owner.with(|| {
+            let context = AppContext::new();
+            assert_eq!(partial_preview_warning(context, &full_preview), None);
+            assert!(!confirm_restore_message(context, &full_preview).contains("omitted"));
+
+            let replace_warn = partial_preview_warning(context, &partial_replace_preview).unwrap();
+            assert!(replace_warn.contains("42"));
+            assert!(replace_warn.contains("7"));
+            assert!(replace_warn.contains("Replacing history"));
+
+            let replace_confirm = confirm_restore_message(context, &partial_replace_preview);
+            assert!(replace_confirm.contains("42"));
+            assert!(replace_confirm.contains("7"));
+            assert!(replace_confirm.contains("replacement mode will delete destination samples"));
+
+            let merge_warn = partial_preview_warning(context, &partial_merge_preview).unwrap();
+            assert!(merge_warn.contains("42"));
+            assert!(merge_warn.contains("7"));
+            assert!(merge_warn.contains("Merging will not restore"));
+        });
     }
 }

@@ -128,6 +128,9 @@ fn build_cors_layer() -> CorsLayer {
         HeaderName::from_static("deprecation"),
         HeaderName::from_static("x-aetherflow-inventory-mode"),
         HeaderName::from_static("x-aetherflow-inventory-authenticated"),
+        HeaderName::from_static(crate::streaming_portability::HEADER_ARCHIVE_TELEMETRY),
+        HeaderName::from_static(crate::streaming_portability::HEADER_OMITTED_SESSION_SAMPLES),
+        HeaderName::from_static(crate::streaming_portability::HEADER_OMITTED_BANDWIDTH_SAMPLES),
         header::LINK,
     ];
 

@@ -2499,9 +2499,26 @@ paths:
       tags:
         - Streaming
       summary: Get streaming portability export
+      description: Archives retain all playback history, labels, and tracking policy. If older telemetry samples are omitted to fit the 100,000-record cap, the archive manifest includes `omittedSamples` with both counts. The serialized archive may not exceed 8 MiB.
       responses:
         '200':
-          description: OK
+          description: Streaming history archive
+          headers:
+            x-aetherflow-archive-telemetry:
+              description: Whether the archive contains all routine telemetry samples.
+              schema:
+                type: string
+                enum: [complete, partial]
+            x-aetherflow-omitted-session-samples:
+              description: Number of omitted session samples. Present for partial telemetry archives.
+              schema:
+                type: integer
+                minimum: 0
+            x-aetherflow-omitted-bandwidth-samples:
+              description: Number of omitted bandwidth samples. Present for partial telemetry archives.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
@@ -2509,6 +2526,8 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '413':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
@@ -2519,7 +2538,7 @@ paths:
       summary: Execute streaming portability preview
       responses:
         '200':
-          description: OK
+          description: Restore preview and approval token. For partial telemetry archives the response includes `omittedSamples` and a mode-specific `partialTelemetryNotice`.
           content:
             application/json:
               schema:
@@ -2545,7 +2564,7 @@ paths:
       summary: Execute streaming portability restore
       responses:
         '200':
-          description: OK
+          description: Restore result and backup verification. For partial telemetry archives the response includes `omittedSamples` and a mode-specific `partialTelemetryNotice`.
           content:
             application/json:
               schema:

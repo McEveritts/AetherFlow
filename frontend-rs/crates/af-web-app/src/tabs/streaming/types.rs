@@ -464,6 +464,21 @@ pub(super) struct UserBindings {
     pub extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct OmittedSamples {
+    pub session_samples: u64,
+    pub bandwidth_samples: u64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl OmittedSamples {
+    pub(super) fn has_omissions(&self) -> bool {
+        self.session_samples > 0 || self.bandwidth_samples > 0
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(super) struct ArchivePreview {
@@ -475,6 +490,10 @@ pub(super) struct ArchivePreview {
     pub plan: BTreeMap<String, BTreeMap<String, u64>>,
     pub replacement_counts: Option<BTreeMap<String, u64>>,
     pub replacement_notice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_samples: Option<OmittedSamples>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_telemetry_notice: Option<String>,
     #[serde(deserialize_with = "nullable")]
     pub conflicts: Vec<Value>,
     #[serde(flatten)]
@@ -506,6 +525,8 @@ pub(super) struct ArchiveManifest {
     pub format: String,
     #[serde(default)]
     pub record_counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_samples: Option<OmittedSamples>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -625,9 +646,19 @@ mod tests {
     fn archive_summary_requires_manifest_and_object_data_but_keeps_extensions() {
         let archive: PortableArchive = serde_json::from_value(json!({"manifest":{"format":"aetherflow.streaming-history","formatVersion":1,"recordCounts":{"history":2}},"data":{"history":[]},"futureReceipt":true})).unwrap();
         assert_eq!(archive.manifest.record_counts["history"], 2);
+        assert_eq!(archive.manifest.omitted_samples, None);
         assert_eq!(
             serde_json::to_value(archive).unwrap()["futureReceipt"],
             true
+        );
+        let partial: PortableArchive = serde_json::from_value(json!({"manifest":{"format":"aetherflow.streaming-history","formatVersion":1,"recordCounts":{"history":2},"omittedSamples":{"sessionSamples":15,"bandwidthSamples":4}},"data":{"history":[]}})).unwrap();
+        assert_eq!(
+            partial.manifest.omitted_samples,
+            Some(OmittedSamples {
+                session_samples: 15,
+                bandwidth_samples: 4,
+                extra: BTreeMap::new(),
+            })
         );
         assert!(serde_json::from_value::<PortableArchive>(
             json!({"manifest":{"format":"aetherflow.streaming-history"},"data":[]})

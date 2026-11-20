@@ -282,8 +282,24 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
         export.headers().get(header::CACHE_CONTROL).unwrap(),
         "no-store"
     );
+    assert_eq!(
+        export
+            .headers()
+            .get(crate::streaming_portability::HEADER_ARCHIVE_TELEMETRY)
+            .unwrap(),
+        "complete"
+    );
+    assert!(export
+        .headers()
+        .get(crate::streaming_portability::HEADER_OMITTED_SESSION_SAMPLES)
+        .is_none());
+    assert!(export
+        .headers()
+        .get(crate::streaming_portability::HEADER_OMITTED_BANDWIDTH_SAMPLES)
+        .is_none());
     let archive = response_json(export).await;
     assert_eq!(archive["manifest"]["recordCounts"]["history"], 2);
+    assert!(archive["manifest"].get("omittedSamples").is_none());
     let serialized = serde_json::to_string(&archive).unwrap();
     for private_value in [
         "fixture-provider-secret",
@@ -309,6 +325,8 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
     assert_eq!(preview.status(), StatusCode::OK);
     let preview = response_json(preview).await;
     assert!(preview["approvalToken"].as_str().is_some());
+    assert!(preview.get("omittedSamples").is_none());
+    assert!(preview.get("partialTelemetryNotice").is_none());
     {
         let connection = af_db::get_conn().unwrap();
         let audits: i64 = connection
@@ -413,6 +431,8 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
     let restored = response_json(restored).await;
     assert_eq!(restored["backupVerified"], true);
     assert_eq!(restored["resultingCounts"]["history"], 2);
+    assert!(restored.get("omittedSamples").is_none());
+    assert!(restored.get("partialTelemetryNotice").is_none());
     let connection = af_db::get_conn().unwrap();
     let users: i64 = connection
         .query_row(
@@ -436,4 +456,94 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
     assert_eq!(users, 3);
     assert_eq!(audits, 1);
     assert_eq!(watched, 120);
+
+    // Partial archive HTTP disclosure & CORS header exposure checks.
+    connection
+        .execute_batch(
+            "INSERT INTO streaming_session_samples(history_id,sampled_at,observed_secs,playing,bitrate_bps)
+             VALUES (10,1790856000,30,1,1200000),(10,1790856060,30,1,1200000),(10,1790856120,30,1,1200000);
+             INSERT INTO streaming_bandwidth_samples(id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta)
+             VALUES (1,'2026-10-31T20:00:00Z','jellyfin',1,1,0,0,1200000,1024),(2,'2026-10-31T20:01:00Z','jellyfin',1,1,0,0,1200000,1024);",
+        )
+        .unwrap();
+    // Base rows = 2 history + 1 label + 1 policy = 4; budget 6 leaves 2 sample slots (1 session + 1 bandwidth).
+    let partial_archive = crate::streaming_portability::export_archive_json_with_budget(
+        &connection,
+        1_798_876_800,
+        6,
+    );
+    drop(connection);
+    assert_eq!(
+        partial_archive["manifest"]["omittedSamples"],
+        json!({"sessionSamples": 2, "bandwidthSamples": 1})
+    );
+
+    let partial_preview_resp = fixture
+        .request(
+            Method::POST,
+            preview_path,
+            Some(&fixture.admin_token),
+            Some(json!({"archive": partial_archive, "mode": "replace"})),
+        )
+        .await;
+    assert_eq!(partial_preview_resp.status(), StatusCode::OK);
+    let partial_preview = response_json(partial_preview_resp).await;
+    assert_eq!(
+        partial_preview["omittedSamples"],
+        json!({"sessionSamples": 2, "bandwidthSamples": 1})
+    );
+    assert!(partial_preview["partialTelemetryNotice"]
+        .as_str()
+        .is_some_and(|n| n.contains("2 earlier session") && n.contains("1 earlier bandwidth")));
+    assert!(partial_preview["replacementNotice"]
+        .as_str()
+        .is_some_and(|n| n.contains("2 earlier session")));
+
+    let mut stripped_partial = partial_archive.clone();
+    stripped_partial["manifest"]
+        .as_object_mut()
+        .unwrap()
+        .remove("omittedSamples");
+    let rejected_stripped = fixture
+        .request(
+            Method::POST,
+            preview_path,
+            Some(&fixture.admin_token),
+            Some(json!({"archive": stripped_partial, "mode": "replace"})),
+        )
+        .await;
+    assert_eq!(rejected_stripped.status(), StatusCode::BAD_REQUEST);
+
+    let cors_router = fixture.router.clone().layer(crate::build_cors_layer());
+    let cors_export = cors_router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/admin/streaming/portability/export")
+                .header(header::ORIGIN, "http://localhost:3000")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", fixture.admin_token),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cors_export.status(), StatusCode::OK);
+    let exposed = cors_export
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    for required in [
+        crate::streaming_portability::HEADER_ARCHIVE_TELEMETRY,
+        crate::streaming_portability::HEADER_OMITTED_SESSION_SAMPLES,
+        crate::streaming_portability::HEADER_OMITTED_BANDWIDTH_SAMPLES,
+    ] {
+        assert!(
+            exposed.to_ascii_lowercase().contains(required),
+            "missing {required} in Access-Control-Expose-Headers: {exposed}"
+        );
+    }
 }
