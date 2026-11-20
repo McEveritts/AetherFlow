@@ -296,7 +296,7 @@ impl MarketplaceOps {
         let jobs = self.jobs.with_untracked(|jobs| {
             jobs.iter()
                 .filter(|(_, j)| j.active && j.accepted)
-                .map(|(id, j)| (id.clone(), j.ticket))
+                .map(|(id, j)| (id.clone(), j.ticket, j.job_id.clone()))
                 .collect::<Vec<_>>()
         });
         if jobs.is_empty() {
@@ -305,13 +305,31 @@ impl MarketplaceOps {
         self.polling.set(true);
         spawn_local(async move {
             let mut changed = false;
-            for (id, ticket) in jobs {
-                let result = ApiClient
-                    .get(&format!(
-                        "/api/v1/auth/packages/{}/progress",
-                        js_sys::encode_uri_component(&id)
-                    ))
-                    .await;
+            for (id, ticket, job_id) in jobs {
+                let mut url = format!(
+                    "/api/v1/auth/packages/{}/progress",
+                    js_sys::encode_uri_component(&id)
+                );
+                if !job_id.is_empty() {
+                    url.push_str(&format!(
+                        "?job_id={}",
+                        js_sys::encode_uri_component(&job_id)
+                    ));
+                }
+                let result = match ApiClient.get(&url).await {
+                    Err(error)
+                        if !job_id.is_empty()
+                            && error.status == 404
+                            && error.code.as_deref() == Some("PACKAGE_JOB_NOT_FOUND") =>
+                    {
+                        Ok(json!({
+                            "job_id": job_id,
+                            "status": "unconfirmed",
+                            "message": error.message,
+                        }))
+                    }
+                    other => other,
+                };
                 if self.jobs.is_disposed() {
                     return;
                 }

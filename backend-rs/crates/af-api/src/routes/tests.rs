@@ -1497,7 +1497,12 @@ async fn package_progress_sanitizes_users_and_plugins_but_keeps_admin_diagnostic
         ("admin", None, true),
     ] {
         let user = progress_test_user(role, plugin);
-        let response = package_progress(Path("sonarr".into()), Extension(user.clone())).await;
+        let response = package_progress(
+            Path("sonarr".into()),
+            Query(Default::default()),
+            Extension(user.clone()),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
@@ -1528,6 +1533,7 @@ async fn package_progress_sanitizes_users_and_plugins_but_keeps_admin_diagnostic
     .unwrap();
     let response = package_progress(
         Path("sonarr".into()),
+        Query(Default::default()),
         Extension(progress_test_user("admin", None)),
     )
     .await;
@@ -1884,6 +1890,70 @@ async fn package_ingress_callbacks_require_the_current_lifecycle_owner() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn package_progress_returns_superseded_receipt_by_job_and_package() {
+    use super::marketplace::PackageProgressQuery;
+
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, connection) = lifecycle_status_fixture();
+    connection
+        .execute_batch(
+            "INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at)
+                 VALUES ('sonarr','new-job','update','updating','fixture');
+             INSERT INTO package_lifecycle_history
+                 (package_id,job_id,action,status,started_at,sanitized_summary)
+                 VALUES ('sonarr','old-job','update','failed','fixture','private-fixture-detail');",
+        )
+        .unwrap();
+    for (package, job_id, role, expected_status, expected_code) in [
+        ("sonarr", Some("old-job"), "user", StatusCode::OK, "failed"),
+        ("sonarr", Some("old-job"), "admin", StatusCode::OK, "failed"),
+        (
+            "sonarr",
+            Some("new-job"),
+            "user",
+            StatusCode::OK,
+            "updating",
+        ),
+        ("sonarr", None, "user", StatusCode::OK, "updating"),
+        (
+            "radarr",
+            Some("old-job"),
+            "user",
+            StatusCode::NOT_FOUND,
+            "PACKAGE_JOB_NOT_FOUND",
+        ),
+    ] {
+        let response = package_progress(
+            Path(package.into()),
+            Query(PackageProgressQuery {
+                job_id: job_id.map(str::to_owned),
+            }),
+            Extension(progress_test_user(role, None)),
+        )
+        .await;
+        assert_eq!(response.status(), expected_status);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        if expected_status == StatusCode::OK {
+            assert_eq!(payload["status"], expected_code);
+            assert_eq!(payload["job_id"], job_id.unwrap_or("new-job"));
+        } else {
+            assert_eq!(payload["code"], expected_code);
+        }
+        assert_eq!(
+            payload.to_string().contains("private-fixture-detail"),
+            role == "admin"
+        );
+    }
+    drop(connection);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn package_progress_yields_and_fails_closed_on_blocked_journal() {
     if crate::plugins::tests::run_plugin_test_in_subprocess() {
         return;
@@ -1892,6 +1962,7 @@ async fn package_progress_yields_and_fails_closed_on_blocked_journal() {
     blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
     let mut response = Box::pin(package_progress(
         Path("sonarr".into()),
+        Query(Default::default()),
         Extension(progress_test_user("user", None)),
     ));
     assert!(
@@ -1935,6 +2006,7 @@ async fn package_progress_yields_and_fails_closed_on_blocked_journal() {
     blocker.execute("INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at) VALUES ('sonarr','matching-receipt','update','completed','fixture')", []).unwrap();
     let response = package_progress(
         Path("sonarr".into()),
+        Query(Default::default()),
         Extension(progress_test_user("user", None)),
     )
     .await;

@@ -4277,6 +4277,12 @@ paths:
       tags:
         - Marketplace
       summary: Get packages progress
+      parameters:
+        - in: query
+          name: job_id
+          description: Return progress or a retained terminal receipt for this exact job.
+          schema:
+            type: string
       responses:
         '200':
           description: OK
@@ -4286,6 +4292,12 @@ paths:
                 $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
+        '404':
+          description: The requested job has no current or retained terminal receipt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
       security:
         - cookieAuth: []
   /auth/plugins:

@@ -391,8 +391,14 @@ pub(super) fn package_progress_payload(
     })
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct PackageProgressQuery {
+    pub(super) job_id: Option<String>,
+}
+
 pub(super) async fn package_progress(
     Path(id): Path<String>,
+    Query(query): Query<PackageProgressQuery>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> Response {
     let diagnostics_allowed = crate::ws::package_diagnostics_allowed(&auth_user);
@@ -404,12 +410,25 @@ pub(super) async fn package_progress(
                 "Lifecycle status could not be confirmed; retry shortly",
             );
         };
-        Json(package_progress_payload(
-            &id,
-            jobs.active.get(&id).cloned(),
-            jobs.outcomes.get(&id).cloned(),
-            diagnostics_allowed,
-        ))
+        let matches_job = |id: &str| query.job_id.as_deref().is_none_or(|expected| id == expected);
+        let active = jobs.active.get(&id).filter(|job| matches_job(&job.job_id)).cloned();
+        let mut outcome = jobs.outcomes.get(&id).filter(|job| matches_job(&job.job_id)).cloned();
+        if let Some(job_id) = query.job_id.filter(|_| active.is_none() && outcome.is_none()) {
+            match af_services::get_package_job_history_outcome(&id, &job_id) {
+                Ok(Some(receipt)) => outcome = Some(receipt),
+                Ok(None) => return api_error(
+                    StatusCode::NOT_FOUND,
+                    "PACKAGE_JOB_NOT_FOUND",
+                    "The package operation receipt is unavailable. Check the current package state.",
+                ),
+                Err(_) => return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "STATUS_UNAVAILABLE",
+                    "Lifecycle status could not be confirmed; retry shortly",
+                ),
+            }
+        }
+        Json(package_progress_payload(&id, active, outcome, diagnostics_allowed))
         .into_response()
     })
     .await

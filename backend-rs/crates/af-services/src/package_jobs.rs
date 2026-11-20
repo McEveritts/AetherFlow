@@ -2,7 +2,7 @@
 //! installer output can contain credentials and must never enter this journal.
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::{collections::HashMap, sync::Mutex, time::Duration};
@@ -171,24 +171,7 @@ impl JobRegistry {
             "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
                     failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version
              FROM package_lifecycle_jobs",
-        )?.query_map([], |row| {
-            let status: String = row.get(3)?;
-            let failed_stage: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
-            let exit_code: Option<i32> = row.get(8)?;
-            let sanitized_summary: String = row.get::<_, Option<String>>(9)?.unwrap_or_default();
-            let expected_target_version: String = row.get::<_, Option<String>>(10)?.unwrap_or_default();
-            let achieved_version: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
-            Ok(PackageJobOutcome {
-                package_id: row.get(0)?, job_id: row.get(1)?, action: row.get(2)?,
-                message: outcome_summary(&status, &row.get::<_, String>(6)?).into(), status,
-                started_at: row.get(4)?, finished_at: row.get(5)?,
-                failed_stage: if failed_stage.is_empty() { None } else { Some(failed_stage) },
-                exit_code,
-                sanitized_summary: if sanitized_summary.is_empty() { None } else { Some(sanitized_summary) },
-                expected_target_version: if expected_target_version.is_empty() { None } else { Some(expected_target_version) },
-                achieved_version: if achieved_version.is_empty() { None } else { Some(achieved_version) },
-            })
-        })?.collect::<rusqlite::Result<_>>()?;
+        )?.query_map([], read_outcome)?.collect::<rusqlite::Result<_>>()?;
         for row in rows {
             if !matches!(row.status.as_str(), "completed" | "failed" | "interrupted") {
                 if self
@@ -356,6 +339,45 @@ impl JobRegistry {
     }
 }
 
+fn read_outcome(row: &Row<'_>) -> rusqlite::Result<PackageJobOutcome> {
+    let status: String = row.get(3)?;
+    let failed_stage: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+    let exit_code: Option<i32> = row.get(8)?;
+    let sanitized_summary: String = row.get::<_, Option<String>>(9)?.unwrap_or_default();
+    let expected_target_version: String = row.get::<_, Option<String>>(10)?.unwrap_or_default();
+    let achieved_version: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
+    Ok(PackageJobOutcome {
+        package_id: row.get(0)?,
+        job_id: row.get(1)?,
+        action: row.get(2)?,
+        message: outcome_summary(&status, &row.get::<_, String>(6)?).into(),
+        status,
+        started_at: row.get(4)?,
+        finished_at: row.get(5)?,
+        failed_stage: if failed_stage.is_empty() {
+            None
+        } else {
+            Some(failed_stage)
+        },
+        exit_code,
+        sanitized_summary: if sanitized_summary.is_empty() {
+            None
+        } else {
+            Some(sanitized_summary)
+        },
+        expected_target_version: if expected_target_version.is_empty() {
+            None
+        } else {
+            Some(expected_target_version)
+        },
+        achieved_version: if achieved_version.is_empty() {
+            None
+        } else {
+            Some(achieved_version)
+        },
+    })
+}
+
 fn outcome_summary(status: &str, category: &str) -> &'static str {
     match status {
         "completed" => "Operation completed.",
@@ -423,6 +445,37 @@ pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
     snapshot.active = refreshed.active;
     snapshot.outcomes = refreshed.outcomes;
     Ok(snapshot)
+}
+
+/// Look up an exact terminal receipt after a later job supersedes it in the live registry.
+pub fn get_package_job_history_outcome(
+    package_id: &str,
+    job_id: &str,
+) -> anyhow::Result<Option<PackageJobOutcome>> {
+    let path = JOBS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lifecycle registry unavailable"))?
+        .db
+        .as_ref()
+        .and_then(|conn| conn.path())
+        .map(str::to_owned);
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_millis(150))?;
+    Ok(conn
+        .query_row(
+            "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
+                    failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version
+             FROM package_lifecycle_history
+             WHERE package_id = ?1 AND job_id = ?2
+               AND status IN ('completed', 'failed', 'interrupted')
+             ORDER BY id DESC LIMIT 1",
+            params![package_id, job_id],
+            read_outcome,
+        )
+        .optional()?)
 }
 
 pub fn take_package_job_lease(
