@@ -1204,7 +1204,7 @@ pub fn target_version_matches(expected: &str, achieved: &str) -> bool {
     versions_match_target(achieved, expected)
 }
 
-fn resolve_candidate_receipt_paths(pkg_name: &str) -> Vec<PathBuf> {
+pub(super) fn resolve_candidate_receipt_paths(pkg_name: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let fs_root = std::env::var("AETHERFLOW_FS_ROOT")
         .ok()
@@ -1263,11 +1263,6 @@ fn resolve_candidate_receipt_paths(pkg_name: &str) -> Vec<PathBuf> {
         }
     }
     paths
-}
-
-#[allow(dead_code)]
-pub(crate) fn candidate_receipt_paths_for_package(pkg_name: &str) -> Vec<PathBuf> {
-    resolve_candidate_receipt_paths(pkg_name)
 }
 
 fn open_dir_nofollow_stepwise_ext(
@@ -1413,17 +1408,6 @@ fn open_dir_nofollow_stepwise_ext(
     }
 
     Ok(Some(curr_fd))
-}
-
-#[allow(dead_code)]
-fn open_dir_nofollow_stepwise(dir_path: &std::path::Path) -> Result<OwnedFd, String> {
-    match open_dir_nofollow_stepwise_ext(dir_path, false)? {
-        Some(fd) => Ok(fd),
-        None => Err(format!(
-            "ENOENT: Directory component {} does not exist",
-            dir_path.display()
-        )),
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

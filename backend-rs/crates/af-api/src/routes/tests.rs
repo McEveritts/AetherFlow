@@ -4429,7 +4429,7 @@ fn test_candidate_receipt_paths_includes_blueprint_config_and_restores_atomicall
         ("radarr", "/etc/radarr/config.xml".to_string())
     };
 
-    let paths = candidate_receipt_paths_for_package(pkg);
+    let paths = marketplace::resolve_candidate_receipt_paths(pkg);
     let rel_trimmed = cfg_path.trim_start_matches(['/', '\\']);
     let expected_cfg = temp_dir.join(rel_trimmed);
     assert!(
@@ -4562,11 +4562,13 @@ fn test_candidate_receipt_preserves_mode_and_ownership_on_restoration() {
 
 #[test]
 fn test_wave22_api_sanitize_scalar_credentials_and_filebot_receipts() {
-    let paths = candidate_receipt_paths_for_package("filebot");
+    let paths = marketplace::resolve_candidate_receipt_paths("filebot");
     assert!(
-            paths.iter().any(|p| p.to_string_lossy().contains("filebot-node")),
-            "candidate_receipt_paths_for_package('filebot') must include opt/filebot-node/.af-version: {paths:?}"
-        );
+        paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("filebot-node")),
+        "FileBot receipt paths must include opt/filebot-node/.af-version: {paths:?}"
+    );
 
     let cases = [
         "Cookie: session=CANARY_COOKIE",

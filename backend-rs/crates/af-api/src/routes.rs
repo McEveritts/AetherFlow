@@ -92,9 +92,8 @@ use marketplace::{
 // Keep the existing crate::routes paths for lifecycle callers.
 #[allow(unused_imports)]
 pub(crate) use marketplace::{
-    append_package_job_output, candidate_receipt_paths_for_package, reinstall_package,
-    should_rollback_post_certification_failure, PackageActionQuery, PackageLifecycleFailure,
-    PostOperationRefreshResult, ReceiptSnapshotEntry,
+    append_package_job_output, reinstall_package, should_rollback_post_certification_failure,
+    PackageActionQuery, PackageLifecycleFailure, PostOperationRefreshResult, ReceiptSnapshotEntry,
 };
 use marketplace::{
     check_package_updates, check_single_package_update, get_marketplace_apps, install_package,
