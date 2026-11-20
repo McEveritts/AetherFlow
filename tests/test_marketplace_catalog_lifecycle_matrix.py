@@ -2684,7 +2684,7 @@ curl() {
         fixture.file("etc/systemd/system/listenarr.service", "previous-unit\n")
         process = subprocess.Popen([str(executable), "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            result = fixture.run("reinstall")
+            result = fixture.run("reinstall", AF_GITHUB_TOKEN="fixture-listenarr-token")
         finally:
             process.terminate()
             process.wait(timeout=5)
@@ -2692,6 +2692,10 @@ curl() {
         self.assertNotIn("Text file busy", result.stderr)
         self.assertEqual((fixture.root / "opt/Listenarr/.af-version").read_text(), "2.1.0\n")
         commands = [json.loads(line) for line in (fixture.root / "commands.jsonl").read_text().splitlines()]
+        discovery = next(command for command in commands if command[0] == "curl"
+                         and "https://api.github.com/repos/Listenarrs/Listenarr/releases" in command)
+        self.assertEqual(discovery[1:3], ["-K", "-"])
+        self.assertNotIn("fixture-listenarr-token", json.dumps(commands))
         self.assertIn(["systemctl", "stop", "--", "listenarr.service"], commands)
         self.assertIn(["systemctl", "restart", "listenarr.service"], commands)
 

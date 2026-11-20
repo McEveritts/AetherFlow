@@ -66,13 +66,7 @@ case "${ARCH}" in
 esac
 
 report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
-AUTH_HEADER=()
-GH_TOKEN="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
-if [[ -n "$GH_TOKEN" ]]; then
-    AUTH_HEADER=(-H "Authorization: Bearer $GH_TOKEN")
-fi
-
-RELEASES_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
+RELEASES_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
 
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) | .tag_name][0] // empty) elif (type == "object" and ((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' || true)"
@@ -82,10 +76,10 @@ if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     fi
     if [[ -z "$LATEST_TAG" || -z "$ASSET_URL" ]]; then
         TARGET_TAG_LOOKUP="$AF_TARGET_VERSION"
-        TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
+        TAG_RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         if [[ -z "$TAG_RELEASE_JSON" && ! "$TARGET_TAG_LOOKUP" =~ ^v ]]; then
             TARGET_TAG_LOOKUP="v${TARGET_TAG_LOOKUP}"
-            TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
+            TAG_RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         fi
         if [[ -n "$TAG_RELEASE_JSON" ]]; then
             LATEST_TAG="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r 'if type == "object" and ((.draft // false) | not) then (.tag_name // empty) else empty end' || true)"

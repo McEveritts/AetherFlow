@@ -192,8 +192,14 @@ _harden_permissions() {
 		if [[ -f "${af_root}/current/bin/af" ]]; then
 			chmod 755 "${af_root}/current/bin/af"
 		fi
+		local speedtest_binary
+		for speedtest_binary in "${af_root}/current/speedtest-backend" "${af_root}/current/bin/speedtest-backend"; do
+			if [[ -f "${speedtest_binary}" && ! -L "${speedtest_binary}" ]]; then
+				chmod 755 "${speedtest_binary}"
+			fi
+		done
 		if [[ -d "${af_root}/releases" ]]; then
-			find "${af_root}/releases" -type f \( -name "aetherflow-api" -o -name "af" -o -name "*.sh" -o -name "*.py" \) -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/releases" \( -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f \( -name "speedtest-backend" -o -name "aetherflow-api" -o -name "af" -o -name "*.sh" -o -name "*.py" \) -exec chmod 755 {} + 2>/dev/null || true
 			find "${af_root}/releases" -path "*/packages/*" -type f -exec chmod 755 {} + 2>/dev/null || true
 		fi
 

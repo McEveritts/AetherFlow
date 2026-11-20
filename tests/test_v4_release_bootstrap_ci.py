@@ -157,6 +157,37 @@ _depends
                     self.assertEqual(outcome.returncode, 0, outcome.stderr)
                     self.assertEqual(outcome.stdout.strip(), f"CURL_CALLS={expected_attempts}")
 
+    @unittest.skipUnless(os.name == "posix", "Installation modes require the remote Linux test environment")
+    def test_permission_hardening_preserves_bundled_librespeed_executables(self):
+        source = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
+        body = source.split("_harden_permissions() {", 1)[1].split("# Database & runtime state directories", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            release = scratch / "releases" / "1"
+            binaries = [release / name for name in ("speedtest-backend", "bin/speedtest-backend")]
+            snapshot = release / "data-snapshot" / "speedtest-backend"
+            for path in [*binaries, snapshot]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+                path.chmod(0o600)
+            (scratch / "current").symlink_to(release, target_is_directory=True)
+            mock_bin = scratch / "mock-bin"
+            mock_bin.mkdir()
+            chown = mock_bin / "chown"
+            chown.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            chown.chmod(0o755)
+            body = body.replace('"/opt/AetherFlow"', '"$1"', 1)
+            probe = 'set -euo pipefail\nOUTTO=/dev/null\n_ensure_aetherflow_user() { :; }\n'
+            probe += f'_harden_permissions() {{{body}\nfi\n}}\n_harden_permissions "$1"\n'
+            outcome = subprocess.run(
+                ["bash", "-c", probe, "permissions-fixture", directory],
+                env={**os.environ, "PATH": f"{mock_bin}:{os.environ['PATH']}"},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            self.assertEqual([path.stat().st_mode & 0o777 for path in binaries], [0o755, 0o755])
+            self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
+
     def test_embedded_harness_owns_process_groups_and_rejects_occupied_listeners(self):
         harness = (ROOT / "scripts/run_embedded_e2e.sh").read_text(encoding="utf-8")
         self.assertIn('exec setsid "${EXEC_PREFIX[@]}" env -i "${API_ENV[@]}" "${BINARY_PATH}"', harness)
