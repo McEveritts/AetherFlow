@@ -18,15 +18,26 @@ pub(super) async fn get_marketplace_apps(
     headers: HeaderMap,
 ) -> Response {
     let require_auth = parse_require_auth(&query);
-    tokio::task::spawn_blocking(move || get_marketplace_apps_blocking(headers, require_auth))
-        .await
-        .unwrap_or_else(|_| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "STATUS_UNAVAILABLE",
-                "Marketplace status unavailable",
-            )
-        })
+    let mut response =
+        tokio::task::spawn_blocking(move || get_marketplace_apps_blocking(headers, require_auth))
+            .await
+            .unwrap_or_else(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "STATUS_UNAVAILABLE",
+                    "Marketplace status unavailable",
+                )
+            });
+    // The same URL serves public catalog metadata and credential-dependent inventory.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().append(
+        header::VARY,
+        HeaderValue::from_static("Authorization, Cookie"),
+    );
+    response
 }
 
 pub(super) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {

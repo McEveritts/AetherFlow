@@ -1269,6 +1269,11 @@ async fn marketplace_inventory_requires_human_admin_for_lifecycle_diagnostics() 
             }
             assert_eq!(response.status(), StatusCode::OK, "{label}");
             assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "private, no-store"
+            );
+            assert_eq!(response.headers()[header::VARY], "Authorization, Cookie");
+            assert_eq!(
                 response.headers()["x-aetherflow-inventory-authenticated"],
                 if authenticated { "true" } else { "false" },
                 "{label}"
