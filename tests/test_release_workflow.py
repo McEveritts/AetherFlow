@@ -17,7 +17,7 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
 def step_script(name):
     workflow = WORKFLOW.read_text()
     step = re.search(
-        rf"^      - name: {re.escape(name)}\n(.*?)(?=^      - name: |\Z)",
+        rf"^      - name: {re.escape(name)}\n(.*?)(?=^      - name: |^  [\w-]+:|\Z)",
         workflow,
         re.MULTILINE | re.DOTALL,
     )
@@ -286,6 +286,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         steps = [workflow.index(f"- name: {name}") for name in ordered]
         self.assertEqual(steps, sorted(steps))
+
+    def test_native_arm64_executes_extracted_release_before_publication(self):
+        workflow = WORKFLOW.read_text()
+        arm64_job = workflow.split("  release-arm64-runtime:\n", 1)[1].split("  release-publish:\n", 1)[0]
+        self.assertIn("runs-on: ubuntu-24.04-arm", arm64_job)
+        self.assertIn("needs: [validate-release, release-build]", arm64_job)
+        self.assertIn("name: release-dist", arm64_job)
+        self.assertRegex(workflow, r"needs: \[.*release-arm64-runtime\]")
+        gate = step_script("Execute ARM64 Release Contracts")
+        self.assertIn("sha256sum --strict --check SHA256SUMS", gate)
+        self.assertIn("aetherflow-linux-arm64.tar.gz", gate)
+        self.assertIn("linux_arm64.tar.gz", gate)
+        for executable in ("bundle/bin/af", "bundle/bin/speedtest-backend", "standalone/speedtest-backend"):
+            self.assertIn('${release_root}/' + executable + '" --version', gate)
+        self.assertIn('scripts/run_embedded_e2e.sh --binary "${release_root}/bundle/aetherflow-api"', gate)
+        self.assertIn('--static-dir "${release_root}/bundle/web/dist"', gate)
 
     def test_release_package_step_archives_the_external_frontend(self):
         for path in ("scripts", "backend-rs/crates/af-cli", "backend-rs/crates/af-librespeed",

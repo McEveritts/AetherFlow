@@ -403,10 +403,45 @@ jobs:
             release-dist/SHA256SUMS
           if-no-files-found: error
 
+  release-arm64-runtime:
+    name: Verify Extracted Release on ARM64
+    needs: [validate-release, release-build]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download Release Bundle Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-dist
+          path: release-dist
+
+      - name: Execute ARM64 Release Contracts
+        env:
+          VERSION_STAMP: ${{ needs.validate-release.outputs.version_stamp }}
+          AETHERFLOW_SKIP_ENV_FILES: "1"
+        run: |
+          set -euo pipefail
+          release_root="$(mktemp -d "${RUNNER_TEMP}/aetherflow-arm64.XXXXXX")"
+          trap 'rm -rf "${release_root}"' EXIT
+          mkdir "${release_root}/bundle" "${release_root}/standalone"
+          (cd release-dist && sha256sum --strict --check SHA256SUMS)
+          tar -xzf release-dist/aetherflow-linux-arm64.tar.gz -C "${release_root}/bundle"
+          tar -xzf "release-dist/speedtest-backend_${VERSION_STAMP#v}_linux_arm64.tar.gz" -C "${release_root}/standalone"
+          test "$(cat "${release_root}/bundle/.version")" = "${VERSION_STAMP}"
+          timeout 30s "${release_root}/bundle/bin/af" --version | grep -F '(linux/aarch64)'
+          timeout 30s "${release_root}/bundle/bin/speedtest-backend" --version
+          timeout 30s "${release_root}/standalone/speedtest-backend" --version
+          bash scripts/run_embedded_e2e.sh --binary "${release_root}/bundle/aetherflow-api" --static-dir "${release_root}/bundle/web/dist" --port 18080
+
   release-publish:
     name: Attest & Publish Signed Release
     if: github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly' || startsWith(github.ref, 'refs/tags/v')
-    needs: [validate-release, security-gate, release-build]
+    needs: [validate-release, security-gate, release-build, release-arm64-runtime]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
