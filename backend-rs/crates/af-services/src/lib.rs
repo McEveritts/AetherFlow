@@ -939,7 +939,7 @@ pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
             qbittorrent_bind_scope(mutators::qbittorrent_web_bind_address().as_deref())
         }
         "maintainerr" | "palate" | "kasmvnc" | "mcvnc" | "nextcloud" | "rutorrent" | "organizr"
-        | "seedcross" => "loopback",
+        | "seedcross" | "ombi" | "n8n" | "notifiarr" | "invidious" => "loopback",
         _ => "network",
     }
 }
@@ -3080,7 +3080,17 @@ mod tests {
 
     #[test]
     fn test_service_capabilities_and_scopes() {
-        for app in ["maintainerr", "palate", "kasmvnc", "mcvnc", "seedcross"] {
+        for app in [
+            "maintainerr",
+            "palate",
+            "kasmvnc",
+            "mcvnc",
+            "seedcross",
+            "ombi",
+            "n8n",
+            "notifiarr",
+            "invidious",
+        ] {
             assert_eq!(
                 resolve_service_bind_scope(app),
                 "loopback",
