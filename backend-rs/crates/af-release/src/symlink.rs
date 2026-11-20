@@ -265,8 +265,19 @@ pub fn cleanup_old_releases(
     current_link: &Path,
     max_releases: usize,
 ) -> ReleaseResult<Vec<PathBuf>> {
+    let mut pruned = Vec::new();
+    prune_old_releases(releases_dir, current_link, max_releases, &mut pruned)?;
+    Ok(pruned)
+}
+
+pub(crate) fn prune_old_releases(
+    releases_dir: &Path,
+    current_link: &Path,
+    max_releases: usize,
+    pruned: &mut Vec<PathBuf>,
+) -> ReleaseResult<()> {
     if !releases_dir.is_dir() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let current_target = read_current_link_target(current_link);
@@ -323,12 +334,10 @@ pub fn cleanup_old_releases(
     });
 
     if dirs.len() <= max_releases {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let to_prune = dirs.len() - max_releases;
-    let mut pruned = Vec::new();
-
     for dir in dirs {
         if pruned.len() >= to_prune {
             break;
@@ -353,5 +362,5 @@ pub fn cleanup_old_releases(
         pruned.push(dir);
     }
 
-    Ok(pruned)
+    Ok(())
 }

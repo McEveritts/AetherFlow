@@ -27,7 +27,8 @@ use crate::snapshot::{
 };
 use crate::symlink::{
     atomic_replace_symlink, canonicalize_preserve_normal, cleanup_old_releases,
-    perform_symlink_swap, read_current_link_target, read_previous_release, write_previous_release,
+    perform_symlink_swap, prune_old_releases, read_current_link_target, read_previous_release,
+    write_previous_release,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -805,7 +806,9 @@ where
             }
         };
 
-        recovery.phase = ReleasePhase::Stage5Cleanup;
+        // Activation and readiness succeeded. A retention failure can be retried
+        // independently, so finish the deployment journal before pruning.
+        recovery.phase = ReleasePhase::Complete;
         recovery.save(&cfg.releases_dir)?;
         append_jsonl_log(
             &cfg.log_file,
@@ -815,16 +818,24 @@ where
                 cfg.max_releases
             ),
         );
-        let pruned_releases =
-            cleanup_old_releases(&cfg.releases_dir, &cfg.current_link, cfg.max_releases)?;
+        let mut pruned_releases = Vec::new();
+        if let Err(error) = prune_old_releases(
+            &cfg.releases_dir,
+            &cfg.current_link,
+            cfg.max_releases,
+            &mut pruned_releases,
+        ) {
+            append_jsonl_log(
+                &cfg.log_file,
+                "WARN",
+                &format!("Release retention cleanup can be retried: {error}"),
+            );
+        }
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
             &format!("Pruned {} old release(s).", pruned_releases.len()),
         );
-
-        recovery.phase = ReleasePhase::Complete;
-        recovery.save(&cfg.releases_dir)?;
 
         if opts.dry_run {
             append_jsonl_log(

@@ -1120,6 +1120,42 @@ os.execvp(inner[0], inner)
         self.assertTrue(fresh_stage.exists())
         self.assertTrue(fresh_native.exists())
 
+    def test_retention_error_does_not_fail_completed_deployment(self):
+        import json
+
+        releases = self.dry / "releases"
+        removable, blocked = releases / "10", releases / "20"
+        removable.mkdir(parents=True)
+        blocked.mkdir()
+        self.write_executable(self.mock / "rm", '''
+            #!/bin/sh
+            for argument do
+                if [ "$argument" = "$TEST_BLOCKED_RELEASE" ]; then
+                    exit 1
+                fi
+            done
+            exec "$TEST_REAL_RM" "$@"
+        ''')
+        config = self.root / "retention.conf"
+        config.write_text('MAX_RELEASES="1"\n')
+        failure_fixture = {"TEST_BLOCKED_RELEASE": str(blocked), "TEST_REAL_RM": str(self.tools / "rm")}
+        result = self.run_manager(
+            "deploy", "--dry-run", "--offline", "--config", str(config),
+            **failure_fixture,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(removable.exists())
+        self.assertTrue(blocked.is_dir())
+        recovery = json.loads((releases / ".recovery_state.json").read_text())
+        self.assertEqual(recovery["phase"], "complete")
+        self.assertEqual((self.dry / "current").resolve(), Path(recovery["candidate_release"]))
+        self.assertIn("Release retention cleanup can be retried", result.stdout + result.stderr)
+
+        cleanup = self.run_manager("cleanup", "--dry-run", "--config", str(config), **failure_fixture)
+        self.assertNotEqual(cleanup.returncode, 0, cleanup.stdout + cleanup.stderr)
+        self.assertEqual(json.loads((releases / ".recovery_state.json").read_text())["phase"], "failed")
+        self.assertEqual((self.dry / "current").resolve(), Path(recovery["candidate_release"]))
+
     def test_stage0_migrates_legacy_v3_slot_current_backend_db_and_env(self):
         v3_slot = self.releases / "v3.2.5"
         (v3_slot / "backend" / "data").mkdir(parents=True)

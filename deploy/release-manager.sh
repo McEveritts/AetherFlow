@@ -2311,10 +2311,17 @@ cleanup_old_releases() {
     local previous_target=""
     [[ -f "${RELEASES_DIR}/.previous_release" ]] && previous_target="$(cat "${RELEASES_DIR}/.previous_release")"
 
+    local release_dirs
+    if ! release_dirs="$(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort -n)"; then
+        LAST_LOG_ERROR="Could not list releases for retention cleanup."
+        log_warn "${LAST_LOG_ERROR}"
+        return 1
+    fi
+    [[ -n "${release_dirs}" ]] || return 0
     local releases=()
     while IFS= read -r dir; do
         releases+=("${dir}")
-    done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort -n)
+    done <<< "${release_dirs}"
 
     local count=${#releases[@]}
     [[ ${count} -le ${MAX_RELEASES} ]] && return 0
@@ -2326,7 +2333,11 @@ cleanup_old_releases() {
         if [[ "${dir}" == "${current_target}" ]] || [[ "${dir}" == "${previous_target}" ]]; then
             continue
         fi
-        rm -rf "${dir}"
+        if ! rm -rf -- "${dir}"; then
+            LAST_LOG_ERROR="Could not prune ${dir} after pruning ${pruned} old release(s)."
+            log_warn "${LAST_LOG_ERROR}"
+            return 1
+        fi
         pruned=$((pruned + 1))
     done
     log_info "Pruned ${pruned} old release(s)."
@@ -2705,9 +2716,10 @@ case "${COMMAND}" in
             fi
             exit 2
         fi
-        save_recovery_state "stage5_cleanup"
-        cleanup_old_releases
         save_recovery_state "complete"
+        if ! cleanup_old_releases; then
+            log_warn "Release retention cleanup can be retried."
+        fi
         if [[ "${DRY_RUN}" == true ]]; then
             log_info "DRY-RUN SUCCESSFUL: Release ${EPOCH} (${CHANNEL}) staged at ${CURRENT_LINK}. Systemd was not restarted."
         else

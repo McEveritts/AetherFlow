@@ -1034,6 +1034,61 @@ AETHERFLOW_DB_PATH=fallback.sqlite
     }
 
     #[test]
+    fn deployment_remains_complete_when_pruning_an_old_release_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = TempSandbox::new("deploy-prune-failure");
+        let mut config = ReleaseConfig::for_root(sandbox.path());
+        config.max_releases = 1;
+        let dry_run_config = config.with_dry_run(true);
+        let removable = dry_run_config.releases_dir.join("1");
+        let blocked = dry_run_config.releases_dir.join("2");
+        fs::create_dir_all(&removable).unwrap();
+        fs::create_dir_all(&blocked).unwrap();
+        fs::write(blocked.join("old-binary"), b"old release").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let engine = ReleaseEngine::new(
+            config,
+            MockArtifactProvider {
+                resolved_tag: Err("offline fixture must not resolve a release".into()),
+                archive_source: sandbox.path().join("unused.tar.gz"),
+                manifest_content: String::new(),
+            },
+            MockLifecycle::default(),
+            MockHealthProber::new(vec![]),
+        );
+        let deployment = engine.execute(&ReleaseOptions {
+            command: ReleaseCommand::Deploy,
+            channel: ReleaseChannel::Stable,
+            dry_run: true,
+            offline: true,
+            from_source: false,
+        });
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let ReleaseOutcome::Deploy(report) = deployment.unwrap() else {
+            panic!("expected deploy outcome");
+        };
+        assert_eq!(report.pruned_releases, vec![removable]);
+        assert!(blocked.join("old-binary").is_file());
+        assert_eq!(
+            read_current_link_target(&dry_run_config.current_link),
+            Some(report.release_dir)
+        );
+        let recovery = RecoveryState::load(&dry_run_config.releases_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery.phase, ReleasePhase::Complete);
+        assert!(!recovery.is_unfinished());
+        let log = fs::read_to_string(dry_run_config.log_file).unwrap();
+        assert!(log.contains("Release retention cleanup can be retried"));
+    }
+
+    #[test]
     fn test_regression_completed_phase_alias_serializes_canonically() {
         let phase: ReleasePhase = serde_json::from_str(r#""completed""#).unwrap();
         assert_eq!(phase, ReleasePhase::Complete);
