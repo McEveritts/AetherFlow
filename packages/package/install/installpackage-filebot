@@ -68,7 +68,7 @@ mkdir -p /opt /usr/local/bin
 FB_BUILD="$(mktemp -d /opt/.filebot-build.XXXXXX)"
 NODE_BUILD="$(mktemp -d /opt/.filebot-node-build.XXXXXX)"
 chmod 755 "$FB_BUILD" "$NODE_BUILD"
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-filebot-runtime.XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-filebot-runtime.")"
 RUNTIME_PATHS=("$FB_DIR" "$NODE_DIR" "$DATA_DIR" "$SERVICE_FILE" /usr/local/bin/filebot)
 RUNTIME_CHANGED=false
 WAS_RUNNABLE=false

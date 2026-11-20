@@ -4207,11 +4207,13 @@ fn sonarr_runtime_snap_dirs_in(root: &std::path::Path) -> Vec<std::path::PathBuf
 fn test_wave25_capture_failure_drops_orphan_backup_root() {
     let temp_dir =
         std::env::temp_dir().join(format!("af-test-w25-orphan-{}", uuid::Uuid::new_v4()));
-    let snap_tmp = temp_dir.join("snap-tmp");
-    std::fs::create_dir_all(&snap_tmp).unwrap();
+    let snap_recovery = temp_dir.join("var/backups/aetherflow-recovery");
+    let snap_staging = temp_dir.join("snap-tmp");
+    std::fs::create_dir_all(&snap_staging).unwrap();
     let mut env_cfg = crate::PackageExecutionEnv::default();
     env_cfg.fs_root = Some(temp_dir.clone());
-    env_cfg.temp_dir = snap_tmp.clone();
+    env_cfg.temp_dir = snap_staging.clone();
+    env_cfg.recovery_root = Some(snap_recovery.clone());
     let opt = temp_dir.join("opt/sonarr");
     let ro_sub = opt.join("ro-bin");
     let etc = temp_dir.join("etc/sonarr");
@@ -4242,10 +4244,14 @@ fn test_wave25_capture_failure_drops_orphan_backup_root() {
         err.contains("/etc"),
         "failure must follow capture of /opt/sonarr: {err}"
     );
-    let after = sonarr_runtime_snap_dirs_in(&snap_tmp);
+    let after = sonarr_runtime_snap_dirs_in(&snap_recovery);
     assert!(
         after.is_empty(),
         "capture failure left orphaned snapshot directories: {after:?}"
+    );
+    assert!(
+        sonarr_runtime_snap_dirs_in(&snap_staging).is_empty(),
+        "capture must not place snapshots under disposable temp_dir"
     );
 
     std::fs::remove_file(&etc_parent).unwrap();
@@ -4255,9 +4261,9 @@ fn test_wave25_capture_failure_drops_orphan_backup_root() {
     let preserved = snap.backup_root.clone();
     assert!(preserved.is_dir(), "backup_root must exist before restore");
     assert!(
-        preserved.starts_with(&snap_tmp),
-        "capture must honor env_cfg.temp_dir ({}) -> got {}",
-        snap_tmp.display(),
+        preserved.starts_with(&snap_recovery),
+        "capture must honor env_cfg.recovery_root ({}) -> got {}",
+        snap_recovery.display(),
         preserved.display()
     );
     std::fs::set_permissions(&ro_sub, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -4384,4 +4390,481 @@ fn test_wave25_sanitize_shell_escapes_glued_suffixes_and_unicode_keys() {
     assert!(!closer_out.contains("SENTINEL"), "{closer_out}");
     serde_json::from_str::<serde_json::Value>(&closer_out)
         .unwrap_or_else(|e| panic!("closer JSON broken ({e}): {closer_out}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_durable_recovery_storage_privileged_policy_validation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current_uid = unsafe { libc::geteuid() };
+    let base = std::env::temp_dir().join(format!(
+        "af-durable-recovery-policy-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&base).unwrap();
+    let fixture = base.join("fixture");
+    std::fs::create_dir_all(&fixture).unwrap();
+    let staging = base.join("disposable-staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let priv_policy = RecoveryStoragePolicy {
+        privileged: true,
+        expected_uid: current_uid,
+    };
+
+    // 1. Isolated fixture with default recovery_root creates private 0700 dirs under
+    //    <fixture>/var/backups/aetherflow-recovery and leaves disposable temp_dir untouched.
+    let mut env_cfg = crate::PackageExecutionEnv::default();
+    env_cfg.fs_root = Some(fixture.clone());
+    env_cfg.temp_dir = staging.clone();
+    env_cfg.recovery_root = None;
+    let created = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-policy1",
+        &env_cfg,
+        priv_policy,
+        None,
+    )
+    .expect("isolated fixture privileged recovery root should succeed");
+    let expected_recovery_root = fixture.join("var/backups/aetherflow-recovery");
+    assert_eq!(created.parent(), Some(expected_recovery_root.as_path()));
+    assert_eq!(
+        std::fs::symlink_metadata(&expected_recovery_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&created)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::read_dir(&staging).unwrap().count(),
+        0,
+        "disposable temp_dir must stay untouched"
+    );
+
+    // 2. Reject ephemeral tmp/run roots, protected roots, relative paths, and parent traversal.
+    for bad_root in [
+        fixture.join("tmp/af-snap"),
+        fixture.join("var/tmp/af-snap"),
+        fixture.join("var/tmp/aetherflow-scratch"),
+        fixture.join("dev/shm/af-snap"),
+        fixture.join("run/af-snap"),
+        fixture.join("var/run/af-snap"),
+        fixture.join("var/backups"),
+        fixture.join("var"),
+        fixture.join("var/backups/../tmp/af-snap"),
+        PathBuf::from("relative/recovery"),
+    ] {
+        let mut bad_env = env_cfg.clone();
+        bad_env.recovery_root = Some(bad_root.clone());
+        let err = prepare_runtime_snapshot_backup_root_with_policy(
+            ".af-rt-snap-sonarr-bad",
+            &bad_env,
+            priv_policy,
+            None,
+        )
+        .expect_err(&format!("expected rejection for {}", bad_root.display()));
+        assert!(!err.is_empty());
+    }
+
+    // 3. Real-host privileged policy rejects ephemeral /tmp, /var/tmp, /var/backups and never
+    //    falls back to temp_dir when default /var/backups/aetherflow-recovery fails.
+    let real_root_policy = RecoveryStoragePolicy {
+        privileged: true,
+        expected_uid: 0,
+    };
+    for bad_host_root in [
+        "/tmp/af-priv-snap",
+        "/var/tmp/af-priv-snap",
+        "/var/tmp/aetherflow-scratch",
+        "/dev/shm/af-priv-snap",
+        "/run/af-priv-snap",
+        "/var/backups",
+    ] {
+        let mut host_env = crate::PackageExecutionEnv::default();
+        host_env.fs_root = None;
+        host_env.temp_dir = staging.clone();
+        host_env.recovery_root = Some(PathBuf::from(bad_host_root));
+        let err = prepare_runtime_snapshot_backup_root_with_policy(
+            ".af-rt-snap-sonarr-hostbad",
+            &host_env,
+            real_root_policy,
+            None,
+        )
+        .expect_err(&format!("expected host rejection for {bad_host_root}"));
+        assert!(
+            err.contains("persistent storage") || err.contains("protected directory"),
+            "unexpected host rejection for {bad_host_root}: {err}"
+        );
+    }
+    if current_uid != 0 {
+        let mut host_default_env = crate::PackageExecutionEnv::default();
+        host_default_env.fs_root = None;
+        host_default_env.temp_dir = staging.clone();
+        host_default_env.recovery_root = None;
+        let err = prepare_runtime_snapshot_backup_root_with_policy(
+            ".af-rt-snap-sonarr-nofallback",
+            &host_default_env,
+            real_root_policy,
+            None,
+        )
+        .expect_err("privileged real-host mode must fail closed without falling back to temp_dir");
+        assert!(!err.is_empty());
+        assert_eq!(
+            std::fs::read_dir(&staging).unwrap().count(),
+            0,
+            "privileged real-host failure must not create fallback snapshots in temp_dir"
+        );
+    }
+
+    // 4. Reject insecure recovery root permissions (0o755 / 0o777) and wrong expected_uid.
+    std::fs::set_permissions(
+        &expected_recovery_root,
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let mode_err = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-mode",
+        &env_cfg,
+        priv_policy,
+        None,
+    )
+    .expect_err("0o755 recovery root must be rejected");
+    assert!(
+        mode_err.contains("0o700"),
+        "unexpected mode error: {mode_err}"
+    );
+    std::fs::set_permissions(
+        &expected_recovery_root,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+
+    let uid_err = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-uid",
+        &env_cfg,
+        RecoveryStoragePolicy {
+            privileged: true,
+            expected_uid: current_uid.saturating_add(1),
+        },
+        None,
+    )
+    .expect_err("wrong owner uid must be rejected");
+    assert!(
+        uid_err.contains("owned by uid"),
+        "unexpected uid error: {uid_err}"
+    );
+
+    // 5. Reject group-writable ancestor under privileged policy.
+    let var_backups = fixture.join("var/backups");
+    std::fs::set_permissions(&var_backups, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let ancestor_err = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-ancestor",
+        &env_cfg,
+        priv_policy,
+        None,
+    )
+    .expect_err("group-writable ancestor must be rejected under privileged policy");
+    assert!(
+        ancestor_err.contains("unsafe writable permissions"),
+        "unexpected ancestor error: {ancestor_err}"
+    );
+    std::fs::set_permissions(&var_backups, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 6. Reject symlinked recovery leaf and symlinked ancestor.
+    let decoy = base.join("decoy");
+    std::fs::create_dir_all(&decoy).unwrap();
+    std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_dir_all(&expected_recovery_root).unwrap();
+    std::os::unix::fs::symlink(&decoy, &expected_recovery_root).unwrap();
+    let sym_leaf_err = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-symleaf",
+        &env_cfg,
+        priv_policy,
+        None,
+    )
+    .expect_err("symlinked recovery root must be rejected");
+    assert!(
+        sym_leaf_err.to_ascii_lowercase().contains("symlink"),
+        "unexpected symlink leaf error: {sym_leaf_err}"
+    );
+
+    std::fs::remove_file(&expected_recovery_root).unwrap();
+    std::fs::remove_dir(&var_backups).unwrap();
+    std::os::unix::fs::symlink(&decoy, &var_backups).unwrap();
+    let sym_anc_err = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-symanc",
+        &env_cfg,
+        priv_policy,
+        None,
+    )
+    .expect_err("symlinked recovery ancestor must be rejected");
+    assert!(
+        sym_anc_err.to_ascii_lowercase().contains("symlink"),
+        "unexpected symlink ancestor error: {sym_anc_err}"
+    );
+
+    force_remove_backup_tree(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_durable_recovery_storage_unprivileged_api_fallback_prefers_data_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current_uid = unsafe { libc::geteuid() };
+    let unpriv_policy = RecoveryStoragePolicy {
+        privileged: false,
+        expected_uid: current_uid,
+    };
+
+    // Place synthetic DATA_DIR beside test binary (non-ephemeral persistent path) to exercise Mode 4.
+    let target_dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("af-unpriv-dd-{}", uuid::Uuid::new_v4()));
+    let data_dir = target_dir.join("data");
+    let fallback_tmp =
+        std::env::temp_dir().join(format!("af-unpriv-fallback-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(&fallback_tmp).unwrap();
+
+    let mut env_cfg = crate::PackageExecutionEnv::default();
+    env_cfg.fs_root = None;
+    env_cfg.recovery_root = None;
+    env_cfg.temp_dir = fallback_tmp.clone();
+
+    let persistent_snap = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-unpriv1",
+        &env_cfg,
+        unpriv_policy,
+        Some(&data_dir),
+    )
+    .expect("unprivileged Mode 4 should prefer persistent DATA_DIR/recovery");
+    assert_eq!(
+        persistent_snap.parent(),
+        Some(data_dir.join("recovery").as_path())
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(data_dir.join("recovery"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&persistent_snap)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    // Without DATA_DIR, unprivileged API fallback still succeeds with private 0o700 dir in temp_dir.
+    let fallback_snap = prepare_runtime_snapshot_backup_root_with_policy(
+        ".af-rt-snap-sonarr-unpriv2",
+        &env_cfg,
+        unpriv_policy,
+        None,
+    )
+    .expect("unprivileged Mode 4 without DATA_DIR should fall back to temp_dir");
+    assert_eq!(fallback_snap.parent(), Some(fallback_tmp.as_path()));
+    assert_eq!(
+        std::fs::symlink_metadata(&fallback_snap)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    force_remove_backup_tree(&target_dir);
+    force_remove_backup_tree(&fallback_tmp);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_runtime_snapshot_ordinary_cleanup_and_incomplete_rollback_preservation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "af-durable-cleanup-preserve-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let env_cfg = crate::PackageExecutionEnv::isolated(&root);
+    let live_dir = root.join("var/lib/sonarr");
+    std::fs::create_dir_all(&live_dir).unwrap();
+    let config = live_dir.join("config.xml");
+    std::fs::write(&config, b"<Config>v1</Config>").unwrap();
+
+    // 1. Ordinary capture + drop cleans up the snapshot directory.
+    let snap_clean = PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false)
+        .expect("capture in isolated root should succeed");
+    let clean_backup = snap_clean.backup_root.clone();
+    let expected_recovery_root = root.join("var/backups/aetherflow-recovery");
+    assert_eq!(
+        clean_backup.parent(),
+        Some(expected_recovery_root.as_path())
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&expected_recovery_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&clean_backup)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(
+        !root.join("tmp").exists() || sonarr_runtime_snap_dirs_in(&root.join("tmp")).is_empty(),
+        "isolated capture must never place snapshots under tmp"
+    );
+    drop(snap_clean);
+    assert!(
+        !clean_backup.exists(),
+        "ordinary drop must remove snapshot backup directory"
+    );
+
+    // 2. Capture + mutate + restore restores live data and cleans up snapshot on drop.
+    let mut snap_restore = PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false)
+        .expect("second capture should succeed");
+    let restore_backup = snap_restore.backup_root.clone();
+    std::fs::write(&config, b"<Config>v2-broken</Config>").unwrap();
+    snap_restore.restore().expect("restore should succeed");
+    assert_eq!(std::fs::read(&config).unwrap(), b"<Config>v1</Config>");
+    drop(snap_restore);
+    assert!(
+        !restore_backup.exists(),
+        "clean restore drop must remove snapshot backup directory"
+    );
+
+    // 3. Preserved snapshot (e.g. quiesce failure / incomplete rollback) stays intact on drop.
+    let mut snap_preserve = PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false)
+        .expect("third capture should succeed");
+    let preserved_backup = snap_preserve.backup_root.clone();
+    snap_preserve.preserve_on_drop = true;
+    drop(snap_preserve);
+    assert!(
+        preserved_backup.is_dir(),
+        "preserve_on_drop must keep backup under persistent recovery root"
+    );
+    assert_eq!(
+        preserved_backup.parent(),
+        Some(expected_recovery_root.as_path())
+    );
+
+    force_remove_backup_tree(&root);
+}
+
+#[test]
+fn test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_from_scratch() {
+    let _guard = ENV_TEST_MUTEX.lock().unwrap();
+    let saved_fs = std::env::var_os("AETHERFLOW_FS_ROOT");
+    let saved_install = std::env::var_os("AETHERFLOW_INSTALL_ROOT");
+    let saved_recovery = std::env::var_os("AETHERFLOW_RECOVERY_ROOT");
+    let saved_af_recovery = std::env::var_os("AF_RECOVERY_ROOT");
+
+    std::env::remove_var("AETHERFLOW_FS_ROOT");
+    std::env::remove_var("AETHERFLOW_INSTALL_ROOT");
+    std::env::remove_var("AETHERFLOW_RECOVERY_ROOT");
+    std::env::remove_var("AF_RECOVERY_ROOT");
+
+    let req = crate::PackageRunnerRequest {
+        action: "update".to_string(),
+        package_id: "n8n".to_string(),
+        script_name: "installpackage-n8n".to_string(),
+        app_port: 5678,
+        delete_data: false,
+        expected_target_version: Some("1.90.0".to_string()),
+        achieved_version: None,
+        lifecycle_job_id: "job-env-check".to_string(),
+    };
+
+    let mut host_cmd = tokio::process::Command::new("/bin/true");
+    crate::package_executor::apply_legacy_package_environment(&mut host_cmd, &req);
+    let host_envs: std::collections::HashMap<_, _> = host_cmd
+        .as_std()
+        .get_envs()
+        .map(|(k, v)| (k.to_os_string(), v.map(|val| val.to_os_string())))
+        .collect();
+    assert_eq!(
+        host_envs.get(std::ffi::OsStr::new("AF_RECOVERY_ROOT")),
+        Some(&Some(std::ffi::OsString::from(
+            crate::package_executor::DEFAULT_PRIVILEGED_RECOVERY_ROOT
+        )))
+    );
+    assert_eq!(
+        host_envs.get(std::ffi::OsStr::new("AF_TRANSACTION_ROOT")),
+        Some(&Some(std::ffi::OsString::from(
+            crate::package_executor::DEFAULT_PRIVILEGED_RECOVERY_ROOT
+        )))
+    );
+    assert_eq!(
+        host_envs.get(std::ffi::OsStr::new("AF_JOB_SCRATCH_ROOT")),
+        Some(&Some(std::ffi::OsString::from(
+            "/var/tmp/aetherflow-scratch"
+        )))
+    );
+    assert_eq!(
+        host_envs.get(std::ffi::OsStr::new("AF_FIXTURE_ROOT")),
+        Some(&None),
+        "real host runner must strip ambient AF_FIXTURE_ROOT"
+    );
+    assert_eq!(
+        host_envs.get(std::ffi::OsStr::new("TEST_ROOT")),
+        Some(&None),
+        "real host runner must strip ambient TEST_ROOT"
+    );
+
+    let fixture_root = std::env::temp_dir().join("af-legacy-env-fixture");
+    std::env::set_var("AETHERFLOW_FS_ROOT", &fixture_root);
+    let mut iso_cmd = tokio::process::Command::new("/bin/true");
+    crate::package_executor::apply_legacy_package_environment(&mut iso_cmd, &req);
+    let iso_envs: std::collections::HashMap<_, _> = iso_cmd
+        .as_std()
+        .get_envs()
+        .map(|(k, v)| (k.to_os_string(), v.map(|val| val.to_os_string())))
+        .collect();
+    let expected_iso = fixture_root
+        .join("var/backups/aetherflow-recovery")
+        .into_os_string();
+    assert_eq!(
+        iso_envs.get(std::ffi::OsStr::new("AF_RECOVERY_ROOT")),
+        Some(&Some(expected_iso.clone()))
+    );
+    assert_eq!(
+        iso_envs.get(std::ffi::OsStr::new("AF_TRANSACTION_ROOT")),
+        Some(&Some(expected_iso))
+    );
+
+    for (key, prev) in [
+        ("AETHERFLOW_FS_ROOT", saved_fs),
+        ("AETHERFLOW_INSTALL_ROOT", saved_install),
+        ("AETHERFLOW_RECOVERY_ROOT", saved_recovery),
+        ("AF_RECOVERY_ROOT", saved_af_recovery),
+    ] {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 }

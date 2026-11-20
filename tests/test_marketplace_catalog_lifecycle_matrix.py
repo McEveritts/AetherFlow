@@ -1422,10 +1422,13 @@ if os.environ.get('AF_FAIL_RESTORE_SUBSTR', '') in source and os.environ.get('AF
 os.execv('/bin/cp', ['/bin/cp', *sys.argv[1:]])
 """).chmod(0o755)
             failed = fixture.run("update", AF_FIXTURE_FAILURE="service",
-                                 AF_FAIL_RESTORE_SUBSTR=str(fixture.root / "tmp/af-runtime-"))
+                                 AF_FAIL_RESTORE_SUBSTR=str(fixture.root / "var/backups/aetherflow-recovery/af-runtime-"))
             self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
             self.assertEqual(database.read_text(), "sqlite-v1-live")
-            backups = list((fixture.root / "tmp").glob("af-runtime-*/1/database.sqlite"))
+            self.assertFalse(list((fixture.root / "tmp").glob("af-runtime-*")))
+            recovery_root = fixture.root / "var/backups/aetherflow-recovery"
+            self.assertEqual(recovery_root.stat().st_mode & 0o777, 0o700)
+            backups = list(recovery_root.glob("af-runtime-*/1/database.sqlite"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(), "sqlite-v1-live")
             self.assertIn("recovery backup preserved at", failed.stderr)
@@ -1455,6 +1458,7 @@ os.execv('/bin/cp', ['/bin/cp', *sys.argv[1:]])
             self.assertEqual((fixture.root / "var/lib/grafana/.af-version").read_text(), "1.0.0\n")
             self.assertEqual(config.read_bytes(), previous_config)
             self.assertFalse(list((fixture.root / "tmp").glob("af-state-*")))
+            self.assertFalse(list((fixture.root / "var/backups/aetherflow-recovery").glob("af-state-*")))
 
     def test_nextcloud_download_failure_allows_clean_retry(self):
         with InstallerFixture("nextcloud") as fixture:
@@ -3873,7 +3877,10 @@ exit 1
                 failed = self.shell(fixture, program, AF_STOP_STATUS=str(stopped_status), AF_ACTIVE_STATUS=str(active_status))
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertEqual(state.read_text(), "live-state")
-                backups = list((fixture.root / "tmp").glob("af-state-*"))
+                self.assertFalse(list((fixture.root / "tmp").glob("af-state-*")))
+                recovery_root = fixture.root / "var/backups/aetherflow-recovery"
+                self.assertEqual(recovery_root.stat().st_mode & 0o777, 0o700)
+                backups = list(recovery_root.glob("af-state-*"))
                 self.assertEqual(len(backups), 1)
                 self.assertEqual((backups[0] / "state/0/rollback-state").read_text(), "previous-state")
                 self.assertEqual(backups[0].stat().st_mode & 0o777, 0o700)
@@ -4390,11 +4397,13 @@ if command == 'systemctl':
             self.assertFalse((fixture.root / 'etc/wireguard/wg0.conf').exists())
             self.assertEqual(json.loads((fixture.root / 'dpkg-state.json').read_text()), {})
             self.assertFalse(list((fixture.root / 'tmp').glob('af-state-*')))
+            self.assertFalse(list((fixture.root / 'var/backups/aetherflow-recovery').glob('af-state-*')))
             self.assertFalse(fixture.lock.exists())
         with InstallerFixture('wireguard') as fixture:
             installed = fixture.run(AF_FIXTURE_PERSISTENT_APT='1')
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
             self.assertFalse(list((fixture.root / 'tmp').glob('af-state-*')))
+            self.assertFalse(list((fixture.root / 'var/backups/aetherflow-recovery').glob('af-state-*')))
             self.assertFalse(list((fixture.root / 'etc/wireguard').glob('.aetherflow-install.*')))
 
     def test_kasmvnc_failed_update_preserves_enabled_and_active_state(self):

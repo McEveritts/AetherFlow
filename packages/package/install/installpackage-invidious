@@ -32,7 +32,7 @@ af_prepare_job_scratch "invidious" 2048 16384
 
 youtube_init invidious 8281
 TMP_DIR=""
-RUNTIME_BACKUP="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/af-invidious-runtime.XXXXXX")"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-invidious-runtime.")"
 RUNTIME_PATHS=("$INSTALL_DIR" "$CONFIG_DIR" "$DATA_DIR" /etc/systemd/system/af-invidious.service /etc/systemd/system/af-invidious-companion.service)
 RUNTIME_UNITS=(af-invidious.service af-invidious-companion.service)
 PREVIOUS_UNITS=()
@@ -51,7 +51,6 @@ cleanup_invidious_install() {
         if [[ "${INSTALL_COMMITTED:-false}" != true && "$RUNTIME_CHANGED" == true ]]; then
             if ! quiesce_services_for_rollback "${RUNTIME_UNITS[@]}"; then
                 restore_failed=true
-                export AF_PRESERVE_SCRATCH=1
                 print_error "Cannot stop Invidious; recovery retained in $RUNTIME_BACKUP"
             else
                 restore_postgresql_database "$RUNTIME_BACKUP" invidious || restored=false
@@ -65,17 +64,16 @@ cleanup_invidious_install() {
                 af_logged systemctl daemon-reload || restore_failed=true
                 if [[ "$restored" != true || "$restore_failed" == true ]]; then
                     restore_failed=true
-                    export AF_PRESERVE_SCRATCH=1
                     print_error "Invidious recovery incomplete; backups retained in $RUNTIME_BACKUP"
                 else
                     for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
-                        af_logged systemctl start "$runtime_unit" || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                        af_logged systemctl start "$runtime_unit" || restore_failed=true
                     done
                 fi
             fi
         else
             for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
-                af_logged systemctl start "$runtime_unit" || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                af_logged systemctl start "$runtime_unit" || restore_failed=true
             done
         fi
     fi
@@ -83,10 +81,17 @@ cleanup_invidious_install() {
     if [[ "${INVIDIOUS_INSTALL_COMPLETED:-0}" -ne 1 ]]; then
         if [[ "$restore_failed" == true ]]; then
             rc=1
-            export AF_PRESERVE_SCRATCH=1
+            if [[ -n "${AF_JOB_SCRATCH_DIR:-}" && "${RUNTIME_BACKUP:-}" == "${AF_JOB_SCRATCH_DIR}"/* ]]; then
+                export AF_PRESERVE_SCRATCH=1
+            fi
             print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
         else
-            rm -rf -- "$RUNTIME_BACKUP" || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+            if ! rm -rf -- "$RUNTIME_BACKUP"; then
+                restore_failed=true
+                if [[ -n "${AF_JOB_SCRATCH_DIR:-}" && "${RUNTIME_BACKUP:-}" == "${AF_JOB_SCRATCH_DIR}"/* ]]; then
+                    export AF_PRESERVE_SCRATCH=1
+                fi
+            fi
         fi
     else
         rm -rf -- "$RUNTIME_BACKUP" 2>/dev/null || true

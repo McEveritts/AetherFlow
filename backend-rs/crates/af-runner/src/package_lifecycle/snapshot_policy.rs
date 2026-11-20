@@ -330,6 +330,7 @@ mod tests {
         let env = crate::PackageExecutionEnv {
             fs_root: Some(root.join("host")),
             temp_dir: root.join("staging"),
+            recovery_root: Some(root.join("recovery")),
             ..Default::default()
         };
         (root, env)
@@ -399,7 +400,12 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.contains("2147483648-byte copy ceiling"), "{error}");
-        assert_eq!(std::fs::read_dir(&env.temp_dir).unwrap().count(), 0);
+        let recovery_root = env.recovery_root.as_ref().unwrap();
+        assert_eq!(std::fs::read_dir(recovery_root).unwrap().count(), 0);
+        assert!(
+            !env.temp_dir.exists(),
+            "runtime snapshot capture must not write into disposable temp_dir"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

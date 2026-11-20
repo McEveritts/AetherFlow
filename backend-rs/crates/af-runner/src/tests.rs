@@ -2563,3 +2563,175 @@ fn managed_units_admit_only_the_cataloged_home_assistant_instance() {
         "home-assistant@homeassistant.timer"
     ));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lifecycle_snapshot_routes_store_and_preserve_recovery_via_runner_socket() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let _env_guard = ENV_TEST_MUTEX.lock().await;
+    let saved_vars: Vec<(&str, Option<std::ffi::OsString>)> = [
+        "AETHERFLOW_RUNNER_SOCK",
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+        "AETHERFLOW_RECOVERY_ROOT",
+        "AF_RECOVERY_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+    ]
+    .into_iter()
+    .map(|k| (k, env::var_os(k)))
+    .collect();
+
+    // Short private directory under /var/tmp so UNIX socket path stays well under sun_path limits.
+    let base_tmp = if Path::new("/var/tmp").is_dir() {
+        PathBuf::from("/var/tmp")
+    } else {
+        env::temp_dir()
+    };
+    let scratch = base_tmp.join(format!(
+        "af-snap-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..10]
+    ));
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(&scratch).unwrap();
+    let root = scratch.join("root");
+    fs::create_dir_all(&root).unwrap();
+
+    // Seed isolated release config + SQLite reservation DB + live Sonarr data.
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    let job_preserve = "job-preserve-1";
+    let job_restore = "job-restore-2";
+    conn.execute(
+        "INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) \
+         VALUES ('sonarr',?1,'update','updating','now',?2,'[\"sonarr.service\"]')",
+        rusqlite::params![job_preserve, &owner.id],
+    )
+    .unwrap();
+
+    let live_dir = root.join("var/lib/sonarr");
+    fs::create_dir_all(&live_dir).unwrap();
+    let config_file = live_dir.join("config.xml");
+    fs::write(&config_file, b"<Config>original-v1</Config>").unwrap();
+
+    let sock_path = scratch.join("r.sock");
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+    env::set_var("AETHERFLOW_FS_ROOT", &root);
+    env::remove_var("AETHERFLOW_INSTALL_ROOT");
+    env::remove_var("AETHERFLOW_RECOVERY_ROOT");
+    env::remove_var("AF_RECOVERY_ROOT");
+    env::remove_var("AETHERFLOW_RELEASE_ROOT");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_runner_connections(
+        listener,
+        build_runner_router(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    // 1. Capture over real runner UDS -> backup created under persistent recovery root (0700), not tmp.
+    PACKAGE_JOB_ID
+        .scope(job_preserve.to_string(), async {
+            dispatch_package_lifecycle_snapshot_capture("sonarr", &[])
+                .await
+                .unwrap();
+        })
+        .await;
+
+    let recovery_root = root.join("var/backups/aetherflow-recovery");
+    assert!(recovery_root.is_dir(), "recovery root must exist");
+    assert_eq!(
+        fs::symlink_metadata(&recovery_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let preserved_backup =
+        package_lifecycle::admitted_lifecycle_snapshot_backup_root("sonarr", job_preserve)
+            .expect("admitted snapshot must register its backup_root");
+    assert_eq!(preserved_backup.parent(), Some(recovery_root.as_path()));
+    assert_eq!(
+        fs::symlink_metadata(&preserved_backup)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(
+        !root.join("tmp").exists(),
+        "runner snapshot must not create or write into tmp"
+    );
+
+    // 2. Discard with preserve_backup=true -> survives runner restart/shutdown on persistent root.
+    dispatch_package_lifecycle_snapshot_discard_for_job("sonarr", job_preserve, true)
+        .await
+        .unwrap();
+    assert!(
+        preserved_backup.is_dir(),
+        "preserved recovery backup must stay on disk after preserve discard"
+    );
+
+    // 3. Re-capture on a new job, mutate live state, restore over UDS -> live state restored and backup removed.
+    conn.execute(
+        "UPDATE package_lifecycle_jobs SET job_id=?1, status='updating' WHERE package_id='sonarr'",
+        rusqlite::params![job_restore],
+    )
+    .unwrap();
+    PACKAGE_JOB_ID
+        .scope(job_restore.to_string(), async {
+            dispatch_package_lifecycle_snapshot_capture("sonarr", &[])
+                .await
+                .unwrap();
+        })
+        .await;
+    let restore_backup =
+        package_lifecycle::admitted_lifecycle_snapshot_backup_root("sonarr", job_restore)
+            .expect("second admitted snapshot must register its backup_root");
+    assert_eq!(restore_backup.parent(), Some(recovery_root.as_path()));
+    fs::write(&config_file, b"<Config>corrupted-v2</Config>").unwrap();
+    PACKAGE_JOB_ID
+        .scope(job_restore.to_string(), async {
+            dispatch_package_lifecycle_snapshot_restore("sonarr")
+                .await
+                .unwrap();
+        })
+        .await;
+    assert_eq!(
+        fs::read(&config_file).unwrap(),
+        b"<Config>original-v1</Config>"
+    );
+    assert!(
+        !restore_backup.exists(),
+        "ordinary restore must clean up its snapshot backup directory"
+    );
+
+    // 4. Shut down runner server -> preserved backup from job 1 still exists outside tmp.
+    let _ = shutdown_tx.send(());
+    let _ = server.await;
+    assert!(
+        preserved_backup.is_dir(),
+        "preserved recovery backup must survive runner shutdown"
+    );
+
+    for (key, prev) in saved_vars {
+        match prev {
+            Some(v) => env::set_var(key, v),
+            None => env::remove_var(key),
+        }
+    }
+    let _ = fs::remove_dir_all(&scratch);
+}

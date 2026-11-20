@@ -31,7 +31,7 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
-BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/af-fail2ban-runtime-XXXXXX")"
+BACKUP_DIR="$(af_create_recovery_backup_dir "af-fail2ban-runtime-")"
 RUNTIME_PATHS=(/etc/fail2ban /var/lib/fail2ban "/usr/bin/fail2ban-server" "/usr/bin/fail2ban-client" "/usr/lib/python3/dist-packages/fail2ban" "/usr/share/fail2ban")
 RUNTIME_HAD_PREVIOUS=0
 RUNTIME_MUTATED=0

@@ -144,6 +144,8 @@ chown -hRP jellyseerr:jellyseerr "$BUILD_DIR" /var/lib/jellyseerr
 chmod 755 "$BUILD_DIR"
 
 report_progress 80 "Backing up Jellyseerr state and activating Seerr ${LATEST_TAG}..."
+validate_config_paths /var/backups/.af-backup-root
+mkdir -p /var/backups
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-jellyseerr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 if [[ -f /etc/systemd/system/jellyseerr.service ]]; then

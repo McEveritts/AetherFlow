@@ -135,7 +135,7 @@ if ! af_logged git clone --depth 1 --branch "$TAG" "$REPO_URL" "${TMP_DIR}/src";
     VERSION="${TAG#v}"
 fi
 af_logged cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml"
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-mcvnc-runtime.XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-mcvnc-runtime.")"
 if [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl is-active --quiet af-mcvnc.service 2>/dev/null; then
     WAS_RUNNABLE=true
     stop_systemd_unit af-mcvnc.service

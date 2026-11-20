@@ -171,7 +171,9 @@ if ! af_logged git clone --branch "$TARGET_TAG" --depth 1 "$REPO_URL" "$BUILD_DI
 fi
 test -s "$BUILD_DIR/cps.py" || { log_error "Failed to clone Calibre-Web repository"; exit 1; }
 
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-calibreweb.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
 queue_app_version "/opt/calibre-web/.af-version" "${TARGET_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"
 
 report_progress 60 "Setting up Python virtual environment and dependencies..."

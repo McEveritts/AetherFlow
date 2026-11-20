@@ -55,7 +55,7 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/usr/local/bin/prometheus" "/usr/local/bin/promtool" "/usr/local/bin/node_exporter" "/usr/bin/prometheus" "/usr/bin/prometheus-node-exporter" "/etc/prometheus" "/var/lib/prometheus" "/etc/systemd/system/prometheus.service" "/etc/systemd/system/node_exporter.service" "/usr/bin/promtool" "/usr/share/prometheus" "/usr/share/prometheus-node-exporter")
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_MUTATED=0

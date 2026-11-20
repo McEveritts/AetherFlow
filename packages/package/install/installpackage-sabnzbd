@@ -144,6 +144,7 @@ rm -f "$TMP_TAR"
 test -s "$BUILD_DIR/SABnzbd.py" || { log_error "Failed to verify SABnzbd archive extraction"; exit 1; }
 
 report_progress 70 "Building SABnzbd Python virtualenv..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-sabnzbd.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 stop_systemd_unit sabnzbd

@@ -1038,6 +1038,301 @@ check_disk_space() {
     return 0
 }
 
+af_resolve_recovery_root() {
+    local explicit="${1:-}"
+    if [[ -n "$explicit" ]]; then
+        printf '%s\n' "$explicit"
+        return 0
+    fi
+    if [[ -n "${AF_RECOVERY_ROOT:-}" ]]; then
+        printf '%s\n' "${AF_RECOVERY_ROOT}"
+        return 0
+    fi
+    if [[ -n "${AETHERFLOW_RECOVERY_ROOT:-}" ]]; then
+        printf '%s\n' "${AETHERFLOW_RECOVERY_ROOT}"
+        return 0
+    fi
+    local default_root="/var/backups/aetherflow-recovery"
+    local fixture_root="${AETHERFLOW_FS_ROOT:-${AETHERFLOW_INSTALL_ROOT:-}}"
+    if [[ -z "$fixture_root" && "${EUID:-$(id -u)}" -ne 0 ]]; then
+        fixture_root="${AF_FIXTURE_ROOT:-${TEST_ROOT:-}}"
+    fi
+    if [[ -n "$fixture_root" ]]; then
+        fixture_root="${fixture_root%/}"
+        if [[ "$default_root" != "${fixture_root}/"* ]]; then
+            printf '%s/%s\n' "$fixture_root" "${default_root#/}"
+            return 0
+        fi
+    fi
+    printf '%s\n' "$default_root"
+}
+
+af_prepare_recovery_root() {
+    local requested
+    requested="$(af_resolve_recovery_root "${1:-}")" || return 1
+    local fixture_root="${AETHERFLOW_FS_ROOT:-${AETHERFLOW_INSTALL_ROOT:-}}"
+    if [[ -z "$fixture_root" && "${EUID:-$(id -u)}" -ne 0 ]]; then
+        fixture_root="${AF_FIXTURE_ROOT:-${TEST_ROOT:-}}"
+    fi
+    python3 - "$requested" "$fixture_root" <<'PYEOF'
+import errno, os, stat, sys
+
+target = sys.argv[1]
+fixture_root = sys.argv[2]
+
+def fail(msg):
+    sys.stderr.write(f"ERROR: {msg}\n")
+    raise SystemExit(1)
+
+def parse_abs_parts(path, label):
+    if not path or not path.startswith("/") or "\x00" in path or "\n" in path:
+        fail(f"Invalid {label}: {path!r}")
+    raw = path.split("/")
+    if any(seg == ".." for seg in raw):
+        fail(f"Parent traversal prohibited in {label}: {path}")
+    return tuple(seg for seg in raw if seg and seg != ".")
+
+target_parts = parse_abs_parts(target, "recovery root")
+if not target_parts:
+    fail(f"Refusing root directory as recovery root: {target}")
+
+EPHEMERAL_PREFIXES = (
+    ("tmp",),
+    ("var", "tmp"),
+    ("dev", "shm"),
+    ("run",),
+    ("var", "run"),
+)
+PROTECTED_EXACT = frozenset((
+    (),
+    ("var",),
+    ("var", "backups"),
+    ("var", "lib"),
+    ("var", "log"),
+    ("opt",),
+    ("etc",),
+    ("usr",),
+    ("home",),
+    ("root",),
+))
+
+euid = os.geteuid()
+fixture_parts = parse_abs_parts(fixture_root, "fixture root") if fixture_root else ()
+inside_fixture = bool(fixture_parts) and target_parts[:len(fixture_parts)] == fixture_parts
+logical_parts = target_parts[len(fixture_parts):] if inside_fixture else target_parts
+is_real_root = (euid == 0) and not inside_fixture
+
+if logical_parts in PROTECTED_EXACT or target_parts in PROTECTED_EXACT:
+    fail(f"Refusing protected directory as recovery root: {target}")
+if target_parts in EPHEMERAL_PREFIXES:
+    fail(f"Recovery root {target} must reside on persistent storage outside ephemeral tmp/run directories")
+if is_real_root or inside_fixture:
+    if any(logical_parts[:len(p)] == p for p in EPHEMERAL_PREFIXES):
+        fail(f"Recovery root {target} must reside on persistent storage outside ephemeral tmp/run directories")
+elif fixture_parts:
+    if any(target_parts[:len(p)] == p for p in EPHEMERAL_PREFIXES):
+        fail(f"Recovery root {target} must reside on persistent storage outside ephemeral tmp/run directories")
+
+norm_target = "/" + "/".join(target_parts)
+dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+def is_symlink_error(exc, path, dir_fd=None):
+    if exc.errno == errno.ELOOP:
+        return True
+    if exc.errno == errno.ENOTDIR:
+        try:
+            st = os.lstat(path, dir_fd=dir_fd) if dir_fd is not None else os.lstat(path)
+            return stat.S_ISLNK(st.st_mode)
+        except OSError:
+            return False
+    return False
+
+def open_dir_nofollow(path, label):
+    try:
+        return os.open(path, dir_flags)
+    except OSError as exc:
+        if is_symlink_error(exc, path):
+            fail(f"{label} {path} is a symlink (symlink traversal prohibited)")
+        fail(f"Failed to open {label} {path}: {exc.strerror}")
+
+if is_real_root:
+    start_path = "/"
+    rel_parts = target_parts
+    check_start = True
+    check_ancestors = True
+    forbidden_write = 0o022
+elif inside_fixture:
+    start_path = "/" + "/".join(fixture_parts)
+    if not os.path.lexists(start_path):
+        os.makedirs(start_path, exist_ok=True)
+    rel_parts = logical_parts
+    check_start = False
+    check_ancestors = True
+    forbidden_write = 0o022 if euid == 0 else 0o002
+else:
+    probe = "/" + "/".join(target_parts[:-1]) if len(target_parts) > 1 else "/"
+    while probe != "/" and not os.path.lexists(probe):
+        probe = os.path.dirname(probe) or "/"
+    start_path = probe
+    start_parts = parse_abs_parts(start_path, "recovery root ancestor") if start_path != "/" else ()
+    rel_parts = target_parts[len(start_parts):]
+    check_start = False
+    check_ancestors = False
+    forbidden_write = 0o002
+
+if not rel_parts:
+    fail(f"Invalid recovery root: {norm_target}")
+
+curr_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)) if start_path == "/" else open_dir_nofollow(start_path, "Recovery root ancestor")
+current = start_path
+try:
+    if check_start:
+        st = os.fstat(curr_fd)
+        mode = stat.S_IMODE(st.st_mode)
+        if st.st_uid != euid or (mode & 0o022) != 0:
+            fail(f"Recovery root ancestor {current} has untrusted ownership/mode (uid={st.st_uid}, mode=0o{mode:o})")
+    for comp in rel_parts[:-1]:
+        current = f"/{comp}" if current == "/" else f"{current}/{comp}"
+        try:
+            next_fd = os.open(comp, dir_flags, dir_fd=curr_fd)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                try:
+                    os.mkdir(comp, 0o755, dir_fd=curr_fd)
+                except FileExistsError:
+                    pass
+                except OSError as mk_exc:
+                    fail(f"Failed to create recovery ancestor {current}: {mk_exc.strerror}")
+                try:
+                    next_fd = os.open(comp, dir_flags, dir_fd=curr_fd)
+                except OSError as open_exc:
+                    if is_symlink_error(open_exc, comp, dir_fd=curr_fd):
+                        fail(f"Recovery root ancestor {current} is a symlink (symlink traversal prohibited)")
+                    fail(f"Failed to open recovery ancestor {current}: {open_exc.strerror}")
+            elif is_symlink_error(exc, comp, dir_fd=curr_fd):
+                fail(f"Recovery root ancestor {current} is a symlink (symlink traversal prohibited)")
+            else:
+                fail(f"Failed to open recovery ancestor {current}: {exc.strerror}")
+        os.close(curr_fd)
+        curr_fd = next_fd
+        if check_ancestors:
+            st = os.fstat(curr_fd)
+            mode = stat.S_IMODE(st.st_mode)
+            if st.st_uid != euid:
+                fail(f"Recovery root ancestor {current} is owned by uid {st.st_uid}, expected {euid}")
+            if (mode & forbidden_write) != 0:
+                fail(f"Recovery root ancestor {current} has unsafe writable permissions 0o{mode:o}")
+
+    leaf = rel_parts[-1]
+    current = f"/{leaf}" if current == "/" else f"{current}/{leaf}"
+    created_leaf = False
+    try:
+        leaf_fd = os.open(leaf, dir_flags, dir_fd=curr_fd)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            try:
+                os.mkdir(leaf, 0o700, dir_fd=curr_fd)
+                created_leaf = True
+            except FileExistsError:
+                pass
+            except OSError as mk_exc:
+                fail(f"Failed to create recovery root {current}: {mk_exc.strerror}")
+            try:
+                leaf_fd = os.open(leaf, dir_flags, dir_fd=curr_fd)
+            except OSError as open_exc:
+                if is_symlink_error(open_exc, leaf, dir_fd=curr_fd):
+                    fail(f"Recovery root {current} is a symlink (symlink traversal prohibited)")
+                fail(f"Failed to open recovery root {current}: {open_exc.strerror}")
+        elif is_symlink_error(exc, leaf, dir_fd=curr_fd):
+            fail(f"Recovery root {current} is a symlink (symlink traversal prohibited)")
+        else:
+            fail(f"Failed to open recovery root {current}: {exc.strerror}")
+    try:
+        if created_leaf:
+            os.fchmod(leaf_fd, 0o700)
+        st = os.fstat(leaf_fd)
+        mode_mask = 0o7777 if euid == 0 else 0o777
+        mode = st.st_mode & mode_mask
+        if st.st_uid != euid:
+            fail(f"Recovery root {current} is owned by uid {st.st_uid}, expected {euid}")
+        if mode != 0o700:
+            fail(f"Recovery root {current} has permissions 0o{mode:o}, expected private 0o700")
+    finally:
+        os.close(leaf_fd)
+finally:
+    os.close(curr_fd)
+
+sys.stdout.write(norm_target + "\n")
+PYEOF
+}
+
+af_create_recovery_backup_dir() {
+    local prefix="${1:?af_create_recovery_backup_dir requires prefix}"
+    local recovery_root
+    recovery_root="$(af_prepare_recovery_root "${2:-}")" || return 1
+    python3 - "$recovery_root" "$prefix" <<'PYEOF'
+import errno, os, re, secrets, stat, sys
+
+root, prefix = sys.argv[1], sys.argv[2]
+
+def fail(msg):
+    sys.stderr.write(f"ERROR: {msg}\n")
+    raise SystemExit(1)
+
+if not re.fullmatch(r"[A-Za-z0-9._-]+", prefix) or prefix in (".", "..") or ".." in prefix:
+    fail(f"Invalid recovery backup prefix: {prefix!r}")
+
+euid = os.geteuid()
+dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+mode_mask = 0o7777 if euid == 0 else 0o777
+
+try:
+    root_fd = os.open(root, dir_flags)
+except OSError as exc:
+    if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR and os.path.islink(root)):
+        fail(f"Recovery root {root} is a symlink (symlink traversal prohibited)")
+    fail(f"Failed to open recovery root {root}: {exc.strerror}")
+
+try:
+    rst = os.fstat(root_fd)
+    if rst.st_uid != euid or (rst.st_mode & mode_mask) != 0o700:
+        fail(f"Recovery root {root} failed ownership/permission verification (uid={rst.st_uid}, mode=0o{rst.st_mode & mode_mask:o})")
+    for _ in range(32):
+        name = f"{prefix}{secrets.token_hex(6)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            fail(f"Failed to create recovery backup {root}/{name}: {exc.strerror}")
+        try:
+            child_fd = os.open(name, dir_flags, dir_fd=root_fd)
+        except OSError as exc:
+            try:
+                os.rmdir(name, dir_fd=root_fd)
+            except OSError:
+                pass
+            fail(f"Failed to verify created recovery backup {root}/{name}: {exc.strerror}")
+        try:
+            os.fchmod(child_fd, 0o700)
+            cst = os.fstat(child_fd)
+            cmode = cst.st_mode & mode_mask
+            if cst.st_uid != euid or cmode != 0o700:
+                try:
+                    os.rmdir(name, dir_fd=root_fd)
+                except OSError:
+                    pass
+                fail(f"Created recovery backup {root}/{name} has unexpected ownership/mode (uid={cst.st_uid}, mode=0o{cmode:o})")
+        finally:
+            os.close(child_fd)
+        sys.stdout.write(f"{root}/{name}\n")
+        raise SystemExit(0)
+    fail(f"Exhausted unique recovery backup names under {root}")
+finally:
+    os.close(root_fd)
+PYEOF
+}
+
 restore_state_snapshot() {
     restore_app_state "$@"
 }
@@ -1055,16 +1350,16 @@ begin_state_transaction() {
     AF_APT_REINSTALL_PACKAGES=()
     AF_APT_TRANSACTION_PACKAGES=()
     INSTALL_COMMITTED=false
-    local staging_root="${AF_TRANSACTION_ROOT:-${TMPDIR:-/var/tmp}}"
-    mkdir -p -m 0700 "$staging_root" 2>/dev/null || true
+    local staging_root
+    staging_root="$(af_prepare_recovery_root "${AF_TRANSACTION_ROOT:-}")" || return 1
     if ! check_disk_space "$staging_root" 512; then
         if declare -F af_write_failure_receipt >/dev/null; then
-            af_write_failure_receipt 28 "preflight_capacity" "Insufficient disk space in transaction staging directory ${staging_root}"
+            af_write_failure_receipt 28 "preflight_capacity" "Insufficient disk space in transaction recovery directory ${staging_root}"
         fi
-        print_error "Insufficient disk space in transaction staging directory ${staging_root}"
+        print_error "Insufficient disk space in transaction recovery directory ${staging_root}"
         return 1
     fi
-    AF_STATE_BACKUP="$(mktemp -d "${staging_root}/af-state-XXXXXX")" || return 1
+    AF_STATE_BACKUP="$(af_create_recovery_backup_dir "af-state-" "$staging_root")" || return 1
     trap 'cleanup_state_transaction $?' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM

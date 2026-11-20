@@ -613,6 +613,7 @@ if [[ "$BUILD_USER_CREATED" -eq 1 ]]; then
 fi
 
 report_progress 75 "Backing up Maintainerr state and activating ${LATEST_TAG}..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-maintainerr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 queue_app_version /opt/maintainerr/.af-version "${LATEST_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"

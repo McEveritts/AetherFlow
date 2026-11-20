@@ -139,6 +139,7 @@ if [[ "$FS_ARCH" == "linux_x64" ]]; then
 fi
 
 report_progress 60 "Downloading and staging FlareSolverr ${FS_VERSION}..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-flaresolverr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 stop_systemd_unit flaresolverr

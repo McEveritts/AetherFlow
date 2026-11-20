@@ -159,6 +159,7 @@ set_config_file_mode 0600 /var/lib/tautulli/config.ini
 chown -hRP tautulli:tautulli /var/lib/tautulli
 
 report_progress 75 "Backing up existing Tautulli installation and activating new build..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-tautulli.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 queue_app_version "/opt/Tautulli/.af-version" "${TARGET_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"

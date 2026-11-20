@@ -160,6 +160,7 @@ test -f "$BUILD_DIR/src/manage.py" || { log_error "Failed to verify Paperless-ng
 queue_app_version "/opt/paperless/.af-version" "${PNGX_VER#v}"
 
 report_progress 70 "Setting up Python virtual environment and dependencies..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-paperless.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 for unit in paperless-webserver.service paperless-worker.service paperless-scheduler.service; do

@@ -124,6 +124,7 @@ af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
 rm -f "$TMP_ZIP"
 test -s "$BUILD_DIR/bazarr.py"
 
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-bazarr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 if [[ -f /etc/systemd/system/bazarr.service ]]; then

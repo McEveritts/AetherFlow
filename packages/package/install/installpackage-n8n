@@ -43,7 +43,7 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ca-certific
 
 ensure_node 24
 
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/n8n" "/var/lib/n8n" "/etc/systemd/system/n8n.service" "/usr/local/bin/n8n")
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_WAS_ACTIVE=0

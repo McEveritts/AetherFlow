@@ -107,7 +107,9 @@ af_logged git clone https://github.com/l3uddz/cloudplow.git "$BUILD_DIR"
 test -s "$BUILD_DIR/cloudplow.py" || { log_error "Failed to clone Cloudplow repository"; exit 1; }
 
 CL_TAG="$(git_checkout_version "$BUILD_DIR" "/opt/cloudplow/.af-version")"
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-cloudplow.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
 queue_app_version /opt/cloudplow/.af-version "${CL_TAG}" "$BUILD_DIR" "$BACKUP_DIR"
 stop_systemd_unit cloudplow
 SERVICE_STOPPED=1

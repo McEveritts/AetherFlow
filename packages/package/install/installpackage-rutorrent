@@ -74,7 +74,7 @@ else
     af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
     af_logged git -C "$BUILD_DIR" fetch --tags --depth 1 origin 2>/dev/null || true
 fi
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
 RUNTIME_SNAPSHOT_READY=false
 RUNTIME_STOPPED=false
 RUNTIME_PATHS=("/var/www/rutorrent" "/var/lib/rutorrent" "/etc/apache2/sites-available/rutorrent.conf" "/etc/apache2/conf-available/aetherflow-rutorrent-listen.conf")

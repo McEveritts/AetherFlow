@@ -49,7 +49,7 @@ fi
 mkdir -p /var/lib/flood
 chown -hRP flood:flood /var/lib/flood
 
-BACKUP_DIR="$(mktemp -d /tmp/af-flood-runtime-XXXXXX)"
+BACKUP_DIR="$(af_create_recovery_backup_dir "af-flood-runtime-")"
 RUNTIME_PATHS=(/opt/flood /usr/local/bin/flood /usr/bin/flood /var/lib/flood /etc/systemd/system/flood.service)
 RUNTIME_HAD_PREVIOUS=0
 RUNTIME_WAS_ACTIVE=0

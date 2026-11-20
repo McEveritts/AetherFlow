@@ -42,8 +42,10 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl bind9-dnsutils iproute2 ca-certificates
 
 report_progress 25 "Freeing port 53 from systemd-resolved stub listener..."
-validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf
+validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf /var/backups/.af-backup-root
+mkdir -p /var/backups
 PIHOLE_BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-pihole.XXXXXX)"
+chmod 700 "$PIHOLE_BACKUP_DIR"
 PIHOLE_COMMITTED=0
 RESOLVED_WAS_ACTIVE=0
 PIHOLE_WAS_ACTIVE=0

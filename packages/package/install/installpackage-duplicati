@@ -59,7 +59,7 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
 fi
 mkdir -p "${DATA_DIR}" "${CONFIG_DIR}"
 
-BACKUP_DIR="$(mktemp -d /tmp/af-duplicati-runtime-XXXXXX)"
+BACKUP_DIR="$(af_create_recovery_backup_dir "af-duplicati-runtime-")"
 RUNTIME_PATHS=("$CONFIG_DIR" "$DATA_DIR" "$SERVICE_FILE" "/usr/bin/duplicati-server" "/usr/lib/duplicati" "/usr/share/duplicati" "/etc/default/duplicati")
 RUNTIME_HAD_PREVIOUS=0
 RUNTIME_WAS_ACTIVE=0

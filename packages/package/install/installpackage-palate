@@ -354,6 +354,7 @@ VERSION="$("$BUILD_DIR/.runtime/bin/node" -p "require('${BUILD_DIR}/package.json
 queue_app_version "$APP_DIR/.af-version" "$VERSION"
 
 report_progress 80 "Backing up data and applying Palate's database schema..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-palate.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 cp -a "${ENV_BACKUP:-$ENV_FILE}" "$BACKUP_DIR/palate.env"

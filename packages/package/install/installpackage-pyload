@@ -62,7 +62,7 @@ mkdir -p "${DATA_DIR}" "${DATA_DIR}/settings" "${DATA_DIR}/Downloads"
 chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}"
 
 STAGE_BASE=""
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/pyload" "/var/lib/pyload" "/etc/systemd/system/pyload.service")
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_MUTATED=0

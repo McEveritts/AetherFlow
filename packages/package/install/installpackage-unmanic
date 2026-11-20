@@ -66,7 +66,7 @@ if getent group render >/dev/null 2>&1; then
     usermod -aG render "${APP_USER}" || true
 fi
 
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/unmanic" "/var/lib/unmanic" "/etc/systemd/system/unmanic.service")
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_MUTATED=0

@@ -736,7 +736,7 @@ TARGET_BACKEND_REF="$PIPED_BACKEND_REF"
 TARGET_PROXY_REF="$PIPED_PROXY_REF"
 
 youtube_init piped 8280
-RUNTIME_BACKUP="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/af-piped-runtime-XXXXXX")"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-piped-runtime-")"
 backup_dir="$RUNTIME_BACKUP"
 RUNTIME_PATHS=("$INSTALL_DIR" "$DATA_DIR" "$CONFIG_DIR" /etc/systemd/system/af-piped.service /etc/systemd/system/af-piped-api.service /etc/systemd/system/af-piped-proxy.service)
 RUNTIME_HAD_PREVIOUS=false
@@ -759,7 +759,6 @@ cleanup_piped_install() {
         if [[ "${INSTALL_COMMITTED:-false}" != true && "$RUNTIME_CHANGED" == true ]]; then
             if ! quiesce_services_for_rollback af-piped af-piped-api af-piped-proxy; then
                 restore_failed=true
-                export AF_PRESERVE_SCRATCH=1
                 print_error "Cannot stop Piped; recovery retained in $RUNTIME_BACKUP"
             else
                 restore_postgresql_database "$RUNTIME_BACKUP" piped || restored=false
@@ -770,20 +769,21 @@ cleanup_piped_install() {
                 af_logged systemctl daemon-reload || restore_failed=true
                 if [[ "$restored" != true || "$restore_failed" == true ]]; then
                     restore_failed=true
-                    export AF_PRESERVE_SCRATCH=1
                     print_error "Piped recovery incomplete; backups retained in $RUNTIME_BACKUP"
                 elif [[ "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-                    af_logged systemctl restart af-piped-api af-piped-proxy af-piped || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                    af_logged systemctl restart af-piped-api af-piped-proxy af-piped || restore_failed=true
                 fi
             fi
         elif [[ "${INSTALL_COMMITTED:-false}" != true && "$SERVICE_STOPPED" == true && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-            af_logged systemctl restart af-piped-api af-piped-proxy af-piped || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+            af_logged systemctl restart af-piped-api af-piped-proxy af-piped || restore_failed=true
         fi
     fi
     [[ -z "$BUILD_DIR" ]] || rm -rf -- "$BUILD_DIR"
     if [[ "${PIPED_INSTALL_COMPLETED:-0}" -ne 1 || "${PIPED_CERTIFIED:-0}" -ne 1 ]]; then
         rc=1
-        export AF_PRESERVE_SCRATCH=1
+        if [[ -n "${AF_JOB_SCRATCH_DIR:-}" && "${RUNTIME_BACKUP:-}" == "${AF_JOB_SCRATCH_DIR}"/* ]]; then
+            export AF_PRESERVE_SCRATCH=1
+        fi
         if [[ "$restore_failed" == true ]]; then
             print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
         else

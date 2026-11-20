@@ -125,6 +125,7 @@ set_config_value "/home/homeassistant/.homeassistant/configuration.yaml" yaml "s
 chown -hRP homeassistant:homeassistant /home/homeassistant
 
 report_progress 45 "Creating Home Assistant Python virtual environment with explicit upgrade..."
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-homeassistant.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 stop_systemd_unit home-assistant@homeassistant

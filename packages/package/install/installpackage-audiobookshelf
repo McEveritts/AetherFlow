@@ -41,8 +41,10 @@ report_progress 10 "Installing prerequisites and multimedia libraries for Audiob
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ffmpeg ca-certificates
 
-validate_config_paths /etc/default/audiobookshelf /etc/systemd/system/audiobookshelf.service /opt/audiobookshelf/.af-version
+validate_config_paths /etc/default/audiobookshelf /etc/systemd/system/audiobookshelf.service /opt/audiobookshelf/.af-version /var/backups/.af-backup-root
+mkdir -p /var/backups
 ABS_BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-audiobookshelf.XXXXXX)"
+chmod 700 "$ABS_BACKUP_DIR"
 ABS_COMMITTED=0
 ABS_MUTATED=0
 ABS_QUIESCE_STARTED=0

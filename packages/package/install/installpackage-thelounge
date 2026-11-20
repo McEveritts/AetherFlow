@@ -62,7 +62,7 @@ fi
 
 mkdir -p /var/lib/thelounge/users
 
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/thelounge" "/var/lib/thelounge" "/etc/systemd/system/thelounge.service" "/usr/local/bin/thelounge")
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_WAS_ACTIVE=0

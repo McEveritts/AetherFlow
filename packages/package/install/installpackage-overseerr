@@ -119,7 +119,9 @@ if [[ -n "$LATEST_TAG" ]]; then
 fi
 
 OVERSEERR_VERSION="$(git_checkout_version "$BUILD_DIR" /opt/overseerr/.af-version)"
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-overseerr.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
 queue_app_version "/opt/overseerr/.af-version" "${OVERSEERR_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
 
 report_progress 55 "Installing Overseerr dependencies and building production bundle..."

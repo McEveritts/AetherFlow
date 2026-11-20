@@ -164,6 +164,7 @@ fi
 chmod 0755 "${STAGE_SRC}/Listenarr.Api" 2>/dev/null || true
 queue_app_version "$INSTALL_DIR/.af-version" "${LATEST_TAG#v}"
 
+validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-listenarr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 if [[ -f "$SERVICE_FILE" ]]; then

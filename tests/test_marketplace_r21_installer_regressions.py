@@ -106,8 +106,16 @@ class MarketplaceR21InstallerRegressions(unittest.TestCase):
         return entries
 
     def backups(self, fixture):
-        return sorted(path for directory in ("tmp", "var/backups") for path in (fixture.root / directory).iterdir()
-                      if path.is_dir() and path.name.startswith(SNAPSHOT_PREFIXES))
+        found = []
+        for directory in ("var/backups/aetherflow-recovery", "var/backups"):
+            base = fixture.root / directory
+            if base.is_dir():
+                found.extend(path for path in base.iterdir()
+                             if path.is_dir() and path.name.startswith(SNAPSHOT_PREFIXES))
+        tmp_leaks = [path for path in (fixture.root / "tmp").iterdir()
+                     if path.is_dir() and path.name.startswith(SNAPSHOT_PREFIXES)]
+        self.assertEqual(tmp_leaks, [], f"Recovery backups must not be created under tmp: {tmp_leaks}")
+        return sorted(found)
 
     def copy_probe(self, fixture):
         fixture.file("mock-bin/cp", COPY_PROBE).chmod(0o700)

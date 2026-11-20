@@ -5,7 +5,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def common_functions(*names):
-    names = tuple(dict.fromkeys(('af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', 'af_github_curl', 'deb_compare_versions', *names)))
+    names = tuple(dict.fromkeys((
+        'af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', 'af_github_curl', 'deb_compare_versions',
+        'af_resolve_recovery_root', 'af_prepare_recovery_root', 'af_create_recovery_backup_dir',
+        *names,
+    )))
     if 'backup_configured_database' in names or 'restore_configured_database' in names:
         names = tuple(dict.fromkeys((*names, 'configured_database_connection', 'configured_postgresql_cleanup',
                                      'validate_config_paths', 'safe_config_python')))

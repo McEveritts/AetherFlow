@@ -99,7 +99,7 @@ if [[ -n "$(mysql -u root --host=localhost --protocol=SOCKET -Nse "SELECT User F
 fi
 fi
 
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
 RUNTIME_PATHS=("/var/www/nextcloud" "/etc/apache2/sites-available/nextcloud.conf" "/etc/apache2/sites-enabled/nextcloud.conf" "/etc/apache2/conf-available/aetherflow-nextcloud-listen.conf" "/etc/apache2/conf-enabled/aetherflow-nextcloud-listen.conf" "/var/lib/nextcloud" "/opt/AetherFlow/logs/nextcloud_credentials.txt" "$NC_DB_OWNER_FILE")
 RUNTIME_CHANGED=false
 INSTALL_COMMITTED=false

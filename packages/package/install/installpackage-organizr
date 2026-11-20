@@ -79,7 +79,7 @@ if ! af_logged git clone --branch "$TARGET_TAG" --depth 1 "$REPO_URL" "$BUILD_DI
         TARGET_TAG="$ALT_TAG"
     fi
 fi
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
 RUNTIME_SNAPSHOT_READY=false
 RUNTIME_STOPPED=false
 RUNTIME_PATHS=("/var/www/organizr" "/var/lib/organizr" "/etc/apache2/sites-available/organizr.conf" "/etc/apache2/conf-available/aetherflow-organizr-listen.conf")

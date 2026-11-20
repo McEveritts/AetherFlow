@@ -1085,6 +1085,11 @@ impl CommandRunner for TokioCommandRunner {
 // Execution Environment & Path Sandboxing
 // -----------------------------------------------------------------------------
 
+/// Trusted persistent recovery root for privileged root-run marketplace updates.
+/// Kept outside `/tmp` and `/var/tmp` so rollback material remains accessible to
+/// operators and survives systemd `PrivateTmp=yes` restarts.
+pub const DEFAULT_PRIVILEGED_RECOVERY_ROOT: &str = "/var/backups/aetherflow-recovery";
+
 /// Execution context and filesystem root configuration for [`DeclarativePackageExecutor`].
 #[derive(Debug, Clone)]
 pub struct PackageExecutionEnv {
@@ -1095,8 +1100,11 @@ pub struct PackageExecutionEnv {
     pub lock_dir: PathBuf,
     /// Directory for package installer logs (`/var/log/aetherflow` by default).
     pub log_dir: PathBuf,
-    /// Temporary download/staging directory (`/tmp` by default).
+    /// Disposable download/staging directory (`/var/tmp` or `TMPDIR` by default).
     pub temp_dir: PathBuf,
+    /// Optional persistent recovery backup root (`AETHERFLOW_RECOVERY_ROOT` / `AF_RECOVERY_ROOT`).
+    /// Distinct from disposable download/staging (`temp_dir`, `scratch_root`).
+    pub recovery_root: Option<PathBuf>,
     /// Override architecture (`amd64`, `arm64`, `armhf`) or auto-detected at runtime.
     pub arch_override: Option<String>,
     /// Allocated application port (`1024..=65535` or `0`).
@@ -1111,7 +1119,7 @@ pub struct PackageExecutionEnv {
     pub artifact_cache_dir: Option<PathBuf>,
     /// Expected target version (`AF_TARGET_VERSION`) for declarative jobs.
     pub expected_target_version: Option<String>,
-    /// Scratch root (`AF_JOB_SCRATCH_ROOT`) for declarative jobs.
+    /// Disposable scratch root (`AF_JOB_SCRATCH_ROOT`) for declarative jobs.
     pub scratch_root: Option<PathBuf>,
     /// Whether dry-run mode is active for this execution context.
     pub dry_run: bool,
@@ -1143,6 +1151,12 @@ impl Default for PackageExecutionEnv {
                     env::temp_dir()
                 }
             });
+        let recovery_root = env::var("AETHERFLOW_RECOVERY_ROOT")
+            .or_else(|_| env::var("AF_RECOVERY_ROOT"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
         let password = env::var("AF_PASS")
             .ok()
             .map(|s| s.trim().to_string())
@@ -1167,6 +1181,7 @@ impl Default for PackageExecutionEnv {
             lock_dir,
             log_dir,
             temp_dir,
+            recovery_root,
             arch_override: None,
             app_port: 0,
             password,
@@ -1191,6 +1206,7 @@ impl PackageExecutionEnv {
             lock_dir: PathBuf::from("/install"),
             log_dir: PathBuf::from("/var/log/aetherflow"),
             temp_dir: root.join("tmp"),
+            recovery_root: Some(root.join("var/backups/aetherflow-recovery")),
             arch_override: Some("amd64".to_string()),
             app_port: 0,
             password: None,
@@ -4854,13 +4870,14 @@ async fn run_legacy_sandbox_systemctl(
 /// `DELETE_DATA` is always set explicitly so an inherited runner value can
 /// never turn an ordinary removal into a purge.
 pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageRunnerRequest) {
+    let default_env = PackageExecutionEnv::default();
     let action_lower = req.action.trim().to_ascii_lowercase();
     let keep_existing_secrets = if action_lower == "remove" || action_lower == "uninstall" {
         false
     } else if action_lower == "update" || action_lower == "reinstall" {
         true
     } else {
-        PackageExecutionEnv::default().keep_existing_secrets
+        default_env.keep_existing_secrets
     };
     cmd.env("DEBIAN_FRONTEND", "noninteractive")
         .env("AF_PACKAGE_ACTION", req.action.as_str())
@@ -4901,6 +4918,22 @@ pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageR
         .filter(|s| !s.trim().is_empty())
     {
         cmd.env("AF_TARGET_VERSION", target.trim());
+    }
+    let recovery_root = default_env
+        .recovery_root
+        .clone()
+        .or_else(|| {
+            default_env
+                .fs_root
+                .as_ref()
+                .map(|root| root.join("var/backups/aetherflow-recovery"))
+        })
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_PRIVILEGED_RECOVERY_ROOT));
+    cmd.env("AF_RECOVERY_ROOT", &recovery_root);
+    cmd.env("AF_TRANSACTION_ROOT", &recovery_root);
+    if default_env.fs_root.is_none() {
+        cmd.env_remove("AF_FIXTURE_ROOT");
+        cmd.env_remove("TEST_ROOT");
     }
     cmd.env("AF_JOB_SCRATCH_ROOT", "/var/tmp/aetherflow-scratch");
 }
@@ -5058,7 +5091,7 @@ pub fn preflight_check_disk_and_inodes(fs_root: Option<&Path>) -> Result<(), Str
     const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
     const MIN_FREE_INODES: u64 = 4096;
 
-    for target in ["/var/tmp", "/opt"] {
+    for target in ["/var/tmp", "/var/backups", "/opt"] {
         let p = if let Some(root) = fs_root {
             root.join(target.trim_start_matches('/'))
         } else {
