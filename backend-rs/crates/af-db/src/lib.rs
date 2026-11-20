@@ -275,6 +275,10 @@ pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
 pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
     let key_opt = *AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
     let Some(key) = key_opt else {
+        anyhow::ensure!(
+            !encoded.starts_with(CIPHERTEXT_PREFIX),
+            "AES_MASTER_KEY is required to decrypt enc:v1: secret"
+        );
         return Ok(encoded.to_string());
     };
 
@@ -3086,6 +3090,24 @@ pub(crate) mod tests {
         drop(writer);
         drop(writer_pool);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_decrypt_key_requires_master_key_for_ciphertext() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let encrypted = encrypt_with_key("fixture-secret", &[1; 32]).unwrap();
+        let previous = AES_MASTER_KEY
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let encrypted_result = decrypt_key(&encrypted);
+        let plaintext_result = decrypt_key("local-development-key");
+        *AES_MASTER_KEY.write().unwrap_or_else(|e| e.into_inner()) = previous;
+
+        let error = encrypted_result.unwrap_err().to_string();
+        assert!(error.contains("AES_MASTER_KEY is required"));
+        assert!(!error.contains(&encrypted));
+        assert_eq!(plaintext_result.unwrap(), "local-development-key");
     }
 
     #[test]
