@@ -1007,19 +1007,19 @@ pub(super) fn build_novnc_recipe() -> DeclarativePackageRecipe {
         },
         DeclarativeStep::WriteSystemdUnit {
             unit_name: "novnc-xvnc.service".to_string(),
-            content_template: "[Unit]\nDescription=AetherFlow TigerVNC Desktop Server for noVNC\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=novnc\nGroup=novnc\nEnvironment=HOME=/var/lib/novnc\nWorkingDirectory=/var/lib/novnc\nExecStart=/usr/bin/Xtigervnc :1 -geometry 1280x800 -depth 24 -localhost yes -rfbport 5901 -PasswordFile /var/lib/novnc/.vnc/passwd -SecurityTypes VncAuth,TLSVnc\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            content_template: "[Unit]\nDescription=AetherFlow TigerVNC Desktop Server for noVNC\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=exec\nUser=novnc\nGroup=novnc\nEnvironment=HOME=/var/lib/novnc\nWorkingDirectory=/var/lib/novnc\nPrivateTmp=yes\nExecStartPre=!/usr/bin/mkdir -p -m 1777 /tmp/.X11-unix\nExecStart=/usr/bin/Xtigervnc :1 -geometry 1280x800 -depth 24 -localhost yes -rfbport 5901 -PasswordFile /var/lib/novnc/.vnc/passwd -SecurityTypes VncAuth,TLSVnc\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
             progress_pct: 74,
             description: "Writing novnc-xvnc.service VNC backend unit...".to_string(),
         },
         DeclarativeStep::WriteSystemdUnit {
             unit_name: "novnc-session.service".to_string(),
-            content_template: "[Unit]\nDescription=AetherFlow noVNC XFCE Desktop Session\nBindsTo=novnc-xvnc.service\nAfter=novnc-xvnc.service\nPartOf=novnc-xvnc.service\n\n[Service]\nType=simple\nUser=novnc\nGroup=novnc\nWorkingDirectory=/var/lib/novnc\nEnvironment=HOME=/var/lib/novnc DISPLAY=:1\nExecStartPre=/usr/bin/timeout 10s /bin/sh -c 'until test -S /tmp/.X11-unix/X1; do sleep 0.2; done'\nExecStart=/var/lib/novnc/.vnc/xstartup\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            content_template: "[Unit]\nDescription=AetherFlow noVNC XFCE Desktop Session\nBindsTo=novnc-xvnc.service\nAfter=novnc-xvnc.service\nPartOf=novnc-xvnc.service\nJoinsNamespaceOf=novnc-xvnc.service\n\n[Service]\nType=exec\nUser=novnc\nGroup=novnc\nWorkingDirectory=/var/lib/novnc\nEnvironment=HOME=/var/lib/novnc DISPLAY=:1\nPrivateTmp=yes\nExecStartPre=/usr/bin/timeout 10s /bin/sh -c 'until test -S /tmp/.X11-unix/X1; do sleep 0.2; done'\nExecStart=/var/lib/novnc/.vnc/xstartup\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
             progress_pct: 77,
             description: "Writing novnc-session.service XFCE desktop unit...".to_string(),
         },
         DeclarativeStep::WriteSystemdUnit {
             unit_name: "novnc.service".to_string(),
-            content_template: "[Unit]\nDescription=AetherFlow noVNC Websockify Proxy\nAfter=network-online.target novnc-xvnc.service\nWants=network-online.target\nRequires=novnc-xvnc.service\n\n[Service]\nType=simple\nUser=novnc\nGroup=novnc\nExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 127.0.0.1:{{APP_PORT}} 127.0.0.1:5901\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            content_template: "[Unit]\nDescription=AetherFlow noVNC Websockify Proxy\nAfter=network-online.target novnc-xvnc.service novnc-session.service\nWants=network-online.target\nRequires=novnc-xvnc.service novnc-session.service\n\n[Service]\nType=exec\nUser=novnc\nGroup=novnc\nExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 127.0.0.1:{{APP_PORT}} 127.0.0.1:5901\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
             progress_pct: 80,
             description: "Writing novnc.service systemd unit on port {{APP_PORT}}...".to_string(),
         },

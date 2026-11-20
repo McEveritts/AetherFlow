@@ -140,7 +140,16 @@ install() {
         chmod 755 "$last"
     fi
 }
-curl() { python3 "$TEST_ROOT/mock.py" curl "$@"; }
+curl() {
+    local arg
+    for arg; do
+        if [[ "$arg" == -w ]]; then
+            printf '%s' "${MOCK_HTTP_STATUS:-401}"
+            return
+        fi
+    done
+    python3 "$TEST_ROOT/mock.py" curl "$@"
+}
 jq() { python3 "$TEST_ROOT/mock.py" jq "$@"; }
 kasmvncpasswd() {
     local first second last
@@ -161,16 +170,13 @@ import sys
 args = sys.argv[2:]
 root = Path(os.environ["TEST_ROOT"])
 if sys.argv[1] == "curl":
-    if "-w" in args:
-        print(os.environ.get("MOCK_HTTP_STATUS", "401"), end="")
+    output = Path(args[args.index("-o") + 1])
+    if "https://api.github.com/repos/kasmtech/KasmVNC/releases/latest" in args:
+        output.write_bytes((root / "release.json").read_bytes())
+    elif "https://api.github.com/repos/McEveritts/McVNC/tags" in args:
+        output.write_bytes((root / "tags.json").read_bytes())
     else:
-        output = Path(args[args.index("-o") + 1])
-        if "https://api.github.com/repos/kasmtech/KasmVNC/releases/latest" in args:
-            output.write_bytes((root / "release.json").read_bytes())
-        elif "https://api.github.com/repos/McEveritts/McVNC/tags" in args:
-            output.write_bytes((root / "tags.json").read_bytes())
-        else:
-            output.write_bytes(b"bad package" if os.environ.get("MOCK_CORRUPT") == "1" else b"fake upstream package")
+        output.write_bytes(b"bad package" if os.environ.get("MOCK_CORRUPT") == "1" else b"fake upstream package")
 else:
     data = json.loads(Path(args[-1]).read_text())
     if args[-2] == ".[0].name":
@@ -203,7 +209,7 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         (self.root / "etc/xrdp/startwm.sh").write_text("original session script\n")
         (self.root / "common.sh").write_text(MOCK_COMMON)
         common = (REPO / "packages/common.sh").read_text()
-        common = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root)/", lambda match: str(self.root) + match.group(), common)
+        common = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root|home)/", lambda match: str(self.root) + match.group(), common)
         (self.root / "real-common.sh").write_text(common)
         (self.root / "mock.py").write_text(MOCK_COMMANDS)
         self.release = {
@@ -258,6 +264,27 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         result = self.run_script("install", "kasmvnc", AF_APP_PORT="17003")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(password_file.read_text(), password)
+
+    def test_kasm_launcher_skips_file_and_abstract_socket_conflicts(self):
+        installed = self.run_script("install", "kasmvnc")
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        launcher = self.root / "usr/local/bin/af-kasmvnc-start"
+        proc_sockets = self.root / "unix-sockets"
+        proc_sockets.write_text("0000: 0002 0000 0000 0001 01 1 @" + str(self.root / "tmp/.X11-unix/X21") + "\n")
+        lock = self.root / "tmp/.X20-lock"
+        lock.write_text("stale lock in service namespace\n")
+        vncserver = self.root / "usr/bin/vncserver"
+        vncserver.parent.mkdir(parents=True, exist_ok=True)
+        vncserver.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        vncserver.chmod(0o755)
+        script = launcher.read_text().replace("/proc/net/unix", str(proc_sockets))
+        started = subprocess.run(["bash", "-c", script, "launcher", "-fg"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertEqual(started.stdout.splitlines(), [":22", "-fg"])
+        self.assertTrue(lock.is_file())
+        removed = self.run_script("remove", "kasmvnc")
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertFalse(launcher.exists())
         self.assertFalse(list((self.root / "tmp").glob("af-kasmvnc-*")))
 
     def test_mcvnc_install_port_and_reinstall(self):

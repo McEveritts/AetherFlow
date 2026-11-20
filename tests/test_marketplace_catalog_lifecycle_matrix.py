@@ -1098,6 +1098,32 @@ class CatalogLifecycleMatrix(unittest.TestCase):
             self.assertIn(old, source)
             path.write_text(source.replace(old, new, 1))
 
+    def test_novnc_session_joins_xvnc_namespace_and_is_removed(self):
+        with InstallerFixture("novnc") as fixture:
+            installed = fixture.run()
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            services = fixture.root / "etc/systemd/system"
+            xvnc = (services / "novnc-xvnc.service").read_text()
+            session_file = services / "novnc-session.service"
+            session = session_file.read_text()
+            proxy = (services / "novnc.service").read_text()
+            self.assertIn("PrivateTmp=yes", xvnc)
+            self.assertIn("ExecStartPre=!", xvnc)
+            self.assertIn("PrivateTmp=yes", session)
+            self.assertIn("JoinsNamespaceOf=novnc-xvnc.service", session)
+            self.assertIn("After=novnc-xvnc.service", session)
+            self.assertIn("Requires=novnc-xvnc.service novnc-session.service", proxy)
+            self.assertNotIn("ExecStartPost=", xvnc)
+            previous = session + "\n# Existing operator override\n"
+            session_file.write_text(previous)
+            failed = fixture.run("update", AF_FIXTURE_FAILURE="service", AF_FIXTURE_FAILURE_UNIT="novnc-session.service")
+            self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+            self.assertEqual(session_file.read_text(), previous)
+            self.assertFalse((fixture.root / "active-novnc-session.service").exists())
+            removed = fixture.run("remove")
+            self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+            self.assertFalse(session_file.exists())
+
     def test_postgresql_rollback_preserves_unrelated_cluster_databases(self):
         with InstallerFixture("piped") as fixture:
             unrelated = fixture.file("var/lib/postgresql/16/main/unrelated-database-marker", "before-unrelated-transaction")

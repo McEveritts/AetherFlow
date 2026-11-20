@@ -39,7 +39,7 @@ fi
 log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} services..."
 
-purge_systemd_unit "novnc" "novnc-xvnc"
+purge_systemd_unit "novnc" "novnc-session" "novnc-xvnc"
 af_logged systemctl daemon-reload
 
 report_progress 60 "Removing ${APP_NAME} packages..."

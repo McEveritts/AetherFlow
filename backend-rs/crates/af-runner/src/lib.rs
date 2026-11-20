@@ -470,6 +470,7 @@ pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
             | "dispatcharr-celerybeat"
             | "novnc"
             | "novnc-xvnc"
+            | "novnc-session"
             | "x2goserver"
             | "xrdp"
             | "xrdp-sesman"

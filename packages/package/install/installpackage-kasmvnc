@@ -268,52 +268,26 @@ EOF
 fi
 chown -hRP af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
 
-PROC_NET_UNIX_PATH="${AF_PROC_NET_UNIX:-/proc/net/unix}"
-x11_display_free() {
-    local disp="$1"
-    [[ ! -e "/tmp/.X${disp}-lock" && ! -L "/tmp/.X${disp}-lock" && ! -e "/tmp/.X11-unix/X${disp}" && ! -L "/tmp/.X11-unix/X${disp}" ]] || return 1
-    if [[ -r "$PROC_NET_UNIX_PATH" ]] && grep -Eq "\.X11-unix/X${disp}([[:space:]]|$)" "$PROC_NET_UNIX_PATH" 2>/dev/null; then
-        return 1
-    fi
-    return 0
-}
-KASMVNC_DISPLAY=""
-if [[ -f /etc/systemd/system/af-kasmvnc.service ]]; then
-    EXISTING_DISPLAY="$(sed -n 's|.*ExecStart=/usr/bin/vncserver :\([0-9][0-9]*\).*|\1|p' /etc/systemd/system/af-kasmvnc.service | head -n1 || true)"
-    if [[ -n "$EXISTING_DISPLAY" ]]; then
-        af_logged systemctl stop af-kasmvnc.service || true
-        af_logged python3 - "$EXISTING_DISPLAY" <<'PYEOF' || true
-import os, pwd, stat, sys
-disp = sys.argv[1]
-try:
-    uid = pwd.getpwnam("af-kasmvnc").pw_uid
-except KeyError:
-    raise SystemExit(0)
-for path in (f"/tmp/.X{disp}-lock", f"/tmp/.X11-unix/X{disp}"):
-    try:
-        st = os.lstat(path)
-    except FileNotFoundError:
-        continue
-    if not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
-        os.unlink(path)
-PYEOF
-        if x11_display_free "$EXISTING_DISPLAY"; then
-            KASMVNC_DISPLAY="$EXISTING_DISPLAY"
-        fi
-    fi
-fi
-if [[ -z "$KASMVNC_DISPLAY" ]]; then
-    for candidate_display in $(seq 20 59); do
-        if x11_display_free "$candidate_display"; then
-            KASMVNC_DISPLAY="$candidate_display"
-            break
-        fi
-    done
-fi
-if [[ -z "$KASMVNC_DISPLAY" ]]; then
-    print_error "No free X display found in range :20..:59 for KasmVNC."
+# Run display selection in the service namespace, where vncserver will bind.
+write_config_file /usr/local/bin/af-kasmvnc-start 0755 <<'EOF'
+#!/bin/bash
+set -eu
+if [[ ! -r /proc/net/unix ]]; then
+    echo "Cannot inspect active X11 sockets for KasmVNC." >&2
     exit 1
 fi
+for ((display = 20; display <= 59; display++)); do
+    lock="/tmp/.X${display}-lock"
+    socket="/tmp/.X11-unix/X${display}"
+    if [[ -e "$lock" || -L "$lock" || -e "$socket" || -L "$socket" ]] ||
+        grep -Eq "[[:space:]]@?/tmp/\.X11-unix/X${display}$" /proc/net/unix; then
+        continue
+    fi
+    exec /usr/bin/vncserver ":${display}" "$@"
+done
+echo "No free X display in range :20..:59 for KasmVNC." >&2
+exit 1
+EOF
 
 cat > /etc/systemd/system/af-kasmvnc.service <<EOF
 [Unit]
@@ -326,7 +300,7 @@ User=af-kasmvnc
 Group=af-kasmvnc
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/bin/vncserver :${KASMVNC_DISPLAY} -fg -interface 127.0.0.1 -cert ${VNC_TLS_CERT} -key ${VNC_TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
+ExecStart=/usr/local/bin/af-kasmvnc-start -fg -interface 127.0.0.1 -cert ${VNC_TLS_CERT} -key ${VNC_TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -354,7 +328,7 @@ for attempt in {1..30}; do
     sleep 1
 done
 if [[ "$READY" != "true" ]]; then
-    print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display :${KASMVNC_DISPLAY}."
+    print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display."
     exit 1
 fi
 VERSION_FILE=/var/lib/kasmvnc/.af-version

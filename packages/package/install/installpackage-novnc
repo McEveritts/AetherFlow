@@ -27,6 +27,7 @@ APP_USER="novnc"
 DATA_DIR="/var/lib/novnc"
 CONFIG_DIR="/etc/novnc"
 XVNC_SERVICE_FILE="/etc/systemd/system/novnc-xvnc.service"
+SESSION_SERVICE_FILE="/etc/systemd/system/novnc-session.service"
 SERVICE_FILE="/etc/systemd/system/novnc.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6080}}"
 VNC_PORT="5901"
@@ -46,7 +47,7 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 PACKAGE_NAME="${PACKAGE_NAME:-novnc}"
-begin_state_transaction "novnc-xvnc.service novnc.service" "$APP_PORT" "/" "/var/lib/novnc" "/etc/novnc" "/usr/local/bin/af-novnc-start" "/usr/local/bin/af-novnc-xvnc-start" "/etc/systemd/system/novnc-xvnc.service" "/etc/systemd/system/novnc.service" "/usr/bin/Xtigervnc" "/usr/bin/tigervncserver" "/usr/bin/x11vnc" "/usr/bin/websockify" "/usr/share/novnc" "/usr/lib/python3/dist-packages/websockify"
+begin_state_transaction "novnc-xvnc.service novnc-session.service novnc.service" "$APP_PORT" "/" "/var/lib/novnc" "/etc/novnc" "/usr/local/bin/af-novnc-start" "/usr/local/bin/af-novnc-xvnc-start" "$XVNC_SERVICE_FILE" "$SESSION_SERVICE_FILE" "$SERVICE_FILE" "/usr/bin/Xtigervnc" "/usr/bin/tigervncserver" "/usr/bin/x11vnc" "/usr/bin/websockify" "/usr/share/novnc" "/usr/lib/python3/dist-packages/websockify"
 
 prepare_apt_package_transaction /etc/novnc/.af-version novnc websockify tigervnc-standalone-server x11vnc
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
@@ -95,14 +96,15 @@ Description=TigerVNC Headless X11 Desktop Server for noVNC
 After=network-online.target
 
 [Service]
-Type=simple
+Type=exec
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${DATA_DIR}
 Environment="HOME=${DATA_DIR}"
 Environment="DISPLAY=:1"
+PrivateTmp=yes
+ExecStartPre=!/usr/bin/mkdir -p -m 1777 /tmp/.X11-unix
 ExecStart=/usr/bin/Xtigervnc :1 -geometry 1920x1080 -depth 24 -localhost yes -rfbport ${VNC_PORT} -PasswordFile ${DATA_DIR}/.vnc/passwd -AlwaysShared
-ExecStartPost=/bin/sh -c 'sleep 1 && DISPLAY=:1 ${DATA_DIR}/.vnc/xstartup &'
 Restart=on-failure
 RestartSec=5
 
@@ -111,14 +113,38 @@ WantedBy=multi-user.target
 EOF
 chmod 0644 "${XVNC_SERVICE_FILE}"
 
+write_config_file "${SESSION_SERVICE_FILE}" 0644 <<EOF
+[Unit]
+Description=AetherFlow noVNC XFCE Desktop Session
+BindsTo=novnc-xvnc.service
+After=novnc-xvnc.service
+PartOf=novnc-xvnc.service
+JoinsNamespaceOf=novnc-xvnc.service
+
+[Service]
+Type=exec
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+Environment=HOME=${DATA_DIR} DISPLAY=:1
+PrivateTmp=yes
+ExecStartPre=/usr/bin/timeout 10s /bin/sh -c 'until test -S /tmp/.X11-unix/X1; do sleep 0.2; done'
+ExecStart=${DATA_DIR}/.vnc/xstartup
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=noVNC HTML5 WebSocket VNC Client Proxy
-After=network-online.target novnc-xvnc.service
-Requires=novnc-xvnc.service
+After=network-online.target novnc-xvnc.service novnc-session.service
+Requires=novnc-xvnc.service novnc-session.service
 
 [Service]
-Type=simple
+Type=exec
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${DATA_DIR}
@@ -132,10 +158,12 @@ EOF
 chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
-af_logged systemctl enable --now novnc-xvnc.service novnc.service
+af_logged systemctl enable novnc-xvnc.service novnc-session.service novnc.service
 
-af_logged systemctl restart novnc-xvnc.service novnc.service
-systemctl is-active --quiet novnc-xvnc.service novnc.service
+af_logged systemctl restart novnc-xvnc.service novnc-session.service novnc.service
+for unit in novnc-xvnc.service novnc-session.service novnc.service; do
+    systemctl is-active --quiet "$unit"
+done
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

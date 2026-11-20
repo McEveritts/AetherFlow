@@ -6282,11 +6282,16 @@ fn novnc_uses_tigervnc_rfb_authentication_and_a_separate_xfce_session() {
     };
     let xvnc = unit("novnc-xvnc.service");
     assert!(xvnc.contains("-PasswordFile /var/lib/novnc/.vnc/passwd"));
+    assert!(xvnc.contains("Type=exec"));
+    assert!(xvnc.contains("PrivateTmp=yes"));
+    assert!(xvnc.contains("ExecStartPre=!/usr/bin/mkdir -p -m 1777 /tmp/.X11-unix"));
     assert!(!xvnc.contains("ExecStartPost="));
     let session = unit("novnc-session.service");
     for setting in [
         "BindsTo=novnc-xvnc.service",
         "After=novnc-xvnc.service",
+        "JoinsNamespaceOf=novnc-xvnc.service",
+        "PrivateTmp=yes",
         "User=novnc",
         "Group=novnc",
         "WorkingDirectory=/var/lib/novnc",
@@ -6297,6 +6302,10 @@ fn novnc_uses_tigervnc_rfb_authentication_and_a_separate_xfce_session() {
     ] {
         assert!(session.contains(setting), "{setting}");
     }
+    assert!(unit("novnc.service").contains("Requires=novnc-xvnc.service novnc-session.service"));
+    assert!(crate::is_managed_runner_systemd_unit(
+        "novnc-session.service"
+    ));
     assert!(recipe.install_steps.iter().any(|step| matches!(step,
         DeclarativeStep::WriteTemplateFile { path, mode: 0o750, content_template, .. }
             if path.ends_with("/xstartup") && content_template.contains("export DISPLAY=:1")
