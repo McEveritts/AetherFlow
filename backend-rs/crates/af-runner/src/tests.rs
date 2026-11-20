@@ -2547,3 +2547,19 @@ fn core_units_cannot_receive_sandbox_dropins() {
     }
     assert!(!root.exists());
 }
+
+#[test]
+fn managed_units_admit_only_the_cataloged_home_assistant_instance() {
+    assert!(is_managed_runner_systemd_unit(
+        "home-assistant@homeassistant"
+    ));
+    assert!(is_managed_runner_systemd_unit(
+        "home-assistant@homeassistant.service"
+    ));
+    assert!(!is_managed_runner_systemd_unit(
+        "home-assistant@other.service"
+    ));
+    assert!(!is_managed_runner_systemd_unit(
+        "home-assistant@homeassistant.timer"
+    ));
+}

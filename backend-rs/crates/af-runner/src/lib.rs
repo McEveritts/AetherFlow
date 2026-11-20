@@ -404,6 +404,13 @@ pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
     }
 
     if let Some((prefix, instance)) = lower.split_once('@') {
+        // Marketplace ships exactly this Home Assistant instance.
+        if matches!(
+            trimmed,
+            "home-assistant@homeassistant" | "home-assistant@homeassistant.service"
+        ) {
+            return true;
+        }
         if instance.is_empty() {
             return false;
         }

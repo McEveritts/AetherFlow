@@ -1387,16 +1387,11 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             }
             return response;
         } else {
-            let status = upstream_resp.status();
-            let resp_headers_clone = upstream_resp.headers().clone();
-            let body_bytes = http_body_util::BodyExt::collect(upstream_resp.into_body())
-                .await
-                .map(|c| c.to_bytes())
-                .unwrap_or_default();
-            let mut response = Response::new(Body::from(body_bytes));
-            *response.status_mut() = status;
+            let (upstream, body) = upstream_resp.into_parts();
+            let mut response = Response::new(Body::new(body));
+            *response.status_mut() = upstream.status;
             let out_headers = response.headers_mut();
-            for (k, v) in resp_headers_clone.iter() {
+            for (k, v) in &upstream.headers {
                 if !is_hop_by_hop_header(k.as_str()) {
                     out_headers.append(k.clone(), v.clone());
                 }
