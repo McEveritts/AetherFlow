@@ -8,6 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Ports available for configurable marketplace apps when their default is busy.
+pub const MARKETPLACE_FALLBACK_PORT_RANGE: [i32; 2] = [17000, 19999];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Hardware & System Telemetry Models
 // ─────────────────────────────────────────────────────────────────────────────

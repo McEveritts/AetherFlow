@@ -2064,7 +2064,8 @@ impl CoordinatedOperation {
             !matches!(self.request.package_id.as_str(), "plex" | "calibreweb"),
             "Fixed application port is unavailable"
         );
-        (17000..=19999)
+        let [start, end] = af_models::MARKETPLACE_FALLBACK_PORT_RANGE;
+        (start..=end)
             .find(|port| !reserved.contains(port) && backend.available_port(*port))
             .context("No application listen port is available")
     }

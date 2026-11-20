@@ -2189,6 +2189,31 @@ async fn test_update_prestop_uses_daemon_and_timer_policy_not_jobs_or_unconfigur
 }
 
 #[test]
+fn test_installer_managed_ports_use_marketplace_fallback_range() {
+    let blueprint = af_services::get_blueprint("uptimekuma").unwrap();
+    assert_eq!(blueprint.fallback_port_range, [0, 0]);
+    let [start, end] = af_models::MARKETPLACE_FALLBACK_PORT_RANGE;
+    let port = allocate_or_resolve_app_port_with(
+        &blueprint.app_name,
+        blueprint.default_port,
+        |_| Ok(None),
+        |_| Ok([blueprint.default_port, start].into()),
+    );
+    assert!((start + 1..=end).contains(&port));
+
+    let plex = af_services::get_blueprint("plex").unwrap();
+    assert_eq!(
+        allocate_or_resolve_app_port_with(
+            &plex.app_name,
+            plex.default_port,
+            |_| Ok(None),
+            |_| Ok([plex.default_port].into()),
+        ),
+        0
+    );
+}
+
+#[test]
 fn test_port_reservation_lookup_failure_fails_closed() {
     let port_when_reserved_err = allocate_or_resolve_app_port_with(
         "sonarr",

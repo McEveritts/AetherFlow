@@ -845,7 +845,7 @@ where
     };
     let bp = af_services::get_blueprint(app_name);
     let candidate = bp.as_ref().map(|b| b.default_port).unwrap_or(default_port);
-    if candidate <= 0 {
+    if !(1024..=65535).contains(&candidate) {
         return 0;
     }
     if !reserved.contains(&candidate)
@@ -857,12 +857,11 @@ where
     if matches!(app_name, "plex" | "calibreweb") {
         return 0;
     }
-    let range = bp
+    let [start, end] = bp
         .as_ref()
         .map(|b| b.fallback_port_range)
-        .unwrap_or([17000, 19999]);
-    let start = range[0].max(1024);
-    let end = range[1].max(start);
+        .filter(|[start, end]| (1024..=65535).contains(start) && (*start..=65535).contains(end))
+        .unwrap_or(af_models::MARKETPLACE_FALLBACK_PORT_RANGE);
     for port in start..=end {
         if !reserved.contains(&port)
             && std::net::TcpListener::bind(("127.0.0.1", port as u16)).is_ok()

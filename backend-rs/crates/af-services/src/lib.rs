@@ -500,7 +500,7 @@ fn default_true_bool() -> bool {
 }
 
 fn default_port_range() -> [i32; 2] {
-    [17000, 19999]
+    af_models::MARKETPLACE_FALLBACK_PORT_RANGE
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -617,7 +617,7 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         default_port: p.default_port,
         supports_dynamic_port,
         fallback_port_range: if supports_dynamic_port {
-            [17000, 19999]
+            default_port_range()
         } else {
             [0, 0]
         },
