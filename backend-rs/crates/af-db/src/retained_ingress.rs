@@ -163,6 +163,61 @@ pub fn load_lifecycle_ingress(
     }
 }
 
+/// Resolve the ingress settings to materialize and persist for a package lifecycle.
+pub fn plan_lifecycle_ingress(
+    app: &str,
+    port: i32,
+    base_domain: &str,
+    existing: Option<&AppIngressConfig>,
+) -> anyhow::Result<Option<AppIngressConfig>> {
+    if port <= 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        (1024..=65535).contains(&port),
+        "Invalid ingress listen port"
+    );
+
+    let public_domain = existing
+        .map(|config| config.public_domain.clone())
+        .filter(|domain| !domain.trim().is_empty())
+        .unwrap_or_else(|| {
+            let domain = crate::normalize_base_domain(base_domain);
+            if domain.is_empty() {
+                return String::new();
+            }
+            let label: String = app
+                .to_ascii_lowercase()
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            format!("{}.{}", label.trim_matches('-'), domain)
+        });
+    // A configured base domain opts fresh web installs into automatic
+    // subdomain ingress. Active and retained policy takes precedence.
+    let enable_by_default = !public_domain.is_empty();
+    let now = chrono::Utc::now();
+    Ok(Some(AppIngressConfig {
+        app_name: app.to_owned(),
+        external_access_enabled: existing
+            .map(|config| config.external_access_enabled)
+            .unwrap_or(enable_by_default),
+        tls_enabled: existing
+            .map(|config| config.tls_enabled)
+            .unwrap_or(enable_by_default),
+        public_domain,
+        listen_port: port,
+        created_at: existing.map(|config| config.created_at).unwrap_or(now),
+        updated_at: now,
+    }))
+}
+
 pub fn synchronize_lifecycle_ingress(
     conn: &mut Connection,
     app: &str,
@@ -187,54 +242,11 @@ pub fn synchronize_lifecycle_ingress(
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_reservation(&tx, app, Some((job_id, action)))?;
         if port > 0 {
-            anyhow::ensure!(
-                (1024..=65535).contains(&port),
-                "Invalid ingress listen port"
-            );
             let existing = load_lifecycle_ingress(&tx, app)?;
-            let domain = existing
-                .as_ref()
-                .map(|config| config.public_domain.clone())
-                .filter(|domain| !domain.is_empty())
-                .unwrap_or_else(|| {
-                    let domain = crate::normalize_base_domain(base_domain);
-                    if domain.is_empty() {
-                        String::new()
-                    } else {
-                        let clean: String = app
-                            .to_ascii_lowercase()
-                            .chars()
-                            .map(|character| {
-                                if character.is_ascii_alphanumeric() {
-                                    character
-                                } else {
-                                    '-'
-                                }
-                            })
-                            .collect();
-                        format!("{}.{}", clean.trim_matches('-'), domain)
-                    }
-                });
-            let now = chrono::Utc::now();
-            let config = AppIngressConfig {
-                app_name: app.to_owned(),
-                external_access_enabled: existing
-                    .as_ref()
-                    .map(|config| config.external_access_enabled)
-                    .unwrap_or(!domain.is_empty()),
-                tls_enabled: existing
-                    .as_ref()
-                    .map(|config| config.tls_enabled)
-                    .unwrap_or(!domain.is_empty()),
-                public_domain: domain,
-                listen_port: port,
-                created_at: existing
-                    .as_ref()
-                    .map(|config| config.created_at)
-                    .unwrap_or(now),
-                updated_at: now,
-            };
-            crate::write_app_ingress_config(&tx, &config)?;
+            if let Some(config) = plan_lifecycle_ingress(app, port, base_domain, existing.as_ref())?
+            {
+                crate::write_app_ingress_config(&tx, &config)?;
+            }
         }
         tx.commit()?;
     }

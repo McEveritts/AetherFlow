@@ -1151,51 +1151,6 @@ pub(crate) struct PackageLifecycleFailure {
     pub(crate) message: String,
 }
 
-pub(super) fn merge_blueprint_finalization(
-    finalization: Result<(), PackageLifecycleFailure>,
-    blueprint_error: Option<String>,
-) -> Result<(), PackageLifecycleFailure> {
-    match (finalization, blueprint_error) {
-        (result, None) => result,
-        (Ok(_), Some(error)) => Err(PackageLifecycleFailure {
-            kind: af_services::PackageJobFailure::Configuration,
-            message: format!("Required blueprint configuration synchronization failed: {error}"),
-        }),
-        (Err(mut failure), Some(error)) => {
-            if failure.kind == af_services::PackageJobFailure::ServiceRestore {
-                failure.kind = af_services::PackageJobFailure::ConfigurationAndServiceRestore;
-            }
-            failure.message.push_str(&format!(
-                "; Required blueprint configuration synchronization failed: {error}"
-            ));
-            Err(failure)
-        }
-    }
-}
-
-pub(crate) trait PostOperationRefreshResult {
-    fn into_installed_version(self) -> Option<String>;
-}
-
-impl PostOperationRefreshResult for () {
-    fn into_installed_version(self) -> Option<String> {
-        None
-    }
-}
-
-impl PostOperationRefreshResult for Option<String> {
-    fn into_installed_version(self) -> Option<String> {
-        self
-    }
-}
-
-impl PostOperationRefreshResult for Option<af_services::workers::PackageUpdateRecord> {
-    fn into_installed_version(self) -> Option<String> {
-        self.map(|r| r.installed_version)
-            .filter(|s| !s.trim().is_empty())
-    }
-}
-
 pub fn versions_match_target(achieved: &str, expected: &str) -> bool {
     af_runner::af_release::lifecycle::versions_match_target(achieved, expected)
 }
@@ -1868,114 +1823,71 @@ pub(super) fn restore_candidate_receipts(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn finalize_post_script_lifecycle_with<
-    LoadIngressFn,
+    ApplyFut,
     SaveIngressFn,
     ControlFn,
     ControlFut,
-    RefreshUpdateFn,
-    RefreshUpdateFut,
-    RefreshOutput,
+    RefreshFut,
 >(
-    action: &str,
-    clean_id: &str,
-    allocated_port: i32,
-    stopped_units: Vec<String>,
-    base_domain: &str,
-    mut load_ingress: LoadIngressFn,
-    mut save_ingress: SaveIngressFn,
+    stopped_units: &[String],
+    apply_blueprint: ApplyFut,
     mut control_unit: ControlFn,
-    mut refresh_update: RefreshUpdateFn,
+    query_status: impl Fn(&str) -> String,
+    refresh_update: RefreshFut,
+    save_ingress: SaveIngressFn,
 ) -> Result<Option<String>, PackageLifecycleFailure>
 where
-    LoadIngressFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
-    SaveIngressFn: FnMut(&AppIngressConfig) -> anyhow::Result<()>,
+    ApplyFut: std::future::Future<Output = Result<Option<AppIngressConfig>, String>>,
+    SaveIngressFn: FnOnce(&AppIngressConfig) -> anyhow::Result<()>,
     ControlFn: FnMut(String, &'static str) -> ControlFut,
     ControlFut: std::future::Future<Output = anyhow::Result<()>>,
-    RefreshUpdateFn: FnMut(String) -> RefreshUpdateFut,
-    RefreshUpdateFut: std::future::Future<Output = RefreshOutput>,
-    RefreshOutput: PostOperationRefreshResult,
+    RefreshFut: std::future::Future<Output = Option<String>>,
 {
-    if !matches!(action, "install" | "reinstall" | "update") {
-        return Ok(None);
+    let ingress = apply_blueprint.await;
+    let mut service_failures = Vec::new();
+    for unit in stopped_units.iter().rev() {
+        if let Err(error) = control_unit(unit.clone(), "start").await {
+            service_failures.push(format!("Failed to restart stopped unit {unit}: {error}"));
+        }
     }
-
-    let mut required_errors: Vec<String> = Vec::new();
-    let mut configuration_failed = false;
-    let mut service_restore_failed = false;
-
-    if allocated_port > 0 {
-        match load_ingress(clean_id) {
-            Ok(existing) => {
-                let public_domain = existing
-                    .as_ref()
-                    .map(|c| c.public_domain.clone())
-                    .filter(|d| !d.is_empty())
-                    .unwrap_or_else(|| {
-                        if base_domain.is_empty() {
-                            String::new()
-                        } else {
-                            af_services::format_app_public_domain(clean_id, base_domain)
-                        }
-                    });
-                let external_access = existing
-                    .as_ref()
-                    .map(|c| c.external_access_enabled)
-                    .unwrap_or(false);
-                let tls_enabled = existing
-                    .as_ref()
-                    .map(|c| c.tls_enabled)
-                    .unwrap_or(!public_domain.is_empty());
-                let now = Utc::now();
-                let cfg = AppIngressConfig {
-                    app_name: clean_id.to_string(),
-                    public_domain,
-                    external_access_enabled: external_access,
-                    listen_port: allocated_port,
-                    tls_enabled,
-                    created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
-                    updated_at: now,
-                };
-                if let Err(e) = save_ingress(&cfg) {
-                    configuration_failed = true;
-                    required_errors.push(format!("Failed to persist ingress configuration: {}", e));
-                }
-            }
-            Err(error) => {
-                configuration_failed = true;
-                required_errors.push(format!("Failed to load ingress configuration: {}", error))
-            }
+    let achieved_version = refresh_update.await;
+    for unit in stopped_units {
+        let status = query_status(unit);
+        if status != "running" && status != "idle" {
+            service_failures.push(format!(
+                "Application service failed to remain active after execution: {unit} ({status})"
+            ));
         }
     }
 
-    if matches!(action, "update" | "install" | "reinstall")
-        && af_services::should_pre_stop_on_update(clean_id)
-    {
-        for u in stopped_units.iter().rev() {
-            if let Err(e) = control_unit(u.clone(), "start").await {
-                service_restore_failed = true;
-                required_errors.push(format!("Failed to restart stopped unit {}: {}", u, e));
-            }
-        }
-    }
-
-    let refreshed = refresh_update(clean_id.to_string()).await;
-    let achieved_version = refreshed.into_installed_version();
-
-    if required_errors.is_empty() {
-        Ok(achieved_version)
-    } else {
-        let kind = match (configuration_failed, service_restore_failed) {
-            (true, true) => af_services::PackageJobFailure::ConfigurationAndServiceRestore,
-            (false, true) => af_services::PackageJobFailure::ServiceRestore,
-            _ => af_services::PackageJobFailure::Configuration,
+    let ingress = ingress.map_err(|error| {
+        let mut message =
+            format!("Required blueprint configuration synchronization failed: {error}");
+        let kind = if service_failures.is_empty() {
+            af_services::PackageJobFailure::Configuration
+        } else {
+            message.push_str(&format!("; {}", service_failures.join("; ")));
+            af_services::PackageJobFailure::ConfigurationAndServiceRestore
         };
-        Err(PackageLifecycleFailure {
-            kind,
-            message: required_errors.join("; "),
-        })
+        PackageLifecycleFailure { kind, message }
+    })?;
+    if !service_failures.is_empty() {
+        return Err(PackageLifecycleFailure {
+            kind: af_services::PackageJobFailure::ServiceRestore,
+            message: service_failures.join("; "),
+        });
     }
+
+    // Commit only after all phases that can trigger runtime rollback. A
+    // failed transaction leaves both active and retained ingress intact.
+    if let Some(config) = ingress {
+        save_ingress(&config).map_err(|error| PackageLifecycleFailure {
+            kind: af_services::PackageJobFailure::Configuration,
+            message: format!("Failed to persist ingress configuration: {error}"),
+        })?;
+    }
+    Ok(achieved_version)
 }
 
 fn is_incomplete_rollback_error(err_msg: &str) -> bool {
@@ -3647,31 +3559,9 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 &job_id,
             );
 
-            let blueprint_error =
-                af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port)
-                    .await
-                    .err();
-
-            let base_domain = af_services::resolve_base_domain();
             let finalization = finalize_post_script_lifecycle_with(
-                action,
-                &clean_id,
-                allocated_port,
-                stopped_units.clone(),
-                &base_domain,
-                load_authoritative_app_ingress_config,
-                |_cfg| {
-                    let mut conn = af_db::get_conn()?;
-                    af_db::synchronize_lifecycle_ingress(
-                        &mut conn,
-                        &clean_id,
-                        action,
-                        &job_id,
-                        allocated_port,
-                        false,
-                        &base_domain,
-                    )
-                },
+                &stopped_units,
+                af_services::mutators::apply_lifecycle_blueprint_app_config(&clean_id, allocated_port),
                 |unit_name, ctrl_action| async move {
                     af_services::control_service_with_manager(
                         &unit_name,
@@ -3680,25 +3570,27 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     )
                     .await
                 },
-                |app_id| async move {
-                    let _ = af_services::workers::refresh_package_update_by_id(&app_id).await;
+                |unit| af_services::get_systemd_unit_info(unit).0,
+                async {
+                    let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
                     let pkgs = af_services::get_packages().unwrap_or_default();
-                    if let Some(pkg) = pkgs.into_iter().find(|p| p.name == app_id) {
+                    let version = if let Some(pkg) = pkgs.into_iter().find(|p| p.name == clean_id) {
                         af_services::workers::probe_installed_package_version_strict(&pkg)
                             .await
                             .ok()
                             .filter(|s| !s.trim().is_empty())
                     } else {
                         None
+                    };
+                    if !stopped_units.is_empty() {
+                        af_services::clear_service_status_cache();
                     }
+                    version
                 },
+                |cfg| af_db::set_app_ingress_config_for_lifecycle(cfg, &job_id, action),
             )
             .await;
-            let finalization_check = finalization.as_ref().map(|_| ()).map_err(|e| PackageLifecycleFailure {
-                kind: e.kind,
-                message: e.message.clone(),
-            });
-            if let Err(required_err) = merge_blueprint_finalization(finalization_check, blueprint_error) {
+            if let Err(required_err) = finalization {
                 let (required_err, receipt_restore_error, _restart_failures) =
                     handle_post_certification_finalization_failure_ext_with(
                         action,
@@ -3846,67 +3738,6 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             }
         }
 
-        let mut unresumed_units = Vec::new();
-        for unit in &stopped_units {
-            let (st, _, _) = af_services::get_systemd_unit_info(unit);
-            if st != "running" && st != "idle" {
-                unresumed_units.push(format!("{unit} ({st})"));
-            }
-        }
-        if !unresumed_units.is_empty() {
-            let (receipt_restore_error, restart_failures) =
-                quiesce_and_restore_candidate_receipts_and_runtime_ext(
-                    &clean_id,
-                    &stopped_units,
-                    &receipt_snapshots,
-                    &blueprint_snapshots,
-                    false,
-                    runtime_snapshot.as_mut(),
-                    runner_snapshot.as_mut(),
-                )
-                .await;
-            if let Some(ref r_err) = receipt_restore_error {
-                tracing::error!(
-                    package = %clean_id,
-                    error = %r_err,
-                    "Failed to restore candidate receipts after service inactive verification"
-                );
-                append_package_job_output(&job_id, &format!("receipt restoration error: {r_err}"));
-            }
-            let mut msg = format!(
-                "Application service failed to remain active after execution: {}",
-                unresumed_units.join("; ")
-            );
-            if !restart_failures.is_empty() {
-                msg.push_str(&format!("; post-restoration restart failures: {}", restart_failures.join("; ")));
-            }
-            if let Some(ref r_err) = receipt_restore_error {
-                msg.push_str(&format!("; receipt restoration error: {}", r_err));
-            }
-            if let Some(ref mut rs) = runner_snapshot {
-            rs.discard(false).await;
-        }
-        if runtime_snapshot.is_some() {
-            let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
-        }
-
-        af_services::clear_service_status_cache();
-            af_services::mutators::clear_app_runtime_meta_cache();
-            finish_package_lifecycle(
-                &clean_id,
-                action,
-                Some(af_services::PackageJobFailure::ServiceRestore),
-                95,
-                &msg,
-                &started_at,
-                &job_id,
-                expected_target_version.as_deref(),
-                achieved_ver.as_deref(),
-                &stopped_units,
-            );
-            return;
-        }
-
         if let Some(ref mut rs) = runner_snapshot {
             rs.discard(false).await;
         }
@@ -3927,7 +3758,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             &job_id,
             expected_target_version.as_deref(),
             achieved_ver.as_deref(),
-            &stopped_units,
+            // Final service verification already ran before ingress persistence.
+            &[],
         );
     }));
 

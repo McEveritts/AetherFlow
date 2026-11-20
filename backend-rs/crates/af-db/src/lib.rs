@@ -2,7 +2,7 @@ mod retained_ingress;
 pub use retained_ingress::{
     archive_app_ingress_config, archive_app_ingress_config_for_lifecycle,
     get_reserved_ports_excluding, get_retained_app_ingress_config, list_reserved_ports_excluding,
-    load_lifecycle_ingress, synchronize_lifecycle_ingress,
+    load_lifecycle_ingress, plan_lifecycle_ingress, synchronize_lifecycle_ingress,
 };
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};

@@ -225,15 +225,17 @@ async fn updater_observation_errors_do_not_expose_private_detail() {
     assert!(!String::from_utf8_lossy(&body).contains("/private/"));
 }
 
-#[test]
-fn blueprint_callback_failure_preserves_required_restoration_failure() {
-    let failure = merge_blueprint_finalization(
-        Err(PackageLifecycleFailure {
-            kind: af_services::PackageJobFailure::ServiceRestore,
-            message: "fixture restore failed".into(),
-        }),
-        Some("fixture vhost failed".into()),
+#[tokio::test]
+async fn blueprint_callback_failure_preserves_required_restoration_failure() {
+    let failure = finalize_post_script_lifecycle_with(
+        &["sonarr".into()],
+        async { Err("fixture vhost failed".into()) },
+        |_, _| async { anyhow::bail!("fixture restore failed") },
+        |_| "stopped".into(),
+        async { None },
+        |_| panic!("failed blueprint must prevent ingress persistence"),
     )
+    .await
     .unwrap_err();
     assert_eq!(
         failure.kind,
@@ -241,7 +243,6 @@ fn blueprint_callback_failure_preserves_required_restoration_failure() {
     );
     assert!(failure.message.contains("restore failed"));
     assert!(failure.message.contains("vhost failed"));
-    assert!(merge_blueprint_finalization(Ok(()), Some("fixture DNS failed".into())).is_err());
 }
 
 #[cfg(unix)]
@@ -390,23 +391,20 @@ async fn f01_reinstall_action_preserves_install_port_and_finalization_contract()
     .unwrap();
     assert_eq!(pre_stopped, vec!["sonarr".to_string()]);
 
-    let saved = Arc::new(Mutex::new(Vec::new()));
-    let saved_clone = saved.clone();
     let finalized = finalize_post_script_lifecycle_with(
-        "reinstall",
-        "sonarr",
-        18989,
-        vec![],
-        "aetherflow.local",
-        |_| Ok(None),
-        move |cfg| {
-            saved_clone.lock().unwrap().push(cfg.listen_port);
-            Ok(())
+        &pre_stopped,
+        async {
+            af_db::plan_lifecycle_ingress("sonarr", 18989, "", Some(&existing))
+                .map_err(|err| err.to_string())
         },
         |_, _| async { Ok(()) },
-        |_| async {},
+        |_| "running".into(),
+        async { None },
+        |cfg| {
+            assert_eq!(cfg.listen_port, 18989);
+            Ok(())
+        },
     )
     .await;
     assert!(finalized.is_ok());
-    assert_eq!(*saved.lock().unwrap(), vec![18989]);
 }

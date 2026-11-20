@@ -883,140 +883,46 @@ fn test_single_package_update_response_flattens_contract_fields() {
 }
 
 #[tokio::test]
-async fn test_finalize_post_script_lifecycle_required_failures_and_install_refresh() {
-    use std::sync::{Arc, Mutex};
-
-    let refreshed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let refresh_handle = Arc::clone(&refreshed);
-
-    let ok_res = finalize_post_script_lifecycle_with(
-        "install",
-        "radarr",
-        7878,
-        Vec::new(),
-        "example.com",
-        |_app_id| Ok(None),
-        |_cfg| Ok(()),
-        |_unit, _action| async move { Ok(()) },
-        move |app_id| {
-            let r = Arc::clone(&refresh_handle);
-            async move {
-                r.lock().unwrap().push(app_id);
-            }
+async fn test_finalize_post_script_lifecycle_restarts_and_verifies_before_saving() {
+    let timeline = std::cell::RefCell::new(Vec::new());
+    let stopped = ["radarr".into(), "companion".into()];
+    let version = finalize_post_script_lifecycle_with(
+        &stopped,
+        async {
+            timeline.borrow_mut().push("blueprint".to_string());
+            Ok(Some(AppIngressConfig::default()))
         },
-    )
-    .await;
-    assert!(ok_res.is_ok());
-    assert_eq!(*refreshed.lock().unwrap(), vec!["radarr".to_string()]);
-
-    let err_ingress = finalize_post_script_lifecycle_with(
-        "install",
-        "radarr",
-        7878,
-        Vec::new(),
-        "example.com",
-        |_app_id| Ok(None),
-        |_cfg| Err(anyhow::anyhow!("sqlite locked")),
-        |_unit, _action| async move { Ok(()) },
-        |_app_id| async move {},
-    )
-    .await
-    .expect_err("ingress persistence failure must fail required post-script stage");
-    assert!(err_ingress
-        .message
-        .contains("Failed to persist ingress configuration"));
-    assert_eq!(
-        err_ingress.kind,
-        af_services::PackageJobFailure::Configuration
-    );
-
-    let restored = Arc::new(Mutex::new(Vec::new()));
-    let restore_handle = Arc::clone(&restored);
-    let err_read = finalize_post_script_lifecycle_with(
-        "update",
-        "radarr",
-        7878,
-        vec!["radarr".to_string()],
-        "example.com",
-        |_app_id| Err(anyhow::anyhow!("sqlite read failed")),
-        |_cfg| panic!("failed read must not overwrite ingress"),
-        move |unit, _action| {
-            restore_handle.lock().unwrap().push(unit);
+        |unit, action| {
+            timeline.borrow_mut().push(format!("{action} {unit}"));
             async { Ok(()) }
         },
-        |_app_id| async {},
-    )
-    .await
-    .expect_err("failed ingress read must fail required synchronization");
-    assert!(err_read
-        .message
-        .contains("Failed to load ingress configuration"));
-    assert_eq!(err_read.kind, af_services::PackageJobFailure::Configuration);
-    assert_eq!(*restored.lock().unwrap(), vec!["radarr".to_string()]);
-
-    let err_restart = finalize_post_script_lifecycle_with(
-        "update",
-        "radarr",
-        7878,
-        vec!["radarr".to_string()],
-        "example.com",
-        |_app_id| Ok(None),
-        |_cfg| Ok(()),
-        |unit, _action| async move { Err(anyhow::anyhow!("{} failed to start", unit)) },
-        |_app_id| async move {},
-    )
-    .await
-    .expect_err("stopped unit restart failure must fail required post-script stage");
-    assert!(err_restart
-        .message
-        .contains("Failed to restart stopped unit radarr"));
-    assert_eq!(
-        err_restart.kind,
-        af_services::PackageJobFailure::ServiceRestore
-    );
-
-    let both = finalize_post_script_lifecycle_with(
-        "update",
-        "radarr",
-        7878,
-        vec!["radarr".into()],
-        "example.com",
-        |_| Err(anyhow::anyhow!("secret ingress failure")),
-        |_| Ok(()),
-        |_, _| async { Err(anyhow::anyhow!("secret service failure")) },
-        |_| async {},
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(
-        both.kind,
-        af_services::PackageJobFailure::ConfigurationAndServiceRestore
-    );
-
-    let reinstall_restored = Arc::new(Mutex::new(Vec::new()));
-    let reinstall_restore_handle = Arc::clone(&reinstall_restored);
-    finalize_post_script_lifecycle_with(
-        "install",
-        "radarr",
-        7878,
-        vec!["radarr".into()],
-        "example.com",
-        |_| Ok(None),
-        |_| Ok(()),
-        move |unit, action| {
-            reinstall_restore_handle
-                .lock()
-                .unwrap()
-                .push(format!("{action} {unit}"));
-            async { Ok(()) }
+        |unit| {
+            timeline.borrow_mut().push(format!("check {unit}"));
+            "running".into()
         },
-        |_| async {},
+        async {
+            timeline.borrow_mut().push("refresh".into());
+            Some("v2".into())
+        },
+        |_| {
+            timeline.borrow_mut().push("commit".into());
+            Ok(())
+        },
     )
     .await
-    .expect("in-place reinstall must restart pre-stopped units");
+    .unwrap();
+    assert_eq!(version.as_deref(), Some("v2"));
     assert_eq!(
-        *reinstall_restored.lock().unwrap(),
-        vec!["start radarr".to_string()]
+        timeline.into_inner(),
+        [
+            "blueprint",
+            "start companion",
+            "start radarr",
+            "refresh",
+            "check radarr",
+            "check companion",
+            "commit",
+        ]
     );
 }
 
@@ -1759,6 +1665,159 @@ async fn package_admission_reconciles_dead_same_package_before_catalog_validatio
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn finalize_post_script_lifecycle_preserves_routing_on_required_failure() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    use af_services::PackageJobFailure::{Configuration, ServiceRestore};
+
+    let (root, conn) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    let original = AppIngressConfig {
+        app_name: "sonarr".into(),
+        public_domain: "custom.example.test".into(),
+        external_access_enabled: false,
+        tls_enabled: true,
+        listen_port: 18989,
+        ..Default::default()
+    };
+    af_db::set_app_ingress_config(&original).unwrap();
+    af_db::archive_app_ingress_config("sonarr", false).unwrap();
+    let retained = af_db::get_retained_app_ingress_config("sonarr").unwrap();
+    af_db::set_app_ingress_config(&original).unwrap();
+    let original = af_db::get_app_ingress_config("sonarr").unwrap().unwrap();
+
+    let vhost = root.join("etc/apache2/sites-available/aetherflow-app-sonarr.conf");
+    std::fs::create_dir_all(vhost.parent().unwrap()).unwrap();
+    std::fs::write(&vhost, b"ProxyPass / http://127.0.0.1:18989/\n").unwrap();
+    let blueprint_snapshots = af_runner::package_lifecycle::snapshot_blueprint_targets(
+        "sonarr",
+        &af_runner::PackageExecutionEnv {
+            fs_root: Some(root.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let prior_vhost = std::fs::read(&vhost).unwrap();
+
+    let job_id = "ingress-update";
+    assert!(af_services::try_start_package_job(
+        af_services::PackageJobInfo {
+            job_id: job_id.into(),
+            package_id: "sonarr".into(),
+            action: "update".into(),
+            status: "updating".into(),
+            progress: 85,
+            last_line: String::new(),
+            started_at: "fixture-start".into(),
+            expected_target_version: None,
+        }
+    ));
+    conn.execute_batch(
+        "CREATE TABLE ingress_writes(port INTEGER);
+         CREATE TRIGGER count_ingress_update AFTER UPDATE ON app_ingress_configs
+         BEGIN INSERT INTO ingress_writes VALUES (NEW.listen_port); END;
+         CREATE TRIGGER fail_ingress_update AFTER UPDATE ON app_ingress_configs
+         WHEN NEW.app_name = 'sonarr'
+         BEGIN SELECT RAISE(ABORT, 'fixture rejected ingress update'); END;",
+    )
+    .unwrap();
+
+    let units = ["sonarr".to_string()];
+    let planned =
+        af_db::plan_lifecycle_ingress("sonarr", 28989, "base.example.test", Some(&original))
+            .unwrap()
+            .unwrap();
+    let writes = || {
+        conn.query_row("SELECT count(*) FROM ingress_writes", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    let run = |blueprint_failed, status: &'static str| {
+        let planned = planned.clone();
+        finalize_post_script_lifecycle_with(
+            &units,
+            async move {
+                if blueprint_failed {
+                    Err("fixture vhost synchronization failed".into())
+                } else {
+                    Ok(Some(planned))
+                }
+            },
+            |_, _| async { Ok(()) },
+            move |_| status.into(),
+            async { None },
+            |cfg| af_db::set_app_ingress_config_for_lifecycle(cfg, job_id, "update"),
+        )
+    };
+    for (blueprint_failed, status, expected_kind, cause) in [
+        (
+            true,
+            "running",
+            Configuration,
+            "fixture vhost synchronization failed",
+        ),
+        (false, "stopped", ServiceRestore, "failed to remain active"),
+        (
+            false,
+            "running",
+            Configuration,
+            "fixture rejected ingress update",
+        ),
+    ] {
+        std::fs::write(&vhost, b"ProxyPass / http://127.0.0.1:28989/\n").unwrap();
+        let failure = run(blueprint_failed, status).await.unwrap_err();
+        assert_eq!(failure.kind, expected_kind);
+        assert!(failure.message.contains(cause), "{}", failure.message);
+        let (_, restore_error, restart_failures) =
+            marketplace::handle_post_certification_finalization_failure_ext_with(
+                "update",
+                failure,
+                "sonarr",
+                &units,
+                &[],
+                &blueprint_snapshots,
+                false,
+                None,
+                None,
+                |_, _| async { Ok(()) },
+                |_| "running".into(),
+            )
+            .await;
+        assert!(restore_error.is_none());
+        assert!(restart_failures.is_empty());
+        assert_eq!(std::fs::read(&vhost).unwrap(), prior_vhost);
+        assert_eq!(
+            af_db::get_app_ingress_config("sonarr").unwrap(),
+            Some(original.clone())
+        );
+        assert_eq!(
+            af_db::get_retained_app_ingress_config("sonarr").unwrap(),
+            retained
+        );
+        assert_eq!(writes(), 0);
+    }
+
+    conn.execute_batch("DROP TRIGGER fail_ingress_update")
+        .unwrap();
+    std::fs::write(&vhost, b"ProxyPass / http://127.0.0.1:28989/\n").unwrap();
+    run(false, "running").await.unwrap();
+    let committed = af_db::get_app_ingress_config("sonarr").unwrap().unwrap();
+    assert_eq!(committed.listen_port, 28989);
+    assert_eq!(committed.public_domain, original.public_domain);
+    assert_eq!(
+        committed.external_access_enabled,
+        original.external_access_enabled
+    );
+    assert_eq!(committed.tls_enabled, original.tls_enabled);
+    assert_eq!(writes(), 1);
+    af_services::finish_package_job("sonarr", "update", true, "done", job_id).unwrap();
+    drop(conn);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn package_ingress_callbacks_require_the_current_lifecycle_owner() {
     if crate::plugins::tests::run_plugin_test_in_subprocess() {
         return;
@@ -1781,15 +1840,15 @@ async fn package_ingress_callbacks_require_the_current_lifecycle_owner() {
         "installing"
     )));
     finalize_post_script_lifecycle_with(
-        "install",
-        "sonarr",
-        18989,
-        Vec::new(),
-        "example.com",
-        load_authoritative_app_ingress_config,
-        |cfg| af_db::set_app_ingress_config_for_lifecycle(cfg, "ingress-install", "install"),
+        &[],
+        async {
+            af_db::plan_lifecycle_ingress("sonarr", 18989, "example.com", None)
+                .map_err(|err| err.to_string())
+        },
         |_, _| async { Ok(()) },
-        |_| async {},
+        |_| unreachable!(),
+        async { None },
+        |cfg| af_db::set_app_ingress_config_for_lifecycle(cfg, "ingress-install", "install"),
     )
     .await
     .unwrap();

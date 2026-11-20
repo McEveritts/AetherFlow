@@ -12,23 +12,15 @@ async fn finalize(conn: &mut Connection, action: &str, job: &str) {
         &["sabnzbd".into()],
     )
     .unwrap();
-    af_runner::PACKAGE_JOB_ID
+    let config = af_runner::PACKAGE_JOB_ID
         .scope(job.to_string(), async {
-            af_services::mutators::apply_blueprint_app_config("sabnzbd", 18080)
+            af_services::mutators::apply_lifecycle_blueprint_app_config("sabnzbd", 18080)
                 .await
-                .unwrap();
+                .unwrap()
+                .unwrap()
         })
         .await;
-    af_db::synchronize_lifecycle_ingress(
-        conn,
-        "sabnzbd",
-        action,
-        job,
-        18080,
-        false,
-        "base.example.test",
-    )
-    .unwrap();
+    af_db::set_app_ingress_config_for_lifecycle(&config, job, action).unwrap();
     af_release::lifecycle::finish_job(conn, "sabnzbd", job, action, true, "").unwrap();
     drop(lease);
 }
@@ -204,7 +196,26 @@ async fn owned_reinstall_materializes_retained_native_and_apache_configuration()
     assert!(af_db::load_lifecycle_ingress(&conn, "sabnzbd")
         .unwrap()
         .is_none());
+    env::remove_var("AETHERFLOW_BASE_DOMAIN");
+    env::remove_var("AETHERFLOW_DOMAIN");
+    af_db::set_base_domain("").unwrap();
+    finalize(&mut conn, "install", "local-only-install").await;
+    let local_only = af_db::get_app_ingress_config("sabnzbd").unwrap().unwrap();
+    assert!(local_only.public_domain.is_empty());
+    assert!(!local_only.external_access_enabled);
+    assert!(!local_only.tls_enabled);
+    assert!(!external_vhost.exists());
+    remove(&mut conn, "local-only-purge", true);
+
+    af_db::set_base_domain("base.example.test").unwrap();
     finalize(&mut conn, "install", "post-purge-install").await;
+    let auto_provisioned = af_db::get_app_ingress_config("sabnzbd").unwrap().unwrap();
+    assert_eq!(auto_provisioned.public_domain, "sabnzbd.base.example.test");
+    assert!(auto_provisioned.external_access_enabled);
+    assert!(auto_provisioned.tls_enabled);
+    assert!(fs::read_to_string(&external_vhost)
+        .unwrap()
+        .contains("ServerName sabnzbd.base.example.test"));
     assert!(!read_config(&root).contains("custom.example.test"));
     remove(&mut conn, "corrupt-remove", false);
     conn.execute("UPDATE retained_app_ingress_configs SET config_json='invalid-json' WHERE app_name='sabnzbd'", []).unwrap();

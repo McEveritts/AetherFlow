@@ -82,9 +82,9 @@ use marketplace::{
     allocate_or_resolve_app_port, allocate_or_resolve_app_port_with,
     build_single_package_update_response, dispatch_package_lifecycle_with_target,
     emit_package_progress, finalize_post_script_lifecycle_with, finish_package_lifecycle,
-    get_marketplace_apps_blocking, get_marketplace_auth_info, merge_blueprint_finalization,
-    package_progress_payload, parse_uninstall_purge, pre_stop_units_for_package_update_with,
-    public_job_outcome, resolve_package_lifecycle_port_with, restore_candidate_receipts,
+    get_marketplace_apps_blocking, get_marketplace_auth_info, package_progress_payload,
+    parse_uninstall_purge, pre_stop_units_for_package_update_with, public_job_outcome,
+    resolve_package_lifecycle_port_with, restore_candidate_receipts,
     restore_pre_stopped_units_after_installer_failure_with,
     run_package_lifecycle_dispatch_gate_with, snapshot_candidate_receipts,
     system_update_lifecycle_block_with, UninstallQuery, CANDIDATE_QUIESCE_RECORDER,
@@ -93,7 +93,7 @@ use marketplace::{
 #[allow(unused_imports)]
 pub(crate) use marketplace::{
     append_package_job_output, reinstall_package, should_rollback_post_certification_failure,
-    PackageActionQuery, PackageLifecycleFailure, PostOperationRefreshResult, ReceiptSnapshotEntry,
+    PackageActionQuery, PackageLifecycleFailure, ReceiptSnapshotEntry,
 };
 use marketplace::{
     check_package_updates, check_single_package_update, get_marketplace_apps, install_package,

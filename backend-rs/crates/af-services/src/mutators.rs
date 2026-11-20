@@ -1,3 +1,4 @@
+use af_models::AppIngressConfig;
 #[cfg(test)]
 use base64::engine::general_purpose::STANDARD as BASE64_STD;
 #[cfg(test)]
@@ -1440,6 +1441,7 @@ pub async fn apply_blueprint_app_config_detailed(
     with_blueprint_mutation(app_name, async {
         apply_blueprint_app_config_detailed_admitted(app_name, port as i32)
             .await
+            .map(|(summary, _)| summary)
             .map_err(anyhow::Error::msg)
     })
     .await
@@ -1466,14 +1468,33 @@ async fn apply_blueprint_app_config_admitted(
     app_name: &str,
     listen_port: i32,
 ) -> Result<Value, String> {
-    let summary = apply_blueprint_app_config_detailed_admitted(app_name, listen_port).await?;
+    let (summary, _) = apply_blueprint_app_config_detailed_admitted(app_name, listen_port).await?;
     serde_json::to_value(summary).map_err(|e| format!("failed to serialize blueprint summary: {e}"))
+}
+
+/// Apply the host blueprint under lifecycle admission and return the exact
+/// ingress settings used, for the caller to commit after final verification.
+pub async fn apply_lifecycle_blueprint_app_config(
+    app_name: &str,
+    listen_port: i32,
+) -> Result<Option<AppIngressConfig>, String> {
+    if af_runner::current_package_job_id().is_empty() {
+        return Err("Blueprint lifecycle job identity is required".into());
+    }
+    with_blueprint_mutation(app_name, async {
+        apply_blueprint_app_config_detailed_admitted(app_name, listen_port)
+            .await
+            .map(|(_, ingress)| ingress)
+            .map_err(anyhow::Error::msg)
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))
 }
 
 async fn apply_blueprint_app_config_detailed_admitted(
     app_name: &str,
     listen_port: i32,
-) -> Result<BlueprintConfigSummary, String> {
+) -> Result<(BlueprintConfigSummary, Option<AppIngressConfig>), String> {
     let canonical = normalize_app_key_name(app_name);
     let bp = crate::get_blueprint(&canonical)
         .or_else(|| crate::get_blueprint(app_name))
@@ -1501,6 +1522,19 @@ async fn apply_blueprint_app_config_detailed_admitted(
     .await
     .map_err(|error| format!("cannot read blueprint ingress configuration: {error}"))?
     .map_err(|error| format!("cannot read blueprint ingress configuration: {error}"))?;
+
+    let base_domain = crate::resolve_base_domain();
+    let lifecycle_ingress = if lifecycle_owned {
+        af_db::plan_lifecycle_ingress(
+            &bp.app_name,
+            effective_port,
+            &base_domain,
+            existing_ingress.as_ref(),
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
 
     let req = af_models::RunnerBlueprintApplyRequest {
         app_name: bp.app_name.clone(),
@@ -1540,12 +1574,11 @@ async fn apply_blueprint_app_config_detailed_admitted(
         format!("{}.aether.local", bp.app_name.trim().to_lowercase())
     };
 
+    let ingress = lifecycle_ingress.as_ref().or(existing_ingress.as_ref());
     let mut dns_domains = vec![internal_domain.clone()];
-    let base_domain = crate::resolve_base_domain();
     let mut public_domain = String::new();
     if effective_port > 0 {
-        public_domain = existing_ingress
-            .as_ref()
+        public_domain = ingress
             .map(|config| config.public_domain.trim().to_ascii_lowercase())
             .filter(|domain| !domain.is_empty())
             .unwrap_or_else(|| crate::format_app_public_domain(&bp.app_name, &base_domain));
@@ -1554,24 +1587,20 @@ async fn apply_blueprint_app_config_detailed_admitted(
         }
     }
 
-    let external_access_enabled = existing_ingress
-        .as_ref()
-        .map(|c| c.external_access_enabled)
-        .unwrap_or(false);
     sync_apache_app_vhost_with_tls(
         &bp.app_name,
         effective_port,
         &internal_domain,
         &public_domain,
-        external_access_enabled,
-        existing_ingress.as_ref().is_some_and(|cfg| cfg.tls_enabled),
+        ingress.is_some_and(|cfg| cfg.external_access_enabled),
+        ingress.is_some_and(|cfg| cfg.tls_enabled),
     )
     .await
     .map_err(|err| err.to_string())?;
     sync_local_dns_domains(&dns_domains).await?;
     clear_app_runtime_meta_cache();
 
-    Ok(BlueprintConfigSummary {
+    let summary = BlueprintConfigSummary {
         app_name: bp.app_name,
         service_name: bp.service_name,
         listen_port: effective_port,
@@ -1585,7 +1614,8 @@ async fn apply_blueprint_app_config_detailed_admitted(
         dns_synced: true,
         unprivileged_skips: Vec::new(),
         warnings: Vec::new(),
-    })
+    };
+    Ok((summary, lifecycle_ingress))
 }
 
 #[cfg(test)]
