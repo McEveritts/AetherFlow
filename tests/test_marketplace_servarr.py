@@ -312,9 +312,21 @@ class ServarrLifecycleTests(ArchiveFixture):
             for architecture, asset in (('amd64', 'x64'), ('arm64', 'arm64'), ('armhf', 'arm')):
                 with self.subTest(package=package, architecture=architecture):
                     self.prepare(package)
+                    (self.root / 'commands.jsonl').unlink(missing_ok=True)
                     self.assert_success(self.run_script(package, TEST_ARCH=architecture))
                     commands = [json.loads(line) for line in
                                 (self.root / 'commands.jsonl').read_text().splitlines()]
+                    if package == 'readarr':
+                        # Retired Readarr admits these architectures with a pinned
+                        # local archive or retained runtime and has no network asset URL.
+                        self.assertIn(['dpkg', '--print-architecture'], commands)
+                        self.assertFalse(any(command[0] == 'curl' and any(
+                            argument.startswith(('http://', 'https://'))
+                            and not argument.startswith('http://127.0.0.1:')
+                            for argument in command[1:]) for command in commands))
+                        self.assertEqual((self.root / 'opt/Readarr/.af-version').read_text().strip(),
+                                         '0.4.12.2738')
+                        continue
                     expected = f'arch={asset}'
                     if package in ('sonarr', 'ombi'):
                         expected = f'linux-{asset}'
