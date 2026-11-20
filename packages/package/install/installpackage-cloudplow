@@ -103,14 +103,14 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
 report_progress 35 "Staging Cloudplow repository..."
 mkdir -p /opt /var/backups
 BUILD_DIR="$(mktemp -d /opt/.cloudplow-build.XXXXXX)"
-af_logged git clone https://github.com/l3uddz/cloudplow.git "$BUILD_DIR"
+git_stage_exact_revision "https://github.com/l3uddz/cloudplow.git" "$BUILD_DIR" "${AF_TARGET_VERSION:-}" head
 test -s "$BUILD_DIR/cloudplow.py" || { log_error "Failed to clone Cloudplow repository"; exit 1; }
 
-CL_TAG="$(git_checkout_version "$BUILD_DIR" "/opt/cloudplow/.af-version")"
+CL_VERSION="$AF_STAGED_GIT_VERSION"
 validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-cloudplow.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
-queue_app_version /opt/cloudplow/.af-version "${CL_TAG}" "$BUILD_DIR" "$BACKUP_DIR"
+queue_app_version /opt/cloudplow/.af-version "$CL_VERSION" "$BUILD_DIR" "$BACKUP_DIR"
 stop_systemd_unit cloudplow
 SERVICE_STOPPED=1
 snapshot_app_state "$BACKUP_DIR" /var/lib/cloudplow /etc/cloudplow

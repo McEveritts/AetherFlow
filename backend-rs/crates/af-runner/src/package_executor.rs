@@ -4918,6 +4918,8 @@ pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageR
         .filter(|s| !s.trim().is_empty())
     {
         cmd.env("AF_TARGET_VERSION", target.trim());
+    } else {
+        cmd.env_remove("AF_TARGET_VERSION");
     }
     let recovery_root = default_env
         .recovery_root

@@ -1731,6 +1731,14 @@ pub(super) async fn probe_live_git_version(
     pkg: &Package,
     _budget: Duration,
 ) -> Option<Result<String, anyhow::Error>> {
+    // Cloudplow's checkout is private to root because it also holds rclone configuration.
+    if pkg.name == "cloudplow"
+        && resolve_configured_fs_root().is_none()
+        && af_runner::is_runner_available()
+    {
+        return Some(af_runner::probe_package_version_via_runner(&pkg.name).await);
+    }
+
     if pkg.name == "piped" || pkg.update_repo.eq_ignore_ascii_case("TeamPiped/Piped") {
         let fe_dir = resolve_git_dir_for_probe("/opt/piped/frontend/.git")
             .or_else(|| resolve_git_dir_for_probe("/opt/piped/.git"));

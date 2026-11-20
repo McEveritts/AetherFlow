@@ -94,6 +94,46 @@ fn test_purge_is_explicit_per_request_and_never_inherited() {
 }
 
 #[test]
+fn test_target_version_env_is_explicit_and_cleared_when_absent() {
+    for (package_id, script_name, target) in [
+        ("cloudplow", "installpackage-cloudplow", " 1.3.2 "),
+        ("overseerr", "installpackage-overseerr", " v1.33.2 "),
+    ] {
+        let mut req = PackageRunnerRequest {
+            action: "update".to_string(),
+            package_id: package_id.to_string(),
+            script_name: script_name.to_string(),
+            expected_target_version: Some(target.to_string()),
+            ..Default::default()
+        };
+        let env = legacy_env(&req);
+        assert_eq!(
+            env.get("AF_TARGET_VERSION"),
+            Some(&Some(target.trim().to_string())),
+            "{package_id} update must pass trimmed AF_TARGET_VERSION"
+        );
+
+        req.action = "install".to_string();
+        req.expected_target_version = None;
+        let env_none = legacy_env(&req);
+        assert_eq!(
+            env_none.get("AF_TARGET_VERSION"),
+            Some(&None),
+            "{package_id} unpinned install must strip ambient AF_TARGET_VERSION"
+        );
+
+        req.action = "reinstall".to_string();
+        req.expected_target_version = Some("   ".to_string());
+        let env_blank = legacy_env(&req);
+        assert_eq!(
+            env_blank.get("AF_TARGET_VERSION"),
+            Some(&None),
+            "{package_id} blank target must strip ambient AF_TARGET_VERSION"
+        );
+    }
+}
+
+#[test]
 fn test_registry_contains_catalog_packages_and_defers_incomplete_recipes() {
     for id in list_declarative_recipe_ids() {
         assert!(

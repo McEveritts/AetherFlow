@@ -24,6 +24,8 @@ def common_functions(*names):
         names = tuple(dict.fromkeys((*names, 'quiesce_services_for_rollback', 'retained_bind_address')))
     if 'download_file' in names:
         names = tuple(dict.fromkeys((*names, 'af_prepare_logfile_path', 'af_validate_tar_archive')))
+    if 'git_checkout_version' in names:
+        names = tuple(dict.fromkeys((*names, 'git_stage_exact_revision')))
     source = (ROOT / "packages/common.sh").read_text()
     functions = []
     for name in names:

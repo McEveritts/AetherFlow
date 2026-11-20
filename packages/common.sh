@@ -522,7 +522,18 @@ commit_app_versions() {
         norm_ver="${norm_ver#Release-}"
         norm_ver="${norm_ver#v}"
         norm_ver="${norm_ver#V}"
-        if [[ "$norm_ver" != "$clean_target" ]]; then
+        local target_matches=0
+        if [[ "$norm_ver" == "$clean_target" ]]; then
+            target_matches=1
+        elif [[ "$norm_ver" =~ ^[0-9a-fA-F]{7,64}$ && "$clean_target" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+            local lower_ver="${norm_ver,,}" lower_target="${clean_target,,}"
+            if [[ ( ! "$lower_ver" =~ ^[0-9]+$ || ${#lower_ver} -eq 40 || ${#lower_ver} -eq 64 ) && \
+                  ( ! "$lower_target" =~ ^[0-9]+$ || ${#lower_target} -eq 40 || ${#lower_target} -eq 64 ) && \
+                  "$lower_ver" == "$lower_target"* ]]; then
+                target_matches=1
+            fi
+        fi
+        if [[ "$target_matches" -ne 1 ]]; then
             if (( ${#AF_PENDING_VERSION_VALUES[@]} > 1 )); then
                 echo "ERROR: Committed version(s) (${AF_PENDING_VERSION_VALUES[*]}) do not match requested target version (${AF_TARGET_VERSION})" >&2
             else
@@ -694,16 +705,353 @@ PYEOF
 }
 
 git_checkout_version() {
-    local directory="$1" previous="${2:-}" version
-    version="$(git -C "$directory" describe --tags --abbrev=0 2>/dev/null || true)"
-    if [[ -z "${version//[[:space:]]/}" ]]; then
-        version="$(git -C "$directory" rev-parse HEAD 2>/dev/null || true)"
+    local directory="$1" previous="${2:-}" expected="${3:-${AF_TARGET_VERSION:-}}" version="" head_commit=""
+    local tag="" clean_expected="" norm_tag="" points_at="" is_expected_sha=0
+    if [[ -n "$expected" ]]; then
+        clean_expected="${expected#release-}"
+        clean_expected="${clean_expected#Release-}"
+        clean_expected="${clean_expected#v}"
+        clean_expected="${clean_expected#V}"
+        if [[ "$expected" =~ ^[0-9a-fA-F]{7,64}$ && ( ! "$expected" =~ ^[0-9]+$ || ${#expected} -eq 40 || ${#expected} -eq 64 ) ]]; then
+            is_expected_sha=1
+        fi
+        points_at="$(git -C "$directory" tag --points-at HEAD 2>/dev/null || true)"
+        if [[ -n "$points_at" ]]; then
+            while IFS= read -r tag; do
+                [[ -n "${tag//[[:space:]]/}" ]] || continue
+                if [[ "$tag" == "$expected" ]]; then
+                    version="$tag"
+                    break
+                fi
+            done <<< "$points_at"
+            if [[ -z "$version" ]]; then
+                while IFS= read -r tag; do
+                    [[ -n "${tag//[[:space:]]/}" ]] || continue
+                    norm_tag="${tag#release-}"
+                    norm_tag="${norm_tag#Release-}"
+                    norm_tag="${norm_tag#v}"
+                    norm_tag="${norm_tag#V}"
+                    if [[ "$norm_tag" == "$clean_expected" ]]; then
+                        version="$tag"
+                        break
+                    fi
+                done <<< "$points_at"
+            fi
+        fi
+        if [[ -z "$version" && "$is_expected_sha" -eq 1 ]]; then
+            head_commit="$(git -C "$directory" rev-parse --verify HEAD 2>/dev/null || true)"
+            if [[ -n "$head_commit" && "${head_commit,,}" == "${expected,,}"* ]]; then
+                version="${head_commit,,}"
+            fi
+        fi
     fi
-    if [[ -z "${version//[[:space:]]/}" && -n "$previous" && -f "$previous" && ! -L "$previous" ]]; then
+    if [[ -z "${version//[[:space:]]/}" ]]; then
+        version="$(git -C "$directory" describe --tags --exact-match HEAD 2>/dev/null || true)"
+    fi
+    if [[ -z "${version//[[:space:]]/}" ]]; then
+        head_commit="$(git -C "$directory" rev-parse --verify HEAD 2>/dev/null || true)"
+        version="$head_commit"
+    fi
+    if [[ -z "${version//[[:space:]]/}" && -z "${AF_TARGET_VERSION:-}" && ! -e "$directory/.git" && -n "$previous" && -f "$previous" && ! -L "$previous" ]]; then
         version="$(cat -- "$previous")"
     fi
     [[ -n "${version//[[:space:]]/}" ]] || { print_error "Cannot determine checked-out application version"; return 1; }
     printf '%s\n' "$version"
+}
+
+git_stage_exact_revision() {
+    local repo_url="${1:-}" build_dir="${2:-}" raw_target="${3:-}"
+    local target="" remote_tags="" resolved_output="" selected_kind="" selected_ref="" selected_tag="" expected_commit=""
+    local advertised_head="" local_tag_commit="" resolved_commit="" actual_commit=""
+
+    AF_STAGED_GIT_VERSION=""
+    AF_STAGED_GIT_REF=""
+    AF_STAGED_GIT_COMMIT=""
+
+    if [[ -z "$repo_url" || "$repo_url" == -* || -z "$build_dir" ]]; then
+        if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+            af_write_failure_receipt 1 "download" "invalid_git_source" "Invalid Git repository URL or staging directory"
+        fi
+        print_error "Invalid Git repository URL or staging directory"
+        return 1
+    fi
+
+    # Cloudplow publishes commits on its default branch instead of release tags.
+    if [[ -z "$raw_target" && "${4:-}" == "head" ]]; then
+        if ! advertised_head="$(git ls-remote --exit-code "$repo_url" HEAD)" ||
+            [[ ! "$advertised_head" =~ ^([[:xdigit:]]{40}|[[:xdigit:]]{64})$'\t'HEAD$ ]]; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "invalid_target_commit" "Unable to resolve remote HEAD for ${repo_url}"
+            fi
+            print_error "Unable to resolve remote HEAD for ${repo_url}"
+            return 1
+        fi
+        selected_kind="commit"
+        selected_ref="HEAD"
+        expected_commit="${BASH_REMATCH[1],,}"
+    else
+        if [[ -n "$raw_target" ]]; then
+            if ! target="$(python3 -c '
+import sys
+
+raw = sys.argv[1]
+trimmed = raw.strip()
+forbidden = frozenset((
+    "latest", "unknown", "none", "null", "undefined", "error", "n/a", "na",
+    "current", "installed", "pending", "default", "auto", "true", "false",
+    "head", "main", "master", "stable", "beta", "nightly", "edge", "dev",
+    "devel", "alpha", "rc", "release",
+))
+bad_chars = frozenset(";&|`$()<>\"'\''*?!{}[]^~:\\")
+
+if (
+    not trimmed
+    or len(trimmed) > 256
+    or trimmed.startswith("-")
+    or ".." in trimmed
+    or "@{" in trimmed
+    or "/" in trimmed
+    or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F or ch in bad_chars for ch in trimmed)
+    or trimmed.lower() in forbidden
+):
+    sys.exit(1)
+print(trimmed)
+' "$raw_target")"; then
+                if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                    af_write_failure_receipt 1 "download" "invalid_target_version" "Invalid requested target version: ${raw_target}"
+                fi
+                print_error "Invalid requested target version: ${raw_target}"
+                return 1
+            fi
+        fi
+
+        if ! remote_tags="$(git ls-remote --tags "$repo_url")"; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "git_ls_remote_failed" "Failed to query remote tags from ${repo_url}"
+            fi
+            print_error "Failed to query remote tags from ${repo_url}"
+            return 1
+        fi
+
+        if ! resolved_output="$(python3 -c '
+import re, sys
+
+target = sys.argv[1]
+repo_url = sys.argv[2]
+
+direct = {}
+peeled = {}
+for line in sys.stdin.read().splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    parts = line.split()
+    if len(parts) < 2:
+        continue
+    sha, ref = parts[0].lower(), parts[1]
+    if not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+        continue
+    if not ref.startswith("refs/tags/"):
+        continue
+    if ref.endswith("^{}"):
+        name = ref[len("refs/tags/"):-3]
+        if name:
+            peeled[name] = sha
+    else:
+        name = ref[len("refs/tags/"):]
+        if name:
+            direct[name] = sha
+
+resolved = {name: peeled.get(name, sha) for name, sha in direct.items()}
+
+def strip_prefix(value):
+    clean = re.sub(r"^(?:[rR]elease-)", "", value)
+    clean = re.sub(r"^[vV]", "", clean)
+    return clean
+
+def valid_tag_name(name):
+    return (
+        bool(name)
+        and not name.startswith("-")
+        and ".." not in name
+        and "@{" not in name
+        and "/" not in name
+        and not any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name)
+    )
+
+if target:
+    if target in resolved and valid_tag_name(target):
+        print("tag")
+        print(f"refs/tags/{target}")
+        print(target)
+        print(resolved[target])
+        sys.exit(0)
+
+    clean = strip_prefix(target)
+    candidates = []
+    for candidate in (
+        f"v{clean}",
+        clean,
+        f"V{clean}",
+        f"release-{clean}",
+        f"release-v{clean}",
+        f"Release-{clean}",
+        f"Release-v{clean}",
+    ):
+        if candidate and candidate not in candidates and candidate in resolved and valid_tag_name(candidate):
+            candidates.append(candidate)
+
+    if candidates:
+        commits = {resolved[c] for c in candidates}
+        if len(commits) > 1:
+            sys.stderr.write(
+                f"Ambiguous remote tags for requested target {target!r} in {repo_url}: {candidates}\n"
+            )
+            sys.exit(2)
+        chosen = candidates[0]
+        print("tag")
+        print(f"refs/tags/{chosen}")
+        print(chosen)
+        print(resolved[chosen])
+        sys.exit(0)
+
+    is_hex = bool(re.fullmatch(r"[0-9a-fA-F]{7,64}", target))
+    if is_hex and (not target.isdecimal() or len(target) in (40, 64)):
+        lower_sha = target.lower()
+        print("commit")
+        print(lower_sha)
+        print("")
+        print(lower_sha)
+        sys.exit(0)
+
+    sys.stderr.write(
+        f"Requested target version {target!r} was not found in remote tags for {repo_url}\n"
+    )
+    sys.exit(3)
+
+stable_pattern = re.compile(r"^(?:[rR]elease-)?[vV]?([0-9]+(?:\.[0-9]+)+)$")
+stable_candidates = []
+for name, sha in resolved.items():
+    match = stable_pattern.fullmatch(name)
+    if not match or not valid_tag_name(name):
+        continue
+    nums = tuple(int(part) for part in match.group(1).split("."))
+    stable_candidates.append((nums, name, sha))
+
+if not stable_candidates:
+    sys.stderr.write(f"No stable release tags found in {repo_url}\n")
+    sys.exit(4)
+
+max_len = max(len(item[0]) for item in stable_candidates)
+def sort_key(item):
+    nums, name, _sha = item
+    padded = nums + (0,) * (max_len - len(nums))
+    return (padded, len(nums), 1 if name.startswith("v") else 0, name)
+
+_best_nums, best_tag, best_sha = max(stable_candidates, key=sort_key)
+print("tag")
+print(f"refs/tags/{best_tag}")
+print(best_tag)
+print(best_sha)
+' "$target" "$repo_url" <<< "$remote_tags")"; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "invalid_target_tag" "Unable to resolve target revision '${target:-latest stable tag}' in ${repo_url}"
+            fi
+            print_error "Unable to resolve target revision '${target:-latest stable tag}' in ${repo_url}"
+            return 1
+        fi
+
+        {
+            IFS= read -r selected_kind
+            IFS= read -r selected_ref
+            IFS= read -r selected_tag
+            IFS= read -r expected_commit
+        } <<< "$resolved_output"
+    fi
+
+    if [[ -z "$selected_kind" || -z "$expected_commit" || ! "$expected_commit" =~ ^[0-9a-f]{7,64}$ ]]; then
+        if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+            af_write_failure_receipt 1 "download" "invalid_target_commit" "Resolved Git revision metadata is invalid for ${repo_url}"
+        fi
+        print_error "Resolved Git revision metadata is invalid for ${repo_url}"
+        return 1
+    fi
+
+    if [[ "$selected_kind" == "tag" ]]; then
+        if [[ -z "$selected_tag" || "$selected_tag" == -* ]]; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "invalid_target_tag" "Invalid resolved tag name '${selected_tag}' for ${repo_url}"
+            fi
+            print_error "Invalid resolved tag name '${selected_tag}' for ${repo_url}"
+            return 1
+        fi
+        if ! af_logged git clone --no-checkout --depth 1 --branch "$selected_tag" "$repo_url" "$build_dir"; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "git_clone_failed" "Failed to clone ${repo_url} at tag ${selected_tag}"
+            fi
+            print_error "Failed to clone ${repo_url} at tag ${selected_tag}"
+            return 1
+        fi
+        local_tag_commit="$(git -C "$build_dir" rev-parse --verify --quiet "refs/tags/${selected_tag}^{commit}" 2>/dev/null || true)"
+        if [[ "${local_tag_commit,,}" != "$expected_commit" ]]; then
+            if ! af_logged git -C "$build_dir" fetch --force --depth 1 origin "refs/tags/${selected_tag}:refs/tags/${selected_tag}"; then
+                if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                    af_write_failure_receipt 1 "download" "git_fetch_failed" "Failed to fetch exact tag ${selected_ref} from ${repo_url}"
+                fi
+                print_error "Failed to fetch exact tag ${selected_ref} from ${repo_url}"
+                return 1
+            fi
+            local_tag_commit="$(git -C "$build_dir" rev-parse --verify --quiet "refs/tags/${selected_tag}^{commit}" 2>/dev/null || true)"
+        fi
+        if [[ -z "$local_tag_commit" || "${local_tag_commit,,}" != "$expected_commit" ]]; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "git_revision_mismatch" "Fetched tag ${selected_ref} resolved to '${local_tag_commit:-unknown}' instead of expected commit '${expected_commit}'"
+            fi
+            print_error "Fetched tag ${selected_ref} resolved to '${local_tag_commit:-unknown}' instead of expected commit '${expected_commit}'"
+            return 1
+        fi
+    elif [[ "$selected_kind" == "commit" ]]; then
+        if ! af_logged git clone --no-checkout "$repo_url" "$build_dir"; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "git_clone_failed" "Failed to clone ${repo_url} for commit ${expected_commit}"
+            fi
+            print_error "Failed to clone ${repo_url} for commit ${expected_commit}"
+            return 1
+        fi
+        resolved_commit="$(git -C "$build_dir" rev-parse --verify --quiet "${expected_commit}^{commit}" 2>/dev/null || true)"
+        if [[ -z "$resolved_commit" || ! "$resolved_commit" =~ ^[0-9a-fA-F]{7,64}$ || "${resolved_commit,,}" != "${expected_commit}"* ]]; then
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "invalid_target_commit" "Requested commit '${expected_commit}' was not found in ${repo_url}"
+            fi
+            print_error "Requested commit '${expected_commit}' was not found in ${repo_url}"
+            return 1
+        fi
+        expected_commit="${resolved_commit,,}"
+        selected_ref="$expected_commit"
+    else
+        print_error "Unsupported resolved Git revision kind: ${selected_kind}"
+        return 1
+    fi
+
+    if ! af_logged git -C "$build_dir" checkout --detach "$expected_commit"; then
+        if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+            af_write_failure_receipt 1 "download" "git_checkout_failed" "Failed to check out commit ${expected_commit} for ${selected_ref}"
+        fi
+        print_error "Failed to check out commit ${expected_commit} for ${selected_ref}"
+        return 1
+    fi
+    actual_commit="$(git -C "$build_dir" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)"
+    if [[ -z "$actual_commit" || "${actual_commit,,}" != "$expected_commit" ]]; then
+        if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+            af_write_failure_receipt 1 "download" "git_revision_mismatch" "Staged HEAD (${actual_commit:-unknown}) does not match expected commit (${expected_commit}) for ${selected_ref}"
+        fi
+        print_error "Staged HEAD (${actual_commit:-unknown}) does not match expected commit (${expected_commit}) for ${selected_ref}"
+        return 1
+    fi
+
+    AF_STAGED_GIT_VERSION="${selected_tag:-$expected_commit}"
+    AF_STAGED_GIT_REF="$selected_ref"
+    AF_STAGED_GIT_COMMIT="$expected_commit"
 }
 
 deb_compare_versions() {

@@ -5,6 +5,33 @@ static ENV_TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
 
 #[test]
+fn test_cloudplow_version_probe_reads_the_deployed_git_commit() {
+    let installed = std::env::temp_dir().join(format!("af-cloudplow-{}", uuid::Uuid::new_v4()));
+    let checkout = installed.join("opt/cloudplow");
+    std::fs::create_dir_all(checkout.join(".git")).unwrap();
+    let live_commit = "b".repeat(40);
+    std::fs::write(checkout.join(".git/HEAD"), format!("{live_commit}\n")).unwrap();
+    let env = crate::PackageExecutionEnv {
+        fs_root: Some(installed.clone()),
+        ..Default::default()
+    };
+
+    std::fs::write(checkout.join(".af-version"), "a".repeat(40)).unwrap();
+    assert!(matches!(
+        probe_live_runtime_version("cloudplow", &env),
+        LiveRuntimeProbeOutcome::Verified(version) if version == live_commit
+    ));
+    assert!(resolve_verified_installed_version("cloudplow", &env).is_none());
+
+    std::fs::write(checkout.join(".af-version"), &live_commit).unwrap();
+    assert_eq!(
+        resolve_verified_installed_version("cloudplow", &env),
+        Some(live_commit)
+    );
+    std::fs::remove_dir_all(installed).unwrap();
+}
+
+#[test]
 fn test_stale_af_version_receipt_against_older_live_runtime_fails_certification() {
     let env_cfg = crate::PackageExecutionEnv::default();
     let target = "2.5.0";

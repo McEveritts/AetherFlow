@@ -918,14 +918,13 @@
     ]
   },
   "cloudplow": {
-    "update_source": "git_tags",
+    "update_source": "git",
     "require_download_sha256": true,
     "update_repo": "l3uddz/cloudplow",
     "update_repo_url": "https://github.com/l3uddz/cloudplow.git",
     "version_command": [
-      "/opt/cloudplow/.venv/bin/python",
-      "/opt/cloudplow/cloudplow.py",
-      "--version"
+      "cat",
+      "/opt/cloudplow/.af-version"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [

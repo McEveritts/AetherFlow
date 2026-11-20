@@ -210,7 +210,25 @@ EOF
                 chmod +x "${dest}/target/release/mcvnc"
             fi
             exit 0
-        elif [ "$1" = "describe" ] || [ "$1" = "tag" ] || [ "$1" = "-C" ]; then
+        elif [ "$1" = "ls-remote" ]; then
+            case "$*" in
+                *' HEAD') printf 'abcdef1234567890abcdef1234567890abcdef12\tHEAD\n' ;;
+                *) printf 'abcdef1234567890abcdef1234567890abcdef12\trefs/tags/v3.0.0\n' ;;
+            esac
+            exit 0
+        elif [ "$1" = "-C" ]; then
+            case "$*" in
+                *rev-parse*|*rev-list*)
+                    echo "abcdef1234567890abcdef1234567890abcdef12"
+                    ;;
+                *checkout*|*fetch*)
+                    ;;
+                *)
+                    echo "v3.0.0"
+                    ;;
+            esac
+            exit 0
+        elif [ "$1" = "describe" ] || [ "$1" = "tag" ]; then
             echo "v3.0.0"
             exit 0
         fi
@@ -585,6 +603,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "download_file",
             "download_servarr_archive",
             "git_checkout_version",
+            "git_stage_exact_revision",
             "verify_deb_installed",
             "safe_rm_rf",
             "snapshot_app_state",
@@ -665,14 +684,14 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
     def test_cloudplow_update_preserves_live_config_and_retains_state(self):
         app_dir = self.root / "opt/cloudplow"
         app_dir.mkdir(parents=True, exist_ok=True)
-        (app_dir / ".af-version").write_text("1.0.0\n")
+        (app_dir / ".af-version").write_text("deadbeef1234567890abcdef1234567890abcdef\n")
         custom_cfg = json.dumps({"remotes": {"test": {"sync_remote": "custom:remote"}}})
         (app_dir / "config.json").write_text(custom_cfg)
 
         result = self.run_script("cloudplow")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((app_dir / "config.json").read_text(), custom_cfg)
-        self.assertEqual((app_dir / ".af-version").read_text().strip(), "v3.0.0")
+        self.assertEqual((app_dir / ".af-version").read_text().strip(), "abcdef1234567890abcdef1234567890abcdef12")
 
     def test_cloudplow_failed_download_preserves_old_version_and_restarts_service(self):
         app_dir = self.root / "opt/cloudplow"

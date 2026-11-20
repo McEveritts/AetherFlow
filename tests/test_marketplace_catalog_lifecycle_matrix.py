@@ -582,7 +582,10 @@ elif command == 'git':
         destination = pathlib.Path(arguments[-1])
         shutil.copytree(root / 'repository', destination, dirs_exist_ok=True)
     elif 'pull' in arguments and failure == 'pull': sys.exit(76)
-    elif 'ls-remote' in arguments: print('abcdef123456\trefs/tags/v' + version)
+    elif 'ls-remote' in arguments:
+        if arguments[-1] == 'HEAD': print('abcdef1234567890abcdef1234567890abcdef12\tHEAD')
+        else: print('abcdef123456\trefs/tags/v' + version)
+    elif app == 'cloudplow' and 'rev-parse' in arguments: print('abcdef1234567890abcdef1234567890abcdef12')
     elif 'rev-parse' in arguments or 'rev-list' in arguments: print('abcdef123456')
     else: print('v' + version)
 elif command in ('npm', 'yarn', 'pnpm'):
