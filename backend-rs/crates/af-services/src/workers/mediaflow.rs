@@ -490,6 +490,7 @@ impl PinnedMediaflowSource {
     }
 
     #[cfg(unix)]
+    #[allow(clippy::unnecessary_cast)] // libc::stat field widths vary across Linux targets.
     pub(super) fn matches_live_stat(&self, st: &libc::stat) -> bool {
         (st.st_mode & libc::S_IFMT) == libc::S_IFREG
             && st.st_nlink == 1
