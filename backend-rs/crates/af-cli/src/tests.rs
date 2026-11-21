@@ -527,7 +527,8 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
 
     // `af info sonarr` and `af list --installed` agree with canonical services/API status (`installed: false`)
     // while surfacing the legacy receipt as upgrade input.
-    let info_inv = parse_cli_args(["--json", "--root", &root_str, "info", "sonarr"]).unwrap();
+    let info_inv =
+        parse_cli_args(["--json", "--root", &root_str, "package", "info", "sonarr"]).unwrap();
     let info_env = execute_invocation(&info_inv, &transport);
     assert_eq!(info_env.status, "ok");
     let info_data = info_env.data.as_ref().unwrap();
@@ -2313,7 +2314,8 @@ fn legacy_receipt_parity_rejects_unsafe_locks_and_honors_custom_catalog_and_reta
     )
     .unwrap();
     fs::write(cfg_dir.join("package_automation.json"), "{}").unwrap();
-    let custom_info = parse_cli_args(["--json", "--root", &root_str, "info", "sonarr"]).unwrap();
+    let custom_info =
+        parse_cli_args(["--json", "--root", &root_str, "package", "info", "sonarr"]).unwrap();
     let custom_env = execute_invocation(&custom_info, &transport);
     assert_eq!(custom_env.status, "ok", "{}", custom_env.message);
     let custom_data = custom_env.data.as_ref().unwrap();
