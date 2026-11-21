@@ -1,11 +1,39 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { expect, test, type Page, type Route } from '@playwright/test';
 
 const ADMIN_USER = process.env.E2E_ADMIN_USER || 'admin';
 const ADMIN_PASS = process.env.E2E_ADMIN_PASS || 'AetherFlowE2E!2026';
 const MEMBER_USER = process.env.E2E_MEMBER_USER || 'live-member';
+
+function externalPluginConfig(): { id: string; port: number; tokenFile: string } {
+  const id = (process.env.E2E_EXTERNAL_PLUGIN_ID || 'telemetry-inspector-external').trim();
+  const rawPort = (process.env.E2E_EXTERNAL_PLUGIN_PORT || '').trim();
+  const tokenFile = (process.env.E2E_EXTERNAL_PLUGIN_TOKEN_FILE || '').trim();
+  expect(rawPort, 'Run this live matrix through scripts/run_embedded_e2e.sh --playwright').toMatch(/^\d{5}$/);
+  expect(tokenFile, 'Run this live matrix through scripts/run_embedded_e2e.sh --playwright').toBeTruthy();
+  const port = Number(rawPort);
+  expect(port).toBeGreaterThanOrEqual(21000);
+  expect(port).toBeLessThanOrEqual(21999);
+  const resolved = realpathSync(tokenFile);
+  const scratchDir = dirname(resolved);
+  const workRoot = dirname(scratchDir);
+  expect(basename(resolved)).toBe('token');
+  expect(basename(scratchDir)).toBe('external-plugin');
+  expect(basename(workRoot).startsWith('aetherflow-embedded-e2e.')).toBe(true);
+  return { id, port, tokenFile: resolved };
+}
+
+function writeExternalPluginToken(tokenFile: string, token: string): void {
+  const resolved = realpathSync(tokenFile);
+  const scratchDir = dirname(resolved);
+  const workRoot = dirname(scratchDir);
+  expect(basename(resolved)).toBe('token');
+  expect(basename(scratchDir)).toBe('external-plugin');
+  expect(basename(workRoot).startsWith('aetherflow-embedded-e2e.')).toBe(true);
+  writeFileSync(resolved, token, { encoding: 'utf8', mode: 0o600 });
+}
 
 function completedTelemetryHistory(page: Page, window?: string) {
   return page.waitForResponse(async response => {
@@ -553,6 +581,10 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
       };
     });
 
+    const externalPlugin = externalPluginConfig();
+    const encodedExternalPluginId = externalPlugin.id.replace('i', '%69');
+    expect(encodedExternalPluginId).not.toBe(externalPlugin.id);
+
     expect(sessionCheck.sessStatus).toBe(200);
     expect(sessionCheck.sessUser?.username).toBe(ADMIN_USER);
     expect(sessionCheck.histStatus).toBe(200);
@@ -561,9 +593,12 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     expect(sessionCheck.plugStatus).toBe(200);
     expect(Array.isArray(sessionCheck.plugBody?.plugins)).toBeTruthy();
     expect(sessionCheck.plugBody.plugins.some((p: { id: string }) => p.id === 'telemetry-inspector')).toBeTruthy();
+    expect(sessionCheck.plugBody.plugins.some((p: { id: string }) => p.id === externalPlugin.id)).toBeTruthy();
 
-    // 3b. Verify sandboxed plugin UI headers and scoped plugin token security boundaries against live Rust backend
-    const pluginBoundaryCheck = await page.evaluate(async () => {
+    // 3b. Verify managed start fails closed without the privileged systemd runner,
+    // while preserving live sandboxed UI CSP, proxy stripping, scoped token, and
+    // revocation coverage against the harness-staged external telemetry backend.
+    const managedIsolationCheck = await page.evaluate(async () => {
       const csrfRes = await fetch('/api/v1/public/csrf-token', { credentials: 'include' });
       const csrfPayload = await csrfRes.json().catch(() => ({} as { csrf_token?: string }));
       const csrfToken = csrfPayload.csrf_token || '';
@@ -591,97 +626,15 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
       });
       const startBody = await startRes.json().catch(() => ({}));
 
-      const uiRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/ui', { credentials: 'include' });
-      const csp = uiRes.headers.get('content-security-policy') || '';
-      const xfo = uiRes.headers.get('x-frame-options') || '';
-      const uiHtml = await uiRes.text().catch(() => '');
-
-      const proxyRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/proxy/status', {
+      const afterUiRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/ui', { credentials: 'include' });
+      const afterProxyRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/proxy/status', {
         credentials: 'include',
       });
-      const proxyBody = await proxyRes.json().catch(() => ({}));
-
-      const proxyPolicies = [];
-      for (const prefix of [
-        '/plugins/telemetry-inspector/proxy',
-        '/api/auth/plugins/telemetry-%69nspector/proxy',
-        '/api/v1/auth/plugins/telemetry-inspector/proxy',
-      ]) {
-        for (const suffix of ['status', 'ui', '%75i']) {
-          const response = await fetch(`${prefix}/${suffix}`, { credentials: 'include' });
-          proxyPolicies.push({
-            path: `${prefix}/${suffix}`,
-            status: response.status,
-            csp: response.headers.get('content-security-policy'),
-            xfo: response.headers.get('x-frame-options'),
-            contentType: response.headers.get('content-type'),
-            cacheControl: response.headers.get('cache-control'),
-            pragma: response.headers.get('pragma'),
-            expires: response.headers.get('expires'),
-            sharedCacheHeaders: ['surrogate-control', 'cdn-cache-control', 'cloudflare-cdn-cache-control']
-              .filter(header => response.headers.has(header)),
-            body: await response.json(),
-          });
-        }
-      }
-
-      const snapshotRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/proxy/snapshot', {
-        credentials: 'include',
-      });
-      const snapshotBody = await snapshotRes.json().catch(() => ({}));
-
-      const tokRes = await fetch('/api/v1/admin/plugins/telemetry-inspector/token', {
+      const afterTokRes = await fetch('/api/v1/admin/plugins/telemetry-inspector/token', {
         method: 'POST',
         credentials: 'include',
         headers: jsonHeaders,
         body: JSON.stringify({ ttl_seconds: 300 }),
-      });
-      const tokBody = await tokRes.json().catch(() => ({}));
-      const pluginJwt = tokBody.token || '';
-
-      // Allowed GET /api/v1/auth/system/metrics with plugin token (omit cookies so only Bearer is used)
-      const allowedGet = await fetch('/api/v1/auth/system/metrics', {
-        method: 'GET',
-        credentials: 'omit',
-        headers: { Authorization: `Bearer ${pluginJwt}` },
-      });
-      // Alternate HTTP method (POST) on allowed route must be denied (403)
-      const deniedPost = await fetch('/api/v1/auth/system/metrics', {
-        method: 'POST',
-        credentials: 'omit',
-        headers: { Authorization: `Bearer ${pluginJwt}`, 'X-Requested-With': 'XMLHttpRequest' },
-      });
-      // Unscoped admin endpoint must be denied (403)
-      const deniedAdmin = await fetch('/api/v1/admin/users', {
-        method: 'GET',
-        credentials: 'omit',
-        headers: { Authorization: `Bearer ${pluginJwt}` },
-      });
-      // Session refresh with plugin Bearer token must be denied (401/403)
-      const deniedRefresh = await fetch('/api/v1/public/auth/refresh', {
-        method: 'POST',
-        credentials: 'omit',
-        headers: { Authorization: `Bearer ${pluginJwt}`, 'X-Requested-With': 'XMLHttpRequest' },
-      });
-
-      const stopRes = await fetch('/api/v1/admin/plugins/telemetry-inspector/control', {
-        method: 'POST',
-        credentials: 'include',
-        headers: jsonHeaders,
-        body: JSON.stringify({ action: 'stop' }),
-      });
-      const stopBody = await stopRes.json().catch(() => ({}));
-
-      const revokedTokenGet = await fetch('/api/v1/auth/system/metrics', {
-        method: 'GET',
-        credentials: 'omit',
-        headers: { Authorization: `Bearer ${pluginJwt}` },
-      });
-      const stoppedUiAfterRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/ui', {
-        credentials: 'include',
-      });
-      const stoppedProxyAfterRes = await fetch('/api/v1/auth/plugins/telemetry-inspector/proxy/status', {
-        credentials: 'include',
       });
 
       return {
@@ -689,83 +642,267 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
         stoppedProxyStatus: stoppedProxyRes.status,
         stoppedTokStatus: stoppedTokRes.status,
         startStatus: startRes.status,
-        startedPlugin: startBody.plugin || null,
-        uiStatus: uiRes.status,
-        csp,
-        xfo,
-        uiHtml,
-        proxyStatus: proxyRes.status,
-        proxyBody,
-        proxyPolicies,
-        snapshotStatus: snapshotRes.status,
-        snapshotBody,
-        tokStatus: tokRes.status,
-        tokenType: tokBody.token_type,
-        audience: tokBody.audience,
-        allowedGetStatus: allowedGet.status,
-        deniedPostStatus: deniedPost.status,
-        deniedAdminStatus: deniedAdmin.status,
-        deniedRefreshStatus: deniedRefresh.status,
-        stopStatus: stopRes.status,
-        stoppedPlugin: stopBody.plugin || null,
-        revokedTokenStatus: revokedTokenGet.status,
-        stoppedUiAfterStatus: stoppedUiAfterRes.status,
-        stoppedProxyAfterStatus: stoppedProxyAfterRes.status,
+        startCode: String(startBody.code || ''),
+        afterUiStatus: afterUiRes.status,
+        afterProxyStatus: afterProxyRes.status,
+        afterTokStatus: afterTokRes.status,
       };
     });
 
-    expect(pluginBoundaryCheck.stoppedUiStatus).toBe(403);
-    expect(pluginBoundaryCheck.stoppedProxyStatus).toBe(503);
-    expect(pluginBoundaryCheck.stoppedTokStatus).toBe(409);
-    expect(pluginBoundaryCheck.startStatus).toBe(200);
-    expect(pluginBoundaryCheck.startedPlugin?.enabled).toBe(true);
-    expect(pluginBoundaryCheck.startedPlugin?.status).toBe('running');
-    expect(pluginBoundaryCheck.startedPlugin?.healthy).toBe(true);
-    expect(pluginBoundaryCheck.startedPlugin?.allocated_port).toBeGreaterThanOrEqual(21000);
-    expect(pluginBoundaryCheck.startedPlugin?.allocated_port).toBeLessThanOrEqual(21999);
-    expect(pluginBoundaryCheck.uiStatus).toBe(200);
-    expect(pluginBoundaryCheck.csp).toContain('sandbox allow-scripts');
-    expect(pluginBoundaryCheck.xfo).toBe('SAMEORIGIN');
-    expect(pluginBoundaryCheck.uiHtml).toContain('Managed Loopback Runtime v1.0.0');
-    expect(pluginBoundaryCheck.proxyStatus).toBe(200);
-    expect(pluginBoundaryCheck.proxyBody?.status).toBe('ok');
-    expect(pluginBoundaryCheck.proxyBody?.plugin_id).toBe('telemetry-inspector');
-    expect(pluginBoundaryCheck.proxyBody?.runtime_mode).toBe('managed');
-    expect(pluginBoundaryCheck.proxyBody?.listen_port).toBe(pluginBoundaryCheck.startedPlugin?.allocated_port);
-    expect(pluginBoundaryCheck.proxyBody?.auth_token_configured).toBe(true);
-    expect(pluginBoundaryCheck.proxyBody?.had_cookie_header).toBe(false);
-    expect(pluginBoundaryCheck.proxyBody?.had_authorization_header).toBe(false);
-    expect(pluginBoundaryCheck.proxyPolicies).toHaveLength(9);
-    for (const response of pluginBoundaryCheck.proxyPolicies) {
-      expect(response.csp, response.path).toBe("sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
-      expect(response.xfo, response.path).toBe('DENY');
-      expect(response.contentType, response.path).toContain('application/json');
-      expect(response.cacheControl, response.path).toBe('private, no-store');
-      expect(response.pragma, response.path).toBe('no-cache');
-      expect(response.expires, response.path).toBe('0');
-      expect(response.sharedCacheHeaders, response.path).toEqual([]);
-      expect(response.status, response.path).toBe(response.path.endsWith('/status') ? 200 : 404);
-      if (response.status === 200) {
-        expect(response.body.status, response.path).toBe('ok');
-        expect(response.body.had_cookie_header, response.path).toBe(false);
-        expect(response.body.had_authorization_header, response.path).toBe(false);
+    expect(managedIsolationCheck.stoppedUiStatus).toBe(403);
+    expect(managedIsolationCheck.stoppedProxyStatus).toBe(503);
+    expect(managedIsolationCheck.stoppedTokStatus).toBe(409);
+    expect(managedIsolationCheck.startStatus).toBe(503);
+    expect(managedIsolationCheck.startCode).toBe('PLUGIN_ISOLATION_UNAVAILABLE');
+    expect(managedIsolationCheck.afterUiStatus).toBe(403);
+    expect(managedIsolationCheck.afterProxyStatus).toBe(503);
+    expect(managedIsolationCheck.afterTokStatus).toBe(409);
+
+    writeExternalPluginToken(externalPlugin.tokenFile, '');
+    try {
+      const externalStartCheck = await page.evaluate(
+        async ({ pluginId, pluginPort }: { pluginId: string; pluginPort: number }) => {
+          const csrfRes = await fetch('/api/v1/public/csrf-token', { credentials: 'include' });
+          const csrfPayload = await csrfRes.json().catch(() => ({} as { csrf_token?: string }));
+          const csrfToken = csrfPayload.csrf_token || '';
+          const jsonHeaders: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRF-Token': csrfToken,
+          };
+          const stoppedUiRes = await fetch(`/api/v1/auth/plugins/${pluginId}/ui`, { credentials: 'include' });
+          const stoppedProxyRes = await fetch(`/api/v1/auth/plugins/${pluginId}/proxy/status`, {
+            credentials: 'include',
+          });
+          const stoppedTokRes = await fetch(`/api/v1/admin/plugins/${pluginId}/token`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: jsonHeaders,
+            body: JSON.stringify({ ttl_seconds: 300 }),
+          });
+
+          const startRes = await fetch(`/api/v1/admin/plugins/${pluginId}/control`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: jsonHeaders,
+            body: JSON.stringify({ action: 'start', port: pluginPort }),
+          });
+          const startBody = await startRes.json().catch(() => ({}));
+
+          const tokRes = await fetch(`/api/v1/admin/plugins/${pluginId}/token`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: jsonHeaders,
+            body: JSON.stringify({ ttl_seconds: 300 }),
+          });
+          const tokBody = await tokRes.json().catch(() => ({}));
+
+          return {
+            stoppedUiStatus: stoppedUiRes.status,
+            stoppedProxyStatus: stoppedProxyRes.status,
+            stoppedTokStatus: stoppedTokRes.status,
+            startStatus: startRes.status,
+            startedPlugin: startBody.plugin || null,
+            tokStatus: tokRes.status,
+            tokenType: tokBody.token_type,
+            audience: tokBody.audience,
+            pluginJwt: String(tokBody.token || ''),
+          };
+        },
+        { pluginId: externalPlugin.id, pluginPort: externalPlugin.port },
+      );
+
+      expect(externalStartCheck.stoppedUiStatus).toBe(403);
+      expect(externalStartCheck.stoppedProxyStatus).toBe(503);
+      expect(externalStartCheck.stoppedTokStatus).toBe(409);
+      expect(externalStartCheck.startStatus).toBe(200);
+      expect(externalStartCheck.startedPlugin?.enabled).toBe(true);
+      expect(externalStartCheck.startedPlugin?.status).toBe('running');
+      expect(externalStartCheck.startedPlugin?.healthy).toBe(true);
+      expect(externalStartCheck.startedPlugin?.runtime_status).toBe('external');
+      expect(externalStartCheck.startedPlugin?.allocated_port).toBe(externalPlugin.port);
+      expect(externalStartCheck.tokStatus).toBe(200);
+      expect(externalStartCheck.tokenType).toBe('plugin');
+      expect(externalStartCheck.audience).toBe('aetherflow-plugin-api');
+      expect(externalStartCheck.pluginJwt.length).toBeGreaterThan(0);
+
+      writeExternalPluginToken(externalPlugin.tokenFile, externalStartCheck.pluginJwt);
+
+      const pluginBoundaryCheck = await page.evaluate(
+        async ({
+          pluginId,
+          encodedPluginId,
+          pluginJwt,
+        }: {
+          pluginId: string;
+          encodedPluginId: string;
+          pluginJwt: string;
+        }) => {
+          const csrfRes = await fetch('/api/v1/public/csrf-token', { credentials: 'include' });
+          const csrfPayload = await csrfRes.json().catch(() => ({} as { csrf_token?: string }));
+          const csrfToken = csrfPayload.csrf_token || '';
+          const jsonHeaders: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRF-Token': csrfToken,
+          };
+
+          const uiRes = await fetch(`/api/v1/auth/plugins/${pluginId}/ui`, { credentials: 'include' });
+          const csp = uiRes.headers.get('content-security-policy') || '';
+          const xfo = uiRes.headers.get('x-frame-options') || '';
+          const uiHtml = await uiRes.text().catch(() => '');
+
+          const proxyRes = await fetch(`/api/v1/auth/plugins/${pluginId}/proxy/status`, {
+            credentials: 'include',
+          });
+          const proxyBody = await proxyRes.json().catch(() => ({}));
+
+          const proxyPolicies = [];
+          for (const prefix of [
+            `/plugins/${pluginId}/proxy`,
+            `/api/auth/plugins/${encodedPluginId}/proxy`,
+            `/api/v1/auth/plugins/${pluginId}/proxy`,
+          ]) {
+            for (const suffix of ['status', 'ui', '%75i']) {
+              const response = await fetch(`${prefix}/${suffix}`, { credentials: 'include' });
+              proxyPolicies.push({
+                path: `${prefix}/${suffix}`,
+                status: response.status,
+                csp: response.headers.get('content-security-policy'),
+                xfo: response.headers.get('x-frame-options'),
+                contentType: response.headers.get('content-type'),
+                cacheControl: response.headers.get('cache-control'),
+                pragma: response.headers.get('pragma'),
+                expires: response.headers.get('expires'),
+                sharedCacheHeaders: ['surrogate-control', 'cdn-cache-control', 'cloudflare-cdn-cache-control']
+                  .filter(header => response.headers.has(header)),
+                body: await response.json(),
+              });
+            }
+          }
+
+          const snapshotRes = await fetch(`/api/v1/auth/plugins/${pluginId}/proxy/snapshot`, {
+            credentials: 'include',
+          });
+          const snapshotBody = await snapshotRes.json().catch(() => ({}));
+
+          // Allowed GET /api/v1/auth/system/metrics with plugin token (omit cookies so only Bearer is used)
+          const allowedGet = await fetch('/api/v1/auth/system/metrics', {
+            method: 'GET',
+            credentials: 'omit',
+            headers: { Authorization: `Bearer ${pluginJwt}` },
+          });
+          // Alternate HTTP method (POST) on allowed route must be denied (403)
+          const deniedPost = await fetch('/api/v1/auth/system/metrics', {
+            method: 'POST',
+            credentials: 'omit',
+            headers: { Authorization: `Bearer ${pluginJwt}`, 'X-Requested-With': 'XMLHttpRequest' },
+          });
+          // Unscoped admin endpoint must be denied (403)
+          const deniedAdmin = await fetch('/api/v1/admin/users', {
+            method: 'GET',
+            credentials: 'omit',
+            headers: { Authorization: `Bearer ${pluginJwt}` },
+          });
+          // Session refresh with plugin Bearer token must be denied (401/403)
+          const deniedRefresh = await fetch('/api/v1/public/auth/refresh', {
+            method: 'POST',
+            credentials: 'omit',
+            headers: { Authorization: `Bearer ${pluginJwt}`, 'X-Requested-With': 'XMLHttpRequest' },
+          });
+
+          const stopRes = await fetch(`/api/v1/admin/plugins/${pluginId}/control`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: jsonHeaders,
+            body: JSON.stringify({ action: 'stop' }),
+          });
+          const stopBody = await stopRes.json().catch(() => ({}));
+
+          const revokedTokenGet = await fetch('/api/v1/auth/system/metrics', {
+            method: 'GET',
+            credentials: 'omit',
+            headers: { Authorization: `Bearer ${pluginJwt}` },
+          });
+          const stoppedUiAfterRes = await fetch(`/api/v1/auth/plugins/${pluginId}/ui`, {
+            credentials: 'include',
+          });
+          const stoppedProxyAfterRes = await fetch(`/api/v1/auth/plugins/${pluginId}/proxy/status`, {
+            credentials: 'include',
+          });
+
+          return {
+            uiStatus: uiRes.status,
+            csp,
+            xfo,
+            uiHtml,
+            proxyStatus: proxyRes.status,
+            proxyBody,
+            proxyPolicies,
+            snapshotStatus: snapshotRes.status,
+            snapshotBody,
+            allowedGetStatus: allowedGet.status,
+            deniedPostStatus: deniedPost.status,
+            deniedAdminStatus: deniedAdmin.status,
+            deniedRefreshStatus: deniedRefresh.status,
+            stopStatus: stopRes.status,
+            stoppedPlugin: stopBody.plugin || null,
+            revokedTokenStatus: revokedTokenGet.status,
+            stoppedUiAfterStatus: stoppedUiAfterRes.status,
+            stoppedProxyAfterStatus: stoppedProxyAfterRes.status,
+          };
+        },
+        {
+          pluginId: externalPlugin.id,
+          encodedPluginId: encodedExternalPluginId,
+          pluginJwt: externalStartCheck.pluginJwt,
+        },
+      );
+
+      expect(pluginBoundaryCheck.uiStatus).toBe(200);
+      expect(pluginBoundaryCheck.csp).toContain('sandbox allow-scripts');
+      expect(pluginBoundaryCheck.xfo).toBe('SAMEORIGIN');
+      expect(pluginBoundaryCheck.uiHtml).toContain('External Loopback Runtime v1.0.0');
+      expect(pluginBoundaryCheck.proxyStatus).toBe(200);
+      expect(pluginBoundaryCheck.proxyBody?.status).toBe('ok');
+      expect(pluginBoundaryCheck.proxyBody?.plugin_id).toBe(externalPlugin.id);
+      expect(pluginBoundaryCheck.proxyBody?.runtime_mode).toBe('external');
+      expect(pluginBoundaryCheck.proxyBody?.listen_port).toBe(externalPlugin.port);
+      expect(pluginBoundaryCheck.proxyBody?.auth_token_configured).toBe(true);
+      expect(pluginBoundaryCheck.proxyBody?.had_cookie_header).toBe(false);
+      expect(pluginBoundaryCheck.proxyBody?.had_authorization_header).toBe(false);
+      expect(pluginBoundaryCheck.proxyPolicies).toHaveLength(9);
+      for (const response of pluginBoundaryCheck.proxyPolicies) {
+        expect(response.csp, response.path).toBe("sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+        expect(response.xfo, response.path).toBe('DENY');
+        expect(response.contentType, response.path).toContain('application/json');
+        expect(response.cacheControl, response.path).toBe('private, no-store');
+        expect(response.pragma, response.path).toBe('no-cache');
+        expect(response.expires, response.path).toBe('0');
+        expect(response.sharedCacheHeaders, response.path).toEqual([]);
+        expect(response.status, response.path).toBe(response.path.endsWith('/status') ? 200 : 404);
+        if (response.status === 200) {
+          expect(response.body.status, response.path).toBe('ok');
+          expect(response.body.had_cookie_header, response.path).toBe(false);
+          expect(response.body.had_authorization_header, response.path).toBe(false);
+        }
       }
+      expect(pluginBoundaryCheck.snapshotStatus).toBe(200);
+      expect(pluginBoundaryCheck.snapshotBody?.marketplace_status).toBe(200);
+      expect(pluginBoundaryCheck.snapshotBody?.metrics_status).toBe(200);
+      expect(pluginBoundaryCheck.snapshotBody?.auth_token_configured).toBe(true);
+      expect(pluginBoundaryCheck.allowedGetStatus).toBe(200);
+      expect(pluginBoundaryCheck.deniedPostStatus).toBe(403);
+      expect(pluginBoundaryCheck.deniedAdminStatus).toBe(403);
+      expect([401, 403]).toContain(pluginBoundaryCheck.deniedRefreshStatus);
+      expect(pluginBoundaryCheck.stopStatus).toBe(200);
+      expect(pluginBoundaryCheck.stoppedPlugin?.enabled).toBe(false);
+      expect(pluginBoundaryCheck.revokedTokenStatus).toBe(401);
+      expect(pluginBoundaryCheck.stoppedUiAfterStatus).toBe(403);
+      expect(pluginBoundaryCheck.stoppedProxyAfterStatus).toBe(503);
+    } finally {
+      writeExternalPluginToken(externalPlugin.tokenFile, '');
     }
-    expect(pluginBoundaryCheck.snapshotStatus).toBe(200);
-    expect(pluginBoundaryCheck.snapshotBody?.marketplace_status).toBe(200);
-    expect(pluginBoundaryCheck.snapshotBody?.metrics_status).toBe(200);
-    expect(pluginBoundaryCheck.tokStatus).toBe(200);
-    expect(pluginBoundaryCheck.tokenType).toBe('plugin');
-    expect(pluginBoundaryCheck.audience).toBe('aetherflow-plugin-api');
-    expect(pluginBoundaryCheck.allowedGetStatus).toBe(200);
-    expect(pluginBoundaryCheck.deniedPostStatus).toBe(403);
-    expect(pluginBoundaryCheck.deniedAdminStatus).toBe(403);
-    expect([401, 403]).toContain(pluginBoundaryCheck.deniedRefreshStatus);
-    expect(pluginBoundaryCheck.stopStatus).toBe(200);
-    expect(pluginBoundaryCheck.stoppedPlugin?.enabled).toBe(false);
-    expect(pluginBoundaryCheck.revokedTokenStatus).toBe(401);
-    expect(pluginBoundaryCheck.stoppedUiAfterStatus).toBe(403);
-    expect(pluginBoundaryCheck.stoppedProxyAfterStatus).toBe(503);
 
     const windowSelector = page.getByRole('group', { name: 'Telemetry History Window' });
     await expect(windowSelector).toBeVisible();
@@ -782,24 +919,30 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     await sidebar.getByRole('button', { name: /Marketplace/i }).click();
     await expect(page.getByRole('heading', { name: /AetherMarketplace/i })).toBeVisible();
     await expect(page.getByTestId('installed-plugins-section')).toBeVisible();
-    const pluginCard = page.getByTestId('plugin-card-telemetry-inspector');
-    await expect(pluginCard).toBeVisible();
-    await expect(pluginCard.getByText('Stopped', { exact: true })).toBeVisible();
-    await page.getByTestId('toggle-plugin-telemetry-inspector').click();
-    await expect(pluginCard.getByText('Healthy', { exact: true })).toBeVisible();
-    await page.getByTestId('open-plugin-ui-telemetry-inspector').click();
+    const managedPluginCard = page.getByTestId('plugin-card-telemetry-inspector');
+    await expect(managedPluginCard).toBeVisible();
+    await expect(managedPluginCard.getByText('Stopped', { exact: true })).toBeVisible();
+    const externalPluginCard = page.getByTestId(`plugin-card-${externalPlugin.id}`);
+    await expect(externalPluginCard).toBeVisible();
+    await expect(externalPluginCard.getByText('Stopped', { exact: true })).toBeVisible();
+    await page.getByTestId(`toggle-plugin-${externalPlugin.id}`).click();
+    await expect(externalPluginCard.getByText('Healthy', { exact: true })).toBeVisible();
+    await page.getByTestId(`open-plugin-ui-${externalPlugin.id}`).click();
     const iframe = page.getByTestId('plugin-sandbox-iframe');
     await expect(iframe).toBeVisible();
     await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
-    await expect(iframe).toHaveAttribute('title', 'Plugin Sandbox: Telemetry Inspector');
+    await expect(iframe).toHaveAttribute('title', 'Plugin Sandbox: Telemetry Inspector (External E2E)');
     const sandboxFrame = page.frameLocator('[data-testid="plugin-sandbox-iframe"]');
     await expect(sandboxFrame.getByText('Telemetry Inspector', { exact: true }).first()).toBeVisible();
-    await expect(sandboxFrame.getByTestId('telemetry-inspector-bundle-badge')).toHaveText('Managed Loopback Runtime v1.0.0');
-    await expect(sandboxFrame.getByTestId('telemetry-inspector-bridge-output')).toContainText('"runtime_mode": "managed"');
+    await expect(sandboxFrame.getByTestId('telemetry-inspector-bundle-badge')).toHaveText('External Loopback Runtime v1.0.0');
+    await expect(sandboxFrame.getByTestId('telemetry-inspector-bridge-output')).toContainText('"runtime_mode": "external"');
+    await expect(sandboxFrame.getByTestId('telemetry-inspector-bridge-output')).toContainText(`"plugin_id": "${externalPlugin.id}"`);
+    await sandboxFrame.getByTestId('telemetry-inspector-probe-btn').click();
+    await expect(sandboxFrame.getByTestId('telemetry-inspector-bridge-output')).toContainText('"status": "ok"');
     await page.getByTestId('close-plugin-sandbox').click();
     await expect(iframe).toHaveCount(0);
-    await page.getByTestId('toggle-plugin-telemetry-inspector').click();
-    await expect(pluginCard.getByText('Stopped', { exact: true })).toBeVisible();
+    await page.getByTestId(`toggle-plugin-${externalPlugin.id}`).click();
+    await expect(externalPluginCard.getByText('Stopped', { exact: true })).toBeVisible();
 
     await sidebar.hover();
     await sidebar.getByRole('button', { name: /Settings/i }).click();

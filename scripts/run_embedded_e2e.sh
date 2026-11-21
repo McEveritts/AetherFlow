@@ -328,6 +328,7 @@ chmod 0755 "${WORK_DIR}"
 API_PID=""
 RUNNER_PID=""
 SQLITE_GUARD_PID=""
+EXT_PLUGIN_PID=""
 
 cleanup() {
     local code=$?
@@ -335,6 +336,10 @@ cleanup() {
     if [[ -n "${API_PID}" ]]; then
         kill -TERM -- "-${API_PID}" 2>/dev/null || kill "${API_PID}" 2>/dev/null || true
         wait "${API_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${EXT_PLUGIN_PID}" ]]; then
+        kill -TERM -- "-${EXT_PLUGIN_PID}" 2>/dev/null || kill "${EXT_PLUGIN_PID}" 2>/dev/null || true
+        wait "${EXT_PLUGIN_PID}" 2>/dev/null || true
     fi
     if [[ -n "${RUNNER_PID}" ]]; then
         kill -TERM -- "-${RUNNER_PID}" 2>/dev/null || kill "${RUNNER_PID}" 2>/dev/null || true
@@ -397,6 +402,274 @@ if [[ -d "${ROOT_DIR}/plugins" ]]; then
     cp -R "${ROOT_DIR}/plugins/." "${PLUGINS_DIR}/"
     cp -R "${ROOT_DIR}/plugins/." "${FS_ROOT}/opt/AetherFlow/plugins/"
     chmod -R go-w "${PLUGINS_DIR}" "${FS_ROOT}/opt/AetherFlow/plugins" 2>/dev/null || true
+fi
+
+EXT_PLUGIN_ID="telemetry-inspector-external"
+EXT_PLUGIN_DIR="${PLUGINS_DIR}/${EXT_PLUGIN_ID}"
+EXT_PLUGIN_SCRATCH_DIR="${WORK_DIR}/external-plugin"
+EXT_PLUGIN_RUNTIME="${EXT_PLUGIN_SCRATCH_DIR}/runtime.py"
+EXT_PLUGIN_TOKEN_FILE="${EXT_PLUGIN_SCRATCH_DIR}/token"
+EXT_PLUGIN_PORT_FILE="${EXT_PLUGIN_SCRATCH_DIR}/port"
+EXT_PLUGIN_LOG="${WORK_DIR}/external-plugin.log"
+EXT_PLUGIN_PORT=""
+
+# Stage a test-only external telemetry backend in the isolated work directory so
+# live Playwright tests preserve iframe CSP, proxy stripping, scoped token, and
+# UI coverage while keeping managed telemetry-inspector untouched (fail-closed
+# without the privileged systemd runner).
+if [[ "${RUN_PLAYWRIGHT}" == "1" ]]; then
+    EXT_FRONTEND_TEMPLATE="${ROOT_DIR}/plugins/telemetry-inspector/frontend/dist/index.html"
+    if [[ ! -f "${EXT_FRONTEND_TEMPLATE}" ]]; then
+        echo "[ERROR] Missing telemetry-inspector frontend template: ${EXT_FRONTEND_TEMPLATE}" >&2
+        exit 1
+    fi
+    mkdir -p "${EXT_PLUGIN_DIR}/frontend/dist" "${EXT_PLUGIN_SCRATCH_DIR}"
+    chmod 0700 "${EXT_PLUGIN_SCRATCH_DIR}"
+    cat > "${EXT_PLUGIN_DIR}/plugin.manifest.json" <<'EOF'
+{
+  "id": "telemetry-inspector-external",
+  "name": "Telemetry Inspector (External E2E)",
+  "version": "1.0.0",
+  "sdk": "external-e2e",
+  "contract_version": "v1",
+  "runtime_status": "external",
+  "description": "Test-only external loopback telemetry backend staged by the unprivileged E2E harness.",
+  "author": "AetherFlow Core",
+  "permissions": [
+    "marketplace:read",
+    "system:metrics:read"
+  ],
+  "api_scopes": [
+    "GET /api/v1/public/marketplace",
+    "GET /api/v1/auth/system/metrics"
+  ],
+  "backend": {
+    "health_path": "/healthz",
+    "port_allocation": "dynamic"
+  },
+  "frontend": {
+    "entry": "frontend/dist/index.html",
+    "bundle": "frontend/dist/index.html",
+    "slot": "marketplace",
+    "capabilities": [
+      "sandbox-iframe",
+      "postmessage-bridge",
+      "scoped-proxy"
+    ]
+  }
+}
+EOF
+    python3 - "${EXT_FRONTEND_TEMPLATE}" "${EXT_PLUGIN_DIR}/frontend/dist/index.html" "${EXT_PLUGIN_ID}" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+target = pathlib.Path(sys.argv[2])
+plugin_id = sys.argv[3]
+replacements = (
+    ('data-plugin-id="telemetry-inspector"', f'data-plugin-id="{plugin_id}"'),
+    ("const pluginId = 'telemetry-inspector';", f"const pluginId = '{plugin_id}';"),
+    ("Managed Loopback Runtime v1.0.0", "External Loopback Runtime v1.0.0"),
+    ("Probe Managed Runtime Status", "Probe External Runtime Status"),
+)
+rendered = source
+for old, new in replacements:
+    if old not in rendered:
+        raise SystemExit(f"[ERROR] External plugin frontend template missing expected marker: {old}")
+    rendered = rendered.replace(old, new, 1)
+target.write_text(rendered, encoding="utf-8")
+PY
+    chmod -R go-w "${EXT_PLUGIN_DIR}"
+    : > "${EXT_PLUGIN_TOKEN_FILE}"
+    chmod 0600 "${EXT_PLUGIN_TOKEN_FILE}"
+    cat > "${EXT_PLUGIN_RUNTIME}" <<'PY'
+import json
+import os
+import random
+import signal
+import threading
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def read_token(token_file):
+    if not token_file:
+        return ""
+    try:
+        with open(token_file, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def probe_host_endpoint(url, bearer_token=""):
+    headers = {"Accept": "application/json"}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request_obj = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with OPENER.open(request_obj, timeout=3.0) as response:
+            raw_body = response.read().decode("utf-8", errors="replace")
+            parsed_body = json.loads(raw_body) if raw_body.strip() else None
+            return response.status, parsed_body
+    except urllib.error.HTTPError as http_err:
+        return http_err.code, None
+    except Exception:
+        return 502, None
+
+
+class LoopbackExternalServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+class ExternalTelemetryHandler(BaseHTTPRequestHandler):
+    def log_message(self, format_str, *args):
+        return
+
+    def send_json(self, status_code, payload):
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_GET(self):
+        cfg = self.server.plugin_config
+        token = read_token(cfg["token_file"])
+        route_path = self.path.split("?", 1)[0]
+        lower_headers = {key.lower(): val for key, val in self.headers.items()}
+        had_cookie = "cookie" in lower_headers
+        had_auth = "authorization" in lower_headers
+        forwarded_plugin = lower_headers.get("x-aetherflow-plugin-id", "")
+        forwarded_user = lower_headers.get("x-aetherflow-user", "")
+
+        if route_path in ("/healthz", "/status"):
+            self.send_json(
+                200,
+                {
+                    "status": "ok",
+                    "plugin_id": cfg["plugin_id"],
+                    "plugin_name": cfg["plugin_name"],
+                    "version": cfg["plugin_version"],
+                    "sdk": "external-e2e",
+                    "runtime_mode": "external",
+                    "listen_port": cfg["port"],
+                    "auth_token_configured": bool(token),
+                    "proxied_plugin_header": forwarded_plugin,
+                    "forwarded_user": forwarded_user,
+                    "had_cookie_header": had_cookie,
+                    "had_authorization_header": had_auth,
+                },
+            )
+            return
+
+        if route_path == "/snapshot":
+            mkt_status, mkt_payload = probe_host_endpoint(
+                f"{cfg['api_base_url']}/api/v1/public/marketplace"
+            )
+            metrics_status, metrics_payload = probe_host_endpoint(
+                f"{cfg['api_base_url']}/api/v1/auth/system/metrics",
+                token,
+            )
+            marketplace_count = 0
+            if isinstance(mkt_payload, list):
+                marketplace_count = len(mkt_payload)
+            elif isinstance(mkt_payload, dict) and isinstance(mkt_payload.get("packages"), list):
+                marketplace_count = len(mkt_payload["packages"])
+            self.send_json(
+                200,
+                {
+                    "status": "ok",
+                    "plugin_id": cfg["plugin_id"],
+                    "runtime_mode": "external",
+                    "listen_port": cfg["port"],
+                    "auth_token_configured": bool(token),
+                    "marketplace_status": mkt_status,
+                    "marketplace_count": marketplace_count,
+                    "metrics_status": metrics_status,
+                    "metrics_sampled": isinstance(metrics_payload, dict),
+                    "had_cookie_header": had_cookie,
+                    "had_authorization_header": had_auth,
+                },
+            )
+            return
+
+        self.send_json(
+            404,
+            {
+                "error": "NOT_FOUND",
+                "path": route_path,
+                "plugin_id": cfg["plugin_id"],
+            },
+        )
+
+
+def main():
+    bind_addr = os.environ.get("PLUGIN_BIND_ADDR", "127.0.0.1").strip()
+    if bind_addr != "127.0.0.1":
+        raise SystemExit(f"External test telemetry backend must bind 127.0.0.1, got {bind_addr!r}")
+    port_min = int(os.environ.get("PLUGIN_PORT_MIN", "21000"))
+    port_max = int(os.environ.get("PLUGIN_PORT_MAX", "21999"))
+    if not (21000 <= port_min <= port_max <= 21999):
+        raise SystemExit(f"External test telemetry port range out of bounds: {port_min}..{port_max}")
+    api_base_url = os.environ.get("AETHERFLOW_API_BASE_URL", "").strip().rstrip("/")
+    if not api_base_url.startswith("http://127.0.0.1:"):
+        raise SystemExit(f"External test telemetry API base URL must be loopback HTTP: {api_base_url!r}")
+    port_file = os.environ.get("PLUGIN_PORT_FILE", "").strip()
+    if not port_file:
+        raise SystemExit("PLUGIN_PORT_FILE is required")
+
+    ports = list(range(port_min, port_max + 1))
+    offset = random.randrange(len(ports))
+    ordered_ports = ports[offset:] + ports[:offset]
+
+    server = None
+    bound_port = None
+    for candidate in ordered_ports:
+        try:
+            server = LoopbackExternalServer((bind_addr, candidate), ExternalTelemetryHandler)
+            bound_port = candidate
+            break
+        except OSError:
+            continue
+    if server is None or bound_port is None:
+        raise SystemExit(f"No available loopback port in {port_min}..{port_max}")
+
+    server.plugin_config = {
+        "plugin_id": os.environ.get("PLUGIN_ID", "telemetry-inspector-external").strip(),
+        "plugin_name": os.environ.get("PLUGIN_NAME", "Telemetry Inspector (External E2E)").strip(),
+        "plugin_version": os.environ.get("PLUGIN_VERSION", "1.0.0").strip(),
+        "api_base_url": api_base_url,
+        "token_file": os.environ.get("AETHERFLOW_PLUGIN_TOKEN_FILE", "").strip(),
+        "port": bound_port,
+    }
+
+    tmp_port_file = f"{port_file}.tmp"
+    with open(tmp_port_file, "w", encoding="utf-8") as handle:
+        handle.write(f"{bound_port}\n")
+    os.replace(tmp_port_file, port_file)
+
+    def handle_signal(_signum, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+    try:
+        server.serve_forever(poll_interval=0.2)
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
+PY
+    chmod 0644 "${EXT_PLUGIN_RUNTIME}"
 fi
 
 PRIV_RUNNER_ENABLED="false"
@@ -685,6 +958,63 @@ with sqlite3.connect(database_path) as database:
     )
 print("[OK] Seeded 12 real persisted telemetry rows in the isolated E2E database")
 PY
+    PYTHON_BIN="$(command -v python3)"
+    EXT_PLUGIN_ENV=(
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        "HOME=${WORK_DIR}"
+        "TMPDIR=${WORK_DIR}"
+        "NO_PROXY=127.0.0.1,localhost"
+        "no_proxy=127.0.0.1,localhost"
+        "PLUGIN_BIND_ADDR=127.0.0.1"
+        "PLUGIN_PORT_MIN=21000"
+        "PLUGIN_PORT_MAX=21999"
+        "PLUGIN_ID=${EXT_PLUGIN_ID}"
+        "PLUGIN_NAME=Telemetry Inspector (External E2E)"
+        "PLUGIN_VERSION=1.0.0"
+        "AETHERFLOW_API_BASE_URL=${BASE_URL}"
+        "AETHERFLOW_PLUGIN_TOKEN_FILE=${EXT_PLUGIN_TOKEN_FILE}"
+        "PLUGIN_PORT_FILE=${EXT_PLUGIN_PORT_FILE}"
+    )
+    (
+        cd "${EXT_PLUGIN_SCRATCH_DIR}"
+        exec setsid "${EXEC_PREFIX[@]}" env -i "${EXT_PLUGIN_ENV[@]}" "${PYTHON_BIN}" -B "${EXT_PLUGIN_RUNTIME}" >"${EXT_PLUGIN_LOG}" 2>&1
+    ) &
+    EXT_PLUGIN_PID=$!
+
+    EXT_PLUGIN_READY=0
+    for _ in $(seq 1 50); do
+        if ! kill -0 "${EXT_PLUGIN_PID}" 2>/dev/null; then
+            echo "[ERROR] External E2E telemetry backend exited prematurely. Log output:" >&2
+            cat "${EXT_PLUGIN_LOG}" >&2 || true
+            exit 1
+        fi
+        if [[ -s "${EXT_PLUGIN_PORT_FILE}" ]]; then
+            candidate_port="$(tr -d '[:space:]' < "${EXT_PLUGIN_PORT_FILE}")"
+            if [[ "${candidate_port}" =~ ^[0-9]{5}$ ]] && (( 10#${candidate_port} >= 21000 && 10#${candidate_port} <= 21999 )); then
+                EXT_PLUGIN_PORT=$((10#${candidate_port}))
+                ext_health="$(curl -fsS --max-time 2 "http://127.0.0.1:${EXT_PLUGIN_PORT}/healthz" 2>/dev/null || true)"
+                if [[ "${ext_health}" =~ \"status\"[[:space:]]*:[[:space:]]*\"ok\" ]] && \
+                   [[ "${ext_health}" =~ \"runtime_mode\"[[:space:]]*:[[:space:]]*\"external\" ]]; then
+                    EXT_PLUGIN_READY=1
+                    break
+                fi
+            fi
+        fi
+        sleep 0.1
+    done
+    if [[ "${EXT_PLUGIN_READY}" -ne 1 ]]; then
+        echo "[ERROR] Timed out waiting for external E2E telemetry backend healthz" >&2
+        cat "${EXT_PLUGIN_LOG}" >&2 || true
+        exit 1
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "^0\.0\.0\.0:${EXT_PLUGIN_PORT}$|^\*:${EXT_PLUGIN_PORT}$"; then
+            echo "[FATAL] External E2E telemetry backend bound wildcard 0.0.0.0:${EXT_PLUGIN_PORT} instead of 127.0.0.1:${EXT_PLUGIN_PORT}!" >&2
+            exit 1
+        fi
+    fi
+    echo "[OK] External test-only telemetry backend listening on 127.0.0.1:${EXT_PLUGIN_PORT}"
+
     echo "[INFO] Running Playwright E2E suite against the external WASM frontend (${BASE_URL}) ..."
     PLAYWRIGHT_SPECS="${E2E_PLAYWRIGHT_SPECS:-[.]live[.]spec[.]ts$}"
     (
@@ -692,6 +1022,9 @@ PY
         E2E_ADMIN_USER="${ADMIN_USER}" \
         E2E_ADMIN_PASS="${ADMIN_PASS}" \
         E2E_MEMBER_USER="${MEMBER_USER}" \
+        E2E_EXTERNAL_PLUGIN_ID="${EXT_PLUGIN_ID}" \
+        E2E_EXTERNAL_PLUGIN_PORT="${EXT_PLUGIN_PORT}" \
+        E2E_EXTERNAL_PLUGIN_TOKEN_FILE="${EXT_PLUGIN_TOKEN_FILE}" \
         PLAYWRIGHT_BASE_URL="${BASE_URL}" \
         PLAYWRIGHT_SKIP_WEBSERVER="1" \
         npx playwright test ${PLAYWRIGHT_SPECS}

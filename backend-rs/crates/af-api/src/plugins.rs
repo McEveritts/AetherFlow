@@ -929,7 +929,11 @@ pub(crate) fn update_registry_state(
     read_registry_state(plugin_id)
 }
 
-fn allocate_plugin_port(plugin_id: &str, preferred: u16) -> Result<u16, String> {
+fn allocate_plugin_port(
+    plugin_id: &str,
+    preferred: u16,
+    allow_listening_preferred: bool,
+) -> Result<u16, String> {
     let mut used_ports = HashSet::new();
     if let Ok(conn) = af_db::get_conn() {
         if let Ok(mut stmt) = conn.prepare(
@@ -956,7 +960,7 @@ fn allocate_plugin_port(plugin_id: &str, preferred: u16) -> Result<u16, String> 
 
     if (PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END).contains(&preferred)
         && !used_ports.contains(&preferred)
-        && TcpListener::bind(("127.0.0.1", preferred)).is_ok()
+        && (allow_listening_preferred || TcpListener::bind(("127.0.0.1", preferred)).is_ok())
     {
         return Ok(preferred);
     }
@@ -1430,6 +1434,7 @@ pub async fn start_plugin_instance_with_port(
     let port = allocate_plugin_port(
         &manifest.id,
         preferred_port.unwrap_or(existing.allocated_port),
+        !spawned_managed,
     )
     .map_err(PluginLifecycleError::Runtime)?;
 
@@ -3432,6 +3437,113 @@ esac
         assert_eq!(stopped.status, "stopped");
         assert!(decode_and_verify_plugin_token(&token).is_err());
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn external_plugin_reuses_listening_preferred_port_while_preserving_guards() {
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let _env_guard = test_env_lock().lock().await;
+        let db = ensure_shared_test_db();
+        let tmp = db
+            .parent()
+            .unwrap()
+            .join(format!("external-port-{}", Uuid::new_v4()));
+        let plugins_root = tmp.join("plugins");
+
+        for id in ["external-listening", "other-external"] {
+            let plugin_dir = plugins_root.join(id);
+            fs::create_dir_all(&plugin_dir).unwrap();
+            fs::write(
+                plugin_dir.join("plugin.manifest.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "name": id,
+                    "version": "1.0.0",
+                    "runtime_status": "external",
+                    "permissions": ["system:metrics:read"],
+                    "api_scopes": ["GET /api/v1/auth/system/metrics"],
+                    "backend": { "health_path": "/healthz" }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let mut bound = None;
+        for candidate in (21500..=PLUGIN_PORT_RANGE_END).chain(PLUGIN_PORT_RANGE_START..21500) {
+            if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", candidate)).await {
+                bound = Some((candidate, listener));
+                break;
+            }
+        }
+        let (ext_port, listener) = bound.expect("bind loopback port in plugin range");
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/healthz",
+                axum::routing::get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+
+        env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+        env::set_var("AETHERFLOW_RUNNER_SOCK", tmp.join("absent-runner.sock"));
+        env::set_var("PRIVILEGED_RUNNER_ENABLED", "false");
+
+        let (manifests, rejected) = discover_plugins_in_dir(&plugins_root);
+        assert!(rejected.is_empty(), "rejected={rejected:?}");
+        let ext_manifest = manifests
+            .iter()
+            .find(|m| m.id == "external-listening")
+            .unwrap()
+            .clone();
+        let other_manifest = manifests
+            .iter()
+            .find(|m| m.id == "other-external")
+            .unwrap()
+            .clone();
+
+        // 1. Explicitly selected already-listening external port is honored and healthy.
+        let started = start_plugin_instance_with_port(&ext_manifest, Some(ext_port))
+            .await
+            .unwrap();
+        assert!(started.enabled);
+        assert!(started.healthy);
+        assert_eq!(started.allocated_port, ext_port);
+
+        // 2. Stopping and re-starting without an explicit port honors the registered port.
+        let stopped = stop_plugin_instance(&ext_manifest).await.unwrap();
+        assert!(!stopped.enabled);
+        assert_eq!(stopped.allocated_port, ext_port);
+
+        let restarted = start_plugin_instance(&ext_manifest).await.unwrap();
+        assert!(restarted.enabled);
+        assert!(restarted.healthy);
+        assert_eq!(restarted.allocated_port, ext_port);
+
+        // 3. Another plugin cannot claim the same port registered to external-listening.
+        let other_started = start_plugin_instance_with_port(&other_manifest, Some(ext_port))
+            .await
+            .unwrap();
+        assert_ne!(other_started.allocated_port, ext_port);
+        assert!((PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END)
+            .contains(&other_started.allocated_port));
+
+        // 4. Out-of-range preferred ports are never returned for external launches.
+        let in_range_port = allocate_plugin_port("external-out-of-range", 19999, true).unwrap();
+        assert_ne!(in_range_port, 19999);
+        assert!((PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END).contains(&in_range_port));
+
+        // 5. Managed launches still enforce free-port binding and skip already-listening ports.
+        let managed_port = allocate_plugin_port("external-listening", ext_port, false).unwrap();
+        assert_ne!(managed_port, ext_port);
+        assert!((PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END).contains(&managed_port));
+
+        let _ = stop_plugin_instance(&other_manifest).await;
+        let _ = stop_plugin_instance(&ext_manifest).await;
+        server.abort();
         let _ = fs::remove_dir_all(&tmp);
     }
 

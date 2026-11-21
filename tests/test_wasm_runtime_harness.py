@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -324,6 +325,51 @@ class ExternalWasmHarnessTests(unittest.TestCase):
         self.assertTrue(Path(api_env["DB_PATH"]).is_relative_to(self.root))
         for key in ("OPENAI_API_KEY", "GOOGLE_CLIENT_SECRET", "AETHERFLOW_INTERNAL_API_URL"):
             self.assertNotIn(key, api_env)
+
+    def test_playwright_mode_stages_isolated_external_telemetry_plugin_without_mutating_managed(self):
+        harness = HARNESS.read_text(encoding="utf-8")
+        self.assertIn('exec setsid "${EXEC_PREFIX[@]}" env -i "${EXT_PLUGIN_ENV[@]}" "${PYTHON_BIN}" -B "${EXT_PLUGIN_RUNTIME}"', harness)
+        self.assertIn('kill -TERM -- "-${EXT_PLUGIN_PID}"', harness)
+        self.assertIn("PLUGIN_PORT_MIN=21000", harness)
+        self.assertIn("PLUGIN_PORT_MAX=21999", harness)
+        self.assertFalse((ROOT / "plugins/telemetry-inspector-external").exists())
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        result = self.run_harness("--port", str(port), "--playwright", env={**self.env, "STATIC_DIR": str(self.default_dist)})
+        self.assertNotEqual(result.returncode, 0)  # non-server stub exits before API readiness
+        self.assertTrue(self.marker.exists(), result.stderr)
+        api_env = dict(line.split("=", 1) for line in self.marker.read_text().splitlines())
+        self.assertEqual(api_env["PRIVILEGED_RUNNER_ENABLED"], "false")
+
+        plugins_dir = Path(api_env["AETHERFLOW_PLUGINS_DIR"])
+        work_dir = plugins_dir.parent
+        self.assertTrue(work_dir.is_relative_to(self.root))
+
+        managed_manifest = json.loads((plugins_dir / "telemetry-inspector/plugin.manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(managed_manifest["runtime_status"], "managed")
+        self.assertEqual(managed_manifest["lifecycle_hooks"]["on_start"], "backend/hooks/start.sh")
+
+        external_dir = plugins_dir / "telemetry-inspector-external"
+        external_manifest = json.loads((external_dir / "plugin.manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(external_manifest["id"], "telemetry-inspector-external")
+        self.assertEqual(external_manifest["runtime_status"], "external")
+        self.assertNotIn("lifecycle_hooks", external_manifest)
+        self.assertNotIn("entry", external_manifest["backend"])
+        self.assertNotIn("binary_name", external_manifest["backend"])
+
+        external_ui = (external_dir / "frontend/dist/index.html").read_text(encoding="utf-8")
+        self.assertIn("const pluginId = 'telemetry-inspector-external';", external_ui)
+        self.assertIn("External Loopback Runtime v1.0.0", external_ui)
+
+        scratch_dir = work_dir / "external-plugin"
+        token_file = scratch_dir / "token"
+        runtime_script = scratch_dir / "runtime.py"
+        self.assertEqual(scratch_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(token_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(token_file.read_text(encoding="utf-8"), "")
+        compile(runtime_script.read_text(encoding="utf-8"), str(runtime_script), "exec")
 
 
 if __name__ == "__main__":
