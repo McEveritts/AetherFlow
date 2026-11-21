@@ -1,33 +1,10 @@
-use af_models::AppIngressConfig;
+use af_models::{app_metadata::normalize_app_slug as canonical_app, AppIngressConfig};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::BTreeSet;
 
 fn schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);")?;
     Ok(())
-}
-
-fn canonical_app(app: &str) -> String {
-    let normalized = app.trim().to_ascii_lowercase();
-    match normalized.trim_end_matches(".service") {
-        "af-maintainerr" => "maintainerr".into(),
-        "af-palate" => "palate".into(),
-        "af-kasmvnc" => "kasmvnc".into(),
-        "af-mcvnc" => "mcvnc".into(),
-        "deluged" | "deluge-web" => "deluge".into(),
-        "paperless" | "paperless-webserver" | "paperless-worker" | "paperless-scheduler" => {
-            "paperless-ngx".into()
-        }
-        "dispatcharr-celery" | "dispatcharr-celerybeat" => "dispatcharr".into(),
-        "novnc-xvnc" | "novnc-session" => "novnc".into(),
-        "xrdp-sesman" => "xrdp".into(),
-        "node_exporter" => "prometheus".into(),
-        "rclone-vfs" => "rclone".into(),
-        "librespeed.socket" => "librespeed".into(),
-        "scrutiny-collector" | "scrutiny-collector.timer" => "scrutiny".into(),
-        "recyclarr.timer" => "recyclarr".into(),
-        name => name.into(),
-    }
 }
 
 fn check_reservation(
@@ -838,6 +815,15 @@ mod tests {
             .unwrap();
         assert!(set_config(&mut conn, &config, Some(("install-job", "install"))).is_err());
         set_config(&mut conn, &config, None).unwrap();
+
+        // Old lifecycle rows can lack a recorded unit alias.
+        conn.execute(
+            "INSERT INTO package_lifecycle_jobs VALUES ('plex','plex-job','remove','uninstalling','[]')",
+            [],
+        )
+        .unwrap();
+        assert!(check_reservation(&conn, " PlexMediaServer.service ", None).is_err());
+        assert!(check_reservation(&conn, "plexmediaserver", Some(("plex-job", "remove"))).is_ok());
     }
 
     #[test]

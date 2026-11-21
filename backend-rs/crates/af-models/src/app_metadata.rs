@@ -14,7 +14,9 @@ pub fn normalize_app_slug(app_name: &str) -> String {
         "pihole-ftl" => "pihole".to_string(),
         "transmission-daemon" => "transmission".to_string(),
         "deluged" | "deluge-web" => "deluge".to_string(),
-        "paperless-webserver" | "paperless" => "paperless-ngx".to_string(),
+        "paperless" | "paperless-webserver" | "paperless-worker" | "paperless-scheduler" => {
+            "paperless-ngx".to_string()
+        }
         "qbittorrent-nox" => "qbittorrent".to_string(),
         "calibre-web" => "calibreweb".to_string(),
         "grafana-server" => "grafana".to_string(),
@@ -28,6 +30,14 @@ pub fn normalize_app_slug(app_name: &str) -> String {
         "af-piped" => "piped".to_string(),
         "af-invidious" => "invidious".to_string(),
         "home-assistant@homeassistant" => "homeassistant".to_string(),
+        "dispatcharr-celery" | "dispatcharr-celerybeat" => "dispatcharr".to_string(),
+        "novnc-xvnc" | "novnc-session" => "novnc".to_string(),
+        "xrdp-sesman" => "xrdp".to_string(),
+        "node_exporter" => "prometheus".to_string(),
+        "rclone-vfs" => "rclone".to_string(),
+        "librespeed.socket" => "librespeed".to_string(),
+        "scrutiny-collector" | "scrutiny-collector.timer" => "scrutiny".to_string(),
+        "recyclarr.timer" => "recyclarr".to_string(),
         _ => clean,
     }
 }
