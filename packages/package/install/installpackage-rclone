@@ -291,10 +291,17 @@ PYEOF
                         gui_status="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 "http://127.0.0.1:${port}/" 2>/dev/null || true)"
                         case "$gui_status" in
                             200|301|302|307|308)
+                                if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                                    af_emit_readiness_record "$service" "http://127.0.0.1:${rc_check_port}/metrics" true false
+                                    af_emit_readiness_record "$service" "http://127.0.0.1:${port}/" false false
+                                fi
                                 return 0
                                 ;;
                         esac
                     else
+                        if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                            af_emit_readiness_record "$service" "http://127.0.0.1:${rc_check_port}/metrics" true false
+                        fi
                         return 0
                     fi
                 fi

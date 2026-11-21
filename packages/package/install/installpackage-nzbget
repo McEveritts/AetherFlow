@@ -128,7 +128,10 @@ for line in safe_read_text('/var/lib/nzbget/nzbget.conf').splitlines():
 credentials = settings.get('ControlUsername', '') + ':' + settings.get('ControlPassword', '')
 print('user = ' + json.dumps(credentials, ensure_ascii=False))
 PYEOF
-    systemctl is-active --quiet "$service"
+    systemctl is-active --quiet "$service" || return 1
+    if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+        af_emit_readiness_record "$service" "http://127.0.0.1:${port}${path}" true false
+    fi
 }
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/jsonrpc/version"
 

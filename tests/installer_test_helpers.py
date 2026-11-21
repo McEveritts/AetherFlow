@@ -15,7 +15,7 @@ def common_functions(*names):
         names = tuple(dict.fromkeys((*names, 'configured_database_connection', 'configured_postgresql_cleanup',
                                      'validate_config_paths', 'safe_config_python')))
     if 'safe_rm_rf' in names or 'wait_for_service_ready' in names:
-        names = tuple(dict.fromkeys((*names, 'validate_config_paths', 'safe_config_python', 'application_readiness_url')))
+        names = tuple(dict.fromkeys((*names, 'validate_config_paths', 'safe_config_python', 'application_readiness_url', 'af_emit_readiness_record')))
     if 'wait_for_apache_app_ready' in names or 'apache_app_enter_maintenance' in names:
         names = tuple(dict.fromkeys((*names, 'apache_app_readiness_target', 'apache_app_probe_body_is_healthy',
                                      'apache_app_prepare_maintenance_vhost', 'apache_app_capture_worker_pids',

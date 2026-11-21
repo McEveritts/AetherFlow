@@ -1368,3 +1368,740 @@ async fn legacy_output_overflow_is_truncated_and_reaps_child_before_releasing_ma
     drop(owner);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_stream_restores_sandbox_journal_on_failure_and_commits_on_success() {
+    use futures::StreamExt;
+    let test =
+        "lifecycle_tests::legacy_stream_restores_sandbox_journal_on_failure_and_commits_on_success";
+    if subprocess(test) {
+        return;
+    }
+    let root = fixture_root();
+    let scripts = root.join("packages/package/install");
+    fs::create_dir_all(&scripts).unwrap();
+    let config_dir = root.join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"Fixture","description":"Test fixture","lock_file":"/install/.fixture.lock","category":"Media","service_type":"systemd","service_name":"fixture","default_port":5452}]"#,
+    )
+    .unwrap();
+    fs::write(
+        &auto_cfg,
+        r#"{"fixture":{"sandbox_profile":"java","sandbox_rw_paths":["/var/lib/fixture"],"sandbox_service_units":["fixture.service"]}}"#,
+    )
+    .unwrap();
+
+    let dropin_dir = root.join("etc/systemd/system/fixture.service.d");
+    fs::create_dir_all(&dropin_dir).unwrap();
+    let prior_dropin = "[Service]\n# prior-fixture-dropin\n";
+    let canonical_dropin = dropin_dir.join("10-aetherflow-sandbox.conf");
+    let legacy_dropin = dropin_dir.join("aetherflow-sandbox.conf");
+    fs::write(&canonical_dropin, prior_dropin).unwrap();
+
+    env::set_current_dir(&root).unwrap();
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_MASTER_USER", "admin");
+    env::set_var("AETHERFLOW_MASTER_PASS", "test-master-secret");
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','sb-fail','install','installing','now',?1,'[\"fixture.service\"]')", [&owner.id]).unwrap();
+
+    let script_name = "installpackage-sandbox-fixture";
+
+    // 1. Failing legacy script must restore prior sandbox drop-in and remove newly created files
+    executable(
+        &scripts.join(script_name),
+        "#!/bin/bash\necho failing-fixture-install\nexit 1\n",
+    );
+    let fail_req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: script_name.into(),
+        lifecycle_job_id: "sb-fail".into(),
+        ..Default::default()
+    };
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(5),
+        package_executor::execute_package_request_stream(fail_req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+    assert!(output.contains("__RUNNER_EXIT_ERROR__:"), "{output}");
+    assert_eq!(
+        fs::read_to_string(&canonical_dropin).unwrap(),
+        prior_dropin,
+        "failed legacy install must restore prior 10-aetherflow-sandbox.conf"
+    );
+    assert!(
+        !legacy_dropin.exists(),
+        "failed legacy install must remove newly created companion drop-in"
+    );
+    assert!(
+        fs::read_dir(&dropin_dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().contains(".bak-af.")),
+        "rollback must not leave .bak-af backup files behind"
+    );
+
+    // 2. Succeeding legacy script must write sandbox drop-in and commit journal (no .bak-af left)
+    conn.execute("DELETE FROM package_lifecycle_jobs", [])
+        .unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','sb-ok','install','installing','now',?1,'[\"fixture.service\"]')", [&owner.id]).unwrap();
+    executable(
+        &scripts.join(script_name),
+        "#!/bin/bash\necho ok-fixture-install\nexit 0\n",
+    );
+    let ok_req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: script_name.into(),
+        lifecycle_job_id: "sb-ok".into(),
+        ..Default::default()
+    };
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(5),
+        package_executor::execute_package_request_stream(ok_req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+    assert!(!output.contains("__RUNNER_EXIT_ERROR__:"), "{output}");
+    let updated = fs::read_to_string(&canonical_dropin).unwrap();
+    assert!(updated.contains("ProtectSystem=strict"), "{updated}");
+    assert!(
+        fs::read_dir(&dropin_dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().contains(".bak-af.")),
+        "committed install must remove .bak-af backup files"
+    );
+
+    drop((owner, conn));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn filebot_post_sandbox_restart_waits_for_delayed_listener_and_consumes_common_sh_record() {
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let test = "lifecycle_tests::filebot_post_sandbox_restart_waits_for_delayed_listener_and_consumes_common_sh_record";
+    if subprocess(test) {
+        return;
+    }
+
+    let root = fixture_root();
+    let common_sh = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("packages/common.sh");
+    let config_dir = root.join("config");
+    let scripts = root.join("packages/package/install");
+    let fake_bin = root.join("fake-bin");
+    let systemd_dir = root.join("etc/systemd/system");
+    let install_dir = root.join("install");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&systemd_dir).unwrap();
+    fs::create_dir_all(&install_dir).unwrap();
+
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"FileBot Fixture","description":"FileBot readiness fixture","lock_file":"/install/.filebot.lock","category":"Media","service_type":"systemd","service_name":"filebot","default_port":5452}]"#,
+    )
+    .unwrap();
+    fs::write(
+        &auto_cfg,
+        r#"{"fixture":{"sandbox_profile":"java","sandbox_rw_paths":["/var/lib/filebot"],"sandbox_service_units":["filebot.service"]}}"#,
+    )
+    .unwrap();
+
+    let restart_marker = root.join("try-restart.fired");
+    let old_stopped_marker = root.join("old-listener.stopped");
+    let systemctl_log = root.join("systemctl.log");
+    executable(
+        &fake_bin.join("systemctl"),
+        &format!(
+            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> {:?}\ncase \"${{1:-}}\" in\n  is-active) exit 0 ;;\n  daemon-reload) exit 0 ;;\n  show)\n    printf 'LoadState=loaded\\nType=simple\\nActiveState=active\\nSubState=running\\nRemainAfterExit=no\\nResult=success\\n'\n    exit 0 ;;\n  try-restart)\n    touch {:?}\n    while [[ ! -f {:?} ]]; do sleep 0.01; done\n    exit 0 ;;\nesac\nexit 0\n",
+            systemctl_log, restart_marker, old_stopped_marker
+        ),
+    );
+
+    // Phase 1 listener runs during installpackage-filebot-fixture's wait_for_service_ready.
+    // On try-restart, the old listener is dropped BEFORE try-restart returns 0 (matching real
+    // systemd stopping the old PID synchronously), and the new listener binds only 320ms later.
+    let initial_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = initial_listener.local_addr().unwrap().port();
+    let post_restart_hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let post_restart_hits_task = post_restart_hits.clone();
+    let restart_marker_task = restart_marker.clone();
+    let old_stopped_marker_task = old_stopped_marker.clone();
+    let server_task = tokio::spawn(async move {
+        let mut listener = Some(initial_listener);
+        let mut restarted = false;
+        loop {
+            if !restarted && restart_marker_task.exists() {
+                restarted = true;
+                // Drop old listener synchronously before letting try-restart return 0
+                drop(listener.take());
+                let _ = fs::write(&old_stopped_marker_task, "stopped");
+                tokio::time::sleep(Duration::from_millis(320)).await;
+                listener = Some(
+                    tokio::net::TcpListener::bind(("127.0.0.1", port))
+                        .await
+                        .expect("rebind delayed filebot listener"),
+                );
+            }
+            if let Some(ref l) = listener {
+                tokio::select! {
+                    accepted = l.accept() => {
+                        if let Ok((mut sock, _)) = accepted {
+                            if restarted {
+                                post_restart_hits_task.fetch_add(1, Ordering::SeqCst);
+                            }
+                            tokio::spawn(async move {
+                                let mut buf = [0u8; 1024];
+                                let _ = sock.read(&mut buf).await;
+                                let resp = b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"FileBot\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = sock.write_all(resp).await;
+                            });
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        }
+    });
+
+    let script_name = "installpackage-filebot-delay-fixture";
+    executable(
+        &scripts.join(script_name),
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nexport LOGFILE=/dev/null\nexport LOCK_DIR={:?}\nsource {:?}\nexport PATH={:?}:\"$PATH\"\ncat > {:?} <<'EOF'\n[Unit]\nDescription=FileBot Test\n[Service]\nType=simple\nExecStart=/bin/true\nEOF\nwait_for_service_ready filebot.service \"$AF_APP_PORT\" / 5\ntouch {:?}\n",
+            install_dir,
+            common_sh,
+            fake_bin,
+            systemd_dir.join("filebot.service"),
+            install_dir.join(".filebot.lock"),
+        ),
+    );
+
+    let orig_path = env::var("PATH").unwrap_or_default();
+    env::set_current_dir(&root).unwrap();
+    env::set_var("PATH", format!("{}:{orig_path}", fake_bin.display()));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::set_var("AETHERFLOW_TEST_LIVE_SANDBOX", "1");
+    env::set_var("AETHERFLOW_TEST_READINESS_TIMEOUT_MS", "3000");
+    env::set_var("AETHERFLOW_TEST_POLL_INTERVAL_MS", "30");
+    env::set_var("AETHERFLOW_MASTER_USER", "admin");
+    env::set_var("AETHERFLOW_MASTER_PASS", "test-master-secret");
+    // Dead ambient proxy proves post-restart probe enforces no_proxy().
+    env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
+    env::set_var("http_proxy", "http://127.0.0.1:1");
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','fb-delay','install','installing','now',?1,'[\"filebot.service\"]')", [&owner.id]).unwrap();
+
+    let req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: script_name.into(),
+        app_port: i32::from(port),
+        lifecycle_job_id: "fb-delay".into(),
+        ..Default::default()
+    };
+
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_executor::execute_package_request_stream(req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+
+    server_task.abort();
+    assert!(!output.contains("__RUNNER_EXIT_ERROR__:"), "{output}");
+    assert!(
+        !output.contains("__AF_READINESS_PROBE__="),
+        "internal readiness probe record must be consumed and not leaked to stream: {output}"
+    );
+    assert!(
+        output.contains("Verified post-sandbox readiness for filebot.service")
+            && output.contains("HTTP 401"),
+        "expected post-sandbox HTTP 401 verification note: {output}"
+    );
+    assert!(
+        restart_marker.exists(),
+        "runner must have executed try-restart on changed filebot.service"
+    );
+    assert!(
+        post_restart_hits.load(Ordering::SeqCst) >= 1,
+        "runner must observe and probe the delayed listener after final try-restart"
+    );
+    let dropin_dir = systemd_dir.join("filebot.service.d");
+    assert!(dropin_dir.join("10-aetherflow-sandbox.conf").exists());
+    assert!(
+        fs::read_dir(&dropin_dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().contains(".bak-af.")),
+        "committed install must clean up .bak-af backups"
+    );
+
+    drop((owner, conn));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn filebot_post_sandbox_restart_fails_clearly_when_service_dies_and_restores_only_dropin() {
+    use futures::StreamExt;
+    let test = "lifecycle_tests::filebot_post_sandbox_restart_fails_clearly_when_service_dies_and_restores_only_dropin";
+    if subprocess(test) {
+        return;
+    }
+
+    let root = fixture_root();
+    let common_sh = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("packages/common.sh");
+    let config_dir = root.join("config");
+    let scripts = root.join("packages/package/install");
+    let fake_bin = root.join("fake-bin");
+    let systemd_dir = root.join("etc/systemd/system");
+    let install_dir = root.join("install");
+    let dropin_dir = systemd_dir.join("filebot.service.d");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&dropin_dir).unwrap();
+    fs::create_dir_all(&install_dir).unwrap();
+
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"FileBot Fixture","description":"FileBot readiness fixture","lock_file":"/install/.filebot.lock","category":"Media","service_type":"systemd","service_name":"filebot","default_port":5452}]"#,
+    )
+    .unwrap();
+    fs::write(
+        &auto_cfg,
+        r#"{"fixture":{"sandbox_profile":"java","sandbox_rw_paths":["/var/lib/filebot"],"sandbox_service_units":["filebot.service"]}}"#,
+    )
+    .unwrap();
+
+    let prior_dropin = "[Service]\n# prior-filebot-dropin\n";
+    let canonical_dropin = dropin_dir.join("10-aetherflow-sandbox.conf");
+    let companion_dropin = dropin_dir.join("aetherflow-sandbox.conf");
+    fs::write(&canonical_dropin, prior_dropin).unwrap();
+
+    let restart_marker = root.join("try-restart.fired");
+    let systemctl_log = root.join("systemctl.log");
+    executable(
+        &fake_bin.join("systemctl"),
+        &format!(
+            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> {:?}\ncase \"${{1:-}}\" in\n  is-active) exit 0 ;;\n  daemon-reload) exit 0 ;;\n  show)\n    if [[ -f {:?} ]]; then\n      printf 'LoadState=loaded\\nType=simple\\nActiveState=activating\\nSubState=auto-restart\\nRemainAfterExit=no\\nResult=exit-code\\n'\n    else\n      printf 'LoadState=loaded\\nType=simple\\nActiveState=active\\nSubState=running\\nRemainAfterExit=no\\nResult=success\\n'\n    fi\n    exit 0 ;;\n  try-restart)\n    touch {:?}\n    exit 0 ;;\nesac\nexit 0\n",
+            systemctl_log, restart_marker, restart_marker
+        ),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_task = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+
+    let lock_file = install_dir.join(".filebot.lock");
+    let script_name = "installpackage-filebot-die-fixture";
+    executable(
+        &scripts.join(script_name),
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nexport LOGFILE=/dev/null\nexport LOCK_DIR={:?}\nsource {:?}\nexport PATH={:?}:\"$PATH\"\ncat > {:?} <<'EOF'\n[Unit]\nDescription=FileBot Test\n[Service]\nType=simple\nExecStart=/bin/true\nEOF\nwait_for_service_ready filebot.service \"$AF_APP_PORT\" / 5\ntouch {:?}\n",
+            install_dir,
+            common_sh,
+            fake_bin,
+            systemd_dir.join("filebot.service"),
+            lock_file,
+        ),
+    );
+
+    let orig_path = env::var("PATH").unwrap_or_default();
+    env::set_current_dir(&root).unwrap();
+    env::set_var("PATH", format!("{}:{orig_path}", fake_bin.display()));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::set_var("AETHERFLOW_TEST_LIVE_SANDBOX", "1");
+    env::set_var("AETHERFLOW_TEST_READINESS_TIMEOUT_MS", "1500");
+    env::set_var("AETHERFLOW_TEST_POLL_INTERVAL_MS", "30");
+    env::set_var("AETHERFLOW_MASTER_USER", "admin");
+    env::set_var("AETHERFLOW_MASTER_PASS", "test-master-secret");
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','fb-die','install','installing','now',?1,'[\"filebot.service\"]')", [&owner.id]).unwrap();
+
+    let req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: script_name.into(),
+        app_port: i32::from(port),
+        lifecycle_job_id: "fb-die".into(),
+        ..Default::default()
+    };
+
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_executor::execute_package_request_stream(req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+
+    server_task.abort();
+    assert!(
+        output.contains("__RUNNER_EXIT_ERROR__:post-install sandbox failed:")
+            && output.contains("crash-loop"),
+        "dying service after final restart must fail clearly: {output}"
+    );
+    assert!(
+        output.contains(
+            "managed sandbox drop-in changes restored (package installer had already committed)"
+        ),
+        "must accurately report drop-in restoration without claiming package rollback: {output}"
+    );
+    assert!(
+        !output.contains("incomplete rollback"),
+        "clean drop-in restoration must not claim incomplete rollback: {output}"
+    );
+    assert_eq!(
+        fs::read_to_string(&canonical_dropin).unwrap(),
+        prior_dropin,
+        "managed sandbox drop-in must be restored to prior content"
+    );
+    assert!(
+        !companion_dropin.exists(),
+        "newly created companion drop-in must be removed on restoration"
+    );
+    assert!(
+        lock_file.exists(),
+        "runner must not pretend to roll back installer-committed package state"
+    );
+    let calls = fs::read_to_string(&systemctl_log).unwrap();
+    assert!(
+        calls.lines().filter(|l| *l == "daemon-reload").count() >= 3,
+        "expected daemon-reload pre-install, post-install, and on drop-in restoration: {calls}"
+    );
+
+    drop((owner, conn));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn filebot_post_sandbox_restart_fails_clearly_when_listener_never_becomes_ready() {
+    use futures::StreamExt;
+    let test = "lifecycle_tests::filebot_post_sandbox_restart_fails_clearly_when_listener_never_becomes_ready";
+    if subprocess(test) {
+        return;
+    }
+
+    let root = fixture_root();
+    let common_sh = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("packages/common.sh");
+    let config_dir = root.join("config");
+    let scripts = root.join("packages/package/install");
+    let fake_bin = root.join("fake-bin");
+    let systemd_dir = root.join("etc/systemd/system");
+    let install_dir = root.join("install");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&systemd_dir).unwrap();
+    fs::create_dir_all(&install_dir).unwrap();
+
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"FileBot Fixture","description":"FileBot readiness fixture","lock_file":"/install/.filebot.lock","category":"Media","service_type":"systemd","service_name":"filebot","default_port":5452}]"#,
+    )
+    .unwrap();
+    fs::write(
+        &auto_cfg,
+        r#"{"fixture":{"sandbox_profile":"java","sandbox_rw_paths":["/var/lib/filebot"],"sandbox_service_units":["filebot.service"]}}"#,
+    )
+    .unwrap();
+
+    let restart_marker = root.join("try-restart.fired");
+    let old_stopped_marker = root.join("old-listener.stopped");
+    executable(
+        &fake_bin.join("systemctl"),
+        &format!(
+            "#!/bin/bash\ncase \"${{1:-}}\" in\n  is-active) exit 0 ;;\n  daemon-reload) exit 0 ;;\n  show)\n    printf 'LoadState=loaded\\nType=simple\\nActiveState=active\\nSubState=running\\nRemainAfterExit=no\\nResult=success\\n'\n    exit 0 ;;\n  try-restart)\n    touch {:?}\n    while [[ ! -f {:?} ]]; do sleep 0.01; done\n    exit 0 ;;\nesac\nexit 0\n",
+            restart_marker, old_stopped_marker
+        ),
+    );
+
+    // Initial listener answers during install, then drops permanently BEFORE try-restart returns 0
+    // so the service stays ActiveState=active/running but NEVER binds the listener again.
+    let initial_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = initial_listener.local_addr().unwrap().port();
+    let restart_marker_task = restart_marker.clone();
+    let old_stopped_marker_task = old_stopped_marker.clone();
+    let server_task = tokio::spawn(async move {
+        let mut listener = Some(initial_listener);
+        loop {
+            if restart_marker_task.exists() {
+                drop(listener.take());
+                let _ = fs::write(&old_stopped_marker_task, "stopped");
+                break;
+            }
+            if let Some(ref l) = listener {
+                tokio::select! {
+                    accepted = l.accept() => {
+                        if let Ok((mut sock, _)) = accepted {
+                            tokio::spawn(async move {
+                                let mut buf = [0u8; 1024];
+                                let _ = sock.read(&mut buf).await;
+                                let _ = sock
+                                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                    .await;
+                            });
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        }
+    });
+
+    let script_name = "installpackage-filebot-hang-fixture";
+    executable(
+        &scripts.join(script_name),
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nexport LOGFILE=/dev/null\nexport LOCK_DIR={:?}\nsource {:?}\nexport PATH={:?}:\"$PATH\"\ncat > {:?} <<'EOF'\n[Unit]\nDescription=FileBot Test\n[Service]\nType=simple\nExecStart=/bin/true\nEOF\nwait_for_service_ready filebot.service \"$AF_APP_PORT\" / 5\ntouch {:?}\n",
+            install_dir,
+            common_sh,
+            fake_bin,
+            systemd_dir.join("filebot.service"),
+            install_dir.join(".filebot.lock"),
+        ),
+    );
+
+    let orig_path = env::var("PATH").unwrap_or_default();
+    env::set_current_dir(&root).unwrap();
+    env::set_var("PATH", format!("{}:{orig_path}", fake_bin.display()));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::set_var("AETHERFLOW_TEST_LIVE_SANDBOX", "1");
+    env::set_var("AETHERFLOW_TEST_READINESS_TIMEOUT_MS", "450");
+    env::set_var("AETHERFLOW_TEST_POLL_INTERVAL_MS", "30");
+    env::set_var("AETHERFLOW_MASTER_USER", "admin");
+    env::set_var("AETHERFLOW_MASTER_PASS", "test-master-secret");
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','fb-hang','install','installing','now',?1,'[\"filebot.service\"]')", [&owner.id]).unwrap();
+
+    let req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: script_name.into(),
+        app_port: i32::from(port),
+        lifecycle_job_id: "fb-hang".into(),
+        ..Default::default()
+    };
+
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_executor::execute_package_request_stream(req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+
+    server_task.abort();
+    assert!(
+        output.contains("__RUNNER_EXIT_ERROR__:post-install sandbox failed:")
+            && output.contains("filebot.service did not become HTTP-ready within")
+            && output.contains("HTTP probe failed")
+            && !output.contains(&format!("http://127.0.0.1:{port}/")),
+        "unready listener must report the failed probe without exposing its URL: {output}"
+    );
+    assert!(
+        output.contains(
+            "managed sandbox drop-in changes restored (package installer had already committed)"
+        ),
+        "{output}"
+    );
+    // Drop-in dir did not exist prior to install and must be cleaned up on restoration.
+    assert!(!systemd_dir.join("filebot.service.d").exists());
+
+    drop((owner, conn));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_old_script_without_readiness_record_does_not_infer_http_from_port() {
+    use futures::StreamExt;
+    let test =
+        "lifecycle_tests::legacy_old_script_without_readiness_record_does_not_infer_http_from_port";
+    if subprocess(test) {
+        return;
+    }
+
+    let root = fixture_root();
+    let config_dir = root.join("config");
+    let scripts = root.join("packages/package/install");
+    let fake_bin = root.join("fake-bin");
+    let systemd_dir = root.join("etc/systemd/system");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&systemd_dir).unwrap();
+
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"FileBot Fixture","description":"Old script fixture","lock_file":"/install/.filebot.lock","category":"Media","service_type":"systemd","service_name":"filebot","default_port":5452}]"#,
+    )
+    .unwrap();
+    fs::write(
+        &auto_cfg,
+        r#"{"fixture":{"sandbox_profile":"java","sandbox_rw_paths":["/var/lib/filebot"],"sandbox_service_units":["filebot.service"]}}"#,
+    )
+    .unwrap();
+
+    executable(
+        &fake_bin.join("systemctl"),
+        "#!/bin/bash\ncase \"${1:-}\" in\n  daemon-reload|try-restart) exit 0 ;;\n  show)\n    printf 'LoadState=loaded\\nType=simple\\nActiveState=active\\nSubState=running\\nRemainAfterExit=no\\nResult=success\\n'\n    exit 0 ;;\nesac\nexit 0\n",
+    );
+
+    // Pick a guaranteed-closed port to prove we do NOT infer HTTP from req.app_port/default_port.
+    let closed_sock = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_port = closed_sock.local_addr().unwrap().port();
+    drop(closed_sock);
+
+    // Old script: writes unit file and exits 0 WITHOUT calling wait_for_service_ready or emitting a record.
+    let script_name = "installpackage-old-script-fixture";
+    executable(
+        &scripts.join(script_name),
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\ncat > {:?} <<'EOF'\n[Unit]\nDescription=Legacy Old Script\n[Service]\nType=simple\nExecStart=/bin/true\nEOF\n",
+            systemd_dir.join("filebot.service"),
+        ),
+    );
+
+    let orig_path = env::var("PATH").unwrap_or_default();
+    env::set_current_dir(&root).unwrap();
+    env::set_var("PATH", format!("{}:{orig_path}", fake_bin.display()));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::set_var("AETHERFLOW_TEST_LIVE_SANDBOX", "1");
+    env::set_var("AETHERFLOW_TEST_READINESS_TIMEOUT_MS", "500");
+    env::set_var("AETHERFLOW_TEST_POLL_INTERVAL_MS", "25");
+    env::set_var("AETHERFLOW_TEST_NON_HTTP_SETTLE_MS", "50");
+    env::set_var("AETHERFLOW_MASTER_USER", "admin");
+    env::set_var("AETHERFLOW_MASTER_PASS", "test-master-secret");
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','old-script','install','installing','now',?1,'[\"filebot.service\"]')", [&owner.id]).unwrap();
+
+    let req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: script_name.into(),
+        app_port: i32::from(closed_port),
+        lifecycle_job_id: "old-script".into(),
+        ..Default::default()
+    };
+
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_executor::execute_package_request_stream(req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+
+    assert!(
+        !output.contains("__RUNNER_EXIT_ERROR__:"),
+        "old script without emitted record must use systemd check and not infer HTTP from port: {output}"
+    );
+    assert!(
+        output.contains("Verified post-sandbox readiness for filebot.service (active/running)"),
+        "{output}"
+    );
+
+    drop((owner, conn));
+    fs::remove_dir_all(root).unwrap();
+}

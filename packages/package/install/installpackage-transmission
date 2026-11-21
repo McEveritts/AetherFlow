@@ -73,7 +73,10 @@ wait_for_service_ready() {
         [0-9][0-9][0-9]) return 1 ;;
         *) af_logged transmission_curl -fsS --connect-timeout 2 --max-time 5 "$url" || return 1 ;;
     esac
-    systemctl is-active --quiet "$service"
+    systemctl is-active --quiet "$service" || return 1
+    if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+        af_emit_readiness_record "$service" "$url" true true
+    fi
 }
 begin_state_transaction "transmission-daemon" "$APP_PORT" "/transmission/rpc" "/var/lib/transmission" "/var/lib/transmission-daemon" "/etc/transmission-daemon" "/usr/share/transmission/web" "/etc/systemd/system/transmission-daemon.service" "/usr/bin/transmission-daemon" "/usr/bin/transmission-remote" "/usr/share/transmission" "/usr/lib/transmission"
 

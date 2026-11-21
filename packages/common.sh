@@ -7363,8 +7363,35 @@ print(f'http://{host}:{port}{base}{endpoint}')
 PYEOF
 }
 
+af_emit_readiness_record() {
+    [[ "${AF_EMIT_READINESS_RECORD:-0}" == "1" ]] || return 0
+    local raw_unit="${1:-}" probe_url="${2:-}" accept_auth="${3:-false}" accept_409="${4:-false}"
+    local emit_unit="$raw_unit" authority="" query=""
+    case "$emit_unit" in
+        *.service|*.timer|*.socket) ;;
+        *) emit_unit="${emit_unit}.service" ;;
+    esac
+    [[ "$emit_unit" =~ ^[A-Za-z0-9@._-]+\.service$ ]] || return 0
+    probe_url="${probe_url%%#*}"
+    [[ "$probe_url" =~ ^https?://[^[:space:][:cntrl:]\"\\]+$ ]] || return 0
+    authority="${probe_url#*://}"
+    authority="${authority%%[/?#]*}"
+    [[ -n "$authority" && "$authority" != *@* ]] || return 0
+    if [[ "$probe_url" == *\?* ]]; then
+        query="${probe_url#*\?}"
+        if [[ "${query,,}" =~ (^|&)(password|passwd|pass|secret|token|apikey|api_key|access_token|auth)= ]]; then
+            return 0
+        fi
+    fi
+    [[ "$accept_auth" == "true" ]] || accept_auth="false"
+    [[ "$accept_409" == "true" ]] || accept_409="false"
+    printf '__AF_READINESS_PROBE__={"unit":"%s","url":"%s","accept_auth":%s,"accept_409":%s}\n' \
+        "$emit_unit" "$probe_url" "$accept_auth" "$accept_409" >&2
+}
+
 wait_for_service_ready() {
     local unit="$1" port="$2" readiness_path="${3:-/}" attempts="${4:-30}" attempt app_name credentials="" http_status ready_url
+    local auth_apps_re='^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr|filebot|pihole-ftl)$'
     app_name="${unit,,}"
     app_name="${app_name%.service}"
     app_name="${app_name#af-}"
@@ -7399,19 +7426,47 @@ wait_for_service_ready() {
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if systemctl is-active --quiet "$unit"; then
             if [[ -n "$credentials" ]]; then
-                if printf 'user = "%s"\n' "$credentials" | curl "${curl_tls_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+                if printf 'user = "%s"\n' "$credentials" | curl "${curl_tls_args[@]}" --noproxy '*' -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+                    local emit_accept_409=false
+                    if [[ "$app_name" == transmission* ]]; then
+                        emit_accept_409=true
+                    fi
+                    if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                        af_emit_readiness_record "$unit" "$ready_url" true "$emit_accept_409"
+                    fi
                     return 0
                 fi
                 if [[ "$app_name" == transmission* && "$readiness_path" == /transmission/rpc ]]; then
-                    if http_status="$(printf 'user = "%s"\n' "$credentials" | curl -K - -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}${readiness_path}" 2>/dev/null)"; then
-                        case "$http_status" in 200|401|409) return 0 ;; esac
+                    if http_status="$(printf 'user = "%s"\n' "$credentials" | curl --noproxy '*' -K - -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}${readiness_path}" 2>/dev/null)"; then
+                        case "$http_status" in
+                            200|401|409)
+                                if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                                    af_emit_readiness_record "$unit" "http://127.0.0.1:${port}${readiness_path}" true true
+                                fi
+                                return 0
+                                ;;
+                        esac
                     fi
                 fi
-            elif curl "${curl_tls_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+            elif curl "${curl_tls_args[@]}" --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+                local emit_accept_auth=false
+                if [[ "$app_name" =~ $auth_apps_re ]]; then
+                    emit_accept_auth=true
+                fi
+                if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                    af_emit_readiness_record "$unit" "$ready_url" "$emit_accept_auth" false
+                fi
                 return 0
-            elif [[ "$app_name" =~ ^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr|filebot|pihole-ftl)$ ]]; then
-                if http_status="$(curl "${curl_tls_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
-                    case "$http_status" in 200|204|401|403) return 0 ;; esac
+            elif [[ "$app_name" =~ $auth_apps_re ]]; then
+                if http_status="$(curl "${curl_tls_args[@]}" --noproxy '*' -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
+                    case "$http_status" in
+                        200|204|401|403)
+                            if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                                af_emit_readiness_record "$unit" "$ready_url" true false
+                            fi
+                            return 0
+                            ;;
+                    esac
                 fi
             fi
         fi

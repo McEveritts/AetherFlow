@@ -2465,6 +2465,15 @@ impl RollbackJournal {
         }
     }
 
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+            && self.restorable_services.is_empty()
+            && self.touched_services.is_empty()
+            && self.dir_snapshots.is_empty()
+            && self.apt_downgrades.is_empty()
+            && self.temp_files.is_empty()
+    }
+
     fn stage_directory_snapshots_with_cancel(
         &mut self,
         target_dirs: &[PathBuf],
@@ -3570,6 +3579,9 @@ pub use declarative_recipes::*;
 mod apache_ingress;
 pub use apache_ingress::*;
 
+mod legacy_readiness;
+pub(crate) use legacy_readiness::*;
+
 /// Normalizes a raw `dpkg-query -W -f=${Version}` string (e.g. `1:0.14.0-1build2` -> `0.14.0`),
 /// falling back to `fallback` if the output is empty or non-conforming (e.g. mock placeholder output).
 fn normalize_dpkg_version(raw: &str, fallback: &str) -> String {
@@ -4218,10 +4230,19 @@ fn apply_sandbox_in_root_with_journal(
         validate_filesystem_path(&dropin_aether, fs_root)?;
         validate_filesystem_path(&dropin_10, fs_root)?;
 
-        if pkg.sandbox_profile == "privileged"
+        if !norm.ends_with(".service")
+            || pkg.sandbox_profile == "privileged"
             || pkg.sandbox_profile == "none"
             || crate::is_exempt_sandbox_unit(&norm)
         {
+            if let Some(ref mut j) = journal {
+                if dropin_aether.exists() {
+                    j.stage_file_mutation(&dropin_aether)?;
+                }
+                if dropin_10.exists() {
+                    j.stage_file_mutation(&dropin_10)?;
+                }
+            }
             let _ = fs::remove_file(&dropin_aether);
             let _ = fs::remove_file(&dropin_10);
             continue;
@@ -4276,14 +4297,7 @@ fn collect_package_version_receipt_logical_paths(
     paths
 }
 
-/// Ensures systemd sandbox drop-ins (`aetherflow-sandbox.conf` and `10-aetherflow-sandbox.conf`)
-/// are written on `"install"`, `"reinstall"`, and `"update"`, and removed (along with stale
-/// `.af-version` receipts) on `"remove"` / `"uninstall"` across both synthetic roots and live `/`.
-pub fn ensure_package_sandbox_dropin_under_root(
-    install_root: Option<&Path>,
-    pkg_id: &str,
-    action: &str,
-) -> Result<(), PackageExecutorError> {
+fn resolve_package_sandbox_roots(install_root: Option<&Path>) -> (Option<PathBuf>, PathBuf) {
     let effective_root: Option<PathBuf> = install_root.map(Path::to_path_buf).or_else(|| {
         env::var("AETHERFLOW_INSTALL_ROOT")
             .or_else(|_| env::var("AETHERFLOW_PACKAGE_FS_ROOT"))
@@ -4301,6 +4315,27 @@ pub fn ensure_package_sandbox_dropin_under_root(
             Some(root) => root.join("etc/systemd/system"),
             None => PathBuf::from("/etc/systemd/system"),
         });
+    (effective_root, systemd_root)
+}
+
+/// Ensures systemd sandbox drop-ins (`aetherflow-sandbox.conf` and `10-aetherflow-sandbox.conf`)
+/// are written on `"install"`, `"reinstall"`, and `"update"`, and removed (along with stale
+/// `.af-version` receipts) on `"remove"` / `"uninstall"` across both synthetic roots and live `/`.
+pub fn ensure_package_sandbox_dropin_under_root(
+    install_root: Option<&Path>,
+    pkg_id: &str,
+    action: &str,
+) -> Result<(), PackageExecutorError> {
+    ensure_package_sandbox_dropin_under_root_with_journal(install_root, pkg_id, action, None)
+}
+
+pub(crate) fn ensure_package_sandbox_dropin_under_root_with_journal(
+    install_root: Option<&Path>,
+    pkg_id: &str,
+    action: &str,
+    journal: Option<&mut RollbackJournal>,
+) -> Result<(), PackageExecutorError> {
+    let (effective_root, systemd_root) = resolve_package_sandbox_roots(install_root);
 
     let action_lower = action.trim().to_ascii_lowercase();
     match action_lower.as_str() {
@@ -4308,7 +4343,7 @@ pub fn ensure_package_sandbox_dropin_under_root(
             apply_sandbox_in_root_with_journal(
                 pkg_id,
                 &systemd_root,
-                None,
+                journal,
                 effective_root.as_deref(),
             )?;
         }
@@ -4931,25 +4966,40 @@ fn legacy_sandbox_units(pkg_id: &str) -> Vec<String> {
             pkg.service_name
         });
     }
-    units
-        .into_iter()
-        .map(|unit| normalize_unit_filename(&unit))
-        .filter(|unit| !crate::is_exempt_sandbox_unit(unit))
-        .collect()
+    let mut out = Vec::new();
+    for raw in units {
+        let norm = normalize_unit_filename(&raw);
+        if norm.ends_with(".service")
+            && !crate::is_exempt_sandbox_unit(&norm)
+            && !out.contains(&norm)
+        {
+            out.push(norm);
+        }
+    }
+    out
 }
 
-fn legacy_unit_snapshot(unit: &str) -> anyhow::Result<Vec<Option<fs::Metadata>>> {
+fn legacy_unit_snapshot_in_root(
+    unit: &str,
+    fs_root: Option<&Path>,
+) -> anyhow::Result<Vec<Option<fs::Metadata>>> {
     [
-        "/etc/systemd/system",
-        "/usr/local/lib/systemd/system",
-        "/usr/lib/systemd/system",
-        "/lib/systemd/system",
+        "etc/systemd/system",
+        "usr/local/lib/systemd/system",
+        "usr/lib/systemd/system",
+        "lib/systemd/system",
     ]
     .iter()
-    .map(|dir| match fs::metadata(Path::new(dir).join(unit)) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+    .map(|rel| {
+        let path = match fs_root {
+            Some(root) => root.join(rel).join(unit),
+            None => Path::new("/").join(rel).join(unit),
+        };
+        match fs::metadata(&path) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     })
     .collect()
 }
@@ -4963,21 +5013,47 @@ fn legacy_unit_changed(before: &[Option<fs::Metadata>], after: &[Option<fs::Meta
     })
 }
 
-async fn run_legacy_sandbox_systemctl(
-    guard: &af_release::ReleaseLockGuard,
-    args: &[&str],
-) -> anyhow::Result<()> {
-    let mut command = Command::new("systemctl");
-    command.args(args).kill_on_drop(true);
-    guard.preserve_in_child(command.as_std_mut())?;
-    let output = tokio::time::timeout(Duration::from_secs(45), command.output()).await??;
-    anyhow::ensure!(
-        output.status.success(),
-        "systemctl {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr).trim(),
-    );
-    Ok(())
+async fn rollback_legacy_sandbox_with_lease(
+    guard: &Arc<af_release::ReleaseLockGuard>,
+    sandbox_journal: &mut RollbackJournal,
+    sandbox_units: &[String],
+    systemd_root: &Path,
+    live_sandbox: bool,
+) -> Result<bool, String> {
+    let runner = TokioCommandRunner {
+        respect_dry_run_env: false,
+    };
+    crate::PACKAGE_MAINTENANCE_LEASE
+        .scope(
+            guard.clone(),
+            rollback_legacy_sandbox(
+                sandbox_journal,
+                sandbox_units,
+                systemd_root,
+                live_sandbox,
+                &runner,
+            ),
+        )
+        .await
+}
+
+fn format_error_with_sandbox_rollback(base: String, rollback_res: Result<bool, String>) -> String {
+    match rollback_res {
+        Err(rb) => format!("__RUNNER_EXIT_ERROR__:{base}; incomplete rollback: {rb}\n"),
+        Ok(_) => format!("__RUNNER_EXIT_ERROR__:{base}\n"),
+    }
+}
+
+fn format_post_commit_sandbox_error(base: String, rollback_res: Result<bool, String>) -> String {
+    match rollback_res {
+        Ok(true) => format!(
+            "__RUNNER_EXIT_ERROR__:{base}; managed sandbox drop-in changes restored (package installer had already committed)\n"
+        ),
+        Ok(false) => format!("__RUNNER_EXIT_ERROR__:{base}\n"),
+        Err(rb) => format!(
+            "__RUNNER_EXIT_ERROR__:{base}; incomplete rollback: failed to restore managed sandbox drop-in changes ({rb})\n"
+        ),
+    }
 }
 
 /// Sets the lifecycle contract environment for a legacy Bash package script.
@@ -5637,30 +5713,108 @@ pub fn execute_package_request_stream(
 
         let installs = matches!(action, PackageAction::Install | PackageAction::Reinstall | PackageAction::Update);
         let sandbox_units = legacy_sandbox_units(&req.package_id);
-        let live_sandbox = env_cfg.fs_root.is_none()
-            && env::var_os("AETHERFLOW_SYSTEMD_ROOT").is_none()
+        let test_live_sandbox = {
+            #[cfg(test)]
+            {
+                env::var("AETHERFLOW_TEST_LIVE_SANDBOX")
+                    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        let live_sandbox = ((env_cfg.fs_root.is_none()
+            && env::var_os("AETHERFLOW_SYSTEMD_ROOT").is_none())
+            || test_live_sandbox)
             && !env::var("AETHERFLOW_SANDBOX_DRY_RUN").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             && cfg!(target_os = "linux");
+        let (sandbox_effective_root, sandbox_systemd_root) =
+            resolve_package_sandbox_roots(env_cfg.fs_root.as_deref());
+        let mut sandbox_journal = RollbackJournal::new(sandbox_effective_root);
+        let sandbox_runner = TokioCommandRunner {
+            respect_dry_run_env: false,
+        };
+        let readiness_config = {
+            #[cfg(test)]
+            {
+                LegacyReadinessConfig::from_test_env()
+            }
+            #[cfg(not(test))]
+            {
+                LegacyReadinessConfig::default()
+            }
+        };
         let mut unit_snapshots = Vec::new();
         if installs && !sandbox_units.is_empty() {
-            if let Err(error) = ensure_package_sandbox_dropin_under_root(
-                env_cfg.fs_root.as_deref(), &req.package_id, &req.action,
+            if let Err(error) = ensure_package_sandbox_dropin_under_root_with_journal(
+                env_cfg.fs_root.as_deref(),
+                &req.package_id,
+                &req.action,
+                Some(&mut sandbox_journal),
             ) {
-                yield Ok(format!("__RUNNER_EXIT_ERROR__:pre-install sandbox failed: {error}\n"));
+                let rb = rollback_legacy_sandbox_with_lease(
+                    &maintenance_guard,
+                    &mut sandbox_journal,
+                    &sandbox_units,
+                    &sandbox_systemd_root,
+                    live_sandbox,
+                )
+                .await;
+                yield Ok(format_error_with_sandbox_rollback(
+                    format!("pre-install sandbox failed: {error}"),
+                    rb,
+                ));
                 return;
             }
             if live_sandbox {
                 for unit in &sandbox_units {
-                    match legacy_unit_snapshot(unit) {
+                    match legacy_unit_snapshot_in_root(unit, env_cfg.fs_root.as_deref()) {
                         Ok(snapshot) => unit_snapshots.push((unit, snapshot)),
                         Err(error) => {
-                            yield Ok(format!("__RUNNER_EXIT_ERROR__:cannot snapshot {unit}: {error}\n"));
+                            let rb = rollback_legacy_sandbox_with_lease(
+                                &maintenance_guard,
+                                &mut sandbox_journal,
+                                &sandbox_units,
+                                &sandbox_systemd_root,
+                                live_sandbox,
+                            )
+                            .await;
+                            yield Ok(format_error_with_sandbox_rollback(
+                                format!("cannot snapshot {unit}: {error}"),
+                                rb,
+                            ));
                             return;
                         }
                     }
                 }
-                if let Err(error) = run_legacy_sandbox_systemctl(&maintenance_guard, &["daemon-reload"]).await {
-                    yield Ok(format!("__RUNNER_EXIT_ERROR__:pre-install sandbox failed: {error}\n"));
+                if let Err(error) = crate::PACKAGE_MAINTENANCE_LEASE
+                    .scope(
+                        maintenance_guard.clone(),
+                        run_systemctl_bounded(
+                            &sandbox_runner,
+                            &["daemon-reload"],
+                            &cancel,
+                            readiness_config.systemctl_timeout,
+                        ),
+                    )
+                    .await
+                {
+                    let rb = rollback_legacy_sandbox_with_lease(
+                        &maintenance_guard,
+                        &mut sandbox_journal,
+                        &sandbox_units,
+                        &sandbox_systemd_root,
+                        live_sandbox,
+                    )
+                    .await;
+                    let base = match error {
+                        PackageExecutorError::Cancelled(_) => {
+                            format!("operation cancelled for package '{}'", req.package_id)
+                        }
+                        other => format!("pre-install sandbox failed: {other}"),
+                    };
+                    yield Ok(format_error_with_sandbox_rollback(base, rb));
                     return;
                 }
             }
@@ -5677,20 +5831,42 @@ pub fn execute_package_request_stream(
             cmd.process_group(0);
         }
         apply_legacy_package_environment(&mut cmd, &req);
+        let verify_sandbox = installs && live_sandbox && !sandbox_units.is_empty();
+        if verify_sandbox {
+            cmd.env("AF_EMIT_READINESS_RECORD", "1");
+        } else {
+            cmd.env_remove("AF_EMIT_READINESS_RECORD");
+        }
         match try_resolve_master_credentials(env_cfg.fs_root.as_deref()) {
             Ok((master_user, master_pass)) => {
                 cmd.env("MASTER_USER", master_user)
                     .env("MASTER_PASS", master_pass);
             }
             Err(error) => {
-                yield Ok(format!("__RUNNER_EXIT_ERROR__:{error}\n"));
+                let rb = rollback_legacy_sandbox_with_lease(
+                    &maintenance_guard,
+                    &mut sandbox_journal,
+                    &sandbox_units,
+                    &sandbox_systemd_root,
+                    live_sandbox,
+                )
+                .await;
+                yield Ok(format_error_with_sandbox_rollback(error.to_string(), rb));
                 return;
             }
         }
 
         #[cfg(unix)]
         if let Err(error) = maintenance_guard.preserve_in_child(cmd.as_std_mut()) {
-            yield Ok(format!("__RUNNER_EXIT_ERROR__:{error}\n"));
+            let rb = rollback_legacy_sandbox_with_lease(
+                &maintenance_guard,
+                &mut sandbox_journal,
+                &sandbox_units,
+                &sandbox_systemd_root,
+                live_sandbox,
+            )
+            .await;
+            yield Ok(format_error_with_sandbox_rollback(error.to_string(), rb));
             return;
         }
 
@@ -5702,21 +5878,39 @@ pub fn execute_package_request_stream(
                 let mut stderr_open = true;
                 let mut diag_failure: Option<serde_json::Value> = None;
                 let mut saw_incomplete_rollback_line: Option<String> = None;
+                let mut recorded_readiness_probes: HashMap<String, Vec<RecordedReadinessProbe>> =
+                    HashMap::new();
                 while stdout_open || stderr_open {
                     if cancel.is_cancelled() {
                         terminate_child_process_group(&mut child).await;
-                        yield Ok(format!(
-                            "__RUNNER_EXIT_ERROR__:operation cancelled for package '{}'\n",
-                            req.package_id
+                        let rb = rollback_legacy_sandbox_with_lease(
+                            &maintenance_guard,
+                            &mut sandbox_journal,
+                            &sandbox_units,
+                            &sandbox_systemd_root,
+                            live_sandbox,
+                        )
+                        .await;
+                        yield Ok(format_error_with_sandbox_rollback(
+                            format!("operation cancelled for package '{}'", req.package_id),
+                            rb,
                         ));
                         return;
                     }
                     let (is_stdout, result) = tokio::select! {
                         _ = wait_for_cancellation(&cancel) => {
                             terminate_child_process_group(&mut child).await;
-                            yield Ok(format!(
-                                "__RUNNER_EXIT_ERROR__:operation cancelled for package '{}'\n",
-                                req.package_id
+                            let rb = rollback_legacy_sandbox_with_lease(
+                                &maintenance_guard,
+                                &mut sandbox_journal,
+                                &sandbox_units,
+                                &sandbox_systemd_root,
+                                live_sandbox,
+                            )
+                            .await;
+                            yield Ok(format_error_with_sandbox_rollback(
+                                format!("operation cancelled for package '{}'", req.package_id),
+                                rb,
                             ));
                             return;
                         }
@@ -5725,6 +5919,19 @@ pub fn execute_package_request_stream(
                     };
                     match result {
                         Ok(Some(line)) => {
+                            if line.trim_start().starts_with(AF_READINESS_PROBE_PREFIX) {
+                                if verify_sandbox && !is_stdout {
+                                    if let Some(probe) =
+                                        parse_readiness_probe_record(&line, &sandbox_units)
+                                    {
+                                        record_readiness_probe(
+                                            &mut recorded_readiness_probes,
+                                            probe,
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
                             if let Some(pos) = line.find("AF_DIAG_FAILURE=") {
                                 let json_slice = &line[pos + "AF_DIAG_FAILURE=".len()..];
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_slice.trim()) {
@@ -5745,7 +5952,15 @@ pub fn execute_package_request_stream(
                         Ok(None) => stderr_open = false,
                         Err(error) => {
                             terminate_child_process_group(&mut child).await;
-                            yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+                            let rb = rollback_legacy_sandbox_with_lease(
+                                &maintenance_guard,
+                                &mut sandbox_journal,
+                                &sandbox_units,
+                                &sandbox_systemd_root,
+                                live_sandbox,
+                            )
+                            .await;
+                            yield Ok(format_error_with_sandbox_rollback(error.to_string(), rb));
                             return;
                         }
                     }
@@ -5754,9 +5969,17 @@ pub fn execute_package_request_stream(
                     biased;
                     _ = wait_for_cancellation(&cancel) => {
                         terminate_child_process_group(&mut child).await;
-                        yield Ok(format!(
-                            "__RUNNER_EXIT_ERROR__:operation cancelled for package '{}'\n",
-                            req.package_id
+                        let rb = rollback_legacy_sandbox_with_lease(
+                            &maintenance_guard,
+                            &mut sandbox_journal,
+                            &sandbox_units,
+                            &sandbox_systemd_root,
+                            live_sandbox,
+                        )
+                        .await;
+                        yield Ok(format_error_with_sandbox_rollback(
+                            format!("operation cancelled for package '{}'", req.package_id),
+                            rb,
                         ));
                         return;
                     }
@@ -5764,6 +5987,23 @@ pub fn execute_package_request_stream(
                 };
                 match status {
                     Ok(status) if !status.success() => {
+                        let rb = rollback_legacy_sandbox_with_lease(
+                            &maintenance_guard,
+                            &mut sandbox_journal,
+                            &sandbox_units,
+                            &sandbox_systemd_root,
+                            live_sandbox,
+                        )
+                        .await;
+                        if let Err(rb_err) = rb {
+                            let combined = match saw_incomplete_rollback_line.take() {
+                                Some(existing) => format!("{existing}; {rb_err}"),
+                                None => format!("incomplete rollback: {rb_err}"),
+                            };
+                            saw_incomplete_rollback_line = Some(
+                                crate::package_lifecycle::sanitize_lifecycle_field(&combined),
+                            );
+                        }
                         let code = status.code().unwrap_or(1);
                         if let Some(formatted) = format_exit_failure_diagnostics(
                             code,
@@ -5776,32 +6016,90 @@ pub fn execute_package_request_stream(
                         }
                     }
                     Err(error) => {
-                        yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+                        let rb = rollback_legacy_sandbox_with_lease(
+                            &maintenance_guard,
+                            &mut sandbox_journal,
+                            &sandbox_units,
+                            &sandbox_systemd_root,
+                            live_sandbox,
+                        )
+                        .await;
+                        yield Ok(format_error_with_sandbox_rollback(error.to_string(), rb));
                     }
                     Ok(_) => {
-                        if let Err(error) = ensure_package_sandbox_dropin_under_root(
-                            env_cfg.fs_root.as_deref(),
-                            &req.package_id,
-                            &req.action,
-                        ) {
-                            yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
-                            return;
-                        }
-                        if installs && live_sandbox && !sandbox_units.is_empty() {
-                            let result = async {
-                                run_legacy_sandbox_systemctl(&maintenance_guard, &["daemon-reload"]).await?;
-                                for (unit, before) in &unit_snapshots {
-                                    if legacy_unit_changed(before, &legacy_unit_snapshot(unit)?) {
-                                        run_legacy_sandbox_systemctl(&maintenance_guard, &["try-restart", unit]).await?;
-                                    }
+                        let activation = async {
+                            let post_script_dropins = verify_sandbox
+                                .then(|| snapshot_sandbox_dropin_bytes(&sandbox_systemd_root, &sandbox_units))
+                                .transpose()?;
+                            ensure_package_sandbox_dropin_under_root_with_journal(
+                                env_cfg.fs_root.as_deref(),
+                                &req.package_id,
+                                &req.action,
+                                Some(&mut sandbox_journal),
+                            )?;
+                            let Some(post_script_dropins) = post_script_dropins else {
+                                return Ok(Vec::new());
+                            };
+                            let final_dropins =
+                                snapshot_sandbox_dropin_bytes(&sandbox_systemd_root, &sandbox_units)?;
+                            let mut units_needing_restart = Vec::new();
+                            for (unit, before) in &unit_snapshots {
+                                let after = legacy_unit_snapshot_in_root(
+                                    unit,
+                                    env_cfg.fs_root.as_deref(),
+                                )
+                                .map_err(|err| {
+                                        PackageExecutorError::ExecutionError(format!(
+                                            "cannot inspect {unit}: {err}"
+                                        ))
+                                })?;
+                                let dropin_changed =
+                                    post_script_dropins.get(*unit) != final_dropins.get(*unit);
+                                if legacy_unit_changed(before, &after) || dropin_changed {
+                                    units_needing_restart.push((*unit).clone());
                                 }
-                                Ok::<(), anyhow::Error>(())
-                            }.await;
-                            if let Err(error) = result {
-                                yield Ok(format!("__RUNNER_EXIT_ERROR__:post-install sandbox failed: {error}\n"));
+                            }
+                            crate::PACKAGE_MAINTENANCE_LEASE
+                                .scope(
+                                    maintenance_guard.clone(),
+                                    activate_and_verify_legacy_sandbox(
+                                        &req.package_id,
+                                        &units_needing_restart,
+                                        &recorded_readiness_probes,
+                                        &sandbox_runner,
+                                        &cancel,
+                                        &readiness_config,
+                                    ),
+                                )
+                                .await
+                        }.await;
+                        match activation {
+                            Ok(notes) => {
+                                for note in notes {
+                                    yield Ok(format!("{note}\n"));
+                                }
+                            }
+                            Err(error) => {
+                                let rollback = rollback_legacy_sandbox_with_lease(
+                                    &maintenance_guard,
+                                    &mut sandbox_journal,
+                                    &sandbox_units,
+                                    &sandbox_systemd_root,
+                                    live_sandbox,
+                                )
+                                .await;
+                                let message = match error {
+                                    PackageExecutorError::Cancelled(_) => format!(
+                                        "operation cancelled for package '{}'",
+                                        req.package_id
+                                    ),
+                                    other => format!("post-install sandbox failed: {other}"),
+                                };
+                                yield Ok(format_post_commit_sandbox_error(message, rollback));
                                 return;
                             }
                         }
+                        sandbox_journal.commit();
                         let defer_blueprint = std::env::var("AETHERFLOW_DEFER_BLUEPRINT_SYNC")
                             .map(|v| v == "1")
                             .unwrap_or(false)
@@ -5832,7 +6130,15 @@ pub fn execute_package_request_stream(
                 }
             }
             Err(error) => {
-                yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+                let rb = rollback_legacy_sandbox_with_lease(
+                    &maintenance_guard,
+                    &mut sandbox_journal,
+                    &sandbox_units,
+                    &sandbox_systemd_root,
+                    live_sandbox,
+                )
+                .await;
+                yield Ok(format_error_with_sandbox_rollback(error.to_string(), rb));
             }
         }
     }
