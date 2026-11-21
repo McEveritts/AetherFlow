@@ -1001,6 +1001,8 @@ youtube_private_port() {
             "bin/node": executable, "bin/npm": executable,
             "api/config/default.php": "<?php $version = '2.1.0';\n",
         }
+        if self.app == "jackett":
+            files["Jackett/jackett.deps.json"] = json.dumps({"libraries": {"jackett/2.1.0": {}}})
         if self.app in ("maintainerr", "jellyseerr"):
             files["package.json"] = json.dumps({"version": "2.1.0", "packageManager": "yarn@4.9.0" if self.app == "maintainerr" else "pnpm@10.5.0"})
             for name in (".yarn/releases/yarn-4.9.0.cjs", "apps/server/dist/main.js", "apps/ui/dist/index.html",
@@ -2062,6 +2064,15 @@ class CatalogCredentialAndFailureTests(unittest.TestCase):
                 self.assertEqual(settings["Port"], 19117)
                 if password is not None:
                     self.assertEqual(settings["BasePathOverride"], "/indexers")
+
+    def test_jackett_rejects_mismatched_release_manifest(self):
+        fixture = self.fixture("jackett")
+        self.assert_success(fixture.run("install", 19117))
+        receipt = fixture.root / "opt/Jackett/.af-version"
+        failed = fixture.run("update", 19117, AF_FIXTURE_VERSION="2.2.0")
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertIn("does not match the downloaded release tag", failed.stdout + failed.stderr)
+        self.assertEqual(receipt.read_text().strip(), "2.1.0")
 
     def fixture(self, app):
         fixture = InstallerFixture(app)

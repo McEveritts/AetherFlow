@@ -287,9 +287,10 @@
     "require_download_sha256": true,
     "update_repo": "Jackett/Jackett",
     "version_command": [
-      "bash",
-      "-lc",
-      "/opt/Jackett/jackett --version"
+      "jq",
+      "-er",
+      ".libraries | keys[] | select(startswith(\"jackett/\")) | ltrimstr(\"jackett/\")",
+      "/opt/Jackett/jackett.deps.json"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -902,9 +903,10 @@
     "update_package": "mergerfs",
     "update_repo": "trapexit/mergerfs",
     "version_command": [
-      "bash",
-      "-lc",
-      "version=\"$(mergerfs -v 2>/dev/null)\" && [[ -n \"${version%%$'\\n'*}\" ]] && printf '%s\\n' \"${version%%$'\\n'*}\" || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null"
+      "dpkg-query",
+      "-W",
+      "-f=${Version}",
+      "mergerfs"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [

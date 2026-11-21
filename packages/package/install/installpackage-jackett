@@ -63,11 +63,7 @@ esac
 
 report_progress 35 "Downloading latest Jackett (${JACKETT_ARCH})..."
 JACKETT_VERSION="$(github_latest_tag "Jackett/Jackett" "0.22.1000")"
-if [[ -n "${JACKETT_VERSION:-}" ]]; then
-    JACKETT_URL="https://github.com/Jackett/Jackett/releases/download/v${JACKETT_VERSION#v}/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz"
-else
-    JACKETT_URL="https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz"
-fi
+JACKETT_URL="https://github.com/Jackett/Jackett/releases/download/v${JACKETT_VERSION}/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz"
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/jackett-XXXXXX.tar.gz")"
 af_logged download_file "$JACKETT_URL" "$TMP_TAR"
@@ -75,9 +71,15 @@ af_logged download_file "$JACKETT_URL" "$TMP_TAR"
 report_progress 65 "Extracting Jackett to /opt/Jackett..."
 stage_app_archive "$TMP_TAR" "/opt/Jackett" "jackett" "/var/lib/jackett" "${PACKAGE_NAME}" "Jackett" "" ""
 rm -f "$TMP_TAR"
-if [[ -n "$JACKETT_VERSION" ]]; then
-    queue_app_version /opt/Jackett/.af-version "$(resolve_installed_binary_version /opt/Jackett/jackett "${JACKETT_VERSION#v}")"
+if ! JACKETT_OBSERVED_VERSION="$(jq -er '.libraries | keys[] | select(startswith("jackett/")) | ltrimstr("jackett/")' /opt/Jackett/jackett.deps.json)"; then
+    print_error "Could not read Jackett's installed version from its .NET manifest."
+    exit 1
 fi
+if [[ "$JACKETT_OBSERVED_VERSION" != "$JACKETT_VERSION" ]]; then
+    print_error "Installed Jackett version does not match the downloaded release tag."
+    exit 1
+fi
+queue_app_version /opt/Jackett/.af-version "$JACKETT_OBSERVED_VERSION"
 
 if [[ ! -s "$JACKETT_CONFIG" ]]; then
     sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' | write_config_file "$JACKETT_CONFIG"
