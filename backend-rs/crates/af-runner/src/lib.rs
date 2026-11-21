@@ -54,7 +54,7 @@ pub use af_release;
 mod adguard_dns;
 pub mod blueprint;
 pub mod bounded_command;
-mod job_receipts;
+pub mod job_receipts;
 mod legacy_stream_output;
 #[cfg(all(test, unix))]
 mod lifecycle_tests;

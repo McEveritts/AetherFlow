@@ -466,16 +466,35 @@ pub fn pop_worker_command(node_id: &str) -> Option<PendingWorkerCommand> {
     lease_next_worker_command(node_id, Utc::now().timestamp(), CLUSTER_COMMAND_LEASE_SECS)
 }
 
-/// Records terminal execution status (`executed` or `failed`) reported by `node_id`,
+pub const WORKER_COMMAND_STATUS_EXECUTED: &str = "executed";
+pub const WORKER_COMMAND_STATUS_FAILED: &str = "failed";
+pub const WORKER_COMMAND_STATUS_UNKNOWN: &str = "unknown";
+
+#[inline]
+fn is_terminal_worker_command_status(status: &str) -> bool {
+    matches!(
+        status,
+        WORKER_COMMAND_STATUS_EXECUTED
+            | WORKER_COMMAND_STATUS_FAILED
+            | WORKER_COMMAND_STATUS_UNKNOWN
+    )
+}
+
+/// Records terminal execution status (`executed`, `failed`, or `unknown`) reported by `node_id`,
 /// enforcing lease-generation fencing when `ack.lease_generation` is present.
+///
+/// `unknown` is a distinct operator-visible terminal state reported when a worker persisted
+/// pre-mutation execution intent for an admitted non-idempotent command and restarted before
+/// persisting a final outcome; the master stops re-leasing the command so an operator can inspect
+/// host state before issuing a fresh command.
 pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyhow::Result<bool> {
     ensure_cluster_schema();
     let clean_id = ack.id.trim();
     let clean_status = ack.status.trim().to_ascii_lowercase();
     anyhow::ensure!(!clean_id.is_empty(), "command id is required");
     anyhow::ensure!(
-        matches!(clean_status.as_str(), "executed" | "failed"),
-        "command ack status must be 'executed' or 'failed'"
+        is_terminal_worker_command_status(clean_status.as_str()),
+        "command ack status must be 'executed', 'failed', or 'unknown'"
     );
     let msg = ack
         .result_message
@@ -485,6 +504,9 @@ pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyh
     let now_iso = Utc::now().to_rfc3339();
     let conn = af_db::get_conn().context("database unavailable")?;
     let changed = if let Some(ack_gen) = ack.lease_generation {
+        if ack_gen <= 0 {
+            return Ok(false);
+        }
         conn.execute(
             "UPDATE cluster_commands
              SET status = ?1,
@@ -493,7 +515,7 @@ pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyh
                  updated_at = ?3
              WHERE id = ?4
                AND node_id = ?5
-               AND status IN ('queued', 'leased')
+               AND status = 'leased'
                AND COALESCE(lease_generation, 0) = ?6",
             params![
                 clean_status,
@@ -528,7 +550,14 @@ pub fn acknowledge_worker_command(node_id: &str, ack: &WorkerCommandAck) -> anyh
         Err(err) => return Err(err).context("failed querying cluster command terminal state"),
     };
     match existing_state {
-        Some((st, _)) if matches!(st.as_str(), "executed" | "failed") => Ok(true),
+        Some((st, existing_gen))
+            if is_terminal_worker_command_status(st.as_str())
+                && st == clean_status
+                && (ack.lease_generation.is_none()
+                    || ack.lease_generation == Some(existing_gen)) =>
+        {
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -3922,6 +3951,9 @@ pub fn load_worker_registration_state_nofollow(
 }
 
 const MAX_WORKER_ACK_OUTBOX_ENTRIES: usize = 256;
+const MAX_WORKER_ACK_OUTBOX_BYTES: usize = 256 * 1024;
+const MAX_WORKER_COMMAND_RECEIPTS: usize = 256;
+const MAX_WORKER_COMMAND_RECEIPTS_BYTES: usize = 512 * 1024;
 
 /// Resolves the durable `0600` worker command-ack outbox file path.
 pub fn resolve_worker_ack_outbox_path(state_path: &Path) -> std::path::PathBuf {
@@ -3937,33 +3969,31 @@ pub fn resolve_worker_ack_outbox_path(state_path: &Path) -> std::path::PathBuf {
         .join("cluster_worker_ack_outbox.json")
 }
 
-/// Atomically persists bounded unconfirmed worker command acks (`0600`, `O_NOFOLLOW`).
+/// Resolves the durable confined `0600` worker command execution receipt ledger path.
+pub fn resolve_worker_command_receipts_path(outbox_path: &Path) -> std::path::PathBuf {
+    if let Ok(explicit) = env::var("CLUSTER_WORKER_COMMAND_RECEIPTS_FILE") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    outbox_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/var/lib/aetherflow"))
+        .join("cluster_worker_command_receipts.json")
+}
+
+/// Atomically persists bounded unconfirmed worker command acks (`0600`, confined `O_NOFOLLOW`).
 pub fn persist_worker_ack_outbox_atomic(
     path: &Path,
     acks: &[WorkerCommandAck],
 ) -> anyhow::Result<()> {
-    use std::io::Write;
-    let Some(parent) = path.parent() else {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
         anyhow::bail!("worker ack outbox path must have a parent directory");
     };
-    if let Ok(pmeta) = std::fs::symlink_metadata(parent) {
-        if pmeta.file_type().is_symlink() {
-            anyhow::bail!("refusing symlink parent directory for worker ack outbox");
-        }
-    } else {
-        std::fs::create_dir_all(parent).context("creating worker ack outbox parent directory")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!("refusing to overwrite symlink worker ack outbox file");
-        }
-    }
+    let Some(file_name) = path.file_name() else {
+        anyhow::bail!("worker ack outbox path must have a filename");
+    };
 
     let bounded: &[WorkerCommandAck] = if acks.len() > MAX_WORKER_ACK_OUTBOX_ENTRIES {
         &acks[acks.len() - MAX_WORKER_ACK_OUTBOX_ENTRIES..]
@@ -3971,103 +4001,83 @@ pub fn persist_worker_ack_outbox_atomic(
         acks
     };
     let payload = serde_json::to_vec_pretty(bounded)?;
-    let tmp_name = format!(
-        ".cluster_worker_ack_outbox.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    );
-    let tmp_path = parent.join(tmp_name);
 
     #[cfg(unix)]
-    let mut tmp_file = {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::io::FromRawFd;
-
-        let c_tmp = CString::new(tmp_path.as_os_str().as_bytes())
-            .context("worker ack outbox temp path contains interior NUL")?;
-        let fd = unsafe {
-            libc::open(
-                c_tmp.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("opening exclusive 0600 worker ack outbox temp file");
-        }
-        unsafe {
-            let _ = libc::fchmod(fd, 0o600);
-            std::fs::File::from_raw_fd(fd)
-        }
-    };
-    #[cfg(not(unix))]
-    let mut tmp_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)?;
-
-    if let Err(err) = tmp_file
-        .write_all(&payload)
-        .and_then(|_| tmp_file.sync_all())
     {
-        drop(tmp_file);
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err).context("writing worker ack outbox temp file");
+        let dir = af_runner::job_receipts::ReceiptDirectory::open_confined(parent, true, 0o700)
+            .context("opening confined worker ack outbox directory")?;
+        dir.write_regular_atomic(file_name, &payload, 0o600)
+            .context("atomically persisting confined 0600 worker ack outbox")?;
+        Ok(())
     }
-    drop(tmp_file);
 
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        std::fs::create_dir_all(parent).context("creating worker ack outbox parent directory")?;
+        let tmp_name = format!(
+            ".cluster_worker_ack_outbox.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        );
+        let tmp_path = parent.join(tmp_name);
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        if let Err(err) = tmp_file
+            .write_all(&payload)
+            .and_then(|_| tmp_file.sync_all())
+        {
+            drop(tmp_file);
             let _ = std::fs::remove_file(&tmp_path);
-            anyhow::bail!("worker ack outbox target turned into a symlink");
+            return Err(err).context("writing worker ack outbox temp file");
         }
+        drop(tmp_file);
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err).context("atomically activating worker ack outbox file");
+        }
+        Ok(())
     }
-    if let Err(err) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err).context("atomically activating worker ack outbox file");
-    }
-    if let Ok(dir_f) = std::fs::File::open(parent) {
-        let _ = dir_f.sync_all();
-    }
-    Ok(())
 }
 
-/// Loads persisted unconfirmed worker command acks safely with `O_NOFOLLOW`.
+/// Loads persisted unconfirmed worker command acks safely using confined `O_NOFOLLOW` I/O.
 pub fn load_worker_ack_outbox_nofollow(path: &Path) -> Vec<WorkerCommandAck> {
-    #[cfg(unix)]
-    let file = {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::io::FromRawFd;
-
-        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
-            return Vec::new();
-        };
-        let fd = unsafe {
-            libc::open(
-                c_path.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Vec::new();
+    let raw = {
+        #[cfg(unix)]
+        {
+            let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                return Vec::new();
+            };
+            let Some(file_name) = path.file_name() else {
+                return Vec::new();
+            };
+            let Ok(Some(dir)) = af_runner::job_receipts::ReceiptDirectory::open_existing(parent)
+            else {
+                return Vec::new();
+            };
+            match dir.read_regular_bounded(file_name, MAX_WORKER_ACK_OUTBOX_BYTES) {
+                Ok(Some(bytes)) => bytes,
+                _ => return Vec::new(),
+            }
         }
-        let f = unsafe { std::fs::File::from_raw_fd(fd) };
-        if !f.metadata().ok().is_some_and(|m| m.is_file()) {
-            return Vec::new();
+        #[cfg(not(unix))]
+        {
+            let Ok(file) = std::fs::File::open(path) else {
+                return Vec::new();
+            };
+            let mut buf = Vec::new();
+            if file
+                .take(MAX_WORKER_ACK_OUTBOX_BYTES as u64)
+                .read_to_end(&mut buf)
+                .is_err()
+            {
+                return Vec::new();
+            }
+            buf
         }
-        f
-    };
-    #[cfg(not(unix))]
-    let Ok(file) = std::fs::File::open(path) else {
-        return Vec::new();
     };
 
-    let mut raw = Vec::new();
-    if file.take(256 * 1024).read_to_end(&mut raw).is_err() {
-        return Vec::new();
-    }
     let mut parsed: Vec<WorkerCommandAck> = serde_json::from_slice(&raw).unwrap_or_default();
     if parsed.len() > MAX_WORKER_ACK_OUTBOX_ENTRIES {
         parsed.drain(0..(parsed.len() - MAX_WORKER_ACK_OUTBOX_ENTRIES));
@@ -4075,21 +4085,24 @@ pub fn load_worker_ack_outbox_nofollow(path: &Path) -> Vec<WorkerCommandAck> {
     parsed
 }
 
-/// Appends or updates an unconfirmed ack in memory and durably persists the `0600` outbox.
+/// Appends or updates an unconfirmed ack and durably persists the `0600` outbox before updating memory.
 pub fn enqueue_worker_ack_outbox_entry(
     outbox_path: &Path,
     pending: &mut Vec<WorkerCommandAck>,
     ack: WorkerCommandAck,
 ) -> anyhow::Result<()> {
-    if let Some(existing) = pending.iter_mut().find(|a| a.id == ack.id) {
+    let mut next = pending.clone();
+    if let Some(existing) = next.iter_mut().find(|a| a.id == ack.id) {
         *existing = ack;
     } else {
-        if pending.len() >= MAX_WORKER_ACK_OUTBOX_ENTRIES {
-            pending.remove(0);
+        if next.len() >= MAX_WORKER_ACK_OUTBOX_ENTRIES {
+            next.remove(0);
         }
-        pending.push(ack);
+        next.push(ack);
     }
-    persist_worker_ack_outbox_atomic(outbox_path, pending)
+    persist_worker_ack_outbox_atomic(outbox_path, &next)?;
+    *pending = next;
+    Ok(())
 }
 
 /// Evicts ONLY those ack entries whose command IDs appear in `confirmed_command_ids`.
@@ -4101,12 +4114,989 @@ pub fn evict_confirmed_acks_from_outbox(
     if confirmed_ids.is_empty() {
         return Ok(());
     }
-    let before = pending.len();
-    pending.retain(|ack| !confirmed_ids.iter().any(|cid| cid == &ack.id));
-    if pending.len() != before {
-        persist_worker_ack_outbox_atomic(outbox_path, pending)?;
+    let mut next = pending.clone();
+    next.retain(|ack| !confirmed_ids.iter().any(|cid| cid == &ack.id));
+    if next.len() != pending.len() {
+        persist_worker_ack_outbox_atomic(outbox_path, &next)?;
+        *pending = next;
     }
     Ok(())
+}
+
+/// Durable worker-side command execution phase.
+///
+/// Recovery contract and limits:
+/// - `Intent` is persisted (`0600`, confined `O_NOFOLLOW`, `flock`, `fsync`) before admitting any
+///   non-idempotent host mutation (`restart_service`, `start_service`, `stop_service`,
+///   `reload_service`, `systemctl`).
+/// - If a worker crashes or restarts after persisting `Intent` and before persisting a final
+///   outcome, startup recovery transitions `Intent` to `Unknown` rather than guessing `Executed`
+///   or `Failed` or replaying the mutation.
+/// - Terminal receipts (`Executed`, `Failed`, `Unknown`) are persisted before ACK and reattached
+///   to freshly observed higher `lease_generation` values without rerunning the side effect.
+/// - Storage is bounded to `MAX_WORKER_COMMAND_RECEIPTS` (256) entries; oldest confirmed terminal
+///   receipts are evicted first. Loss or deletion of the worker state directory removes local
+///   intent/outcome history.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCommandReceiptPhase {
+    Intent,
+    Executed,
+    Failed,
+    Unknown,
+}
+
+impl WorkerCommandReceiptPhase {
+    #[inline]
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Intent)
+    }
+
+    pub fn as_ack_status(self) -> Option<&'static str> {
+        match self {
+            Self::Intent => None,
+            Self::Executed => Some(WORKER_COMMAND_STATUS_EXECUTED),
+            Self::Failed => Some(WORKER_COMMAND_STATUS_FAILED),
+            Self::Unknown => Some(WORKER_COMMAND_STATUS_UNKNOWN),
+        }
+    }
+
+    fn from_ack_status(status: &str) -> Option<Self> {
+        match status.trim().to_ascii_lowercase().as_str() {
+            WORKER_COMMAND_STATUS_EXECUTED => Some(Self::Executed),
+            WORKER_COMMAND_STATUS_FAILED => Some(Self::Failed),
+            WORKER_COMMAND_STATUS_UNKNOWN => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// Durable confined worker-side execution receipt (`cluster_worker_command_receipts.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerCommandReceipt {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmd_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    pub phase: WorkerCommandReceiptPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_message: Option<String>,
+    #[serde(default)]
+    pub ack_confirmed: bool,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+impl WorkerCommandReceipt {
+    pub fn to_ack(&self) -> Option<WorkerCommandAck> {
+        let status = self.phase.as_ack_status()?;
+        Some(WorkerCommandAck {
+            id: self.id.clone(),
+            status: status.to_string(),
+            result_message: self.result_message.clone(),
+            lease_generation: self.lease_generation,
+        })
+    }
+
+    fn matches_identity(&self, identity: &WorkerCommandIdentity) -> bool {
+        if let Some(ref recorded_node) = self.node_id {
+            if recorded_node != &identity.node_id {
+                return false;
+            }
+        }
+        if let Some(ref recorded_type) = self.cmd_type {
+            if recorded_type != &identity.cmd_type {
+                return false;
+            }
+        }
+        if let Some(ref recorded_target) = self.target {
+            if recorded_target != &identity.target {
+                return false;
+            }
+        }
+        if self.cmd_type.is_some() && self.action != identity.action {
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerCommandIdentity {
+    node_id: String,
+    cmd_type: String,
+    target: String,
+    action: Option<String>,
+}
+
+fn extract_command_lease_generation(cmd: &PendingWorkerCommand) -> Option<i64> {
+    (cmd.lease_generation > 0)
+        .then_some(cmd.lease_generation)
+        .or_else(|| {
+            cmd.params
+                .get("lease_generation")
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&g| g > 0)
+        })
+}
+
+fn resolve_service_action(cmd: &PendingWorkerCommand) -> Option<&'static str> {
+    match cmd.cmd_type.trim() {
+        "restart_service" => Some("restart"),
+        "start_service" => Some("start"),
+        "stop_service" => Some("stop"),
+        "reload_service" => Some("reload"),
+        "systemctl" => match cmd.params.get("action").map(|s| s.trim()) {
+            Some("restart") => Some("restart"),
+            Some("start") => Some("start"),
+            Some("stop") => Some("stop"),
+            Some("reload") => Some("reload"),
+            _ => Some("restart"),
+        },
+        _ => None,
+    }
+}
+
+fn resolve_command_target(cmd: &PendingWorkerCommand) -> String {
+    cmd.params
+        .get("service")
+        .or_else(|| cmd.params.get("target"))
+        .or_else(|| cmd.params.get("package"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+impl WorkerCommandIdentity {
+    fn from_command(node_id: &str, cmd: &PendingWorkerCommand) -> Self {
+        Self {
+            node_id: node_id.trim().to_string(),
+            cmd_type: cmd.cmd_type.trim().to_string(),
+            target: resolve_command_target(cmd),
+            action: resolve_service_action(cmd).map(str::to_string),
+        }
+    }
+}
+
+fn build_interrupted_intent_unknown_message(receipt: &WorkerCommandReceipt) -> String {
+    let op = receipt
+        .action
+        .as_deref()
+        .or(receipt.cmd_type.as_deref())
+        .unwrap_or("service command");
+    let target = receipt
+        .target
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown target");
+    truncate_utf8(
+        &format!(
+            "worker restarted after persisting execution intent for {op} {target} before a final outcome was recorded; mutation may have occurred — inspect service state before retrying"
+        ),
+        1024,
+    )
+    .to_string()
+}
+
+fn prune_worker_command_receipts(receipts: &mut Vec<WorkerCommandReceipt>) {
+    while receipts.len() > MAX_WORKER_COMMAND_RECEIPTS {
+        if let Some(pos) = receipts
+            .iter()
+            .position(|r| r.ack_confirmed && r.phase.is_terminal())
+        {
+            receipts.remove(pos);
+        } else if let Some(pos) = receipts.iter().position(|r| r.phase.is_terminal()) {
+            receipts.remove(pos);
+        } else {
+            receipts.remove(0);
+        }
+    }
+}
+
+/// Atomically persists the bounded `0600` worker command execution receipt ledger via
+/// `af_runner::job_receipts::ConfinedFileLock`.
+pub fn persist_worker_command_receipts_atomic(
+    path: &Path,
+    receipts: &[WorkerCommandReceipt],
+) -> anyhow::Result<()> {
+    let mut bounded = receipts.to_vec();
+    prune_worker_command_receipts(&mut bounded);
+    let payload = serde_json::to_vec_pretty(&bounded)?;
+
+    #[cfg(unix)]
+    {
+        let lock = af_runner::job_receipts::ConfinedFileLock::acquire(path, 0o700)
+            .context("acquiring confined lock for worker command receipts")?;
+        lock.write_atomic(&payload, 0o600)
+            .context("atomically persisting confined 0600 worker command receipts")?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+            anyhow::bail!("worker command receipts path must have a parent directory");
+        };
+        std::fs::create_dir_all(parent)?;
+        let tmp_path = parent.join(format!(
+            ".cluster_worker_command_receipts.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        if let Err(err) = tmp_file
+            .write_all(&payload)
+            .and_then(|_| tmp_file.sync_all())
+        {
+            drop(tmp_file);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err).context("writing worker command receipts temp file");
+        }
+        drop(tmp_file);
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err).context("activating worker command receipts file");
+        }
+        Ok(())
+    }
+}
+
+/// Strictly loads persisted worker command execution receipts using confined `O_NOFOLLOW` I/O.
+/// Missing files return `Ok(Vec::new())`; symlinks, hardlinks, non-regular files, and malformed
+/// JSON fail closed with `Err`.
+pub fn load_worker_command_receipts_strict(
+    path: &Path,
+) -> anyhow::Result<Vec<WorkerCommandReceipt>> {
+    let raw_opt = {
+        #[cfg(unix)]
+        {
+            let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                anyhow::bail!("worker command receipts path must have a parent directory");
+            };
+            let Some(file_name) = path.file_name() else {
+                anyhow::bail!("worker command receipts path must have a filename");
+            };
+            let Some(dir) = af_runner::job_receipts::ReceiptDirectory::open_existing(parent)
+                .context("opening confined worker command receipts directory")?
+            else {
+                return Ok(Vec::new());
+            };
+            dir.read_regular_bounded(file_name, MAX_WORKER_COMMAND_RECEIPTS_BYTES)
+                .context("reading confined worker command receipts")?
+        }
+        #[cfg(not(unix))]
+        {
+            match std::fs::File::open(path) {
+                Ok(file) => {
+                    let mut buf = Vec::new();
+                    file.take((MAX_WORKER_COMMAND_RECEIPTS_BYTES as u64) + 1)
+                        .read_to_end(&mut buf)?;
+                    if buf.len() > MAX_WORKER_COMMAND_RECEIPTS_BYTES {
+                        anyhow::bail!("worker command receipts exceed maximum size");
+                    }
+                    Some(buf)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => return Err(err.into()),
+            }
+        }
+    };
+
+    let Some(raw) = raw_opt else {
+        return Ok(Vec::new());
+    };
+    let mut parsed: Vec<WorkerCommandReceipt> =
+        serde_json::from_slice(&raw).context("parsing worker command receipts JSON")?;
+    prune_worker_command_receipts(&mut parsed);
+    Ok(parsed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedServiceMutation {
+    pub id: String,
+    pub service: String,
+    pub action: String,
+    pub lease_generation: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerCommandDispatchPlan {
+    Execute(AdmittedServiceMutation),
+    SendAckOnly(WorkerCommandAck),
+    AlreadyInFlight,
+    RejectedStaleLease,
+    RejectedConflictingIdentity,
+    RejectedStorageFailure,
+}
+
+struct WorkerCommandRuntimeState {
+    node_id: String,
+    receipts: Vec<WorkerCommandReceipt>,
+    pending_acks: Vec<WorkerCommandAck>,
+    in_flight: std::collections::HashSet<String>,
+    storage_corrupt: Option<String>,
+}
+
+/// Coordinates durable confined worker command execution intent, terminal receipts,
+/// lease-generation reattachment, legacy outbox recovery, and ACK confirmation.
+pub(crate) struct WorkerCommandCoordinator {
+    outbox_path: std::path::PathBuf,
+    receipts_path: std::path::PathBuf,
+    state: std::sync::Mutex<WorkerCommandRuntimeState>,
+}
+
+struct InFlightCommandGuard {
+    coordinator: Arc<WorkerCommandCoordinator>,
+    cmd_id: String,
+    armed: bool,
+}
+
+impl InFlightCommandGuard {
+    fn new(coordinator: Arc<WorkerCommandCoordinator>, cmd_id: String) -> Self {
+        Self {
+            coordinator,
+            cmd_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InFlightCommandGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.coordinator.release_in_flight_on_abort(&self.cmd_id);
+        }
+    }
+}
+
+impl WorkerCommandCoordinator {
+    /// Loads durable receipts and legacy outbox entries, converting any orphaned pre-mutation
+    /// `Intent` receipts from a crashed/restarted worker process into distinct `Unknown` results
+    /// before admitting new commands.
+    pub(crate) fn load_and_recover(
+        node_id: &str,
+        outbox_path: &Path,
+        receipts_path: &Path,
+    ) -> Self {
+        let clean_node = node_id.trim().to_string();
+        let mut pending_acks = load_worker_ack_outbox_nofollow(outbox_path);
+        let mut storage_corrupt: Option<String> = None;
+
+        let mut receipts = match load_worker_command_receipts_strict(receipts_path) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                let err_str = truncate_diagnostic_utf8(&err.to_string(), 512);
+                tracing::error!(
+                    path = %receipts_path.display(),
+                    error = %err_str,
+                    "failed loading confined worker command receipts; failing closed for new mutations"
+                );
+                storage_corrupt = Some(err_str);
+                Vec::new()
+            }
+        };
+
+        if storage_corrupt.is_none() {
+            let now_iso = Utc::now().to_rfc3339();
+            let mut receipts_changed = false;
+
+            // 1. Import legacy outbox entries so restarted/upgraded workers recognize completed
+            //    commands even when no receipt ledger existed previously.
+            for ack in &pending_acks {
+                let clean_id = ack.id.trim();
+                if clean_id.is_empty() {
+                    continue;
+                }
+                let Some(phase) = WorkerCommandReceiptPhase::from_ack_status(&ack.status) else {
+                    continue;
+                };
+                if let Some(existing) = receipts.iter_mut().find(|r| r.id == clean_id) {
+                    if existing.phase == WorkerCommandReceiptPhase::Intent {
+                        let non_stale = match (existing.lease_generation, ack.lease_generation) {
+                            (Some(rec_gen), Some(ack_gen)) => ack_gen >= rec_gen,
+                            _ => true,
+                        };
+                        if non_stale {
+                            existing.phase = phase;
+                            existing.lease_generation =
+                                ack.lease_generation.or(existing.lease_generation);
+                            existing.result_message = ack.result_message.clone();
+                            existing.ack_confirmed = false;
+                            existing.updated_at = now_iso.clone();
+                            receipts_changed = true;
+                        }
+                    }
+                } else {
+                    receipts.push(WorkerCommandReceipt {
+                        id: clean_id.to_string(),
+                        node_id: None,
+                        cmd_type: None,
+                        target: None,
+                        action: None,
+                        phase,
+                        lease_generation: ack.lease_generation,
+                        result_message: ack.result_message.clone(),
+                        ack_confirmed: false,
+                        updated_at: now_iso.clone(),
+                    });
+                    receipts_changed = true;
+                }
+            }
+
+            // 2. Any `Intent` still on disk at startup belongs to a dead prior process whose
+            //    non-idempotent mutation may have executed: transition to distinct `Unknown`.
+            for receipt in &mut receipts {
+                if receipt.phase == WorkerCommandReceiptPhase::Intent {
+                    receipt.phase = WorkerCommandReceiptPhase::Unknown;
+                    receipt.ack_confirmed = false;
+                    receipt.result_message =
+                        Some(build_interrupted_intent_unknown_message(receipt));
+                    receipt.updated_at = now_iso.clone();
+                    receipts_changed = true;
+                    tracing::warn!(
+                        command_id = %receipt.id,
+                        lease_generation = ?receipt.lease_generation,
+                        "recovered interrupted cluster command intent as unknown on worker startup"
+                    );
+                }
+            }
+
+            if receipts_changed {
+                if let Err(err) = persist_worker_command_receipts_atomic(receipts_path, &receipts) {
+                    let err_str = truncate_diagnostic_utf8(&err.to_string(), 512);
+                    tracing::error!(
+                        path = %receipts_path.display(),
+                        error = %err_str,
+                        "failed persisting recovered worker command receipts; failing closed"
+                    );
+                    storage_corrupt = Some(err_str);
+                }
+            }
+
+            // 3. Reconcile any unconfirmed terminal receipts (including newly recovered `Unknown`
+            //    receipts or results persisted just before a crash) into the 0600 ack outbox.
+            if storage_corrupt.is_none() {
+                let mut next_pending = pending_acks.clone();
+                let mut outbox_changed = false;
+                for receipt in &receipts {
+                    if receipt.ack_confirmed || !receipt.phase.is_terminal() {
+                        continue;
+                    }
+                    if let Some(ref rec_node) = receipt.node_id {
+                        if !clean_node.is_empty() && rec_node != &clean_node {
+                            continue;
+                        }
+                    }
+                    let Some(ack) = receipt.to_ack() else {
+                        continue;
+                    };
+                    if let Some(existing) = next_pending.iter_mut().find(|a| a.id == ack.id) {
+                        let should_replace = match (existing.lease_generation, ack.lease_generation)
+                        {
+                            (Some(eg), Some(ag)) => ag >= eg && *existing != ack,
+                            (None, Some(_)) => true,
+                            (Some(_), None) => false,
+                            (None, None) => *existing != ack,
+                        };
+                        if should_replace {
+                            *existing = ack;
+                            outbox_changed = true;
+                        }
+                    } else {
+                        if next_pending.len() >= MAX_WORKER_ACK_OUTBOX_ENTRIES {
+                            next_pending.remove(0);
+                        }
+                        next_pending.push(ack);
+                        outbox_changed = true;
+                    }
+                }
+                if outbox_changed {
+                    match persist_worker_ack_outbox_atomic(outbox_path, &next_pending) {
+                        Ok(()) => pending_acks = next_pending,
+                        Err(err) => {
+                            tracing::warn!(
+                                path = %outbox_path.display(),
+                                error = %err,
+                                "failed persisting reconciled worker ack outbox on startup"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            outbox_path: outbox_path.to_path_buf(),
+            receipts_path: receipts_path.to_path_buf(),
+            state: std::sync::Mutex::new(WorkerCommandRuntimeState {
+                node_id: clean_node,
+                receipts,
+                pending_acks,
+                in_flight: std::collections::HashSet::new(),
+                storage_corrupt,
+            }),
+        }
+    }
+
+    pub(crate) fn set_node_id(&self, node_id: &str) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.node_id = node_id.trim().to_string();
+        }
+    }
+
+    pub(crate) fn pending_acks_snapshot(&self) -> Vec<WorkerCommandAck> {
+        self.state
+            .lock()
+            .map(|g| g.pending_acks.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn mark_confirmed(&self, confirmed_ids: &[String]) {
+        if confirmed_ids.is_empty() {
+            return;
+        }
+        let Ok(mut guard) = self.state.lock() else {
+            return;
+        };
+        let _ =
+            evict_confirmed_acks_from_outbox(&self.outbox_path, &mut guard.pending_acks, confirmed_ids);
+        let mut next_receipts = guard.receipts.clone();
+        let mut receipts_changed = false;
+        let now_iso = Utc::now().to_rfc3339();
+        for receipt in &mut next_receipts {
+            if receipt.phase.is_terminal()
+                && !receipt.ack_confirmed
+                && confirmed_ids.iter().any(|cid| cid == &receipt.id)
+            {
+                receipt.ack_confirmed = true;
+                receipt.updated_at = now_iso.clone();
+                receipts_changed = true;
+            }
+        }
+        if receipts_changed
+            && persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts).is_ok()
+        {
+            guard.receipts = next_receipts;
+        }
+    }
+
+    pub(crate) fn prepare_command_dispatch(
+        &self,
+        cmd: PendingWorkerCommand,
+    ) -> WorkerCommandDispatchPlan {
+        let Ok(mut guard) = self.state.lock() else {
+            return WorkerCommandDispatchPlan::RejectedStorageFailure;
+        };
+        if let Some(ref reason) = guard.storage_corrupt {
+            tracing::error!(
+                command_id = %cmd.id,
+                error = %reason,
+                "refusing cluster command admission because confined receipt storage is unhealthy"
+            );
+            return WorkerCommandDispatchPlan::RejectedStorageFailure;
+        }
+
+        let cmd_id = cmd.id.trim().to_string();
+        if cmd_id.is_empty() {
+            return WorkerCommandDispatchPlan::RejectedConflictingIdentity;
+        }
+        let incoming_gen = extract_command_lease_generation(&cmd);
+        let identity = WorkerCommandIdentity::from_command(&guard.node_id, &cmd);
+        let now_iso = Utc::now().to_rfc3339();
+
+        // 1. Check durable receipts for existing intent or terminal outcome.
+        if let Some(idx) = guard.receipts.iter().position(|r| r.id == cmd_id) {
+            let existing = guard.receipts[idx].clone();
+            if !existing.matches_identity(&identity) {
+                tracing::warn!(
+                    command_id = %cmd_id,
+                    recorded_node_id = ?existing.node_id,
+                    incoming_node_id = %identity.node_id,
+                    recorded_cmd_type = ?existing.cmd_type,
+                    incoming_cmd_type = %identity.cmd_type,
+                    recorded_target = ?existing.target,
+                    incoming_target = %identity.target,
+                    "rejecting cluster command with conflicting identity against durable receipt"
+                );
+                return WorkerCommandDispatchPlan::RejectedConflictingIdentity;
+            }
+            if let Some(recorded_gen) = existing.lease_generation {
+                if incoming_gen.is_none_or(|g| g < recorded_gen) {
+                    tracing::warn!(
+                        command_id = %cmd_id,
+                        recorded_lease_generation = recorded_gen,
+                        incoming_lease_generation = ?incoming_gen,
+                        "rejecting stale cluster command lease delivery"
+                    );
+                    return WorkerCommandDispatchPlan::RejectedStaleLease;
+                }
+            }
+
+            if existing.phase == WorkerCommandReceiptPhase::Intent {
+                if guard.in_flight.contains(&cmd_id) {
+                    if let Some(fresh_gen) = incoming_gen {
+                        if existing.lease_generation.is_none_or(|g| fresh_gen > g) {
+                            let mut next_receipts = guard.receipts.clone();
+                            next_receipts[idx].lease_generation = Some(fresh_gen);
+                            next_receipts[idx].updated_at = now_iso;
+                            if persist_worker_command_receipts_atomic(
+                                &self.receipts_path,
+                                &next_receipts,
+                            )
+                            .is_ok()
+                            {
+                                guard.receipts = next_receipts;
+                            }
+                        }
+                    }
+                    return WorkerCommandDispatchPlan::AlreadyInFlight;
+                }
+
+                // Defensive recovery: an intent receipt with no active in-process owner
+                // (e.g., aborted/panicked task) must resolve to `Unknown`, never replay.
+                let attached_gen = incoming_gen.or(existing.lease_generation);
+                let mut next_receipts = guard.receipts.clone();
+                let rec = &mut next_receipts[idx];
+                rec.phase = WorkerCommandReceiptPhase::Unknown;
+                rec.lease_generation = attached_gen;
+                rec.ack_confirmed = false;
+                rec.result_message = Some(build_interrupted_intent_unknown_message(rec));
+                rec.updated_at = now_iso;
+                let ack = match rec.to_ack() {
+                    Some(a) => a,
+                    None => return WorkerCommandDispatchPlan::RejectedStorageFailure,
+                };
+                if let Err(err) =
+                    persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
+                {
+                    tracing::error!(
+                        command_id = %cmd_id,
+                        error = %err,
+                        "failed persisting orphaned-intent unknown receipt"
+                    );
+                    return WorkerCommandDispatchPlan::RejectedStorageFailure;
+                }
+                guard.receipts = next_receipts;
+                if let Err(err) = enqueue_worker_ack_outbox_entry(
+                    &self.outbox_path,
+                    &mut guard.pending_acks,
+                    ack.clone(),
+                ) {
+                    tracing::error!(
+                        command_id = %cmd_id,
+                        error = %err,
+                        "failed persisting orphaned-intent unknown ack to outbox"
+                    );
+                    return WorkerCommandDispatchPlan::RejectedStorageFailure;
+                }
+                return WorkerCommandDispatchPlan::SendAckOnly(ack);
+            }
+
+            // Known terminal durable result (`Executed`, `Failed`, or `Unknown`):
+            // reattach to the freshly observed lease generation without rerunning the effect.
+            let attached_gen = incoming_gen.or(existing.lease_generation);
+            let mut next_receipts = guard.receipts.clone();
+            let rec = &mut next_receipts[idx];
+            let metadata_bound = (rec.node_id.is_none() && !identity.node_id.is_empty())
+                || rec.cmd_type.is_none()
+                || rec.target.is_none()
+                || (rec.action.is_none() && identity.action.is_some());
+            if rec.node_id.is_none() && !identity.node_id.is_empty() {
+                rec.node_id = Some(identity.node_id);
+            }
+            if rec.cmd_type.is_none() {
+                rec.cmd_type = Some(identity.cmd_type);
+            }
+            if rec.target.is_none() {
+                rec.target = Some(identity.target);
+            }
+            if rec.action.is_none() {
+                rec.action = identity.action;
+            }
+            let receipt_dirty =
+                rec.lease_generation != attached_gen || rec.ack_confirmed || metadata_bound;
+            rec.lease_generation = attached_gen;
+            rec.ack_confirmed = false;
+            if receipt_dirty {
+                rec.updated_at = now_iso;
+            }
+            let ack = match rec.to_ack() {
+                Some(a) => a,
+                None => return WorkerCommandDispatchPlan::RejectedStorageFailure,
+            };
+            if receipt_dirty {
+                if let Err(err) =
+                    persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
+                {
+                    tracing::error!(
+                        command_id = %cmd_id,
+                        error = %err,
+                        "failed persisting reattached worker command receipt before ACK"
+                    );
+                    return WorkerCommandDispatchPlan::RejectedStorageFailure;
+                }
+                guard.receipts = next_receipts;
+            }
+            if let Err(err) = enqueue_worker_ack_outbox_entry(
+                &self.outbox_path,
+                &mut guard.pending_acks,
+                ack.clone(),
+            ) {
+                tracing::error!(
+                    command_id = %cmd_id,
+                    error = %err,
+                    "failed persisting reattached worker command ack to outbox before ACK"
+                );
+                return WorkerCommandDispatchPlan::RejectedStorageFailure;
+            }
+            return WorkerCommandDispatchPlan::SendAckOnly(ack);
+        }
+
+        if guard.in_flight.contains(&cmd_id) {
+            return WorkerCommandDispatchPlan::AlreadyInFlight;
+        }
+
+        tracing::info!(
+            command_id = %cmd_id,
+            cmd_type = %identity.cmd_type,
+            lease_generation = ?incoming_gen,
+            "cluster worker executing remote command from master"
+        );
+
+        // 2. Non-mutating commands (`ping`) and pre-mutation validation rejections persist their
+        //    terminal outcome directly before ACK without writing an `Intent` phase.
+        if identity.cmd_type == "ping" {
+            let receipt = WorkerCommandReceipt {
+                id: cmd_id.clone(),
+                node_id: (!identity.node_id.is_empty()).then_some(identity.node_id),
+                cmd_type: Some(identity.cmd_type),
+                target: Some(identity.target),
+                action: None,
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: incoming_gen,
+                result_message: Some("pong".to_string()),
+                ack_confirmed: false,
+                updated_at: now_iso,
+            };
+            return self.persist_immediate_terminal_receipt(&mut guard, receipt);
+        }
+
+        let Some(svc_action) = identity.action.clone() else {
+            let msg = format!(
+                "unsupported command type '{}'",
+                truncate_utf8(&identity.cmd_type, 64)
+            );
+            let receipt = WorkerCommandReceipt {
+                id: cmd_id.clone(),
+                node_id: (!identity.node_id.is_empty()).then_some(identity.node_id),
+                cmd_type: Some(identity.cmd_type),
+                target: Some(identity.target),
+                action: None,
+                phase: WorkerCommandReceiptPhase::Failed,
+                lease_generation: incoming_gen,
+                result_message: Some(msg),
+                ack_confirmed: false,
+                updated_at: now_iso,
+            };
+            return self.persist_immediate_terminal_receipt(&mut guard, receipt);
+        };
+
+        if identity.target.is_empty() {
+            let receipt = WorkerCommandReceipt {
+                id: cmd_id.clone(),
+                node_id: (!identity.node_id.is_empty()).then_some(identity.node_id),
+                cmd_type: Some(identity.cmd_type),
+                target: Some(String::new()),
+                action: Some(svc_action),
+                phase: WorkerCommandReceiptPhase::Failed,
+                lease_generation: incoming_gen,
+                result_message: Some("missing target service parameter".to_string()),
+                ack_confirmed: false,
+                updated_at: now_iso,
+            };
+            return self.persist_immediate_terminal_receipt(&mut guard, receipt);
+        }
+
+        // 3. Admitted non-idempotent service mutation: persist durable `Intent` receipt BEFORE
+        //    invoking `control_service`. If intent persistence fails, refuse admission so the
+        //    command remains genuinely unstarted.
+        let mut next_receipts = guard.receipts.clone();
+        next_receipts.push(WorkerCommandReceipt {
+            id: cmd_id.clone(),
+            node_id: (!identity.node_id.is_empty()).then_some(identity.node_id),
+            cmd_type: Some(identity.cmd_type),
+            target: Some(identity.target.clone()),
+            action: Some(svc_action.clone()),
+            phase: WorkerCommandReceiptPhase::Intent,
+            lease_generation: incoming_gen,
+            result_message: None,
+            ack_confirmed: false,
+            updated_at: now_iso,
+        });
+        prune_worker_command_receipts(&mut next_receipts);
+        if let Err(err) =
+            persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
+        {
+            tracing::error!(
+                command_id = %cmd_id,
+                service = %identity.target,
+                action = %svc_action,
+                error = %err,
+                "failed persisting pre-mutation execution intent; refusing non-idempotent mutation"
+            );
+            return WorkerCommandDispatchPlan::RejectedStorageFailure;
+        }
+        guard.receipts = next_receipts;
+        guard.in_flight.insert(cmd_id.clone());
+
+        WorkerCommandDispatchPlan::Execute(AdmittedServiceMutation {
+            id: cmd_id,
+            service: identity.target,
+            action: svc_action,
+            lease_generation: incoming_gen,
+        })
+    }
+
+    fn persist_immediate_terminal_receipt(
+        &self,
+        guard: &mut WorkerCommandRuntimeState,
+        receipt: WorkerCommandReceipt,
+    ) -> WorkerCommandDispatchPlan {
+        let Some(ack) = receipt.to_ack() else {
+            return WorkerCommandDispatchPlan::RejectedStorageFailure;
+        };
+        let mut next_receipts = guard.receipts.clone();
+        next_receipts.push(receipt);
+        prune_worker_command_receipts(&mut next_receipts);
+        if let Err(err) =
+            persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
+        {
+            tracing::error!(
+                command_id = %ack.id,
+                error = %err,
+                "failed persisting terminal worker command receipt before ACK"
+            );
+            return WorkerCommandDispatchPlan::RejectedStorageFailure;
+        }
+        guard.receipts = next_receipts;
+        if let Err(err) = enqueue_worker_ack_outbox_entry(
+            &self.outbox_path,
+            &mut guard.pending_acks,
+            ack.clone(),
+        ) {
+            tracing::error!(
+                command_id = %ack.id,
+                error = %err,
+                "failed persisting worker command ack to outbox before ACK"
+            );
+            return WorkerCommandDispatchPlan::RejectedStorageFailure;
+        }
+        WorkerCommandDispatchPlan::SendAckOnly(ack)
+    }
+
+    /// Persists the terminal execution result (`Executed` or `Failed`) into the confined receipt
+    /// ledger and `0600` ack outbox BEFORE returning the `WorkerCommandAck` to send.
+    pub(crate) fn complete_admitted_mutation(
+        &self,
+        mutation: &AdmittedServiceMutation,
+        result: Result<(), String>,
+    ) -> anyhow::Result<WorkerCommandAck> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("worker command coordinator mutex poisoned"))?;
+        let now_iso = Utc::now().to_rfc3339();
+        let (phase, result_message) = match result {
+            Ok(()) => (
+                WorkerCommandReceiptPhase::Executed,
+                Some(format!("{} {} succeeded", mutation.action, mutation.service)),
+            ),
+            Err(err_msg) => {
+                tracing::warn!(
+                    service = %mutation.service,
+                    action = %mutation.action,
+                    error = %err_msg,
+                    "cluster worker command failed"
+                );
+                (
+                    WorkerCommandReceiptPhase::Failed,
+                    Some(truncate_utf8(&err_msg, 1024).to_string()),
+                )
+            }
+        };
+
+        let mut next_receipts = guard.receipts.clone();
+        let effective_gen = if let Some(rec) = next_receipts.iter_mut().find(|r| r.id == mutation.id)
+        {
+            let gen = match (rec.lease_generation, mutation.lease_generation) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            rec.phase = phase;
+            rec.lease_generation = gen;
+            rec.result_message = result_message.clone();
+            rec.ack_confirmed = false;
+            rec.updated_at = now_iso;
+            gen
+        } else {
+            let gen = mutation.lease_generation;
+            next_receipts.push(WorkerCommandReceipt {
+                id: mutation.id.clone(),
+                node_id: (!guard.node_id.is_empty()).then_some(guard.node_id.clone()),
+                cmd_type: None,
+                target: Some(mutation.service.clone()),
+                action: Some(mutation.action.clone()),
+                phase,
+                lease_generation: gen,
+                result_message: result_message.clone(),
+                ack_confirmed: false,
+                updated_at: now_iso,
+            });
+            gen
+        };
+        prune_worker_command_receipts(&mut next_receipts);
+        persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)?;
+        guard.receipts = next_receipts;
+
+        let ack = WorkerCommandAck {
+            id: mutation.id.clone(),
+            status: phase
+                .as_ack_status()
+                .unwrap_or(WORKER_COMMAND_STATUS_FAILED)
+                .to_string(),
+            result_message,
+            lease_generation: effective_gen,
+        };
+        let outbox_res = enqueue_worker_ack_outbox_entry(
+            &self.outbox_path,
+            &mut guard.pending_acks,
+            ack.clone(),
+        );
+        guard.in_flight.remove(&mutation.id);
+        outbox_res?;
+        Ok(ack)
+    }
+
+    pub(crate) fn release_in_flight_on_abort(&self, cmd_id: &str) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.in_flight.remove(cmd_id);
+        }
+    }
 }
 
 fn parse_confirmed_command_ids(resp_bytes: &[u8]) -> Vec<String> {
@@ -4126,87 +5116,36 @@ fn parse_confirmed_command_ids(resp_bytes: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn execute_remote_worker_command_with_result(cmd: PendingWorkerCommand) -> WorkerCommandAck {
-    let lease_gen = (cmd.lease_generation > 0)
-        .then_some(cmd.lease_generation)
-        .or_else(|| {
-            cmd.params
-                .get("lease_generation")
-                .and_then(|s| s.parse::<i64>().ok())
-                .filter(|&g| g > 0)
-        });
-    tracing::info!(
-        command_id = %cmd.id,
-        cmd_type = %cmd.cmd_type,
-        lease_generation = ?lease_gen,
-        "cluster worker executing remote command from master"
-    );
-    if cmd.cmd_type == "ping" {
-        return WorkerCommandAck {
-            id: cmd.id,
-            status: "executed".to_string(),
-            result_message: Some("pong".to_string()),
-            lease_generation: lease_gen,
-        };
-    }
-    let action = match cmd.cmd_type.as_str() {
-        "restart_service" => Some("restart"),
-        "start_service" => Some("start"),
-        "stop_service" => Some("stop"),
-        "reload_service" => Some("reload"),
-        "systemctl" => match cmd.params.get("action").map(|s| s.trim()) {
-            Some("restart") => Some("restart"),
-            Some("start") => Some("start"),
-            Some("stop") => Some("stop"),
-            Some("reload") => Some("reload"),
-            _ => Some("restart"),
-        },
-        _ => None,
+async fn send_worker_command_ack_and_confirm(
+    endpoint: WorkerTargetEndpoint,
+    security: WorkerTransportSecurity,
+    cred: String,
+    node_id: String,
+    coordinator: Arc<WorkerCommandCoordinator>,
+    ack: WorkerCommandAck,
+) {
+    let cmd_id = ack.id.clone();
+    let ack_req = WorkerCommandAckRequest {
+        node_id,
+        psk: String::new(),
+        acks: vec![ack],
     };
-    let Some(svc_action) = action else {
-        return WorkerCommandAck {
-            id: cmd.id,
-            status: "failed".to_string(),
-            result_message: Some(format!(
-                "unsupported command type '{}'",
-                truncate_utf8(&cmd.cmd_type, 64)
-            )),
-            lease_generation: lease_gen,
-        };
+    let Ok(bytes) = serde_json::to_vec(&ack_req) else {
+        return;
     };
-    let service_name = cmd
-        .params
-        .get("service")
-        .or_else(|| cmd.params.get("target"))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let Some(service) = service_name else {
-        return WorkerCommandAck {
-            id: cmd.id,
-            status: "failed".to_string(),
-            result_message: Some("missing target service parameter".to_string()),
-            lease_generation: lease_gen,
-        };
-    };
-    match crate::control_service(&service, svc_action).await {
-        Ok(()) => WorkerCommandAck {
-            id: cmd.id,
-            status: "executed".to_string(),
-            result_message: Some(format!("{svc_action} {service} succeeded")),
-            lease_generation: lease_gen,
-        },
-        Err(err) => {
-            tracing::warn!(
-                service = %service,
-                action = %svc_action,
-                error = %err,
-                "cluster worker command failed"
-            );
-            WorkerCommandAck {
-                id: cmd.id,
-                status: "failed".to_string(),
-                result_message: Some(truncate_utf8(&err.to_string(), 1024).to_string()),
-                lease_generation: lease_gen,
+    if let Ok((st, body)) = send_worker_json_post(
+        &endpoint,
+        &security,
+        "/cluster/v1/commands/ack",
+        &cred,
+        bytes,
+    )
+    .await
+    {
+        if st.is_success() {
+            let confirmed = parse_confirmed_command_ids(&body);
+            if confirmed.iter().any(|c| c == &cmd_id) {
+                coordinator.mark_confirmed(&confirmed);
             }
         }
     }
@@ -4338,6 +5277,7 @@ async fn run_worker_registration_and_heartbeat_loop(
     let worker_address = format!("{}:{}", hostname, local_port);
     let state_path = resolve_worker_registration_state_path();
     let outbox_path = resolve_worker_ack_outbox_path(&state_path);
+    let receipts_path = resolve_worker_command_receipts_path(&outbox_path);
 
     let mut active_cred = resolve_live_enrollment_credential(&psk);
     let mut assigned_node_id = format!("node-{}", hostname);
@@ -4377,13 +5317,11 @@ async fn run_worker_registration_and_heartbeat_loop(
     let mut inventory = WorkerServiceInventory::default();
     let mut inventory_task = None;
 
-    let completed_cmds: Arc<std::sync::Mutex<HashMap<String, WorkerCommandAck>>> =
-        Arc::new(std::sync::Mutex::new(HashMap::new()));
-    let in_flight_cmds: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let initial_outbox = load_worker_ack_outbox_nofollow(&outbox_path);
-    let pending_acks: Arc<std::sync::Mutex<Vec<WorkerCommandAck>>> =
-        Arc::new(std::sync::Mutex::new(initial_outbox));
+    let cmd_coordinator = Arc::new(WorkerCommandCoordinator::load_and_recover(
+        &assigned_node_id,
+        &outbox_path,
+        &receipts_path,
+    ));
 
     loop {
         ticker.tick().await;
@@ -4397,9 +5335,7 @@ async fn run_worker_registration_and_heartbeat_loop(
             &inventory,
         );
         hb_payload.psk.clear();
-        let batch_acks: Vec<WorkerCommandAck> =
-            pending_acks.lock().map(|g| g.clone()).unwrap_or_default();
-        hb_payload.command_acks = batch_acks;
+        hb_payload.command_acks = cmd_coordinator.pending_acks_snapshot();
 
         let Ok(hb_bytes) = serde_json::to_vec(&hb_payload) else {
             continue;
@@ -4417,94 +5353,71 @@ async fn run_worker_registration_and_heartbeat_loop(
             Ok((status, resp_bytes)) if status.is_success() => {
                 if let Ok(pong) = serde_json::from_slice::<WorkerHeartbeatResponse>(&resp_bytes) {
                     if !pong.confirmed_command_ids.is_empty() {
-                        if let Ok(mut q) = pending_acks.lock() {
-                            let _ = evict_confirmed_acks_from_outbox(
-                                &outbox_path,
-                                &mut q,
-                                &pong.confirmed_command_ids,
-                            );
-                        }
+                        cmd_coordinator.mark_confirmed(&pong.confirmed_command_ids);
                     }
                     if let Some(cmd) = pong.command {
-                        let cached_ack = completed_cmds
-                            .lock()
-                            .ok()
-                            .and_then(|m| m.get(&cmd.id).cloned())
-                            .filter(|done| {
-                                done.lease_generation.is_none()
-                                    || done.lease_generation == Some(cmd.lease_generation)
-                            });
-                        if let Some(done_ack) = cached_ack {
-                            if let Ok(mut q) = pending_acks.lock() {
-                                let _ =
-                                    enqueue_worker_ack_outbox_entry(&outbox_path, &mut q, done_ack);
-                            }
-                            continue;
-                        }
-                        let should_run = in_flight_cmds
-                            .lock()
-                            .map(|mut s| s.insert(cmd.id.clone()))
-                            .unwrap_or(false);
-                        if should_run {
-                            let ep_clone = endpoint.clone();
-                            let sec_clone = security.clone();
-                            let cred_clone = active_cred.clone();
-                            let node_clone = assigned_node_id.clone();
-                            let done_map = Arc::clone(&completed_cmds);
-                            let flight_set = Arc::clone(&in_flight_cmds);
-                            let ack_queue = Arc::clone(&pending_acks);
-                            let outbox_clone = outbox_path.clone();
-                            tokio::spawn(async move {
-                                let cmd_id = cmd.id.clone();
-                                let ack = execute_remote_worker_command_with_result(cmd).await;
-                                if let Ok(mut m) = done_map.lock() {
-                                    if m.len() >= 256 {
-                                        if let Some(k) = m.keys().next().cloned() {
-                                            m.remove(&k);
-                                        }
-                                    }
-                                    m.insert(cmd_id.clone(), ack.clone());
-                                }
-                                if let Ok(mut q) = ack_queue.lock() {
-                                    let _ = enqueue_worker_ack_outbox_entry(
-                                        &outbox_clone,
-                                        &mut q,
-                                        ack.clone(),
-                                    );
-                                }
-                                if let Ok(mut s) = flight_set.lock() {
-                                    s.remove(&cmd_id);
-                                }
-                                let ack_req = WorkerCommandAckRequest {
-                                    node_id: node_clone,
-                                    psk: String::new(),
-                                    acks: vec![ack],
-                                };
-                                if let Ok(bytes) = serde_json::to_vec(&ack_req) {
-                                    if let Ok((st, body)) = send_worker_json_post(
-                                        &ep_clone,
-                                        &sec_clone,
-                                        "/cluster/v1/commands/ack",
-                                        &cred_clone,
-                                        bytes,
+                        match cmd_coordinator.prepare_command_dispatch(cmd) {
+                            WorkerCommandDispatchPlan::SendAckOnly(ack) => {
+                                let ep_clone = endpoint.clone();
+                                let sec_clone = security.clone();
+                                let cred_clone = active_cred.clone();
+                                let node_clone = assigned_node_id.clone();
+                                let coord_clone = Arc::clone(&cmd_coordinator);
+                                tokio::spawn(async move {
+                                    send_worker_command_ack_and_confirm(
+                                        ep_clone,
+                                        sec_clone,
+                                        cred_clone,
+                                        node_clone,
+                                        coord_clone,
+                                        ack,
                                     )
-                                    .await
+                                    .await;
+                                });
+                            }
+                            WorkerCommandDispatchPlan::Execute(mutation) => {
+                                let ep_clone = endpoint.clone();
+                                let sec_clone = security.clone();
+                                let cred_clone = active_cred.clone();
+                                let node_clone = assigned_node_id.clone();
+                                let coord_clone = Arc::clone(&cmd_coordinator);
+                                tokio::spawn(async move {
+                                    let mut guard = InFlightCommandGuard::new(
+                                        Arc::clone(&coord_clone),
+                                        mutation.id.clone(),
+                                    );
+                                    let outcome =
+                                        crate::control_service(&mutation.service, &mutation.action)
+                                            .await
+                                            .map_err(|err| err.to_string());
+                                    match coord_clone.complete_admitted_mutation(&mutation, outcome)
                                     {
-                                        if st.is_success() {
-                                            let confirmed = parse_confirmed_command_ids(&body);
-                                            if confirmed.iter().any(|c| c == &cmd_id) {
-                                                if let Ok(mut q) = ack_queue.lock() {
-                                                    let _ = evict_confirmed_acks_from_outbox(
-                                                        &outbox_clone,
-                                                        &mut q,
-                                                        &confirmed,
-                                                    );
-                                                }
-                                            }
+                                        Ok(ack) => {
+                                            guard.disarm();
+                                            send_worker_command_ack_and_confirm(
+                                                ep_clone,
+                                                sec_clone,
+                                                cred_clone,
+                                                node_clone,
+                                                coord_clone,
+                                                ack,
+                                            )
+                                            .await;
+                                        }
+                                        Err(err) => {
+                                            tracing::error!(
+                                                command_id = %mutation.id,
+                                                error = %err,
+                                                "failed persisting completed cluster command result before ACK"
+                                            );
                                         }
                                     }
-                                }
-                            });
+                                });
+                            }
+                            WorkerCommandDispatchPlan::AlreadyInFlight
+                            | WorkerCommandDispatchPlan::RejectedStaleLease
+                            | WorkerCommandDispatchPlan::RejectedConflictingIdentity
+                            | WorkerCommandDispatchPlan::RejectedStorageFailure => {}
                         }
                     }
                 }
@@ -4532,6 +5445,7 @@ async fn run_worker_registration_and_heartbeat_loop(
                             &state_path,
                         )
                         .await;
+                        cmd_coordinator.set_node_id(&assigned_node_id);
                     }
                 }
             }
@@ -6050,6 +6964,530 @@ mod tests {
         )
         .unwrap();
         assert!(load_worker_ack_outbox_nofollow(&outbox_file).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_command_restart_between_intent_and_result_reports_unknown_without_replay() {
+        let name = "cluster_daemon::tests::worker_command_restart_between_intent_and_result_reports_unknown_without_replay";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!("af-cluster-dur-1-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("cluster.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        let psk = "durability-master-psk-at-least-32-chars!!";
+        env::set_var("CLUSTER_PSK", psk);
+        af_db::init_db().unwrap();
+        ensure_cluster_schema();
+
+        let reg = register_worker_node(&RegisterWorkerRequest {
+            node_id: "node-alpha".to_string(),
+            hostname: "alpha".to_string(),
+            address: "127.0.0.1:8080".to_string(),
+            psk: psk.to_string(),
+            version: "4.0.0".to_string(),
+            system_info: None,
+        })
+        .unwrap();
+        assert!(reg.accepted);
+
+        let outbox_path = root.join("state/cluster_worker_ack_outbox.json");
+        let receipts_path = resolve_worker_command_receipts_path(&outbox_path);
+
+        // 1. Enqueue non-idempotent service restart and lease generation 1.
+        let queued = enqueue_cluster_command("node-alpha", "restart_service", "sonarr").unwrap();
+        let first_lease = lease_next_worker_command("node-alpha", 1000, 30).unwrap();
+        assert_eq!(first_lease.id, queued.id);
+        assert_eq!(first_lease.lease_generation, 1);
+
+        // Worker #1 admits mutation -> persists confined 0600 `Intent` receipt BEFORE mutation runs.
+        let worker_1 =
+            WorkerCommandCoordinator::load_and_recover("node-alpha", &outbox_path, &receipts_path);
+        let plan_1 = worker_1.prepare_command_dispatch(first_lease);
+        let mutation = match plan_1 {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("expected Execute plan for unstarted command, got {other:?}"),
+        };
+        assert_eq!(mutation.service, "sonarr");
+        assert_eq!(mutation.action, "restart");
+
+        let receipts_mode = std::fs::symlink_metadata(&receipts_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(receipts_mode, 0o600);
+        let on_disk = load_worker_command_receipts_strict(&receipts_path).unwrap();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].phase, WorkerCommandReceiptPhase::Intent);
+        assert_eq!(on_disk[0].lease_generation, Some(1));
+
+        // Simulate crash/restart BEFORE `complete_admitted_mutation` persists a final outcome.
+        drop(worker_1);
+
+        // 2. Restarted worker #2 transitions orphaned `Intent` -> distinct `Unknown` without replay.
+        let worker_2 =
+            WorkerCommandCoordinator::load_and_recover("node-alpha", &outbox_path, &receipts_path);
+        let recovered = load_worker_command_receipts_strict(&receipts_path).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].phase, WorkerCommandReceiptPhase::Unknown);
+        assert_eq!(recovered[0].lease_generation, Some(1));
+        assert!(recovered[0]
+            .result_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("inspect service state before retrying"));
+
+        let pending_before_gen2 = worker_2.pending_acks_snapshot();
+        assert_eq!(pending_before_gen2.len(), 1);
+        assert_eq!(pending_before_gen2[0].status, WORKER_COMMAND_STATUS_UNKNOWN);
+        assert_eq!(pending_before_gen2[0].lease_generation, Some(1));
+
+        // Master lease expires -> lease generation advances to 2 before gen-1 ACK arrives.
+        let expired_re_lease = lease_next_worker_command("node-alpha", 1031, 30).unwrap();
+        assert_eq!(expired_re_lease.id, queued.id);
+        assert_eq!(expired_re_lease.lease_generation, 2);
+
+        // Heartbeat carrying stale gen-1 `unknown` ACK MUST be fenced by master!
+        let hb_stale = process_worker_heartbeat(&WorkerHeartbeatRequest {
+            node_id: "node-alpha".to_string(),
+            hostname: "alpha".to_string(),
+            address: "127.0.0.1:8080".to_string(),
+            psk: psk.to_string(),
+            timestamp: 1035,
+            command_acks: pending_before_gen2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(hb_stale.confirmed_command_ids.is_empty());
+
+        // Worker #2 observes fresh lease_generation=2 -> reattaches durable `unknown` WITHOUT rerunning!
+        let plan_2 = worker_2.prepare_command_dispatch(expired_re_lease);
+        let reattached_ack = match plan_2 {
+            WorkerCommandDispatchPlan::SendAckOnly(ack) => ack,
+            other => panic!("expected SendAckOnly reattachment of unknown receipt, got {other:?}"),
+        };
+        assert_eq!(reattached_ack.id, queued.id);
+        assert_eq!(reattached_ack.status, WORKER_COMMAND_STATUS_UNKNOWN);
+        assert_eq!(reattached_ack.lease_generation, Some(2));
+
+        // Reattached generation=2 ACK is persisted before delivery and commits `unknown` on master.
+        assert_eq!(
+            load_worker_ack_outbox_nofollow(&outbox_path)[0].lease_generation,
+            Some(2)
+        );
+        let hb_commit = process_worker_heartbeat(&WorkerHeartbeatRequest {
+            node_id: "node-alpha".to_string(),
+            hostname: "alpha".to_string(),
+            address: "127.0.0.1:8080".to_string(),
+            psk: psk.to_string(),
+            timestamp: 1040,
+            command_acks: worker_2.pending_acks_snapshot(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(hb_commit.confirmed_command_ids, vec![queued.id.clone()]);
+        assert!(hb_commit.command.is_none());
+        worker_2.mark_confirmed(&hb_commit.confirmed_command_ids);
+        assert!(load_worker_ack_outbox_nofollow(&outbox_path).is_empty());
+
+        let listed = list_cluster_commands(Some("node-alpha"), 10).unwrap();
+        assert_eq!(listed[0].status, WORKER_COMMAND_STATUS_UNKNOWN);
+        assert_eq!(listed[0].lease_generation, 2);
+        assert!(listed[0]
+            .result_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("inspect service state"));
+        assert!(lease_next_worker_command("node-alpha", 2000, 30).is_none());
+
+        // 3. Normal retry semantics for a genuinely unstarted command (lease 1 lost on wire).
+        let unstarted = enqueue_cluster_command("node-alpha", "restart_service", "radarr").unwrap();
+        let lost_gen1 = lease_next_worker_command("node-alpha", 2010, 30).unwrap();
+        assert_eq!(lost_gen1.lease_generation, 1);
+        let gen2 = lease_next_worker_command("node-alpha", 2045, 30).unwrap();
+        assert_eq!(gen2.id, unstarted.id);
+        assert_eq!(gen2.lease_generation, 2);
+
+        let unstarted_mutation = match worker_2.prepare_command_dispatch(gen2) {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("genuinely unstarted command must still execute, got {other:?}"),
+        };
+        let done_ack = worker_2
+            .complete_admitted_mutation(&unstarted_mutation, Ok(()))
+            .unwrap();
+        assert_eq!(done_ack.status, WORKER_COMMAND_STATUS_EXECUTED);
+        assert_eq!(done_ack.lease_generation, Some(2));
+        assert!(acknowledge_worker_command("node-alpha", &done_ack).unwrap());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_command_retry_after_lost_ack_and_new_lease_reattaches_without_rerun() {
+        let name = "cluster_daemon::tests::worker_command_retry_after_lost_ack_and_new_lease_reattaches_without_rerun";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+
+        let root = env::temp_dir().join(format!("af-cluster-dur-2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("cluster.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        let psk = "durability-retry-psk-at-least-32-chars!!";
+        env::set_var("CLUSTER_PSK", psk);
+        af_db::init_db().unwrap();
+        ensure_cluster_schema();
+
+        let reg = register_worker_node(&RegisterWorkerRequest {
+            node_id: "node-beta".to_string(),
+            hostname: "beta".to_string(),
+            address: "127.0.0.1:8081".to_string(),
+            psk: psk.to_string(),
+            version: "4.0.0".to_string(),
+            system_info: None,
+        })
+        .unwrap();
+        assert!(reg.accepted);
+
+        let outbox_path = root.join("state/cluster_worker_ack_outbox.json");
+        let receipts_path = resolve_worker_command_receipts_path(&outbox_path);
+
+        // 1. Execute once on gen=1, persist completed result before ACK, then lose ACK & re-lease gen=2.
+        let cmd_rec = enqueue_cluster_command("node-beta", "restart_service", "plex").unwrap();
+        let lease_1 = lease_next_worker_command("node-beta", 3000, 30).unwrap();
+        assert_eq!(lease_1.lease_generation, 1);
+
+        let worker =
+            WorkerCommandCoordinator::load_and_recover("node-beta", &outbox_path, &receipts_path);
+        let mut exec_count = 0usize;
+        let mutation = match worker.prepare_command_dispatch(lease_1) {
+            WorkerCommandDispatchPlan::Execute(m) => {
+                exec_count += 1;
+                m
+            }
+            other => panic!("expected Execute on first delivery, got {other:?}"),
+        };
+        let ack_gen1 = worker.complete_admitted_mutation(&mutation, Ok(())).unwrap();
+        assert_eq!(ack_gen1.status, WORKER_COMMAND_STATUS_EXECUTED);
+        assert_eq!(ack_gen1.lease_generation, Some(1));
+        assert_eq!(load_worker_ack_outbox_nofollow(&outbox_path).len(), 1);
+        assert_eq!(
+            load_worker_command_receipts_strict(&receipts_path).unwrap()[0].phase,
+            WorkerCommandReceiptPhase::Executed
+        );
+
+        // ACK response is lost; master lease expires and issues gen=2.
+        let lease_2 = lease_next_worker_command("node-beta", 3035, 30).unwrap();
+        assert_eq!(lease_2.id, cmd_rec.id);
+        assert_eq!(lease_2.lease_generation, 2);
+
+        // Same worker reattaches durable `executed` result to gen=2 WITHOUT rerunning the mutation.
+        let ack_gen2 = match worker.prepare_command_dispatch(lease_2) {
+            WorkerCommandDispatchPlan::SendAckOnly(ack) => ack,
+            other => panic!("expected SendAckOnly reattachment on gen=2, got {other:?}"),
+        };
+        assert_eq!(exec_count, 1, "side effect must not be rerun on new lease");
+        assert_eq!(ack_gen2.status, WORKER_COMMAND_STATUS_EXECUTED);
+        assert_eq!(ack_gen2.lease_generation, Some(2));
+        assert_eq!(
+            ack_gen2.result_message.as_deref(),
+            Some("restart plex succeeded")
+        );
+
+        // Deliver reattached gen=2 ACK via /cluster/v1/commands/ack -> master commits and confirms.
+        let ack_req_bytes = serde_json::to_vec(&WorkerCommandAckRequest {
+            node_id: "node-beta".to_string(),
+            psk: String::new(),
+            acks: vec![ack_gen2],
+        })
+        .unwrap();
+        let (code, _, body) = route_cluster_http_request(
+            "POST",
+            "/cluster/v1/commands/ack",
+            "/cluster/v1/commands/ack",
+            psk,
+            &ack_req_bytes,
+            &PeerTransportAuth::InsecureLoopback,
+        );
+        assert_eq!(code, 200);
+        assert_eq!(body["confirmed_command_ids"], serde_json::json!([cmd_rec.id]));
+        worker.mark_confirmed(&[cmd_rec.id.clone()]);
+        assert!(load_worker_ack_outbox_nofollow(&outbox_path).is_empty());
+        assert!(
+            load_worker_command_receipts_strict(&receipts_path).unwrap()[0].ack_confirmed
+        );
+
+        // 2. Legacy outbox compatibility: restarted worker with ONLY legacy 0600 outbox file
+        //    reattaches completed result to freshly observed lease generation without rerunning.
+        let legacy_outbox = root.join("legacy/cluster_worker_ack_outbox.json");
+        let legacy_receipts = resolve_worker_command_receipts_path(&legacy_outbox);
+        let legacy_rec = enqueue_cluster_command("node-beta", "stop_service", "radarr").unwrap();
+        let _legacy_gen1 = lease_next_worker_command("node-beta", 3100, 30).unwrap();
+        let legacy_gen2 = lease_next_worker_command("node-beta", 3135, 30).unwrap();
+        assert_eq!(legacy_gen2.lease_generation, 2);
+
+        persist_worker_ack_outbox_atomic(
+            &legacy_outbox,
+            &[WorkerCommandAck {
+                id: legacy_rec.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("stop radarr succeeded".to_string()),
+                lease_generation: Some(1),
+            }],
+        )
+        .unwrap();
+        assert!(!legacy_receipts.exists());
+
+        let upgraded_worker = WorkerCommandCoordinator::load_and_recover(
+            "node-beta",
+            &legacy_outbox,
+            &legacy_receipts,
+        );
+        let reattached_legacy = match upgraded_worker.prepare_command_dispatch(legacy_gen2) {
+            WorkerCommandDispatchPlan::SendAckOnly(ack) => ack,
+            other => panic!("legacy outbox record must reattach without rerun, got {other:?}"),
+        };
+        assert_eq!(reattached_legacy.id, legacy_rec.id);
+        assert_eq!(reattached_legacy.status, WORKER_COMMAND_STATUS_EXECUTED);
+        assert_eq!(reattached_legacy.lease_generation, Some(2));
+        assert!(acknowledge_worker_command("node-beta", &reattached_legacy).unwrap());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_command_stale_lease_conflicting_identity_and_confined_storage_guards() {
+        let name = "cluster_daemon::tests::worker_command_stale_lease_conflicting_identity_and_confined_storage_guards";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+
+        let root = env::temp_dir().join(format!("af-cluster-dur-3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("cluster.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        let psk = "durability-fence-psk-at-least-32-chars!!";
+        env::set_var("CLUSTER_PSK", psk);
+        af_db::init_db().unwrap();
+        ensure_cluster_schema();
+
+        for (nid, host, addr) in [
+            ("node-gamma", "gamma", "127.0.0.1:8082"),
+            ("node-other", "other", "127.0.0.1:8083"),
+        ] {
+            let reg = register_worker_node(&RegisterWorkerRequest {
+                node_id: nid.to_string(),
+                hostname: host.to_string(),
+                address: addr.to_string(),
+                psk: psk.to_string(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            })
+            .unwrap();
+            assert!(reg.accepted);
+        }
+
+        // 1. Master lease fencing & conflicting node/status rejection.
+        let queued = enqueue_cluster_command("node-gamma", "restart_service", "sonarr").unwrap();
+        let gen1 = lease_next_worker_command("node-gamma", 4000, 30).unwrap();
+        let gen2 = lease_next_worker_command("node-gamma", 4035, 30).unwrap();
+        assert_eq!(gen1.lease_generation, 1);
+        assert_eq!(gen2.lease_generation, 2);
+
+        assert!(!acknowledge_worker_command(
+            "node-gamma",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: None,
+                lease_generation: Some(0),
+            }
+        )
+        .unwrap());
+        assert!(!acknowledge_worker_command(
+            "node-gamma",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("stale gen 1".to_string()),
+                lease_generation: Some(1),
+            }
+        )
+        .unwrap());
+        assert!(!acknowledge_worker_command(
+            "node-other",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("wrong node".to_string()),
+                lease_generation: Some(2),
+            }
+        )
+        .unwrap());
+        assert!(acknowledge_worker_command(
+            "node-gamma",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("restart sonarr succeeded".to_string()),
+                lease_generation: Some(2),
+            }
+        )
+        .unwrap());
+
+        // Post-terminal stale lease & conflicting status ACKs must be rejected, while exact duplicate succeeds.
+        assert!(!acknowledge_worker_command(
+            "node-gamma",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: None,
+                lease_generation: Some(1),
+            }
+        )
+        .unwrap());
+        assert!(!acknowledge_worker_command(
+            "node-gamma",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_FAILED.to_string(),
+                result_message: Some("conflicting outcome".to_string()),
+                lease_generation: Some(2),
+            }
+        )
+        .unwrap());
+        assert!(acknowledge_worker_command(
+            "node-gamma",
+            &WorkerCommandAck {
+                id: queued.id.clone(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("restart sonarr succeeded".to_string()),
+                lease_generation: Some(2),
+            }
+        )
+        .unwrap());
+
+        // 2. Worker-side stale lease rejection and conflicting command identity rejection.
+        let outbox_path = root.join("state/cluster_worker_ack_outbox.json");
+        let receipts_path = resolve_worker_command_receipts_path(&outbox_path);
+        let worker =
+            WorkerCommandCoordinator::load_and_recover("node-gamma", &outbox_path, &receipts_path);
+        let m = match worker.prepare_command_dispatch(gen2.clone()) {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("expected Execute on gen=2, got {other:?}"),
+        };
+        worker.complete_admitted_mutation(&m, Ok(())).unwrap();
+
+        // Stale gen=1 delivery must be rejected without downgrading stored gen=2.
+        assert_eq!(
+            worker.prepare_command_dispatch(gen1),
+            WorkerCommandDispatchPlan::RejectedStaleLease
+        );
+        assert_eq!(
+            load_worker_command_receipts_strict(&receipts_path).unwrap()[0].lease_generation,
+            Some(2)
+        );
+
+        // Conflicting verb/target under same cmd_id must be rejected without executing or overwriting.
+        let mut conflicting_target = gen2.clone();
+        conflicting_target.lease_generation = 3;
+        conflicting_target
+            .params
+            .insert("service".to_string(), "radarr".to_string());
+        conflicting_target
+            .params
+            .insert("target".to_string(), "radarr".to_string());
+        assert_eq!(
+            worker.prepare_command_dispatch(conflicting_target),
+            WorkerCommandDispatchPlan::RejectedConflictingIdentity
+        );
+
+        let mut conflicting_verb = gen2.clone();
+        conflicting_verb.lease_generation = 3;
+        conflicting_verb.cmd_type = "stop_service".to_string();
+        assert_eq!(
+            worker.prepare_command_dispatch(conflicting_verb),
+            WorkerCommandDispatchPlan::RejectedConflictingIdentity
+        );
+
+        // 3. Confined storage rejects symlinks/hardlinks and fails closed on tampered receipt store.
+        let sym_receipts = root.join("state/symlink_receipts.json");
+        std::os::unix::fs::symlink(&receipts_path, &sym_receipts).unwrap();
+        assert!(load_worker_command_receipts_strict(&sym_receipts).is_err());
+        assert!(persist_worker_command_receipts_atomic(&sym_receipts, &[]).is_err());
+        let tampered_worker = WorkerCommandCoordinator::load_and_recover(
+            "node-gamma",
+            &outbox_path,
+            &sym_receipts,
+        );
+        assert_eq!(
+            tampered_worker.prepare_command_dispatch(PendingWorkerCommand {
+                id: "cmd-fresh-tampered".to_string(),
+                cmd_type: "restart_service".to_string(),
+                params: HashMap::from([("service".to_string(), "sonarr".to_string())]),
+                lease_generation: 1,
+            }),
+            WorkerCommandDispatchPlan::RejectedStorageFailure
+        );
+
+        let hardlink_alias = root.join("state/hardlink_alias.json");
+        std::fs::hard_link(&receipts_path, &hardlink_alias).unwrap();
+        assert!(load_worker_command_receipts_strict(&receipts_path).is_err());
+        let _ = std::fs::remove_file(&hardlink_alias);
+
+        // 4. Bounded storage caps receipt ledger at MAX_WORKER_COMMAND_RECEIPTS while keeping active intents.
+        let bounded_path = root.join("bounded/cluster_worker_command_receipts.json");
+        let mut many: Vec<WorkerCommandReceipt> = (0..MAX_WORKER_COMMAND_RECEIPTS + 5)
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-confirmed-{i}"),
+                node_id: Some("node-gamma".to_string()),
+                cmd_type: Some("ping".to_string()),
+                target: Some(String::new()),
+                action: None,
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: Some(1),
+                result_message: Some("pong".to_string()),
+                ack_confirmed: true,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        many.insert(
+            0,
+            WorkerCommandReceipt {
+                id: "cmd-active-intent".to_string(),
+                node_id: Some("node-gamma".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some("sonarr".to_string()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Intent,
+                lease_generation: Some(1),
+                result_message: None,
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            },
+        );
+        persist_worker_command_receipts_atomic(&bounded_path, &many).unwrap();
+        let loaded_bounded = load_worker_command_receipts_strict(&bounded_path).unwrap();
+        assert_eq!(loaded_bounded.len(), MAX_WORKER_COMMAND_RECEIPTS);
+        assert!(
+            loaded_bounded.iter().any(|r| r.id == "cmd-active-intent"),
+            "active intent receipt must survive eviction of older confirmed receipts"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

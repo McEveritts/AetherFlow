@@ -184,13 +184,107 @@ impl ReceiptDirectory {
         launch_is_alive_locked(guard, required)
     }
 
+    pub fn open_confined(path: &Path, create: bool, leaf_mode: u32) -> Result<Self> {
+        Self::open_with_mode(path, create, leaf_mode)
+    }
+
+    pub fn read_regular_bounded(&self, name: &OsStr, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        validate_single_file_name(name)?;
+        self.verify()?;
+        let mut file = match self.open_file(name, libc::O_RDONLY, 0) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((max_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Receipt exceeds maximum size",
+            ));
+        }
+        self.verify()?;
+        verify_entry(self.file(), name, &file, false)?;
+        Ok(Some(bytes))
+    }
+
+    pub fn write_regular_atomic(&self, name: &OsStr, bytes: &[u8], mode: u32) -> Result<()> {
+        validate_single_file_name(name)?;
+        self.verify()?;
+        let previous = match self.open_file(name, libc::O_RDONLY, 0) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut temporary = name.to_os_string();
+        temporary.push(format!(".tmp.{}", uuid::Uuid::new_v4().simple()));
+        let mut file = self.open_file(
+            &temporary,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            mode,
+        )?;
+        let result = (|| {
+            if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+                return Err(Error::last_os_error());
+            }
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            self.verify()?;
+            verify_entry(self.file(), &temporary, &file, false)?;
+            if let Some(prev) = previous.as_ref() {
+                verify_entry(self.file(), name, prev, false)?;
+            } else {
+                match entry_at(self.file(), name) {
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    _ => return Err(io_error("Receipt appeared during update")),
+                }
+            }
+            if unsafe {
+                libc::renameat(
+                    self.file().as_raw_fd(),
+                    c_name(&temporary)?.as_ptr(),
+                    self.file().as_raw_fd(),
+                    c_name(name)?.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(Error::last_os_error());
+            }
+            self.verify()?;
+            verify_entry(self.file(), name, &file, false)?;
+            self.file().sync_all()
+        })();
+        if result.is_err() {
+            if let Ok(temp_c) = c_name(&temporary) {
+                unsafe {
+                    libc::unlinkat(self.file().as_raw_fd(), temp_c.as_ptr(), 0);
+                }
+            }
+        }
+        result
+    }
+
     fn open(path: &Path, create: bool) -> Result<Self> {
+        Self::open_with_mode(path, create, 0o755)
+    }
+
+    fn open_with_mode(path: &Path, create: bool, leaf_mode: u32) -> Result<Self> {
         if path
             .components()
             .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
         {
             return Err(io_error("Receipt directory traversal is forbidden"));
         }
+        let normal_components: Vec<&OsStr> = path
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(name) => Some(name),
+                _ => None,
+            })
+            .collect();
         let root = if path.is_absolute() { "/" } else { "." };
         let mut directory = Self {
             chain: vec![(
@@ -203,14 +297,17 @@ impl ReceiptDirectory {
                 )?,
             )],
         };
-        for component in path.components() {
-            let Component::Normal(name) = component else {
-                continue;
-            };
+        for (idx, name) in normal_components.iter().enumerate() {
             directory.verify()?;
+            let is_leaf = idx + 1 == normal_components.len();
+            let dir_mode = if is_leaf { leaf_mode } else { 0o755 };
             if create {
                 let result = unsafe {
-                    libc::mkdirat(directory.file().as_raw_fd(), c_name(name)?.as_ptr(), 0o755)
+                    libc::mkdirat(
+                        directory.file().as_raw_fd(),
+                        c_name(name)?.as_ptr(),
+                        dir_mode as libc::mode_t,
+                    )
                 };
                 if result != 0 && Error::last_os_error().kind() != ErrorKind::AlreadyExists {
                     return Err(Error::last_os_error());
@@ -293,6 +390,56 @@ impl ReceiptDirectory {
     }
 }
 
+fn validate_single_file_name(name: &OsStr) -> Result<()> {
+    if Path::new(name).components().count() != 1
+        || !matches!(
+            Path::new(name).components().next(),
+            Some(Component::Normal(_))
+        )
+    {
+        return Err(io_error("Invalid receipt filename"));
+    }
+    Ok(())
+}
+
+/// Exclusive `flock`-backed confined regular-file handle reusing `ReceiptDirectory` and `ReceiptLock`.
+pub struct ConfinedFileLock {
+    guard: ReceiptLock,
+}
+
+impl ConfinedFileLock {
+    pub fn acquire(path: &Path, leaf_dir_mode: u32) -> Result<Self> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io_error("Missing receipt filename"))?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let directory = ReceiptDirectory::open_confined(parent, true, leaf_dir_mode)?;
+        let guard = ReceiptLock::acquire_in(directory, name, true)?;
+        Ok(Self { guard })
+    }
+
+    pub fn read_bounded(&self, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        self.guard.verify()?;
+        let bytes = self
+            .guard
+            .directory
+            .read_regular_bounded(&self.guard.name, max_bytes)?;
+        self.guard.verify()?;
+        Ok(bytes)
+    }
+
+    pub fn write_atomic(&self, bytes: &[u8], file_mode: u32) -> Result<()> {
+        self.guard.verify()?;
+        self.guard
+            .directory
+            .write_regular_atomic(&self.guard.name, bytes, file_mode)?;
+        self.guard.verify()
+    }
+}
+
 struct ReceiptLock {
     directory: ReceiptDirectory,
     name: OsString,
@@ -310,14 +457,7 @@ impl ReceiptLock {
     }
 
     fn acquire_in(directory: ReceiptDirectory, name: &OsStr, exclusive: bool) -> Result<Self> {
-        if Path::new(name).components().count() != 1
-            || !matches!(
-                Path::new(name).components().next(),
-                Some(Component::Normal(_))
-            )
-        {
-            return Err(io_error("Invalid receipt filename"));
-        }
+        validate_single_file_name(name)?;
         let mut lock_name = name.to_os_string();
         lock_name.push(".lock");
         let file = directory.open_file(&lock_name, libc::O_RDWR | libc::O_CREAT, 0o600)?;
