@@ -42,6 +42,7 @@ import argparse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -263,6 +264,181 @@ class TargetMatrixReport:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+V4_RELEASE_TAG_RE = re.compile(
+    r"^v([4-9]|[1-9][0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?$"
+)
+
+
+def derive_drill_release_plan(bootstrap_tag: str) -> Dict[str, str]:
+    """
+    Derives consistent v4+ release tags and channels for clean-OS lifecycle drills
+    from the validated artifact bundle's `.version` stamp.
+    Synthetic release-manager drills use stable-channel-compatible `v<maj>.<min>.<patch>`
+    tags whose `.version` stamp, releases metadata `tag_name`, and download path match.
+    """
+    tag = (bootstrap_tag or "").strip()
+    m = V4_RELEASE_TAG_RE.fullmatch(tag)
+    if not m:
+        raise ValueError(
+            f"validated bundle .version stamp {bootstrap_tag!r} is not a valid v4+ release tag"
+        )
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    bootstrap_channel = "nightly" if "-nightly." in tag.lower() else "stable"
+    update_tag = f"v{major}.{minor}.{patch + 1}"
+    broken_tag = f"v{major}.{minor}.{patch + 2}"
+    interrupted_tag = f"v{major}.{minor}.{patch + 3}"
+    return {
+        "bootstrap_tag": tag,
+        "bootstrap_channel": bootstrap_channel,
+        "update_tag": update_tag,
+        "broken_tag": broken_tag,
+        "interrupted_tag": interrupted_tag,
+        "fixture_interrupted_tag": f"{interrupted_tag}-fixture-interrupted",
+    }
+
+
+def extract_archive_version_stamp(archive_path: Path | str) -> Optional[str]:
+    """Reads and strips the top-level `.version` regular file from a `.tar.gz` release bundle."""
+    archive_p = Path(archive_path)
+    with tarfile.open(archive_p, mode="r:gz") as tf:
+        for member in tf.getmembers():
+            raw_name = member.name or ""
+            norm_parts = [p for p in PurePosixPath(raw_name).parts if p not in ("", ".")]
+            if norm_parts == [".version"] and member.isfile():
+                ex = tf.extractfile(member)
+                if ex is not None:
+                    return ex.read().decode("utf-8", errors="replace").strip()
+    return None
+
+
+def render_loopback_curl_shim(
+    *,
+    tag: str,
+    port: int,
+    observe_post_swap_path: Optional[str] = None,
+) -> str:
+    """
+    Renders a private guest-only `curl` fixture shim that maps official GitHub release
+    metadata/artifact URLs for `tag` to a loopback HTTP fixture server on `127.0.0.1:<port>`.
+    Enforces that production `release-manager.sh` still supplied `--proto '=https'` and
+    `--proto-redir '=https'` before adapting transport flags solely for the rewritten loopback
+    artifact request, leaving all other requests (including provenance bundles) untouched.
+    """
+    if not V4_RELEASE_TAG_RE.fullmatch((tag or "").strip()):
+        raise ValueError(f"invalid drill release tag for loopback shim: {tag!r}")
+    if not (1024 <= int(port) <= 65535):
+        raise ValueError(f"loopback fixture port must be in 1024..65535 (got {port})")
+    health_hook = ""
+    if observe_post_swap_path:
+        obs_q = shlex.quote(observe_post_swap_path)
+        health_hook = (
+            "if [[ \"${is_health_probe}\" -eq 1 ]]; then\n"
+            f"    tmp_obs={obs_q}.tmp.$$\n"
+            "    readlink -f \"${CURRENT_LINK:-/opt/AetherFlow/current}\" > \"${tmp_obs}\"\n"
+            f"    mv -f \"${{tmp_obs}}\" {obs_q}\n"
+            "    sleep 30 || true\n"
+            "    exit 7\n"
+            "fi\n"
+        )
+    return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "orig_args=(\"$@\")\n"
+        "rewritten_args=()\n"
+        "rewritten=0\n"
+        "is_releases_api=0\n"
+        "is_health_probe=0\n"
+        "saw_proto_https=0\n"
+        "saw_proto_redir_https=0\n"
+        "i=0\n"
+        "while [[ ${i} -lt ${#orig_args[@]} ]]; do\n"
+        "    arg=\"${orig_args[${i}]}\"\n"
+        "    case \"${arg}\" in\n"
+        "        --proto)\n"
+        "            next_val=\"\"\n"
+        "            if [[ $((i + 1)) -lt ${#orig_args[@]} ]]; then\n"
+        "                next_val=\"${orig_args[$((i + 1))]}\"\n"
+        "            fi\n"
+        "            if [[ \"${next_val}\" == \"=https\" ]]; then\n"
+        "                saw_proto_https=1\n"
+        "            fi\n"
+        "            i=$((i + 2))\n"
+        "            continue\n"
+        "            ;;\n"
+        "        --proto=*)\n"
+        "            if [[ \"${arg#--proto=}\" == \"=https\" ]]; then\n"
+        "                saw_proto_https=1\n"
+        "            fi\n"
+        "            i=$((i + 1))\n"
+        "            continue\n"
+        "            ;;\n"
+        "        --proto-redir)\n"
+        "            next_val=\"\"\n"
+        "            if [[ $((i + 1)) -lt ${#orig_args[@]} ]]; then\n"
+        "                next_val=\"${orig_args[$((i + 1))]}\"\n"
+        "            fi\n"
+        "            if [[ \"${next_val}\" == \"=https\" ]]; then\n"
+        "                saw_proto_redir_https=1\n"
+        "            fi\n"
+        "            i=$((i + 2))\n"
+        "            continue\n"
+        "            ;;\n"
+        "        --proto-redir=*)\n"
+        "            if [[ \"${arg#--proto-redir=}\" == \"=https\" ]]; then\n"
+        "                saw_proto_redir_https=1\n"
+        "            fi\n"
+        "            i=$((i + 1))\n"
+        "            continue\n"
+        "            ;;\n"
+        "        https://api.github.com/repos/*/releases)\n"
+        "            is_releases_api=1\n"
+        "            ;;\n"
+        f"        \"https://github.com/\"*\"/releases/download/{tag}/aetherflow-linux-amd64.tar.gz\")\n"
+        "            rewritten=1\n"
+        f"            rewritten_args+=(\"http://127.0.0.1:{int(port)}/aetherflow-linux-amd64.tar.gz\")\n"
+        "            i=$((i + 1))\n"
+        "            continue\n"
+        "            ;;\n"
+        f"        \"https://github.com/\"*\"/releases/download/{tag}/SHA256SUMS\")\n"
+        "            rewritten=1\n"
+        f"            rewritten_args+=(\"http://127.0.0.1:{int(port)}/SHA256SUMS\")\n"
+        "            i=$((i + 1))\n"
+        "            continue\n"
+        "            ;;\n"
+        "        http://127.0.0.1:[0-9]*/health/ready*)\n"
+        "            is_health_probe=1\n"
+        "            rewritten_args+=(\"${arg}\")\n"
+        "            i=$((i + 1))\n"
+        "            continue\n"
+        "            ;;\n"
+        "        *)\n"
+        "            rewritten_args+=(\"${arg}\")\n"
+        "            i=$((i + 1))\n"
+        "            continue\n"
+        "            ;;\n"
+        "    esac\n"
+        "    i=$((i + 1))\n"
+        "done\n"
+        "if [[ \"${is_releases_api}\" -eq 1 ]]; then\n"
+        "    if [[ \"${saw_proto_https}\" -ne 1 || \"${saw_proto_redir_https}\" -ne 1 ]]; then\n"
+        "        echo \"FIXTURE_HTTPS_GUARD_FAILED: releases API request missing --proto =https / --proto-redir =https\" >&2\n"
+        "        exit 91\n"
+        "    fi\n"
+        f"    printf '[{{\"tag_name\":\"{tag}\",\"draft\":false,\"prerelease\":false,\"target_commitish\":\"master\"}}]\\n'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [[ \"${rewritten}\" -eq 1 ]]; then\n"
+        "    if [[ \"${saw_proto_https}\" -ne 1 || \"${saw_proto_redir_https}\" -ne 1 ]]; then\n"
+        "        echo \"FIXTURE_HTTPS_GUARD_FAILED: artifact download missing --proto =https / --proto-redir =https\" >&2\n"
+        "        exit 92\n"
+        "    fi\n"
+        "    exec /usr/bin/curl --proto '=http' --proto-redir '=http' \"${rewritten_args[@]}\"\n"
+        "fi\n"
+        f"{health_hook}"
+        "exec /usr/bin/curl ${orig_args[@]+\"${orig_args[@]}\"}\n"
+    )
 
 
 def parse_glibc_tuple(version_str: str) -> Tuple[int, ...]:
@@ -679,6 +855,10 @@ def verify_release_artifact_contract(
 
     if not details["version_stamp"]:
         errors.append("archive .version stamp is missing or empty")
+    elif not V4_RELEASE_TAG_RE.fullmatch(details["version_stamp"]):
+        errors.append(
+            f"archive .version stamp {details['version_stamp']!r} is not a valid v4+ release tag"
+        )
 
     if "af" in release_binary_bytes and "bin/af" in release_binary_bytes:
         if release_binary_bytes["af"] != release_binary_bytes["bin/af"]:
@@ -1119,6 +1299,7 @@ readelf --version-info \\
 # ─────────────────────────────────────────────────────────────────────────────
 
 REMOTE_ENGINE_SCRIPT = r"""
+from __future__ import annotations
 import errno
 import hashlib
 import json
@@ -1436,6 +1617,10 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
             errors.append(f"archive entry {exe!r} is not marked executable")
     if not details["version_stamp"]:
         errors.append("archive .version stamp is missing or empty")
+    elif not V4_RELEASE_TAG_RE.fullmatch(details["version_stamp"]):
+        errors.append(
+            f"archive .version stamp {details['version_stamp']!r} is not a valid v4+ release tag"
+        )
 
     return {"valid": len(errors) == 0, "errors": errors, "details": details}
 
@@ -1892,6 +2077,54 @@ def run_guest_lifecycle_drills(vm, *, artifact_tarball, artifact_sha256_file, so
     source_layout = (validation_summary or {}).get("source_layout") or inspect_source_tarball(source_tarball)
     strip_components = int(source_layout["strip_components"])
 
+    validated_version_stamp = (
+        ((validation_summary or {}).get("contract_report") or {})
+        .get("details", {})
+        .get("version_stamp")
+    )
+    if not validated_version_stamp:
+        try:
+            validated_version_stamp = extract_archive_version_stamp(artifact_tarball)
+        except Exception as exc:
+            drills.append({
+                "phase": "artifact_supply_check",
+                "status": "failed",
+                "summary": f"Unable to read .version stamp from artifact bundle: {exc}",
+                "details": {"artifact_tarball": str(artifact_tarball)},
+                "commands": [],
+            })
+            return drills
+
+    try:
+        release_plan = derive_drill_release_plan(validated_version_stamp or "")
+    except ValueError as exc:
+        drills.append({
+            "phase": "artifact_supply_check",
+            "status": "failed",
+            "summary": str(exc),
+            "details": {
+                "artifact_tarball": str(artifact_tarball),
+                "version_stamp": validated_version_stamp,
+            },
+            "commands": [],
+        })
+        return drills
+
+    bootstrap_tag = release_plan["bootstrap_tag"]
+    bootstrap_channel = release_plan["bootstrap_channel"]
+    update_tag = release_plan["update_tag"]
+    broken_tag = release_plan["broken_tag"]
+    interrupted_tag = release_plan["interrupted_tag"]
+    fixture_interrupted_tag = release_plan["fixture_interrupted_tag"]
+
+    update_curl_shim = render_loopback_curl_shim(tag=update_tag, port=18080)
+    broken_curl_shim = render_loopback_curl_shim(tag=broken_tag, port=18081)
+    interrupted_curl_shim = render_loopback_curl_shim(
+        tag=interrupted_tag,
+        port=18082,
+        observe_post_swap_path="/var/tmp/af-drill/post-swap-observed",
+    )
+
     # Upload verified artifact, independent SHA256SUMS, and source snapshot into the isolated guest
     vm.ssh_run("mkdir -p /var/tmp/af-drill/artifacts /var/tmp/af-drill/source", timeout=20, check=True, label="mkdir-guest-drill")
     vm.copy_to_guest(artifact_tarball, "/var/tmp/af-drill/artifacts/aetherflow-linux-amd64.tar.gz", label="upload-artifact-tarball")
@@ -1913,9 +2146,9 @@ def run_guest_lifecycle_drills(vm, *, artifact_tarball, artifact_sha256_file, so
     )
     vm.ssh_run(extract_cmd, timeout=60, check=True, label="extract-and-verify-source-layout")
 
-    # Ensure minimal runtime dependencies inside the isolated VM guest (sqlite3, curl, ca-certificates)
+    # Ensure minimal runtime dependencies inside the isolated VM guest (sqlite3, curl, ca-certificates, dos2unix, rsync)
     vm.ssh_run(
-        "export DEBIAN_FRONTEND=noninteractive; apt-get update -yqq && apt-get install -yqq curl ca-certificates sqlite3 dos2unix >/dev/null",
+        "export DEBIAN_FRONTEND=noninteractive; apt-get update -yqq && apt-get install -yqq curl ca-certificates sqlite3 dos2unix rsync >/dev/null",
         timeout=180,
         check=True,
         label="guest-install-prereqs",
@@ -1927,7 +2160,8 @@ set -euo pipefail
 export AF_INSTALL_ROOT=/opt/AetherFlow
 export AETHERFLOW_PREBUILT_TARBALL=/var/tmp/af-drill/artifacts/aetherflow-linux-amd64.tar.gz
 export AETHERFLOW_PREBUILT_SHA256_FILE=/var/tmp/af-drill/artifacts/SHA256SUMS
-export AETHERFLOW_RELEASE_TAG=v4.0.0-clean-matrix
+export AETHERFLOW_RELEASE_TAG=__BOOTSTRAP_TAG__
+export AETHERFLOW_RELEASE_CHANNEL=__BOOTSTRAP_CHANNEL__
 
 # Verify independent SHA256SUMS matches tarball inside guest before bootstrap
 (cd /var/tmp/af-drill/artifacts && sha256sum -c SHA256SUMS)
@@ -1943,6 +2177,7 @@ if _stage_prebuilt_release_archive "${AETHERFLOW_PREBUILT_TARBALL}" "" "00000000
     echo "TAMPER_CHECK_FAILED: accepted bad SHA256" >&2
     exit 1
 fi
+test ! -e /opt/AetherFlow/current
 
 # 1b. Perform real prebuilt v4 control-plane bootstrap (_build_modern_stack + _syscommands + _boot)
 local_packages="/opt/AetherFlow/packages/"
@@ -1977,44 +2212,77 @@ test -x /opt/AetherFlow/current/bin/speedtest-backend
 cmp /opt/AetherFlow/current/speedtest-backend /opt/AetherFlow/current/bin/speedtest-backend
 curl -fsS --max-time 10 "http://127.0.0.1:8080/${wasm_file#/opt/AetherFlow/current/web/dist/}" -o /tmp/af-ui.wasm
 cmp "${wasm_file}" /tmp/af-ui.wasm
+test "$(tr -d '[:space:]' < /opt/AetherFlow/current/.version)" = "${AETHERFLOW_RELEASE_TAG}"
 echo ""
-readlink -f /opt/AetherFlow/current
+bootstrap_current="$(readlink -f /opt/AetherFlow/current)"
+printf '%s\n' "${bootstrap_current}"
 /usr/local/bin/af --version
 /usr/local/bin/af health --json
-/usr/local/bin/af release status --json
+/usr/local/bin/af release status --json > /tmp/bootstrap_release_status.json
+cat /tmp/bootstrap_release_status.json
+python3 - "${bootstrap_current}" "${AETHERFLOW_RELEASE_TAG}" /tmp/bootstrap_release_status.json <<'PY'
+import json, sys
+cur_path, expected_tag, status_path = sys.argv[1:4]
+payload = json.load(open(status_path, encoding="utf-8"))
+data = payload.get("data") or {}
+assert payload.get("status") == "ok", payload
+assert data.get("current_release") == cur_path, data
+assert data.get("current_version") == expected_tag, data
+PY
 '''
+    bootstrap_script = (
+        bootstrap_script
+        .replace("__BOOTSTRAP_TAG__", bootstrap_tag)
+        .replace("__BOOTSTRAP_CHANNEL__", bootstrap_channel)
+    )
     rc1, out1, err1, rec1 = vm.ssh_run(bootstrap_script, timeout=180, check=False, label="drill-1-bootstrap-and-cli")
     drills.append({
         "phase": "bootstrap_install_health_and_cli",
         "status": "passed" if rc1 == 0 else "failed",
-        "summary": "Verified checksum, tampered-digest rejection, prebuilt bootstrap, systemd health, external HTML/WASM serving, the LibreSpeed companion, and af CLI checks." if rc1 == 0 else f"Bootstrap drill failed (rc={rc1})",
-        "details": {"stdout": out1.strip(), "stderr": err1.strip(), "fixture_only": False},
+        "summary": f"Verified checksum, tampered-digest rejection, prebuilt bootstrap ({bootstrap_tag}), systemd health, external HTML/WASM serving, the LibreSpeed companion, and af CLI checks." if rc1 == 0 else f"Bootstrap drill failed (rc={rc1})",
+        "details": {"stdout": out1.strip(), "stderr": err1.strip(), "bootstrap_tag": bootstrap_tag, "bootstrap_channel": bootstrap_channel, "fixture_only": False},
         "commands": [rec1],
     })
     if rc1 != 0:
         return drills
 
-    # DRILL 2: Clean Release Update to a second v4 release slot (v4.0.1-matrix)
+    # DRILL 2: Positive Release Update through deploy/release-manager.sh (staging, metadata, WAL snapshot, swap, /health/ready, recovery state)
     update_script = r'''
 set -euo pipefail
-mkdir -p /var/tmp/af-drill/release-v2-src
+_release_before="$(readlink -f /opt/AetherFlow/current)"
+rm -rf /var/tmp/af-drill/release-v2-src /var/tmp/af-drill/release-v2-bundle /var/tmp/af-drill/shim-update
+mkdir -p /var/tmp/af-drill/release-v2-src /var/tmp/af-drill/release-v2-bundle /var/tmp/af-drill/shim-update
 tar -xzf /var/tmp/af-drill/artifacts/aetherflow-linux-amd64.tar.gz -C /var/tmp/af-drill/release-v2-src
-printf 'v4.0.1-matrix\n' > /var/tmp/af-drill/release-v2-src/.version
-mkdir -p /var/tmp/af-drill/srv/McEveritts/AetherFlow/releases/download/v4.0.1
-tar --owner=0 --group=0 --numeric-owner -C /var/tmp/af-drill/release-v2-src -czf /var/tmp/af-drill/srv/McEveritts/AetherFlow/releases/download/v4.0.1/aetherflow-linux-amd64.tar.gz .
-(cd /var/tmp/af-drill/srv/McEveritts/AetherFlow/releases/download/v4.0.1 && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
+printf '__UPDATE_TAG__\n' > /var/tmp/af-drill/release-v2-src/.version
+tar --owner=0 --group=0 --numeric-owner -C /var/tmp/af-drill/release-v2-src -czf /var/tmp/af-drill/release-v2-bundle/aetherflow-linux-amd64.tar.gz .
+(cd /var/tmp/af-drill/release-v2-bundle && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
 
-# Seed a marker in the live SQLite database to verify online backup preservation
-sqlite3 /var/lib/aetherflow/aetherflow.sqlite "CREATE TABLE IF NOT EXISTS _matrix_drill (k TEXT PRIMARY KEY, v TEXT); INSERT OR REPLACE INTO _matrix_drill VALUES ('release_marker', 'pre_v4_0_1');"
+# Seed a marker in the live SQLite database as service user aetherflow so DB/WAL ownership stays intact
+runuser -u aetherflow -- sqlite3 /var/lib/aetherflow/aetherflow.sqlite "PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS _matrix_drill (k TEXT PRIMARY KEY, v TEXT); INSERT OR REPLACE INTO _matrix_drill VALUES ('release_marker', 'pre_v4_0_1');"
 
-export AETHERFLOW_PREBUILT_TARBALL=/var/tmp/af-drill/srv/McEveritts/AetherFlow/releases/download/v4.0.1/aetherflow-linux-amd64.tar.gz
-export AETHERFLOW_PREBUILT_SHA256_FILE=/var/tmp/af-drill/srv/McEveritts/AetherFlow/releases/download/v4.0.1/SHA256SUMS
-export AETHERFLOW_RELEASE_TAG=v4.0.1-matrix
+python3 -m http.server 18080 --bind 127.0.0.1 --directory /var/tmp/af-drill/release-v2-bundle >/dev/null 2>&1 &
+http_pid=$!
+trap 'kill ${http_pid} 2>/dev/null || true' EXIT
 
-source /opt/AetherFlow/setup/modules/modern_stack.sh
-_pull_prebuilt_release_before="$(readlink -f /opt/AetherFlow/current)"
-_pull_prebuilt_v4_release
-systemctl restart aetherflow-runner.service aetherflow-api.service
+for i in $(seq 1 25); do
+    if /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18080/SHA256SUMS >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
+done
+/usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18080/SHA256SUMS >/dev/null
+
+cat > /var/tmp/af-drill/shim-update/curl <<'SHIM_UPDATE_EOF'
+__UPDATE_CURL_SHIM__SHIM_UPDATE_EOF
+chmod 0755 /var/tmp/af-drill/shim-update/curl
+
+PATH="/var/tmp/af-drill/shim-update:${PATH}" HEALTH_RETRIES=10 HEALTH_INTERVAL=2 \
+    bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
+
+kill "${http_pid}" 2>/dev/null || true
+
+systemctl is-active aetherflow-runner.service
+systemctl is-active aetherflow-api.service
 
 for i in $(seq 1 15); do
     if curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready >/dev/null 2>&1; then
@@ -2025,17 +2293,42 @@ done
 
 curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "ready" else 1)'
 _after="$(readlink -f /opt/AetherFlow/current)"
-test "${_pull_prebuilt_release_before}" != "${_after}"
-test "$(cat /opt/AetherFlow/releases/.previous_release)" = "${_pull_prebuilt_release_before}"
-test "$(cat /opt/AetherFlow/current/.version)" = "v4.0.1-matrix"
-/usr/local/bin/af release status --json
+test "${_release_before}" != "${_after}"
+test "$(cat /opt/AetherFlow/releases/.previous_release)" = "${_release_before}"
+test "$(tr -d '[:space:]' < /opt/AetherFlow/current/.version)" = "__UPDATE_TAG__"
+test -s "${_after}/data-snapshot/aetherflow.sqlite.bak"
+test -s "${_after}/data-snapshot/MANIFEST.sha256"
+(cd "${_after}/data-snapshot" && sha256sum -c MANIFEST.sha256)
+test "$(sqlite3 -readonly "${_after}/data-snapshot/aetherflow.sqlite.bak" 'PRAGMA integrity_check;')" = "ok"
+test "$(sqlite3 -readonly "${_after}/data-snapshot/aetherflow.sqlite.bak" "SELECT v FROM _matrix_drill WHERE k='release_marker';")" = "pre_v4_0_1"
+/usr/local/bin/af release status --json > /tmp/update_release_status.json
+cat /tmp/update_release_status.json
+python3 - "${_release_before}" "${_after}" "__UPDATE_TAG__" /tmp/update_release_status.json /opt/AetherFlow/releases/.recovery_state.json <<'PY'
+import json, sys
+prev_path, cur_path, expected_tag, status_path, rec_path = sys.argv[1:6]
+status_payload = json.load(open(status_path, encoding="utf-8"))
+data = status_payload.get("data") or {}
+assert status_payload.get("status") == "ok", status_payload
+assert data.get("current_release") == cur_path, data
+assert data.get("previous_release") == prev_path, data
+assert data.get("current_version") == expected_tag, data
+rec = json.load(open(rec_path, encoding="utf-8"))
+assert rec.get("phase") == "complete", rec
+assert rec.get("candidate_release") == cur_path, rec
+assert rec.get("previous_release") == prev_path, rec
+PY
 '''
-    rc2, out2, err2, rec2 = vm.ssh_run(update_script, timeout=120, check=False, label="drill-2-release-update")
+    update_script = (
+        update_script
+        .replace("__UPDATE_TAG__", update_tag)
+        .replace("__UPDATE_CURL_SHIM__", update_curl_shim)
+    )
+    rc2, out2, err2, rec2 = vm.ssh_run(update_script, timeout=180, check=False, label="drill-2-release-update")
     drills.append({
         "phase": "release_update",
         "status": "passed" if rc2 == 0 else "failed",
-        "summary": "Updated live control plane to second verified release slot (v4.0.1-matrix), verified .previous_release tracking and /health/ready." if rc2 == 0 else f"Update drill failed (rc={rc2})",
-        "details": {"stdout": out2.strip(), "stderr": err2.strip(), "fixture_only": False},
+        "summary": f"Updated live control plane through release-manager.sh to verified release slot ({update_tag}), verified WAL snapshot, .previous_release, recovery state, and /health/ready." if rc2 == 0 else f"Update drill failed (rc={rc2})",
+        "details": {"stdout": out2.strip(), "stderr": err2.strip(), "update_tag": update_tag, "fixture_only": False},
         "commands": [rec2],
     })
     if rc2 != 0:
@@ -2047,21 +2340,20 @@ set -euo pipefail
 known_good="$(readlink -f /opt/AetherFlow/current)"
 
 # Create a broken candidate release whose aetherflow-api corrupts the DB and exits 1 (failing /health/ready)
-mkdir -p /var/tmp/af-drill/broken-src
+rm -rf /var/tmp/af-drill/broken-src /var/tmp/af-drill/broken-bundle /var/tmp/af-drill/shim-bin
+mkdir -p /var/tmp/af-drill/broken-src /var/tmp/af-drill/broken-bundle /var/tmp/af-drill/shim-bin
 tar -xzf /var/tmp/af-drill/artifacts/aetherflow-linux-amd64.tar.gz -C /var/tmp/af-drill/broken-src
 cat > /var/tmp/af-drill/broken-src/aetherflow-api <<'BROKEN_EOF'
 #!/bin/bash
 if [[ "${1:-}" == "runner" ]]; then
-    sleep 30
-    exit 0
+    exec sleep 30
 fi
 printf 'CORRUPTED_BY_BAD_CANDIDATE' > /var/lib/aetherflow/aetherflow.sqlite
 exit 1
 BROKEN_EOF
 chmod 0755 /var/tmp/af-drill/broken-src/aetherflow-api
-printf 'v4.0.2-broken\n' > /var/tmp/af-drill/broken-src/.version
+printf '__BROKEN_TAG__\n' > /var/tmp/af-drill/broken-src/.version
 
-mkdir -p /var/tmp/af-drill/broken-bundle
 tar --owner=0 --group=0 --numeric-owner -C /var/tmp/af-drill/broken-src -czf /var/tmp/af-drill/broken-bundle/aetherflow-linux-amd64.tar.gz .
 (cd /var/tmp/af-drill/broken-bundle && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
 
@@ -2070,36 +2362,26 @@ python3 -m http.server 18081 --bind 127.0.0.1 --directory /var/tmp/af-drill/brok
 http_pid=$!
 trap 'kill ${http_pid} 2>/dev/null || true' EXIT
 
-mkdir -p /var/tmp/af-drill/shim-bin
-cat > /var/tmp/af-drill/shim-bin/curl <<'SHIM_EOF'
-#!/bin/bash
-args=()
-for arg in "$@"; do
-    case "${arg}" in
-        https://api.github.com/repos/*/releases)
-            printf '[{"tag_name":"v4.0.2","draft":false,"prerelease":false,"target_commitish":"master"}]\n'
-            exit 0
-            ;;
-        https://github.com/*/releases/download/*/aetherflow-linux-amd64.tar.gz)
-            args+=("http://127.0.0.1:18081/aetherflow-linux-amd64.tar.gz")
-            ;;
-        https://github.com/*/releases/download/*/SHA256SUMS)
-            args+=("http://127.0.0.1:18081/SHA256SUMS")
-            ;;
-        *)
-            args+=("${arg}")
-            ;;
-    esac
+for i in $(seq 1 25); do
+    if /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18081/SHA256SUMS >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
 done
-exec /usr/bin/curl "${args[@]}"
-SHIM_EOF
+/usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18081/SHA256SUMS >/dev/null
+
+cat > /var/tmp/af-drill/shim-bin/curl <<'SHIM_EOF'
+__BROKEN_CURL_SHIM__SHIM_EOF
 chmod 0755 /var/tmp/af-drill/shim-bin/curl
 
+rm -f /var/lib/aetherflow/aetherflow.sqlite.corrupted.*
+
 set +e
-PATH="/var/tmp/af-drill/shim-bin:${PATH}" HEALTH_RETRIES=2 HEALTH_INTERVAL=1 \
+PATH="/var/tmp/af-drill/shim-bin:${PATH}" HEALTH_RETRIES=5 HEALTH_INTERVAL=2 \
     bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
 deploy_rc=$?
 set -e
+printf 'drill-3 deploy_rc=%s\n' "${deploy_rc}"
 
 kill "${http_pid}" 2>/dev/null || true
 
@@ -2107,12 +2389,21 @@ kill "${http_pid}" 2>/dev/null || true
 test "${deploy_rc}" -eq 2
 reverted_target="$(readlink -f /opt/AetherFlow/current)"
 test "${reverted_target}" = "${known_good}"
+test "$(tr -d '[:space:]' < /opt/AetherFlow/current/.version)" = "__UPDATE_TAG__"
 
-# Verify SQLite database was automatically restored from pre-swap snapshot and passes integrity_check + marker check
-test "$(sqlite3 /var/lib/aetherflow/aetherflow.sqlite 'PRAGMA integrity_check;')" = "ok"
-test "$(sqlite3 /var/lib/aetherflow/aetherflow.sqlite "SELECT v FROM _matrix_drill WHERE k='release_marker';")" = "pre_v4_0_1"
+# Verify broken candidate actually corrupted DB and rollback quarantined + restored from pre-swap snapshot
+compgen -G "/var/lib/aetherflow/aetherflow.sqlite.corrupted.*" >/dev/null
+test "$(sqlite3 -readonly /var/lib/aetherflow/aetherflow.sqlite 'PRAGMA integrity_check;')" = "ok"
+test "$(sqlite3 -readonly /var/lib/aetherflow/aetherflow.sqlite "SELECT v FROM _matrix_drill WHERE k='release_marker';")" = "pre_v4_0_1"
+python3 - /opt/AetherFlow/releases/.recovery_state.json <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rec.get("phase") == "complete", rec
+PY
 
 # Verify healthy service recovered on :8080
+systemctl is-active aetherflow-runner.service
+systemctl is-active aetherflow-api.service
 for i in $(seq 1 15); do
     if curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready > /tmp/health_after_rollback.json 2>/dev/null; then
         break
@@ -2122,12 +2413,18 @@ done
 cat /tmp/health_after_rollback.json
 curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "ready" else 1)'
 '''
+    rollback_script = (
+        rollback_script
+        .replace("__BROKEN_TAG__", broken_tag)
+        .replace("__UPDATE_TAG__", update_tag)
+        .replace("__BROKEN_CURL_SHIM__", broken_curl_shim)
+    )
     rc3, out3, err3, rec3 = vm.ssh_run(rollback_script, timeout=180, check=False, label="drill-3-failed-health-rollback")
     drills.append({
         "phase": "failed_health_rollback_and_db_recovery",
         "status": "passed" if rc3 == 0 else "failed",
-        "summary": "Verified deliberate failed-health update triggers automatic symlink rollback (exit code 2), quarantines corrupted SQLite DB, restores verified pre-swap snapshot, and recovers /health/ready." if rc3 == 0 else f"Failed-health rollback drill failed (rc={rc3})",
-        "details": {"stdout": out3.strip(), "stderr": err3.strip(), "fixture_only": False},
+        "summary": f"Verified deliberate failed-health update ({broken_tag}) triggers automatic symlink rollback (exit code 2), quarantines corrupted SQLite DB, restores verified pre-swap snapshot, and recovers /health/ready." if rc3 == 0 else f"Failed-health rollback drill failed (rc={rc3})",
+        "details": {"stdout": out3.strip(), "stderr": err3.strip(), "broken_tag": broken_tag, "fixture_only": False},
         "commands": [rec3],
     })
     if rc3 != 0:
@@ -2140,7 +2437,7 @@ known_good="$(readlink -f /opt/AetherFlow/current)"
 fixture_cand="/opt/AetherFlow/releases/9999999991"
 rm -rf "${fixture_cand}"
 cp -a "${known_good}" "${fixture_cand}"
-printf 'v4.0.3-fixture-interrupted\n' > "${fixture_cand}/.version"
+printf '__FIXTURE_INTERRUPTED_TAG__\n' > "${fixture_cand}/.version"
 
 printf '%s\n' "${known_good}" > /opt/AetherFlow/releases/.previous_release
 ln -sfn "${fixture_cand}" /opt/AetherFlow/current
@@ -2163,15 +2460,29 @@ cat > /opt/AetherFlow/releases/.recovery_state.json <<EOF
 EOF
 chmod 0600 /opt/AetherFlow/releases/.recovery_state.json
 
-if /usr/local/bin/af release deploy --local --dry-run --offline >/dev/null 2>&1; then
+set +e
+/usr/local/bin/af release deploy --local > /tmp/fixture_interrupted_guard.out 2>&1
+guard_rc=$?
+set -e
+if [[ "${guard_rc}" -eq 0 ]]; then
     echo "INTERRUPTED_GUARD_FAILED: deploy succeeded despite unfinished stage2_symlink_swap" >&2
     exit 1
 fi
+cat /tmp/fixture_interrupted_guard.out
+grep -Eqi 'interrupted deployment|unfinished after symlink swap' /tmp/fixture_interrupted_guard.out
+test "$(readlink -f /opt/AetherFlow/current)" = "${fixture_cand}"
+test "$(cat /opt/AetherFlow/releases/.previous_release)" = "${known_good}"
 
 /usr/local/bin/af release rollback --local --json > /tmp/fixture_interrupted_rollback.json
 test "$(readlink -f /opt/AetherFlow/current)" = "${known_good}"
+python3 - /opt/AetherFlow/releases/.recovery_state.json <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rec.get("phase") == "complete", rec
+PY
 rm -rf "${fixture_cand}"
 '''
+    fixture_script = fixture_script.replace("__FIXTURE_INTERRUPTED_TAG__", fixture_interrupted_tag)
     rc4_fix, out4_fix, err4_fix, rec4_fix = vm.ssh_run(fixture_script, timeout=90, check=False, label="drill-4a-interrupted-recovery-fixture")
     drills.append({
         "phase": "interrupted_update_recovery_fixture",
@@ -2182,7 +2493,7 @@ rm -rf "${fixture_cand}"
     })
 
     # DRILL 4B (Mandatory Real Phase): Launch real updater process (`deploy/release-manager.sh deploy`),
-    # observe real Stage 1.5 snapshot + Stage 2 atomic symlink swap to candidate v4.0.3-interrupted,
+    # observe real Stage 1.5 snapshot + Stage 2 atomic symlink swap to candidate __INTERRUPTED_TAG__,
     # intercept at the controlled post-swap Stage 3 readiness probe boundary BEFORE Stage 4 rollback,
     # terminate ONLY the owned updater process tree, then recover via shipped `/usr/local/bin/af release rollback --local --json`
     # and assert DB integrity + marker row + systemd services + symlink restoration.
@@ -2191,23 +2502,21 @@ set -euo pipefail
 known_good="$(readlink -f /opt/AetherFlow/current)"
 test -d "${known_good}"
 
-# Build a candidate release bundle (v4.0.3-interrupted) whose binary never becomes ready on :8080
+# Build a candidate release bundle (__INTERRUPTED_TAG__) whose binary never becomes ready on :8080
 # so the real updater enters Stage 3 readiness polling right after completing Stage 1.5 snapshot & Stage 2 symlink swap
-rm -rf /var/tmp/af-drill/interrupted-src /var/tmp/af-drill/interrupted-bundle /var/tmp/af-drill/post-swap-observed
-mkdir -p /var/tmp/af-drill/interrupted-src /var/tmp/af-drill/interrupted-bundle
+rm -rf /var/tmp/af-drill/interrupted-src /var/tmp/af-drill/interrupted-bundle /var/tmp/af-drill/shim-interrupted /var/tmp/af-drill/post-swap-observed /var/tmp/af-drill/post-swap-observed.tmp.*
+mkdir -p /var/tmp/af-drill/interrupted-src /var/tmp/af-drill/interrupted-bundle /var/tmp/af-drill/shim-interrupted
 tar -xzf /var/tmp/af-drill/artifacts/aetherflow-linux-amd64.tar.gz -C /var/tmp/af-drill/interrupted-src
 cat > /var/tmp/af-drill/interrupted-src/aetherflow-api <<'STALL_EOF'
 #!/bin/bash
 if [[ "${1:-}" == "runner" ]]; then
-    sleep 60
-    exit 0
+    exec sleep 60
 fi
 # Simulate a hung candidate API server during Stage 3 so /health/ready does not return 200
-sleep 60
-exit 1
+exec sleep 60
 STALL_EOF
 chmod 0755 /var/tmp/af-drill/interrupted-src/aetherflow-api
-printf 'v4.0.3-interrupted\n' > /var/tmp/af-drill/interrupted-src/.version
+printf '__INTERRUPTED_TAG__\n' > /var/tmp/af-drill/interrupted-src/.version
 
 tar --owner=0 --group=0 --numeric-owner -C /var/tmp/af-drill/interrupted-src -czf /var/tmp/af-drill/interrupted-bundle/aetherflow-linux-amd64.tar.gz .
 (cd /var/tmp/af-drill/interrupted-bundle && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
@@ -2217,43 +2526,18 @@ http_pid=$!
 updater_pid=""
 trap 'kill ${http_pid} 2>/dev/null || true; if [[ -n "${updater_pid}" ]]; then kill -9 -${updater_pid} ${updater_pid} 2>/dev/null || true; fi' EXIT
 
-# Curl shim that serves v4.0.3-interrupted during Stage 1 and signals /var/tmp/af-drill/post-swap-observed
-# when the launched updater enters Stage 3 and polls http://127.0.0.1:8080/health/ready
-mkdir -p /var/tmp/af-drill/shim-interrupted
-cat > /var/tmp/af-drill/shim-interrupted/curl <<'SHIM_INT_EOF'
-#!/bin/bash
-args=()
-is_health_probe=0
-for arg in "$@"; do
-    case "${arg}" in
-        https://api.github.com/repos/*/releases)
-            printf '[{"tag_name":"v4.0.3","draft":false,"prerelease":false,"target_commitish":"master"}]\n'
-            exit 0
-            ;;
-        https://github.com/*/releases/download/*/aetherflow-linux-amd64.tar.gz)
-            args+=("http://127.0.0.1:18082/aetherflow-linux-amd64.tar.gz")
-            ;;
-        https://github.com/*/releases/download/*/SHA256SUMS)
-            args+=("http://127.0.0.1:18082/SHA256SUMS")
-            ;;
-        http://127.0.0.1:8080/health/ready*)
-            is_health_probe=1
-            args+=("${arg}")
-            ;;
-        *)
-            args+=("${arg}")
-            ;;
-    esac
+for i in $(seq 1 25); do
+    if /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18082/SHA256SUMS >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
 done
-if [[ "${is_health_probe}" -eq 1 ]]; then
-    # Record observable post-swap boundary reached by the real updater
-    readlink -f /opt/AetherFlow/current > /var/tmp/af-drill/post-swap-observed
-    # Hold inside Stage 3 health probe so the test harness can deterministically terminate the updater process
-    sleep 30
-    exit 7
-fi
-exec /usr/bin/curl "${args[@]}"
-SHIM_INT_EOF
+/usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18082/SHA256SUMS >/dev/null
+
+# Curl shim that serves __INTERRUPTED_TAG__ during Stage 1 and signals /var/tmp/af-drill/post-swap-observed
+# when the launched updater enters Stage 3 and polls http://127.0.0.1:8080/health/ready
+cat > /var/tmp/af-drill/shim-interrupted/curl <<'SHIM_INT_EOF'
+__INTERRUPTED_CURL_SHIM__SHIM_INT_EOF
 chmod 0755 /var/tmp/af-drill/shim-interrupted/curl
 
 # Launch the real updater in its own process group (`setsid`) so we can terminate only our own updater tree
@@ -2279,9 +2563,12 @@ test -s /var/tmp/af-drill/post-swap-observed
 swapped_cand="$(cat /var/tmp/af-drill/post-swap-observed)"
 test "${swapped_cand}" != "${known_good}"
 test "$(readlink -f /opt/AetherFlow/current)" = "${swapped_cand}"
-test "$(cat /opt/AetherFlow/current/.version)" = "v4.0.3-interrupted"
+test "$(tr -d '[:space:]' < /opt/AetherFlow/current/.version)" = "__INTERRUPTED_TAG__"
 test "$(cat /opt/AetherFlow/releases/.previous_release)" = "${known_good}"
 test -s "${swapped_cand}/data-snapshot/aetherflow.sqlite.bak"
+test -s "${swapped_cand}/data-snapshot/MANIFEST.sha256"
+(cd "${swapped_cand}/data-snapshot" && sha256sum -c MANIFEST.sha256)
+test "$(sqlite3 -readonly "${swapped_cand}/data-snapshot/aetherflow.sqlite.bak" 'PRAGMA integrity_check;')" = "ok"
 
 # Verify /proc/<updater_pid>/cmdline belongs to our launched release-manager.sh before terminating its process group
 cmdline_str="$(tr '\0' ' ' < "/proc/${updater_pid}/cmdline" 2>/dev/null || true)"
@@ -2293,27 +2580,47 @@ case "${cmdline_str}" in
         ;;
 esac
 
-# Terminate ONLY the launched updater process group (and any child sleep/curl in that group)
-kill -TERM "-${updater_pid}" "${updater_pid}" 2>/dev/null || true
-sleep 1
+# Terminate ONLY the launched updater process group abruptly at the Stage 3 boundary (preventing automatic rollback)
 kill -KILL "-${updater_pid}" "${updater_pid}" 2>/dev/null || true
 wait "${updater_pid}" 2>/dev/null || true
 updater_pid=""
 kill "${http_pid}" 2>/dev/null || true
 
-# Confirm the system is genuinely left in an interrupted post-swap state pointing at v4.0.3-interrupted
+# Confirm the system is genuinely left in an interrupted post-swap state pointing at __INTERRUPTED_TAG__
 test "$(readlink -f /opt/AetherFlow/current)" = "${swapped_cand}"
+test "$(cat /opt/AetherFlow/releases/.previous_release)" = "${known_good}"
+python3 - "${swapped_cand}" "${known_good}" /opt/AetherFlow/releases/.recovery_state.json <<'PY'
+import json, sys
+cand, prev, rec_path = sys.argv[1:4]
+rec = json.load(open(rec_path, encoding="utf-8"))
+assert rec.get("phase") in ("stage2_symlink_swap", "stage3_health_probe"), rec
+assert rec.get("candidate_release") == cand, rec
+assert rec.get("previous_release") == prev, rec
+PY
+
+# Verify a new deploy is refused while interrupted and .previous_release is preserved
+set +e
+/usr/local/bin/af release deploy --local > /tmp/real_interrupted_guard.out 2>&1
+interrupted_deploy_rc=$?
+set -e
+test "${interrupted_deploy_rc}" -ne 0
+grep -Eqi 'interrupted deployment|unfinished after symlink swap' /tmp/real_interrupted_guard.out
 test "$(cat /opt/AetherFlow/releases/.previous_release)" = "${known_good}"
 
 # Now recover using the shipped CLI (`af release rollback --local --json`)
 /usr/local/bin/af release rollback --local --json > /tmp/real_interrupted_rollback.json
 cat /tmp/real_interrupted_rollback.json
 
-# Assert symlink, .previous_release, SQLite DB integrity & marker row, systemd services, and /health/ready are all intact
+# Assert symlink, .previous_release, recovery state, SQLite DB integrity & marker row, systemd services, and /health/ready are all intact
 test "$(readlink -f /opt/AetherFlow/current)" = "${known_good}"
-test "$(cat /opt/AetherFlow/current/.version)" = "v4.0.1-matrix"
-test "$(sqlite3 /var/lib/aetherflow/aetherflow.sqlite 'PRAGMA integrity_check;')" = "ok"
-test "$(sqlite3 /var/lib/aetherflow/aetherflow.sqlite "SELECT v FROM _matrix_drill WHERE k='release_marker';")" = "pre_v4_0_1"
+test "$(tr -d '[:space:]' < /opt/AetherFlow/current/.version)" = "__UPDATE_TAG__"
+python3 - /opt/AetherFlow/releases/.recovery_state.json <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rec.get("phase") == "complete", rec
+PY
+test "$(sqlite3 -readonly /var/lib/aetherflow/aetherflow.sqlite 'PRAGMA integrity_check;')" = "ok"
+test "$(sqlite3 -readonly /var/lib/aetherflow/aetherflow.sqlite "SELECT v FROM _matrix_drill WHERE k='release_marker';")" = "pre_v4_0_1"
 systemctl is-active aetherflow-runner.service
 systemctl is-active aetherflow-api.service
 
@@ -2327,12 +2634,18 @@ cat /tmp/health_after_interrupted_recovery.json
 curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "ready" else 1)'
 /usr/local/bin/af release status --json
 '''
+    real_interrupted_script = (
+        real_interrupted_script
+        .replace("__INTERRUPTED_TAG__", interrupted_tag)
+        .replace("__UPDATE_TAG__", update_tag)
+        .replace("__INTERRUPTED_CURL_SHIM__", interrupted_curl_shim)
+    )
     rc4, out4, err4, rec4 = vm.ssh_run(real_interrupted_script, timeout=180, check=False, label="drill-4b-real-interrupted-update-recovery")
     drills.append({
         "phase": "interrupted_update_recovery",
         "status": "passed" if rc4 == 0 else "failed",
-        "summary": "Launched real updater process, intercepted at observable post-swap Stage 3 boundary after real Stage 1.5 DB snapshot and Stage 2 symlink swap, terminated owned updater process group, recovered via shipped `af release rollback --local --json`, and verified DB, services, and symlinks intact." if rc4 == 0 else f"Real interrupted-update recovery drill failed (rc={rc4})",
-        "details": {"stdout": out4.strip(), "stderr": err4.strip(), "fixture_only": False, "real_execution": True},
+        "summary": f"Launched real updater process ({interrupted_tag}), intercepted at observable post-swap Stage 3 boundary after real Stage 1.5 DB snapshot and Stage 2 symlink swap, terminated owned updater process group, verified deploy refusal while interrupted, recovered via shipped `af release rollback --local --json`, and verified DB, services, and symlinks intact." if rc4 == 0 else f"Real interrupted-update recovery drill failed (rc={rc4})",
+        "details": {"stdout": out4.strip(), "stderr": err4.strip(), "interrupted_tag": interrupted_tag, "fixture_only": False, "real_execution": True},
         "commands": [rec4],
     })
     return drills
@@ -2343,10 +2656,21 @@ curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready | python3 -c 'import j
 def build_remote_driver_script() -> str:
     """
     Assembles the complete remote Python matrix driver script executed by `run_remote_matrix_action`.
+    Shares local drill-fixture helper definitions directly to avoid local/remote drift.
     """
     guest_build_script_literal = json.dumps(render_baseline_guest_build_script(jobs=2))
+    shared_drill_helpers = "\n\n".join(
+        (
+            f"V4_RELEASE_TAG_RE = re.compile({V4_RELEASE_TAG_RE.pattern!r})",
+            inspect.getsource(derive_drill_release_plan),
+            inspect.getsource(extract_archive_version_stamp),
+            inspect.getsource(render_loopback_curl_shim),
+        )
+    )
     return (
         REMOTE_ENGINE_SCRIPT
+        + "\n"
+        + shared_drill_helpers
         + "\n"
         + REMOTE_DRILL_HELPERS
         + "\nBASELINE_GUEST_BUILD_SCRIPT = "

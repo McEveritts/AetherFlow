@@ -25,13 +25,17 @@ Scope & Honesty Boundary:
 from __future__ import annotations
 
 import hashlib
+import http.server
 import io
+import json
 from pathlib import Path
 import shlex
+import socketserver
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -825,6 +829,291 @@ class BaselineBuildAndSingleRemoteEngineTests(unittest.TestCase):
             self.assertEqual(target["overall_status"], "failed")
             self.assertEqual(target["drills"][0]["phase"], "artifact_supply_check")
             self.assertEqual(target["drills"][0]["status"], "failed")
+
+
+class GuestDrillFixtureExecutionTests(unittest.TestCase):
+    """
+    Verifies that `scripts/v4_vm_matrix.py` aligns bootstrap and synthetic drill
+    tags/stamps/metadata consistently, preserves production HTTPS/provenance/checksum
+    enforcement, and exercises the real `modern_stack.sh` and `deploy/release-manager.sh`
+    paths for positive, deliberately broken, and deliberately interrupted drills without
+    booting KVM guests or mutating host state.
+    """
+
+    def _build_release_bundle(
+        self,
+        bundle_dir: Path,
+        *,
+        version: str,
+        api_script: bytes,
+    ) -> tuple[Path, Path]:
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        archive = bundle_dir / "aetherflow-linux-amd64.tar.gz"
+        entries = {
+            "aetherflow-api": (api_script, 0o755),
+            "af": (b"#!/bin/bash\nexit 0\n", 0o755),
+            "bin/af": (b"#!/bin/bash\nexit 0\n", 0o755),
+            "speedtest-backend": (b"#!/bin/bash\nexit 0\n", 0o755),
+            "bin/speedtest-backend": (b"#!/bin/bash\nexit 0\n", 0o755),
+            ".version": (f"{version}\n".encode("utf-8"), 0o644),
+            "web/dist/index.html": (f"<!doctype html><title>{version}</title>\n".encode("utf-8"), 0o644),
+            "web/dist/app.wasm": (b"\x00asm\x01\x00\x00\x00", 0o644),
+            "deploy/release-manager.sh": ((ROOT / "deploy/release-manager.sh").read_bytes(), 0o755),
+            "deploy/release-manager.conf": ((ROOT / "deploy/release-manager.conf").read_bytes(), 0o644),
+            "deploy/verify-provenance.py": ((ROOT / "deploy/verify-provenance.py").read_bytes(), 0o755),
+            "config/packages.json": (b"{}\n", 0o644),
+            "config/package_automation.json": (b"{}\n", 0o644),
+            "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
+        }
+        helper = ArtifactContractAndGlibcTests()
+        digest = helper._build_tarball(archive, entries)
+        sums = bundle_dir / "SHA256SUMS"
+        sums.write_text(f"{digest}  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
+        return archive, sums
+
+    def test_derive_drill_release_plan_aligns_tags_and_rejects_invalid_stamps(self) -> None:
+        namespace = {"__name__": "drill_plan_unit"}
+        exec(vm_matrix.build_remote_driver_script(), namespace)
+
+        for derive in (vm_matrix.derive_drill_release_plan, namespace["derive_drill_release_plan"]):
+            stable = derive("v4.0.0")
+            self.assertEqual(
+                stable,
+                {
+                    "bootstrap_tag": "v4.0.0",
+                    "bootstrap_channel": "stable",
+                    "update_tag": "v4.0.1",
+                    "broken_tag": "v4.0.2",
+                    "interrupted_tag": "v4.0.3",
+                    "fixture_interrupted_tag": "v4.0.3-fixture-interrupted",
+                },
+            )
+            nightly = derive("v4.2.9-nightly.20261121.1")
+            self.assertEqual(nightly["bootstrap_tag"], "v4.2.9-nightly.20261121.1")
+            self.assertEqual(nightly["bootstrap_channel"], "nightly")
+            self.assertEqual(nightly["update_tag"], "v4.2.10")
+            self.assertEqual(nightly["broken_tag"], "v4.2.11")
+            self.assertEqual(nightly["interrupted_tag"], "v4.2.12")
+
+            for bad in ("", "v3.9.9", "4.0.0", "v4.0.0;id", "invalid"):
+                with self.subTest(bad=bad):
+                    with self.assertRaises(ValueError):
+                        derive(bad)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "aetherflow-linux-amd64.tar.gz"
+            sums = root / "SHA256SUMS"
+            art_helper = ArtifactContractAndGlibcTests()
+            entries = art_helper.portable_entries()
+            entries[".version"] = (b"v3.9.9\n", 0o644)
+            digest = art_helper._build_tarball(archive, entries)
+            sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+
+            local = vm_matrix.verify_release_artifact_contract(
+                archive, sums, readelf_symbol_Inspector=lambda _: "2.34"
+            )
+            with mock.patch.dict(namespace, {"run_bounded": lambda *a, **kw: (0, "Name: GLIBC_2.34\n", "", {})}):
+                remote = namespace["inspect_artifact_bundle"](
+                    archive, sums, vm_matrix.asdict(vm_matrix.DEFAULT_ARTIFACT_CONTRACT)
+                )
+            for report in (local, remote):
+                self.assertFalse(report["valid"])
+                self.assertTrue(any("not a valid v4+ release tag" in e for e in report["errors"]), report["errors"])
+
+    def test_run_guest_lifecycle_drills_renders_aligned_scripts_and_passes_bash_syntax(self) -> None:
+        namespace = {"__name__": "drill_render_unit"}
+        exec(vm_matrix.build_remote_driver_script(), namespace)
+
+        class RecordingVm:
+            def __init__(self) -> None:
+                self.commands: dict[str, str] = {}
+                self.copies: list[tuple[str, str]] = []
+
+            def ssh_run(self, script: str, *, timeout: int = 120, check: bool = False, label: str = "ssh-cmd"):
+                self.commands[label] = script
+                return 0, "ok\n", "", {"label": label, "exit_code": 0}
+
+            def copy_to_guest(self, local_path, remote_path, *, timeout: int = 180, label: str = "scp"):
+                self.copies.append((str(local_path), str(remote_path)))
+                return {"label": label, "exit_code": 0}
+
+        for bundle_tag, exp_channel, exp_upd, exp_brk, exp_int in (
+            ("v4.0.0", "stable", "v4.0.1", "v4.0.2", "v4.0.3"),
+            ("v4.3.1-nightly.20261121.7", "nightly", "v4.3.2", "v4.3.3", "v4.3.4"),
+        ):
+            for pass_validation_summary in (True, False):
+                with self.subTest(bundle_tag=bundle_tag, pass_validation_summary=pass_validation_summary):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp)
+                        archive = root / "aetherflow-linux-amd64.tar.gz"
+                        sums = root / "SHA256SUMS"
+                        src_tar = root / "source.tar.gz"
+                        art_helper = ArtifactContractAndGlibcTests()
+                        entries = art_helper.portable_entries()
+                        entries[".version"] = (f"{bundle_tag}\n".encode("utf-8"), 0o644)
+                        digest = art_helper._build_tarball(archive, entries)
+                        sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+                        SourceTarballLayoutAndExtractionRegressionTests()._build_source_tarball(src_tar, prefix="")
+
+                        summary = None
+                        if pass_validation_summary:
+                            summary = {
+                                "supplied": True,
+                                "valid": True,
+                                "errors": [],
+                                "source_layout": {"layout": "flat", "strip_components": 0},
+                                "contract_report": {"valid": True, "details": {"version_stamp": bundle_tag}},
+                            }
+
+                        vm = RecordingVm()
+                        drills = namespace["run_guest_lifecycle_drills"](
+                            vm,
+                            artifact_tarball=str(archive),
+                            artifact_sha256_file=str(sums),
+                            source_tarball=str(src_tar),
+                            validation_summary=summary,
+                        )
+                        status, reasons = vm_matrix.evaluate_certification_status(drills)
+                        self.assertEqual(status, "certified", reasons)
+
+                        self.assertIn("rsync", vm.commands["guest-install-prereqs"])
+
+                        for label in (
+                            "drill-1-bootstrap-and-cli",
+                            "drill-2-release-update",
+                            "drill-3-failed-health-rollback",
+                            "drill-4a-interrupted-recovery-fixture",
+                            "drill-4b-real-interrupted-update-recovery",
+                        ):
+                            script = vm.commands[label]
+                            self.assertNotIn("AETHERFLOW_SKIP_PROVENANCE_VERIFY", script)
+                            self.assertNotIn("v4.0.0-clean-matrix", script)
+                            self.assertNotIn("v4.0.1-matrix", script)
+                            self.assertNotIn("v4.0.2-broken", script)
+                            self.assertNotIn("v4.0.3-interrupted", script)
+                            syntax = subprocess.run(
+                                ["bash", "-n"],
+                                input=script,
+                                text=True,
+                                capture_output=True,
+                            )
+                            self.assertEqual(syntax.returncode, 0, f"{label} syntax error: {syntax.stderr}")
+
+                        d1 = vm.commands["drill-1-bootstrap-and-cli"]
+                        self.assertIn(f"export AETHERFLOW_RELEASE_TAG={bundle_tag}\n", d1)
+                        self.assertIn(f"export AETHERFLOW_RELEASE_CHANNEL={exp_channel}\n", d1)
+
+                        d2 = vm.commands["drill-2-release-update"]
+                        self.assertIn(f"printf '{exp_upd}\\n' > /var/tmp/af-drill/release-v2-src/.version", d2)
+                        self.assertIn(f'"tag_name":"{exp_upd}"', d2)
+                        self.assertIn("bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable", d2)
+                        self.assertIn("runuser -u aetherflow -- sqlite3", d2)
+
+                        d3 = vm.commands["drill-3-failed-health-rollback"]
+                        self.assertIn(f"printf '{exp_brk}\\n' > /var/tmp/af-drill/broken-src/.version", d3)
+                        self.assertIn(f'"tag_name":"{exp_brk}"', d3)
+                        self.assertIn("exec sleep 30", d3)
+                        self.assertIn('compgen -G "/var/lib/aetherflow/aetherflow.sqlite.corrupted.*"', d3)
+
+                        d4a = vm.commands["drill-4a-interrupted-recovery-fixture"]
+                        self.assertIn("/usr/local/bin/af release deploy --local > /tmp/fixture_interrupted_guard.out", d4a)
+                        self.assertNotIn("--dry-run --offline", d4a)
+
+                        d4b = vm.commands["drill-4b-real-interrupted-update-recovery"]
+                        self.assertIn(f"printf '{exp_int}\\n' > /var/tmp/af-drill/interrupted-src/.version", d4b)
+                        self.assertIn(f'"tag_name":"{exp_int}"', d4b)
+                        self.assertIn(f'test "$(tr -d \'[:space:]\' < /opt/AetherFlow/current/.version)" = "{exp_int}"', d4b)
+                        self.assertIn(f'test "$(tr -d \'[:space:]\' < /opt/AetherFlow/current/.version)" = "{exp_upd}"', d4b)
+                        self.assertIn("exec sleep 60", d4b)
+
+    def test_loopback_curl_shim_preserves_https_guard_and_rewrites_only_fixture_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle_dir = root / "bundle"
+            bundle_dir.mkdir()
+            (bundle_dir / "SHA256SUMS").write_text("abc123  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
+
+            class QuietHandler(http.server.SimpleHTTPRequestHandler):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, directory=str(bundle_dir), **kwargs)
+
+                def log_message(self, format, *args):
+                    pass
+
+            class ReusableServer(socketserver.TCPServer):
+                allow_reuse_address = True
+
+            server = ReusableServer(("127.0.0.1", 0), QuietHandler)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            thread.start()
+            try:
+                shim = root / "curl"
+                shim.write_text(vm_matrix.render_loopback_curl_shim(tag="v4.0.2", port=port), encoding="utf-8")
+                shim.chmod(0o755)
+
+                # 1. Releases API succeeds with immutable HTTPS enforcement flags
+                r_api = subprocess.run(
+                    [
+                        str(shim),
+                        "--proto", "=https",
+                        "--proto-redir", "=https",
+                        "--max-filesize", "16777216",
+                        "-sfL",
+                        "https://api.github.com/repos/McEveritts/AetherFlow/releases",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(r_api.returncode, 0, r_api.stderr)
+                parsed = json.loads(r_api.stdout)
+                self.assertEqual(parsed[0]["tag_name"], "v4.0.2")
+
+                # 2. Releases API without --proto '=https' fails closed
+                r_no_https = subprocess.run(
+                    [str(shim), "-sfL", "https://api.github.com/repos/McEveritts/AetherFlow/releases"],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(r_no_https.returncode, 91)
+                self.assertIn("FIXTURE_HTTPS_GUARD_FAILED", r_no_https.stderr)
+
+                # 3. Artifact download succeeds with --proto '=https' --proto-redir '=https' (no Protocol "http" disabled)
+                out_sums = root / "downloaded-SHA256SUMS"
+                r_dl = subprocess.run(
+                    [
+                        str(shim),
+                        "--proto", "=https",
+                        "--proto-redir", "=https",
+                        "--max-filesize", "1048576",
+                        "-fsSL",
+                        "-o", str(out_sums),
+                        "https://github.com/McEveritts/AetherFlow/releases/download/v4.0.2/SHA256SUMS",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(r_dl.returncode, 0, r_dl.stderr)
+                self.assertEqual(out_sums.read_text(encoding="utf-8"), "abc123  aetherflow-linux-amd64.tar.gz\n")
+
+                # 4. Artifact download missing --proto-redir '=https' fails closed
+                r_dl_no_redir = subprocess.run(
+                    [
+                        str(shim),
+                        "--proto", "=https",
+                        "-fsSL",
+                        "-o", str(out_sums),
+                        "https://github.com/McEveritts/AetherFlow/releases/download/v4.0.2/SHA256SUMS",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(r_dl_no_redir.returncode, 92)
+                self.assertIn("FIXTURE_HTTPS_GUARD_FAILED", r_dl_no_redir.stderr)
+            finally:
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == "__main__":
