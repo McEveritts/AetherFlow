@@ -347,6 +347,7 @@ pub(super) fn package_progress_payload(
             outcome.failed_stage = None;
             outcome.exit_code = None;
             outcome.sanitized_summary = None;
+            outcome.recovery_state = None;
         } else {
             outcome.message =
                 sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&outcome.message));
@@ -634,10 +635,70 @@ pub(crate) fn append_package_job_output(job_id: &str, line: &str) {
     }
 }
 
+pub(super) fn is_lock_file_present(lock_file: &str, fs_root_override: Option<&str>) -> bool {
+    let trimmed = lock_file.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = match fs_root_override.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(root) => std::path::Path::new(root).join(trimmed.trim_start_matches(['/', '\\'])),
+        None => PathBuf::from(trimmed),
+    };
+    std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+}
+
+pub(super) fn verified_prior_state_recovery(
+    action: &str,
+    prior_installed: bool,
+    recovery_eligible: bool,
+    receipt_restore_error: Option<&str>,
+    post_restore_failures: &[String],
+    lock_file: &str,
+    fs_root_override: Option<&str>,
+) -> bool {
+    matches!(action, "reinstall" | "update" | "install")
+        && prior_installed
+        && recovery_eligible
+        && receipt_restore_error.is_none()
+        && post_restore_failures.is_empty()
+        && is_lock_file_present(lock_file, fs_root_override)
+}
+
 /// Ends a lifecycle job: records the terminal outcome (so polling clients can
 /// distinguish failure from success) and broadcasts the terminal event.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_package_lifecycle(
+    pkg_id: &str,
+    action: &str,
+    failure: Option<af_services::PackageJobFailure>,
+    progress: i32,
+    message: &str,
+    started_at: &str,
+    job_id: &str,
+    expected_target_version: Option<&str>,
+    achieved_version: Option<&str>,
+    stopped_units: &[String],
+) {
+    finish_package_lifecycle_with_recovery(
+        pkg_id,
+        action,
+        failure,
+        progress,
+        message,
+        started_at,
+        job_id,
+        expected_target_version,
+        achieved_version,
+        stopped_units,
+        false,
+    );
+}
+
+/// Ends a lifecycle job with optional verified prior-state recovery confirmation
+/// for failed in-place operations. Any inactive pre-stopped service forces
+/// `prior_state_recovered` back to `false` (fail-closed).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_package_lifecycle_with_recovery(
     pkg_id: &str,
     action: &str,
     mut failure: Option<af_services::PackageJobFailure>,
@@ -648,6 +709,7 @@ pub(super) fn finish_package_lifecycle(
     expected_target_version: Option<&str>,
     achieved_version: Option<&str>,
     stopped_units: &[String],
+    mut prior_state_recovered: bool,
 ) {
     let mut message_buf = message.to_string();
 
@@ -660,6 +722,7 @@ pub(super) fn finish_package_lifecycle(
             }
         }
         if !inactive_units.is_empty() {
+            prior_state_recovered = false;
             let inactive_diagnostic = format!(
                 "Application stopped services failed to resume: {}",
                 inactive_units.join(", ")
@@ -683,6 +746,14 @@ pub(super) fn finish_package_lifecycle(
     let sanitized_msg = af_services::redact_secrets(&message_buf);
     let message = sanitized_msg.as_str();
     let succeeded = failure.is_none();
+    let recovery_state = if !succeeded
+        && prior_state_recovered
+        && matches!(action, "reinstall" | "update" | "install")
+    {
+        Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED.to_string())
+    } else {
+        None
+    };
     let (failed_stage, exit_code, sanitized_summary) = if !succeeded {
         if failure == Some(af_services::PackageJobFailure::TargetVerification) {
             (
@@ -708,7 +779,7 @@ pub(super) fn finish_package_lifecycle(
         (None, None, None)
     };
 
-    let outcome = af_services::finish_package_job_with_diagnostics(
+    let outcome = af_services::finish_package_job_with_recovery(
         pkg_id,
         action,
         succeeded,
@@ -719,6 +790,7 @@ pub(super) fn finish_package_lifecycle(
         sanitized_summary,
         expected_target_version.map(|s| s.to_string()),
         achieved_version.map(|s| s.to_string()),
+        recovery_state,
     );
     let Some(outcome) = outcome else {
         return;
@@ -3046,11 +3118,25 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await
             }
         };
+        let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
+        let fs_root_override =
+            Option::from(fs_root_override_raw.clone()).filter(|s| !s.trim().is_empty());
+        let prior_installed = is_lock_file_present(&pkg_lock_file, fs_root_override.as_deref());
+
         // Re-check under the lifecycle mutex: a system update may have been
         // launched while this job was queued (run_update holds this mutex
         // while launching, so the check cannot race with the launch).
         if let Some(message) = system_update_lifecycle_block().await {
-            finish_package_lifecycle(
+            let prior_state_recovered = verified_prior_state_recovery(
+                action,
+                prior_installed,
+                true,
+                None,
+                &[],
+                &pkg_lock_file,
+                fs_root_override.as_deref(),
+            );
+            finish_package_lifecycle_with_recovery(
                 &clean_id,
                 action,
                 Some(af_services::PackageJobFailure::Preparation),
@@ -3061,6 +3147,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 expected_target_version.as_deref(),
                 None,
                 &[],
+                prior_state_recovered,
             );
             return;
         }
@@ -3074,9 +3161,6 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             &job_id,
         );
 
-        let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
-        let fs_root_override =
-            Option::from(fs_root_override_raw.clone()).filter(|s| !s.trim().is_empty());
         let can_run_bash =
             cfg!(unix) && fs_root_override.is_none() && std::path::Path::new("/bin/bash").exists();
 
@@ -3315,6 +3399,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             let err_str = error.to_string();
             let is_prep_err = err_str.starts_with("Preparation: ");
             let refuse_restart = is_incomplete_rollback_error(&err_str);
+            let snapshot_captured =
+                runner_snapshot.as_ref().is_some_and(|rs| rs.active) || runtime_snapshot.is_some();
             if refuse_restart {
                 if let Some(ref mut snapshot) = runtime_snapshot {
                     snapshot.preserve_on_drop = true;
@@ -3350,6 +3436,16 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     (None, restart_failures)
                 };
 
+            let prior_state_recovered = verified_prior_state_recovery(
+                action,
+                prior_installed,
+                !refuse_restart && (is_prep_err || snapshot_captured),
+                receipt_restore_error.as_deref(),
+                &restart_failures,
+                &pkg_lock_file,
+                fs_root_override.as_deref(),
+            );
+
             let failure_kind = if is_prep_err {
                 af_services::PackageJobFailure::Preparation
             } else if restart_failures.is_empty() {
@@ -3373,15 +3469,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 failure_message.push_str(&format!("; receipt restoration error: {}", r_err));
             }
             if let Some(ref mut rs) = runner_snapshot {
-            rs.discard(false).await;
-        }
-        if runtime_snapshot.is_some() {
-            let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
-        }
+                rs.discard(false).await;
+            }
+            if runtime_snapshot.is_some() {
+                let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
+            }
 
-        af_services::clear_service_status_cache();
+            af_services::clear_service_status_cache();
             af_services::mutators::clear_app_runtime_meta_cache();
-            finish_package_lifecycle(
+            finish_package_lifecycle_with_recovery(
                 &clean_id,
                 action,
                 Some(failure_kind),
@@ -3392,6 +3488,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 expected_target_version.as_deref(),
                 None,
                 &stopped_units,
+                prior_state_recovered,
             );
             return;
         }
@@ -3417,6 +3514,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             }
 
             if !restart_failures.is_empty() {
+                let snapshot_captured =
+                    runner_snapshot.as_ref().is_some_and(|rs| rs.active) || runtime_snapshot.is_some();
                 let (receipt_restore_error, post_restore_failures) =
                     quiesce_and_restore_candidate_receipts_and_runtime_ext(
                         &clean_id,
@@ -3428,6 +3527,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                         runner_snapshot.as_mut(),
                     )
                     .await;
+                let prior_state_recovered = verified_prior_state_recovery(
+                    action,
+                    prior_installed,
+                    snapshot_captured,
+                    receipt_restore_error.as_deref(),
+                    &post_restore_failures,
+                    &pkg_lock_file,
+                    fs_root_override.as_deref(),
+                );
                 if let Some(ref r_err) = receipt_restore_error {
                     tracing::error!(
                         package = %clean_id,
@@ -3451,15 +3559,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 }
 
                 if let Some(ref mut rs) = runner_snapshot {
-            rs.discard(false).await;
-        }
-        if runtime_snapshot.is_some() {
-            let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
-        }
+                    rs.discard(false).await;
+                }
+                if runtime_snapshot.is_some() {
+                    let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
+                }
 
-        af_services::clear_service_status_cache();
+                af_services::clear_service_status_cache();
                 af_services::mutators::clear_app_runtime_meta_cache();
-                finish_package_lifecycle(
+                finish_package_lifecycle_with_recovery(
                     &clean_id,
                     action,
                     Some(af_services::PackageJobFailure::ServiceRestore),
@@ -3470,6 +3578,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     expected_target_version.as_deref(),
                     achieved_ver.as_deref(),
                     &stopped_units,
+                    prior_state_recovered,
                 );
                 return;
             }
@@ -3503,6 +3612,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             };
 
             if target_match_failed {
+                let snapshot_captured =
+                    runner_snapshot.as_ref().is_some_and(|rs| rs.active) || runtime_snapshot.is_some();
                 let (receipt_restore_error, post_restore_failures) =
                     quiesce_and_restore_candidate_receipts_and_runtime_ext(
                         &clean_id,
@@ -3514,6 +3625,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                         runner_snapshot.as_mut(),
                     )
                     .await;
+                let prior_state_recovered = verified_prior_state_recovery(
+                    action,
+                    prior_installed,
+                    snapshot_captured,
+                    receipt_restore_error.as_deref(),
+                    &post_restore_failures,
+                    &pkg_lock_file,
+                    fs_root_override.as_deref(),
+                );
                 if let Some(ref r_err) = receipt_restore_error {
                     tracing::error!(
                         package = %clean_id,
@@ -3536,15 +3656,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 }
 
                 if let Some(ref mut rs) = runner_snapshot {
-            rs.discard(false).await;
-        }
-        if runtime_snapshot.is_some() {
-            let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
-        }
+                    rs.discard(false).await;
+                }
+                if runtime_snapshot.is_some() {
+                    let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
+                }
 
-        af_services::clear_service_status_cache();
+                af_services::clear_service_status_cache();
                 af_services::mutators::clear_app_runtime_meta_cache();
-                finish_package_lifecycle(
+                finish_package_lifecycle_with_recovery(
                     &clean_id,
                     action,
                     Some(af_services::PackageJobFailure::TargetVerification),
@@ -3555,6 +3675,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     expected_target_version.as_deref(),
                     achieved_ver.as_deref(),
                     &stopped_units,
+                    prior_state_recovered,
                 );
                 return;
             }
@@ -3601,7 +3722,11 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             )
             .await;
             if let Err(required_err) = finalization {
-                let (required_err, receipt_restore_error, _restart_failures) =
+                let snapshot_captured =
+                    runner_snapshot.as_ref().is_some_and(|rs| rs.active) || runtime_snapshot.is_some();
+                let rollback_attempted =
+                    should_rollback_post_certification_failure(action, required_err.kind);
+                let (required_err, receipt_restore_error, post_restore_failures) =
                     handle_post_certification_finalization_failure_ext_with(
                         action,
                         required_err,
@@ -3640,6 +3765,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                         },
                     )
                     .await;
+                let prior_state_recovered = verified_prior_state_recovery(
+                    action,
+                    prior_installed,
+                    rollback_attempted && snapshot_captured,
+                    receipt_restore_error.as_deref(),
+                    &post_restore_failures,
+                    &pkg_lock_file,
+                    fs_root_override.as_deref(),
+                );
                 if let Some(r_err) = receipt_restore_error {
                     tracing::error!(
                         package = %clean_id,
@@ -3649,15 +3783,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     append_package_job_output(&job_id, &format!("receipt restoration error: {r_err}"));
                 }
                 if let Some(ref mut rs) = runner_snapshot {
-            rs.discard(false).await;
-        }
-        if runtime_snapshot.is_some() {
-            let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
-        }
+                    rs.discard(false).await;
+                }
+                if runtime_snapshot.is_some() {
+                    let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
+                }
 
-        af_services::clear_service_status_cache();
+                af_services::clear_service_status_cache();
                 af_services::mutators::clear_app_runtime_meta_cache();
-                finish_package_lifecycle(
+                finish_package_lifecycle_with_recovery(
                     &clean_id,
                     action,
                     Some(required_err.kind),
@@ -3668,6 +3802,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     expected_target_version.as_deref(),
                     None,
                     &stopped_units,
+                    prior_state_recovered,
                 );
                 return;
             }

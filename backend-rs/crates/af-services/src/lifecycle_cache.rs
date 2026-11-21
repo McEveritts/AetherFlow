@@ -115,6 +115,7 @@ mod tests {
             sanitized_summary: None,
             expected_target_version: None,
             achieved_version: None,
+            recovery_state: None,
         }
     }
 

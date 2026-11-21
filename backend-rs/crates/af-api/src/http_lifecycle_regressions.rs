@@ -408,3 +408,258 @@ async fn f01_reinstall_action_preserves_install_port_and_finalization_contract()
     .await;
     assert!(finalized.is_ok());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn marketplace_failed_reinstall_recovery_gate_preserves_failure_and_blocks_incomplete_recovery(
+) {
+    const TEST: &str = "routes::http_lifecycle_regressions::marketplace_failed_reinstall_recovery_gate_preserves_failure_and_blocks_incomplete_recovery";
+    if env::var("AF_HTTP_LIFECYCLE_CHILD").as_deref() != Ok(TEST) {
+        assert!(std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("AF_HTTP_LIFECYCLE_CHILD", TEST)
+            .status()
+            .unwrap()
+            .success());
+        return;
+    }
+
+    let root = env::temp_dir().join(format!("af-reinstall-rec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("var/lib/syncthing")).unwrap();
+    let database = root.join("var/lib/aetherflow/aetherflow.sqlite");
+    for key in [
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_CONFIG_ROOT",
+    ] {
+        env::set_var(key, &root);
+    }
+    for key in ["DB_PATH", "AF_DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &database);
+    }
+    env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+    env::set_var("AETHERFLOW_RUNNER_SOCK", root.join("absent.sock"));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", root.join("packages.json"));
+    env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        root.join("automation.json"),
+    );
+    std::fs::write(root.join("automation.json"), "{}").unwrap();
+    std::fs::write(
+        root.join("packages.json"),
+        r#"[{"name":"syncthing","label":"Syncthing","description":"fixture","category":"test","lock_file":"/install/.syncthing.lock","service_type":"systemd","service_name":"syncthing","default_port":8384}]"#,
+    )
+    .unwrap();
+    let lock = root.join("install/.syncthing.lock");
+    let receipt = root.join("var/lib/syncthing/.af-version");
+    std::fs::write(&lock, "installed\n").unwrap();
+    std::fs::write(&receipt, "1.28.0\n").unwrap();
+
+    af_db::init_db().unwrap();
+    af_db::set_base_domain("review.test").unwrap();
+    af_db::set_app_ingress_config(&AppIngressConfig {
+        app_name: "syncthing".into(),
+        public_domain: "sync.review.test".into(),
+        external_access_enabled: true,
+        listen_port: 18384,
+        ..Default::default()
+    })
+    .unwrap();
+    af_services::initialize_package_jobs(rusqlite::Connection::open(&database).unwrap()).unwrap();
+
+    let fs_root_str = root.to_string_lossy().to_string();
+    let prior_installed = is_lock_file_present("/install/.syncthing.lock", Some(&fs_root_str));
+    assert!(prior_installed);
+
+    // 1. Complete recovery through normal rollback + finish_package_lifecycle_with_recovery path.
+    assert!(af_services::try_start_package_job(
+        af_services::PackageJobInfo {
+            job_id: "http-reinstall-complete".into(),
+            package_id: "syncthing".into(),
+            action: "reinstall".into(),
+            status: "installing".into(),
+            progress: 15,
+            last_line: "reinstalling".into(),
+            started_at: "2026-11-20T01:00:00Z".into(),
+            expected_target_version: None,
+        }
+    ));
+    let snapshots = snapshot_candidate_receipts("syncthing").unwrap();
+    let env_cfg = af_runner::PackageExecutionEnv {
+        fs_root: Some(root.clone()),
+        ..af_runner::PackageExecutionEnv::default()
+    };
+    let mut rt_snap = af_runner::package_lifecycle::PackageRuntimeSnapshot::capture(
+        "syncthing",
+        &["syncthing".into()],
+        &env_cfg,
+        false,
+    )
+    .unwrap();
+    // Simulate failed reinstall mutating receipt and removing lock before rollback restores them.
+    std::fs::write(&receipt, "1.29.0-broken\n").unwrap();
+    std::fs::remove_file(&lock).unwrap();
+
+    let (restore_err, restart_failures) =
+        quiesce_and_restore_candidate_receipts_and_runtime_ext_with(
+            "syncthing",
+            &["syncthing".into()],
+            &["syncthing".into()],
+            &snapshots,
+            &[],
+            false,
+            Some(&mut rt_snap),
+            None,
+            |_, _| async { Ok(()) },
+            |_| "running".into(),
+        )
+        .await;
+    assert!(restore_err.is_none(), "restore_err={restore_err:?}");
+    assert!(
+        restart_failures.is_empty(),
+        "restart_failures={restart_failures:?}"
+    );
+    assert!(lock.is_file());
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "1.28.0\n");
+
+    let recovered = verified_prior_state_recovery(
+        "reinstall",
+        prior_installed,
+        true,
+        restore_err.as_deref(),
+        &restart_failures,
+        "/install/.syncthing.lock",
+        Some(&fs_root_str),
+    );
+    assert!(recovered);
+
+    finish_package_lifecycle_with_recovery(
+        "syncthing",
+        "reinstall",
+        Some(af_services::PackageJobFailure::Installer),
+        60,
+        "installer exited with status 1",
+        "2026-11-20T01:00:00Z",
+        "http-reinstall-complete",
+        None,
+        None,
+        &[],
+        recovered,
+    );
+
+    let outcome = af_services::get_package_job_outcome("syncthing").unwrap();
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(
+        outcome.recovery_state.as_deref(),
+        Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED)
+    );
+    let admin_payload = package_progress_payload("syncthing", None, Some(outcome.clone()), true);
+    assert_eq!(admin_payload["status"], "failed");
+    assert_eq!(
+        admin_payload["last_job"]["recovery_state"],
+        af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED
+    );
+    let viewer_payload = package_progress_payload("syncthing", None, Some(outcome), false);
+    assert!(viewer_payload["last_job"].get("recovery_state").is_none());
+
+    assert_eq!(
+        crate::middlewares::resolve_app_target_for_host("sync.review.test"),
+        Some(("syncthing".into(), 18384))
+    );
+    // Survives simulated API restart.
+    af_services::initialize_package_jobs(rusqlite::Connection::open(&database).unwrap()).unwrap();
+    af_db::invalidate_ingress_cache();
+    assert_eq!(
+        crate::middlewares::resolve_app_target_for_host("sync.review.test"),
+        Some(("syncthing".into(), 18384))
+    );
+
+    // 2. Incomplete rollback (refuse_restart=true) stays failed AND keeps gateway unavailable.
+    assert!(af_services::try_start_package_job(
+        af_services::PackageJobInfo {
+            job_id: "http-reinstall-incomplete".into(),
+            package_id: "syncthing".into(),
+            action: "reinstall".into(),
+            status: "installing".into(),
+            progress: 15,
+            last_line: "reinstalling".into(),
+            started_at: "2026-11-20T01:05:00Z".into(),
+            expected_target_version: None,
+        }
+    ));
+    let (inc_err, inc_failures) = quiesce_and_restore_candidate_receipts_and_runtime_ext_with(
+        "syncthing",
+        &["syncthing".into()],
+        &["syncthing".into()],
+        &snapshots,
+        &[],
+        true,
+        None,
+        None,
+        |_, _| async { Ok(()) },
+        |_| "running".into(),
+    )
+    .await;
+    assert!(inc_err.is_some());
+    let inc_recovered = verified_prior_state_recovery(
+        "reinstall",
+        prior_installed,
+        false,
+        inc_err.as_deref(),
+        &inc_failures,
+        "/install/.syncthing.lock",
+        Some(&fs_root_str),
+    );
+    assert!(!inc_recovered);
+    finish_package_lifecycle_with_recovery(
+        "syncthing",
+        "reinstall",
+        Some(af_services::PackageJobFailure::ServiceRestore),
+        60,
+        "installer failed; incomplete rollback",
+        "2026-11-20T01:05:00Z",
+        "http-reinstall-incomplete",
+        None,
+        None,
+        &[],
+        inc_recovered,
+    );
+    let inc_outcome = af_services::get_package_job_outcome("syncthing").unwrap();
+    assert_eq!(inc_outcome.status, "failed");
+    assert!(inc_outcome.recovery_state.is_none());
+    assert!(crate::middlewares::resolve_app_target_for_host("sync.review.test").is_none());
+
+    // 3. Inactive pre-stopped unit during finish_package_lifecycle_with_recovery forces fail-closed.
+    assert!(af_services::try_start_package_job(
+        af_services::PackageJobInfo {
+            job_id: "http-reinstall-inactive-unit".into(),
+            package_id: "syncthing".into(),
+            action: "reinstall".into(),
+            status: "installing".into(),
+            progress: 15,
+            last_line: "reinstalling".into(),
+            started_at: "2026-11-20T01:10:00Z".into(),
+            expected_target_version: None,
+        }
+    ));
+    finish_package_lifecycle_with_recovery(
+        "syncthing",
+        "reinstall",
+        Some(af_services::PackageJobFailure::Installer),
+        60,
+        "installer failed",
+        "2026-11-20T01:10:00Z",
+        "http-reinstall-inactive-unit",
+        None,
+        None,
+        &["nonexistent-aetherflow-fixture-unit-xyz".into()],
+        true,
+    );
+    let inactive_outcome = af_services::get_package_job_outcome("syncthing").unwrap();
+    assert_eq!(inactive_outcome.status, "failed");
+    assert!(inactive_outcome.recovery_state.is_none());
+    assert!(crate::middlewares::resolve_app_target_for_host("sync.review.test").is_none());
+
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -622,3 +622,197 @@ fn librespeed_tls_requires_a_readable_pem_when_enabled() {
     assert!(super::librespeed_tls_client().is_err());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn gateway_reopens_verified_failed_reinstall_across_restart_and_blocks_incomplete_or_removed() {
+    let name = "middlewares::security_regressions::gateway_reopens_verified_failed_reinstall_across_restart_and_blocks_incomplete_or_removed";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let db = fixture.root.join("gateway.sqlite");
+    let lock = fixture.root.join("install/.syncthing.lock");
+    fs::write(&lock, "installed").unwrap();
+    fixture.active("saved.review.test", true);
+
+    // 1. Complete recovery after a failed reinstall preserves failed outcome and reopens gateway.
+    assert!(af_services::try_start_package_job(
+        af_services::PackageJobInfo {
+            job_id: "reinstall-verified-1".into(),
+            package_id: "syncthing".into(),
+            action: "reinstall".into(),
+            status: "installing".into(),
+            progress: 10,
+            last_line: "reinstalling".into(),
+            started_at: "2026-11-20T00:00:00Z".into(),
+            expected_target_version: None,
+        }
+    ));
+    // Active job blocks all gateway routes immediately.
+    for host in ["saved.review.test", "syncthing.aether.local"] {
+        assert!(
+            resolve_app_target_for_host(host).is_none(),
+            "active job allowed {host}"
+        );
+    }
+    let outcome = af_services::finish_package_job_with_recovery(
+        "syncthing",
+        "reinstall",
+        false,
+        Some(af_services::PackageJobFailure::Installer),
+        "reinstall-verified-1",
+        Some("installer".into()),
+        Some(1),
+        Some("installer exited with status 1".into()),
+        None,
+        None,
+        Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED.into()),
+    )
+    .unwrap();
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.action, "reinstall");
+    assert_eq!(
+        outcome.recovery_state.as_deref(),
+        Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED)
+    );
+    assert_eq!(
+        resolve_app_target_for_host("saved.review.test"),
+        Some(("syncthing".into(), 18384))
+    );
+    assert_eq!(
+        resolve_app_target_for_host("syncthing.aether.local"),
+        Some(("syncthing".into(), 18384))
+    );
+
+    // 2. Survives API restart (fresh JobRegistry opened against same SQLite DB + cache reset).
+    af_services::initialize_package_jobs(rusqlite::Connection::open(&db).unwrap()).unwrap();
+    af_db::invalidate_ingress_cache();
+    let restarted = af_services::get_package_job_outcome("syncthing").unwrap();
+    assert_eq!(restarted.job_id, "reinstall-verified-1");
+    assert_eq!(restarted.status, "failed");
+    assert_eq!(
+        restarted.recovery_state.as_deref(),
+        Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED)
+    );
+    assert_eq!(
+        resolve_app_target_for_host("saved.review.test"),
+        Some(("syncthing".into(), 18384))
+    );
+    assert_eq!(
+        resolve_app_target_for_host("syncthing.aether.local"),
+        Some(("syncthing".into(), 18384))
+    );
+
+    // 3. Current installed & ingress evidence must still hold: missing lock file closes gateway.
+    fs::remove_file(&lock).unwrap();
+    for host in [
+        "saved.review.test",
+        "syncthing.aether.local",
+        "syncthing.review.test",
+    ] {
+        assert!(
+            resolve_app_target_for_host(host).is_none(),
+            "missing install receipt still opened {host}"
+        );
+    }
+    fs::write(&lock, "installed").unwrap();
+    assert_eq!(
+        resolve_app_target_for_host("saved.review.test"),
+        Some(("syncthing".into(), 18384))
+    );
+
+    // Disabling external access still blocks external host while allowing internal.
+    fixture.active("saved.review.test", false);
+    assert!(resolve_app_target_for_host("saved.review.test").is_none());
+    assert_eq!(
+        resolve_app_target_for_host("syncthing.aether.local"),
+        Some(("syncthing".into(), 18384))
+    );
+
+    // Archiving ingress (removed/retained state) blocks all aliases even if lock file remains.
+    af_db::archive_app_ingress_config("syncthing", false).unwrap();
+    for host in [
+        "saved.review.test",
+        "syncthing.aether.local",
+        "syncthing.review.test",
+    ] {
+        assert!(
+            resolve_app_target_for_host(host).is_none(),
+            "archived ingress still opened {host}"
+        );
+    }
+    fixture.active("saved.review.test", true);
+
+    // 4. Incomplete / unverified failures for reinstall, update, and install stay unavailable.
+    for (idx, action) in ["reinstall", "update", "install"].iter().enumerate() {
+        let jid = format!("incomplete-{idx}");
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: jid.clone(),
+                package_id: "syncthing".into(),
+                action: (*action).into(),
+                status: if *action == "update" {
+                    "updating"
+                } else {
+                    "installing"
+                }
+                .into(),
+                progress: 10,
+                last_line: "running".into(),
+                started_at: "2026-11-20T00:05:00Z".into(),
+                expected_target_version: None,
+            }
+        ));
+        let failed = af_services::finish_package_job_with_recovery(
+            "syncthing",
+            action,
+            false,
+            Some(af_services::PackageJobFailure::Installer),
+            &jid,
+            Some("installer".into()),
+            Some(1),
+            Some("incomplete rollback".into()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(failed.status, "failed");
+        assert!(failed.recovery_state.is_none());
+        for host in [
+            "saved.review.test",
+            "syncthing.aether.local",
+            "syncthing.review.test",
+        ] {
+            assert!(
+                resolve_app_target_for_host(host).is_none(),
+                "unverified failed {action} authorized {host}"
+            );
+        }
+    }
+
+    // 5. Interrupted and failed remove stay unavailable even if DB recovery_state is tampered.
+    for (action, status) in [
+        ("remove", "failed"),
+        ("reinstall", "interrupted"),
+        ("update", "interrupted"),
+    ] {
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,recovery_state) VALUES('syncthing','tampered',?1,?2,'now','owner','prior_state_verified')",
+                rusqlite::params![action, status],
+            )
+            .unwrap();
+        for host in [
+            "saved.review.test",
+            "syncthing.aether.local",
+            "syncthing.review.test",
+        ] {
+            assert!(
+                resolve_app_target_for_host(host).is_none(),
+                "{action}/{status} with tampered recovery_state authorized {host}"
+            );
+        }
+    }
+}

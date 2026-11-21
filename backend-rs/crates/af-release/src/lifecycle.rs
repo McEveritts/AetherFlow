@@ -196,6 +196,29 @@ fn retire_finished_owners(conn: &Connection, database: &Path) -> Result<()> {
     Ok(())
 }
 
+pub const RECOVERY_STATE_PRIOR_VERIFIED: &str = "prior_state_verified";
+
+/// Enforces the persistence invariant for failed-operation recovery receipts:
+/// only a failed in-place operation (`install`, `reinstall`, `update`) that did
+/// not fail in removal/retention or interruption may persist
+/// [`RECOVERY_STATE_PRIOR_VERIFIED`]. Every other outcome persists `""` (fail-closed).
+pub fn normalize_recovery_state(
+    success: bool,
+    action: &str,
+    failure_category: &str,
+    recovery_state: Option<&str>,
+) -> &'static str {
+    if !success
+        && matches!(action, "install" | "reinstall" | "update")
+        && !matches!(failure_category, "retention" | "interrupted")
+        && recovery_state.map(str::trim) == Some(RECOVERY_STATE_PRIOR_VERIFIED)
+    {
+        RECOVERY_STATE_PRIOR_VERIFIED
+    } else {
+        ""
+    }
+}
+
 pub fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS package_lifecycle_jobs (
@@ -204,7 +227,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         owner_id TEXT NOT NULL DEFAULT '', service_units TEXT NOT NULL DEFAULT '[]',
         failure_category TEXT NOT NULL DEFAULT '', failed_stage TEXT NOT NULL DEFAULT '',
         exit_code INTEGER, sanitized_summary TEXT NOT NULL DEFAULT '',
-        expected_target_version TEXT NOT NULL DEFAULT '', achieved_version TEXT NOT NULL DEFAULT ''
+        expected_target_version TEXT NOT NULL DEFAULT '', achieved_version TEXT NOT NULL DEFAULT '',
+        recovery_state TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS package_lifecycle_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,7 +237,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         owner_id TEXT NOT NULL DEFAULT '', service_units TEXT NOT NULL DEFAULT '[]',
         failure_category TEXT NOT NULL DEFAULT '', failed_stage TEXT NOT NULL DEFAULT '',
         exit_code INTEGER, sanitized_summary TEXT NOT NULL DEFAULT '',
-        expected_target_version TEXT NOT NULL DEFAULT '', achieved_version TEXT NOT NULL DEFAULT ''
+        expected_target_version TEXT NOT NULL DEFAULT '', achieved_version TEXT NOT NULL DEFAULT '',
+        recovery_state TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_lifecycle_history_pkg ON package_lifecycle_history(package_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_lifecycle_history_job ON package_lifecycle_history(job_id);
@@ -232,6 +257,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         ("sanitized_summary", "TEXT NOT NULL DEFAULT ''"),
         ("expected_target_version", "TEXT NOT NULL DEFAULT ''"),
         ("achieved_version", "TEXT NOT NULL DEFAULT ''"),
+        ("recovery_state", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute_batch(&format!(
@@ -252,6 +278,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         ("sanitized_summary", "TEXT NOT NULL DEFAULT ''"),
         ("expected_target_version", "TEXT NOT NULL DEFAULT ''"),
         ("achieved_version", "TEXT NOT NULL DEFAULT ''"),
+        ("recovery_state", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !hist_columns.iter().any(|column| column == name) {
             conn.execute_batch(&format!(
@@ -270,6 +297,14 @@ pub fn reconcile_jobs(conn: &Connection, database: &Path) -> Result<()> {
     if !has_owner {
         return Ok(());
     }
+    let has_recovery: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='recovery_state')",
+        [], |row| row.get(0),
+    )?;
+    let has_hist_recovery: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='recovery_state')",
+        [], |row| row.get(0),
+    )?;
     let jobs: Vec<(String, String, String)> = conn.prepare(
         "SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')",
     )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -279,16 +314,32 @@ pub fn reconcile_jobs(conn: &Connection, database: &Path) -> Result<()> {
             continue;
         }
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=?1,failure_category='interrupted'
-             WHERE package_id=?2 AND job_id=?3 AND owner_id=?4 AND status IN ('installing','updating','uninstalling')",
-            params![now, package, job, owner],
-        )?;
-        let _ = conn.execute(
-            "UPDATE package_lifecycle_history SET status='interrupted',finished_at=?1,failure_category='interrupted'
-             WHERE package_id=?2 AND job_id=?3 AND owner_id=?4 AND status IN ('installing','updating','uninstalling')",
-            params![now, package, job, owner],
-        );
+        if has_recovery {
+            conn.execute(
+                "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=?1,failure_category='interrupted',recovery_state=''
+                 WHERE package_id=?2 AND job_id=?3 AND owner_id=?4 AND status IN ('installing','updating','uninstalling')",
+                params![now, package, job, owner],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=?1,failure_category='interrupted'
+                 WHERE package_id=?2 AND job_id=?3 AND owner_id=?4 AND status IN ('installing','updating','uninstalling')",
+                params![now, package, job, owner],
+            )?;
+        }
+        if has_hist_recovery {
+            let _ = conn.execute(
+                "UPDATE package_lifecycle_history SET status='interrupted',finished_at=?1,failure_category='interrupted',recovery_state=''
+                 WHERE package_id=?2 AND job_id=?3 AND owner_id=?4 AND status IN ('installing','updating','uninstalling')",
+                params![now, package, job, owner],
+            );
+        } else {
+            let _ = conn.execute(
+                "UPDATE package_lifecycle_history SET status='interrupted',finished_at=?1,failure_category='interrupted'
+                 WHERE package_id=?2 AND job_id=?3 AND owner_id=?4 AND status IN ('installing','updating','uninstalling')",
+                params![now, package, job, owner],
+            );
+        }
     }
     let _ = retire_finished_owners(conn, database);
     Ok(())
@@ -384,14 +435,14 @@ pub fn admit_job_with_target(
     let target_ver_raw = expected_target_version.unwrap_or("");
     let target_ver = sanitize_persisted_lifecycle_text(target_ver_raw);
     tx.execute(
-        "INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version)
-        VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'') ON CONFLICT(package_id) DO UPDATE SET
-        job_id=excluded.job_id,action=excluded.action,status=excluded.status,started_at=excluded.started_at,finished_at='',owner_id=excluded.owner_id,service_units=excluded.service_units,failure_category='',failed_stage='',exit_code=NULL,sanitized_summary='',expected_target_version=excluded.expected_target_version,achieved_version=''",
+        "INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
+        VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','') ON CONFLICT(package_id) DO UPDATE SET
+        job_id=excluded.job_id,action=excluded.action,status=excluded.status,started_at=excluded.started_at,finished_at='',owner_id=excluded.owner_id,service_units=excluded.service_units,failure_category='',failed_stage='',exit_code=NULL,sanitized_summary='',expected_target_version=excluded.expected_target_version,achieved_version='',recovery_state=''",
         params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
     )?;
     tx.execute(
-        "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version)
-        VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'')",
+        "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
+        VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','')",
         params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
     )?;
     tx.commit()?;
@@ -428,6 +479,7 @@ pub struct LifecycleJobDiagnostics<'a> {
     pub expected_target_version: Option<&'a str>,
     pub achieved_version: Option<&'a str>,
     pub finished_at: Option<&'a str>,
+    pub recovery_state: Option<&'a str>,
 }
 
 pub fn finish_job_with_diagnostics(
@@ -446,6 +498,7 @@ pub fn finish_job_with_diagnostics(
         expected_target_version,
         achieved_version,
         finished_at,
+        recovery_state,
     } = diagnostics;
     let status = if success { "completed" } else { "failed" };
     let finished_at_owned = finished_at
@@ -453,6 +506,7 @@ pub fn finish_job_with_diagnostics(
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let finished_at = finished_at_owned.as_str();
     let cat = if success { "" } else { failure_category };
+    let recovery = normalize_recovery_state(success, action, cat, recovery_state);
     let stage = sanitize_persisted_lifecycle_text(failed_stage.unwrap_or(""));
     let summary = sanitize_persisted_lifecycle_text(sanitized_summary.unwrap_or(""));
     let achieved = sanitize_persisted_lifecycle_text(achieved_version.unwrap_or(""));
@@ -464,15 +518,15 @@ pub fn finish_job_with_diagnostics(
     }
     let run = || -> Result<()> {
         let updated = conn.execute(
-            "UPDATE package_lifecycle_jobs SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8
-             WHERE package_id=?9 AND job_id=?10 AND action=?11 AND status IN ('installing','updating','uninstalling')",
-            params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, package, job_id, action],
+            "UPDATE package_lifecycle_jobs SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9
+             WHERE package_id=?10 AND job_id=?11 AND action=?12 AND status IN ('installing','updating','uninstalling')",
+            params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, package, job_id, action],
         )?;
         anyhow::ensure!(updated == 1, "lifecycle receipt identity changed");
         let hist_updated = conn.execute(
-            "UPDATE package_lifecycle_history SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8
-             WHERE package_id=?9 AND job_id=?10 AND action=?11 AND status IN ('installing','updating','uninstalling')",
-            params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, package, job_id, action],
+            "UPDATE package_lifecycle_history SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9
+             WHERE package_id=?10 AND job_id=?11 AND action=?12 AND status IN ('installing','updating','uninstalling')",
+            params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, package, job_id, action],
         )?;
         if hist_updated == 0 {
             let (started_at, owner_id, service_units): (String, String, String) = conn
@@ -483,9 +537,9 @@ pub fn finish_job_with_diagnostics(
                 )
                 .unwrap_or_else(|_| (finished_at.to_string(), String::new(), "[]".to_string()));
             conn.execute(
-                "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                params![package, job_id, action, status, started_at, finished_at, owner_id, service_units, cat, stage, exit_code, summary, expected, achieved],
+                "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                params![package, job_id, action, status, started_at, finished_at, owner_id, service_units, cat, stage, exit_code, summary, expected, achieved, recovery],
             )?;
         }
         Ok(())
@@ -3625,5 +3679,186 @@ mod tests {
 
         let kept = r#"{"na\u006de":"visible"}"#;
         assert_eq!(sanitize_persisted_lifecycle_text(kept), kept);
+    }
+
+    #[test]
+    fn recovery_state_persistence_invariants_and_reset_on_readmit_or_interrupt() {
+        assert_eq!(
+            normalize_recovery_state(
+                false,
+                "reinstall",
+                "installer",
+                Some(RECOVERY_STATE_PRIOR_VERIFIED)
+            ),
+            RECOVERY_STATE_PRIOR_VERIFIED
+        );
+        assert_eq!(
+            normalize_recovery_state(
+                false,
+                "update",
+                "target_verification",
+                Some(RECOVERY_STATE_PRIOR_VERIFIED)
+            ),
+            RECOVERY_STATE_PRIOR_VERIFIED
+        );
+        assert_eq!(
+            normalize_recovery_state(
+                false,
+                "install",
+                "installer",
+                Some(RECOVERY_STATE_PRIOR_VERIFIED)
+            ),
+            RECOVERY_STATE_PRIOR_VERIFIED
+        );
+        // Never allowed for completed, remove, retention, interrupted, or arbitrary values.
+        assert_eq!(
+            normalize_recovery_state(true, "reinstall", "", Some(RECOVERY_STATE_PRIOR_VERIFIED)),
+            ""
+        );
+        assert_eq!(
+            normalize_recovery_state(
+                false,
+                "remove",
+                "installer",
+                Some(RECOVERY_STATE_PRIOR_VERIFIED)
+            ),
+            ""
+        );
+        assert_eq!(
+            normalize_recovery_state(
+                false,
+                "reinstall",
+                "retention",
+                Some(RECOVERY_STATE_PRIOR_VERIFIED)
+            ),
+            ""
+        );
+        assert_eq!(
+            normalize_recovery_state(
+                false,
+                "reinstall",
+                "interrupted",
+                Some(RECOVERY_STATE_PRIOR_VERIFIED)
+            ),
+            ""
+        );
+        assert_eq!(
+            normalize_recovery_state(false, "reinstall", "installer", Some("partial")),
+            ""
+        );
+
+        let root = std::env::temp_dir().join(format!("af-recovery-inv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("aetherflow.sqlite");
+        let mut conn = Connection::open(&db).unwrap();
+        initialize_schema(&conn).unwrap();
+
+        let lease1 = admit_job(
+            &mut conn,
+            "syncthing",
+            "job-1",
+            "reinstall",
+            "t1",
+            &["syncthing".into()],
+        )
+        .unwrap();
+        finish_job_with_diagnostics(
+            &conn,
+            "syncthing",
+            "job-1",
+            "reinstall",
+            false,
+            LifecycleJobDiagnostics {
+                failure_category: "installer",
+                recovery_state: Some(RECOVERY_STATE_PRIOR_VERIFIED),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(lease1);
+
+        let (status, rec): (String, String) = conn
+            .query_row(
+                "SELECT status, recovery_state FROM package_lifecycle_jobs WHERE package_id='syncthing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(rec, RECOVERY_STATE_PRIOR_VERIFIED);
+        let hist_rec: String = conn
+            .query_row(
+                "SELECT recovery_state FROM package_lifecycle_history WHERE job_id='job-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hist_rec, RECOVERY_STATE_PRIOR_VERIFIED);
+
+        // Re-admitting resets recovery_state to empty and abandoning marks interrupted with empty recovery_state.
+        let lease2 = admit_job(
+            &mut conn,
+            "syncthing",
+            "job-2",
+            "reinstall",
+            "t2",
+            &["syncthing".into()],
+        )
+        .unwrap();
+        let active_rec: String = conn
+            .query_row(
+                "SELECT recovery_state FROM package_lifecycle_jobs WHERE package_id='syncthing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_rec, "");
+        drop(lease2);
+        reconcile_jobs(&conn, &db).unwrap();
+        let (int_status, int_rec): (String, String) = conn
+            .query_row(
+                "SELECT status, recovery_state FROM package_lifecycle_jobs WHERE package_id='syncthing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(int_status, "interrupted");
+        assert_eq!(int_rec, "");
+
+        // Remove failure cannot persist prior_state_verified even if passed.
+        let lease3 = admit_job(
+            &mut conn,
+            "syncthing",
+            "job-3",
+            "remove",
+            "t3",
+            &["syncthing".into()],
+        )
+        .unwrap();
+        finish_job_with_diagnostics(
+            &conn,
+            "syncthing",
+            "job-3",
+            "remove",
+            false,
+            LifecycleJobDiagnostics {
+                failure_category: "installer",
+                recovery_state: Some(RECOVERY_STATE_PRIOR_VERIFIED),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(lease3);
+        let rm_rec: String = conn
+            .query_row(
+                "SELECT recovery_state FROM package_lifecycle_jobs WHERE package_id='syncthing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rm_rec, "");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

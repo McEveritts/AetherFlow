@@ -493,6 +493,7 @@ async fn native_cached_observations_keep_lifecycle_and_credentials_fresh() {
             sanitized_summary: None,
             expected_target_version: None,
             achieved_version: None,
+            recovery_state: None,
         },
     );
     let services = tokio::task::spawn_blocking(move || get_active_services_with_jobs(&jobs))

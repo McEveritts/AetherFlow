@@ -167,11 +167,26 @@ impl JobRegistry {
 
     fn refresh(&mut self) -> anyhow::Result<()> {
         let Some(conn) = &self.db else { return Ok(()) };
-        let rows: Vec<PackageJobOutcome> = conn.prepare(
+        let has_recovery: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='recovery_state')",
+            [],
+            |row| row.get(0),
+        )?;
+        let query = if has_recovery {
             "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
-                    failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version
-             FROM package_lifecycle_jobs",
-        )?.query_map([], read_outcome)?.collect::<rusqlite::Result<_>>()?;
+                    failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,
+                    recovery_state
+             FROM package_lifecycle_jobs"
+        } else {
+            "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
+                    failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,
+                    ''
+             FROM package_lifecycle_jobs"
+        };
+        let rows: Vec<PackageJobOutcome> = conn
+            .prepare(query)?
+            .query_map([], read_outcome)?
+            .collect::<rusqlite::Result<_>>()?;
         for row in rows {
             if !matches!(row.status.as_str(), "completed" | "failed" | "interrupted") {
                 if self
@@ -197,11 +212,11 @@ impl JobRegistry {
             } else {
                 self.active.remove(&row.package_id);
                 self.leases.remove(&row.package_id);
-                if self
-                    .outcomes
-                    .get(&row.package_id)
-                    .is_none_or(|old| old.job_id != row.job_id || old.status != row.status)
-                {
+                if self.outcomes.get(&row.package_id).is_none_or(|old| {
+                    old.job_id != row.job_id
+                        || old.status != row.status
+                        || old.recovery_state != row.recovery_state
+                }) {
                     self.outcomes.insert(row.package_id.clone(), row);
                 }
             }
@@ -283,6 +298,36 @@ impl JobRegistry {
         expected_target_version: Option<String>,
         achieved_version: Option<String>,
     ) -> anyhow::Result<Option<PackageJobOutcome>> {
+        self.finish_with_diagnostics_and_recovery(
+            pkg,
+            action,
+            success,
+            failure,
+            job_id,
+            failed_stage,
+            exit_code,
+            sanitized_summary,
+            expected_target_version,
+            achieved_version,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_with_diagnostics_and_recovery(
+        &mut self,
+        pkg: &str,
+        action: &str,
+        success: bool,
+        failure: Option<PackageJobFailure>,
+        job_id: &str,
+        failed_stage: Option<String>,
+        exit_code: Option<i32>,
+        sanitized_summary: Option<String>,
+        expected_target_version: Option<String>,
+        achieved_version: Option<String>,
+        recovery_state: Option<String>,
+    ) -> anyhow::Result<Option<PackageJobOutcome>> {
         let Some(job) = self
             .active
             .get(pkg)
@@ -295,6 +340,17 @@ impl JobRegistry {
             ""
         } else {
             failure.map_or("", PackageJobFailure::category)
+        };
+        let normalized_recovery = af_release::lifecycle::normalize_recovery_state(
+            success,
+            action,
+            category,
+            recovery_state.as_deref(),
+        );
+        let recovery_state_opt = if normalized_recovery.is_empty() {
+            None
+        } else {
+            Some(normalized_recovery.to_string())
         };
         let sanitized_summary = sanitized_summary.map(|s| redact_secrets(&s));
         let failed_stage = failed_stage.map(|s| redact_secrets(&s));
@@ -313,6 +369,7 @@ impl JobRegistry {
             sanitized_summary: sanitized_summary.clone(),
             expected_target_version: expected_target,
             achieved_version,
+            recovery_state: recovery_state_opt.clone(),
         };
         if let Some(conn) = &self.db {
             af_release::lifecycle::finish_job_with_diagnostics(
@@ -329,6 +386,7 @@ impl JobRegistry {
                     expected_target_version: outcome.expected_target_version.as_deref(),
                     achieved_version: outcome.achieved_version.as_deref(),
                     finished_at: Some(outcome.finished_at.as_str()),
+                    recovery_state: recovery_state_opt.as_deref(),
                 },
             )?;
         }
@@ -346,6 +404,7 @@ fn read_outcome(row: &Row<'_>) -> rusqlite::Result<PackageJobOutcome> {
     let sanitized_summary: String = row.get::<_, Option<String>>(9)?.unwrap_or_default();
     let expected_target_version: String = row.get::<_, Option<String>>(10)?.unwrap_or_default();
     let achieved_version: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
+    let recovery_state: String = row.get::<_, Option<String>>(12)?.unwrap_or_default();
     Ok(PackageJobOutcome {
         package_id: row.get(0)?,
         job_id: row.get(1)?,
@@ -374,6 +433,11 @@ fn read_outcome(row: &Row<'_>) -> rusqlite::Result<PackageJobOutcome> {
             None
         } else {
             Some(achieved_version)
+        },
+        recovery_state: if recovery_state.is_empty() {
+            None
+        } else {
+            Some(recovery_state)
         },
     })
 }
@@ -464,17 +528,30 @@ pub fn get_package_job_history_outcome(
     };
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(Duration::from_millis(150))?;
+    let has_recovery: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='recovery_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    let query = if has_recovery {
+        "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
+                failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,
+                recovery_state
+         FROM package_lifecycle_history
+         WHERE package_id = ?1 AND job_id = ?2
+           AND status IN ('completed', 'failed', 'interrupted')
+         ORDER BY id DESC LIMIT 1"
+    } else {
+        "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
+                failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,
+                ''
+         FROM package_lifecycle_history
+         WHERE package_id = ?1 AND job_id = ?2
+           AND status IN ('completed', 'failed', 'interrupted')
+         ORDER BY id DESC LIMIT 1"
+    };
     Ok(conn
-        .query_row(
-            "SELECT package_id,job_id,action,status,started_at,finished_at,failure_category,
-                    failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version
-             FROM package_lifecycle_history
-             WHERE package_id = ?1 AND job_id = ?2
-               AND status IN ('completed', 'failed', 'interrupted')
-             ORDER BY id DESC LIMIT 1",
-            params![package_id, job_id],
-            read_outcome,
-        )
+        .query_row(query, params![package_id, job_id], read_outcome)
         .optional()?)
 }
 
@@ -620,8 +697,37 @@ pub fn finish_package_job_with_diagnostics(
     expected_target_version: Option<String>,
     achieved_version: Option<String>,
 ) -> Option<PackageJobOutcome> {
+    finish_package_job_with_recovery(
+        pkg,
+        action,
+        success,
+        failure,
+        job_id,
+        failed_stage,
+        exit_code,
+        sanitized_summary,
+        expected_target_version,
+        achieved_version,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn finish_package_job_with_recovery(
+    pkg: &str,
+    action: &str,
+    success: bool,
+    failure: Option<PackageJobFailure>,
+    job_id: &str,
+    failed_stage: Option<String>,
+    exit_code: Option<i32>,
+    sanitized_summary: Option<String>,
+    expected_target_version: Option<String>,
+    achieved_version: Option<String>,
+    recovery_state: Option<String>,
+) -> Option<PackageJobOutcome> {
     match JOBS.lock().map(|mut jobs| {
-        jobs.finish_with_diagnostics(
+        jobs.finish_with_diagnostics_and_recovery(
             pkg,
             action,
             success,
@@ -632,6 +738,7 @@ pub fn finish_package_job_with_diagnostics(
             sanitized_summary,
             expected_target_version,
             achieved_version,
+            recovery_state,
         )
     }) {
         Ok(Ok(outcome)) => outcome,

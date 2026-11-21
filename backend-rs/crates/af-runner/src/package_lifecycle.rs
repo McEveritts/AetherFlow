@@ -1589,6 +1589,126 @@ mod tests {
         conn.execute("DELETE FROM package_lifecycle_jobs", [])
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn failed_reinstall_verified_recovery_vs_incomplete_fresh_and_remove_receipts() {
+        let (root, path, conn, mut package) = fixture();
+        package.lock_file = "/install/.syncthing.lock".into();
+        let lock_path = root.join("install/.syncthing.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        std::fs::write(&lock_path, "installed\n").unwrap();
+        let version_path = root.join("var/lib/syncthing/.af-version");
+        std::fs::create_dir_all(version_path.parent().unwrap()).unwrap();
+        std::fs::write(&version_path, "1.28.0\n").unwrap();
+        let vhost_dir = root.join("etc/apache2/sites-available");
+        std::fs::create_dir_all(&vhost_dir).unwrap();
+        let vhost_path = vhost_dir.join("aetherflow-ext-syncthing.conf");
+        std::fs::write(&vhost_path, "# prior vhost\n").unwrap();
+
+        let read_recovery = |c: &Connection| -> (String, String, String) {
+            c.query_row(
+                "SELECT status, failure_category, recovery_state FROM package_lifecycle_jobs WHERE package_id='syncthing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+
+        let (sender, _receiver) = mpsc::channel(32);
+
+        // 1. Failed reinstall with complete restoration of runtime/lock/receipt/vhost and service.
+        let backend_complete = FakeBackend {
+            fail_script: true,
+            ..Default::default()
+        };
+        let mut op1 = CoordinatedOperation::admit(
+            conn,
+            request("reinstall"),
+            package.clone(),
+            vec!["syncthing".into()],
+        )
+        .unwrap();
+        let r1 = op1.execute(&backend_complete, &sender).await.unwrap();
+        assert_eq!(r1.status, "failed");
+        assert_eq!(
+            read_recovery(&op1.conn),
+            (
+                "failed".into(),
+                "installer".into(),
+                lifecycle::RECOVERY_STATE_PRIOR_VERIFIED.into()
+            )
+        );
+        assert!(lock_path.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&vhost_path).unwrap(),
+            "# prior vhost\n"
+        );
+        drop(op1);
+
+        // 2. Failed reinstall with incomplete rollback must NOT record verified recovery.
+        let backend_incomplete = FakeBackend {
+            script_error_message: Some("script failed; incomplete rollback: partial files".into()),
+            ..Default::default()
+        };
+        let mut op2 = CoordinatedOperation::admit(
+            Connection::open(&path).unwrap(),
+            request("reinstall"),
+            package.clone(),
+            vec!["syncthing".into()],
+        )
+        .unwrap();
+        let r2 = op2.execute(&backend_incomplete, &sender).await.unwrap();
+        assert_eq!(r2.status, "failed");
+        assert_eq!(read_recovery(&op2.conn).2, "");
+        drop(op2);
+
+        // 3. Failed reinstall where service restart fails after rollback must NOT record verified recovery.
+        let backend_restore_fail = FakeBackend {
+            fail_script: true,
+            fail_restore: true,
+            ..Default::default()
+        };
+        let mut op3 = CoordinatedOperation::admit(
+            Connection::open(&path).unwrap(),
+            request("reinstall"),
+            package.clone(),
+            vec!["syncthing".into()],
+        )
+        .unwrap();
+        let r3 = op3.execute(&backend_restore_fail, &sender).await.unwrap();
+        assert_eq!(r3.status, "failed");
+        assert_eq!(read_recovery(&op3.conn).2, "");
+        drop(op3);
+
+        // 4. Failed remove must NEVER record verified recovery.
+        let mut op4 = CoordinatedOperation::admit(
+            Connection::open(&path).unwrap(),
+            request("remove"),
+            package.clone(),
+            vec!["syncthing".into()],
+        )
+        .unwrap();
+        let r4 = op4.execute(&backend_complete, &sender).await.unwrap();
+        assert_eq!(r4.status, "failed");
+        assert_eq!(read_recovery(&op4.conn).2, "");
+        drop(op4);
+
+        // 5. Failed fresh install (not previously installed) must NEVER record verified recovery.
+        std::fs::remove_file(&lock_path).unwrap();
+        let mut op5 = CoordinatedOperation::admit(
+            Connection::open(&path).unwrap(),
+            request("install"),
+            package,
+            vec!["syncthing".into()],
+        )
+        .unwrap();
+        let r5 = op5.execute(&backend_complete, &sender).await.unwrap();
+        assert_eq!(r5.status, "failed");
+        assert_eq!(read_recovery(&op5.conn).2, "");
+        drop(op5);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 async fn run_direct(
@@ -1967,17 +2087,24 @@ impl CoordinatedOperation {
         })
     }
 
-    fn is_installed_on_disk(&self) -> bool {
+    fn is_installed_on_disk_in(&self, fs_root: Option<&Path>) -> bool {
         let trimmed = self.package.lock_file.trim();
         if trimmed.is_empty() {
             return false;
         }
-        let env_cfg = crate::PackageExecutionEnv::default();
-        let resolved = match &env_cfg.fs_root {
-            Some(root) => root.join(trimmed.trim_start_matches(['/', '\\'])),
-            None => Path::new(trimmed).to_path_buf(),
+        let raw_path = Path::new(trimmed);
+        let resolved = match fs_root {
+            Some(root) if !raw_path.starts_with(root) => {
+                root.join(trimmed.trim_start_matches(['/', '\\']))
+            }
+            _ => raw_path.to_path_buf(),
         };
         std::fs::symlink_metadata(&resolved).is_ok_and(|meta| meta.is_file())
+    }
+
+    fn is_installed_on_disk(&self) -> bool {
+        let env_cfg = crate::PackageExecutionEnv::default();
+        self.is_installed_on_disk_in(env_cfg.fs_root.as_deref())
     }
 
     fn resolve_port(&self, backend: &impl LifecycleBackend) -> Result<i32> {
@@ -2726,6 +2853,7 @@ impl CoordinatedOperation {
         .await
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn restore_and_restart_units_with_runtime(
         backend: &impl LifecycleBackend,
@@ -2739,7 +2867,43 @@ impl CoordinatedOperation {
         restart_failures: &mut Vec<String>,
         incomplete_rollback: bool,
         quiesce_first: bool,
+        runtime_snapshot: Option<PackageRuntimeSnapshot>,
+    ) {
+        Self::restore_and_restart_units_with_runtime_and_vhosts(
+            backend,
+            lifecycle_job_id,
+            package_id,
+            quiesce_units,
+            restart_units,
+            receipt_snapshots,
+            blueprint_snapshots,
+            receipt_restore_error,
+            restart_failures,
+            incomplete_rollback,
+            quiesce_first,
+            runtime_snapshot,
+            Vec::new(),
+            None,
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn restore_and_restart_units_with_runtime_and_vhosts(
+        backend: &impl LifecycleBackend,
+        lifecycle_job_id: &str,
+        package_id: &str,
+        quiesce_units: &[String],
+        restart_units: &[String],
+        receipt_snapshots: &[FileSnapshot],
+        blueprint_snapshots: &[FileSnapshot],
+        receipt_restore_error: &mut Option<String>,
+        restart_failures: &mut Vec<String>,
+        incomplete_rollback: bool,
+        quiesce_first: bool,
         mut runtime_snapshot: Option<PackageRuntimeSnapshot>,
+        vhost_backups: Vec<crate::VhostBackup>,
+        fs_root: Option<PathBuf>,
     ) {
         if incomplete_rollback {
             if let Some(snapshot) = runtime_snapshot.as_mut() {
@@ -2826,23 +2990,36 @@ impl CoordinatedOperation {
                 } else {
                     runtime_snapshot.as_mut()
                 },
-            )
+            )?;
+            let vhosts_changed = if incomplete_rollback || vhost_backups.is_empty() {
+                false
+            } else {
+                crate::restore_app_vhost_backups(&vhost_backups).map_err(|e| e.to_string())?
+            };
+            Ok::<bool, String>(vhosts_changed)
         })
         .await
         .map_err(|err| format!("Snapshot restore worker failed: {err}"))
         .and_then(|result| result);
         let mut snapshot_restore_failed = false;
-        if let Err(restore_err) = restoration {
-            tracing::error!(
-                package = %package_id,
-                error = %restore_err,
-                "Failed to restore candidate receipts, blueprints, and package runtime"
-            );
-            snapshot_restore_failed = true;
-            if let Some(ref mut existing) = receipt_restore_error {
-                existing.push_str(&format!("; {}", restore_err));
-            } else {
-                *receipt_restore_error = Some(restore_err);
+        match restoration {
+            Ok(vhosts_changed) => {
+                if vhosts_changed {
+                    crate::reload_apache_after_rollback_if_live(fs_root.as_deref()).await;
+                }
+            }
+            Err(restore_err) => {
+                tracing::error!(
+                    package = %package_id,
+                    error = %restore_err,
+                    "Failed to restore candidate receipts, blueprints, and package runtime"
+                );
+                snapshot_restore_failed = true;
+                if let Some(ref mut existing) = receipt_restore_error {
+                    existing.push_str(&format!("; {}", restore_err));
+                } else {
+                    *receipt_restore_error = Some(restore_err);
+                }
             }
         }
 
@@ -2994,12 +3171,17 @@ impl CoordinatedOperation {
             }
         };
 
+        let prior_installed = self.is_installed_on_disk_in(pre_op_env.fs_root.as_deref());
         let mut stopped = Vec::new();
         let mut failure = "preparation";
         let mut runtime_snapshot: Option<PackageRuntimeSnapshot> = None;
+        let mut vhost_backups: Vec<crate::VhostBackup> = Vec::new();
+        let mut prep_services_verified = false;
+        let mut snapshot_captured = false;
+        let mut script_attempted = false;
         let all_controllable_units = self.update_units();
-        let should_quiesce_oneshots_pre_op = self.is_installed_on_disk()
-            || matches!(self.request.action.as_str(), "update" | "reinstall");
+        let should_quiesce_oneshots_pre_op =
+            prior_installed || matches!(self.request.action.as_str(), "update" | "reinstall");
         let mut execution: Result<()> = async {
             self.request.app_port = self.resolve_port(backend)?;
             if let Some(res) = lifecycle::port_resource(self.request.app_port) {
@@ -3038,7 +3220,13 @@ impl CoordinatedOperation {
                     }
                 }
             }
+            prep_services_verified = true;
             if matches!(self.request.action.as_str(), "install" | "reinstall" | "update") {
+                vhost_backups = crate::snapshot_app_vhost_backups(
+                    &self.request.package_id,
+                    pre_op_env.fs_root.as_deref(),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to snapshot Apache vhosts before execution: {e}"))?;
                 runtime_snapshot = Some(
                     PackageRuntimeSnapshot::capture_blocking(
                         self.request.package_id.clone(),
@@ -3048,8 +3236,10 @@ impl CoordinatedOperation {
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to snapshot package runtime before execution: {e}"))?,
                 );
+                snapshot_captured = true;
             }
             failure = "installer";
+            script_attempted = true;
             backend.script(&self.request, sender).await?;
             Ok(())
         }
@@ -3059,6 +3249,8 @@ impl CoordinatedOperation {
             .err()
             .is_some_and(|err| is_incomplete_rollback_error(&err.to_string()));
         let mut restart_failures: Vec<String> = Vec::new();
+        let mut rollback_restart_failures: Vec<String> = Vec::new();
+        let mut rollback_ran = false;
         let mut restore_failed;
         let mut receipt_restore_error: Option<String> = None;
         let lifecycle_job_id = self.request.lifecycle_job_id.clone();
@@ -3070,7 +3262,7 @@ impl CoordinatedOperation {
             } else {
                 &rollback_quiesce_units
             };
-            Self::restore_and_restart_units_with_runtime(
+            Self::restore_and_restart_units_with_runtime_and_vhosts(
                 backend,
                 &lifecycle_job_id,
                 &package_id,
@@ -3083,8 +3275,12 @@ impl CoordinatedOperation {
                 incomplete_rollback,
                 true,
                 runtime_snapshot.take(),
+                std::mem::take(&mut vhost_backups),
+                pre_op_env.fs_root.clone(),
             )
             .await;
+            rollback_ran = true;
+            rollback_restart_failures = restart_failures.clone();
             restore_failed = !restart_failures.is_empty();
         } else {
             if incomplete_rollback {
@@ -3131,7 +3327,7 @@ impl CoordinatedOperation {
             if restore_failed {
                 let initial_failures = restart_failures.clone();
                 let mut restore_restart_failures = Vec::new();
-                Self::restore_and_restart_units_with_runtime(
+                Self::restore_and_restart_units_with_runtime_and_vhosts(
                     backend,
                     &lifecycle_job_id,
                     &package_id,
@@ -3144,8 +3340,12 @@ impl CoordinatedOperation {
                     incomplete_rollback,
                     true,
                     runtime_snapshot.take(),
+                    std::mem::take(&mut vhost_backups),
+                    pre_op_env.fs_root.clone(),
                 )
                 .await;
+                rollback_ran = true;
+                rollback_restart_failures = restore_restart_failures.clone();
                 restart_failures = initial_failures;
                 restart_failures.extend(restore_restart_failures);
                 restore_failed = true;
@@ -3180,7 +3380,7 @@ impl CoordinatedOperation {
                     }
                 }
                 // Rollback / restore previous candidate receipts and blueprints while quiesced so uncertified version is not retained
-                Self::restore_and_restart_units_with_runtime(
+                Self::restore_and_restart_units_with_runtime_and_vhosts(
                     backend,
                     &lifecycle_job_id,
                     &package_id,
@@ -3193,8 +3393,12 @@ impl CoordinatedOperation {
                     incomplete_rollback,
                     true,
                     runtime_snapshot.take(),
+                    std::mem::take(&mut vhost_backups),
+                    pre_op_env.fs_root.clone(),
                 )
                 .await;
+                rollback_ran = true;
+                rollback_restart_failures = restart_failures.clone();
                 if !restart_failures.is_empty() {
                     restore_failed = true;
                 }
@@ -3222,7 +3426,7 @@ impl CoordinatedOperation {
                 restore_failed = true;
                 let primary_failures = restart_failures.clone();
                 let mut restore_restart_failures = Vec::new();
-                Self::restore_and_restart_units_with_runtime(
+                Self::restore_and_restart_units_with_runtime_and_vhosts(
                     backend,
                     &lifecycle_job_id,
                     &package_id,
@@ -3235,8 +3439,12 @@ impl CoordinatedOperation {
                     incomplete_rollback,
                     true,
                     runtime_snapshot.take(),
+                    std::mem::take(&mut vhost_backups),
+                    pre_op_env.fs_root.clone(),
                 )
                 .await;
+                rollback_ran = true;
+                rollback_restart_failures = restore_restart_failures.clone();
                 restart_failures = primary_failures;
                 restart_failures.extend(restore_restart_failures);
             }
@@ -3284,7 +3492,7 @@ impl CoordinatedOperation {
             .await;
             if let Err(error) = post_commit {
                 execution = Err(error);
-                Self::restore_and_restart_units_with_runtime(
+                Self::restore_and_restart_units_with_runtime_and_vhosts(
                     backend,
                     &lifecycle_job_id,
                     &package_id,
@@ -3297,8 +3505,12 @@ impl CoordinatedOperation {
                     incomplete_rollback,
                     true,
                     runtime_snapshot.take(),
+                    std::mem::take(&mut vhost_backups),
+                    pre_op_env.fs_root.clone(),
                 )
                 .await;
+                rollback_ran = true;
+                rollback_restart_failures = restart_failures.clone();
                 if !restart_failures.is_empty() {
                     restore_failed = true;
                 }
@@ -3309,6 +3521,19 @@ impl CoordinatedOperation {
             let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
         }
         let success = execution.is_ok() && !restore_failed && !target_match_failed;
+        let prior_state_recovered = !success
+            && matches!(
+                self.request.action.as_str(),
+                "reinstall" | "update" | "install"
+            )
+            && prior_installed
+            && prep_services_verified
+            && !incomplete_rollback
+            && rollback_ran
+            && (!script_attempted || snapshot_captured)
+            && receipt_restore_error.is_none()
+            && rollback_restart_failures.is_empty()
+            && self.is_installed_on_disk_in(pre_op_env.fs_root.as_deref());
         if let Err(error) = &execution {
             tracing::error!(package = %self.request.package_id, error = %error, "Required lifecycle phase failed");
         }
@@ -3403,6 +3628,8 @@ impl CoordinatedOperation {
                     }),
                 expected_target_version: sanitized_expected.as_deref(),
                 achieved_version: sanitized_achieved.as_deref(),
+                recovery_state: prior_state_recovered
+                    .then_some(lifecycle::RECOVERY_STATE_PRIOR_VERIFIED),
                 ..Default::default()
             },
         )?;

@@ -77,6 +77,7 @@ fn snapshots_bound_and_coalesce_slow_observations_without_caching_jobs() {
             sanitized_summary: None,
             expected_target_version: None,
             achieved_version: None,
+            recovery_state: None,
         },
     );
     let changed = Instant::now();

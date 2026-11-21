@@ -433,6 +433,10 @@ pub struct PackageJobOutcomeRecord {
     pub expected_target_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub achieved_version: Option<String>,
+    /// Durable rollback/recovery confirmation for failed in-place operations
+    /// (e.g. `"prior_state_verified"`). Empty/None always fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_state: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

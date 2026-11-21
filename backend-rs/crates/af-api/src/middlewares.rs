@@ -169,6 +169,13 @@ fn matches_allowed_hosts_control_plane(raw_host: &str, clean_host: &str) -> bool
         })
 }
 
+fn outcome_allows_recovered_admission(job: &af_services::PackageJobOutcome) -> bool {
+    job.status == "failed"
+        && matches!(job.action.as_str(), "install" | "reinstall" | "update")
+        && job.recovery_state.as_deref()
+            == Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED)
+}
+
 fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
     let clean_host = strip_host_port_and_dot(raw_host);
     if local_control_plane_host(&clean_host) {
@@ -275,14 +282,23 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
             .active
             .keys()
             .any(|name| name.eq_ignore_ascii_case(app))
-            || jobs.outcomes.values().any(|job| {
-                job.package_id.eq_ignore_ascii_case(app)
-                    && (job.status == "interrupted"
-                        || (job.status != "completed"
-                            && matches!(job.action.as_str(), "install" | "reinstall" | "remove")))
-            })
         {
             return false;
+        }
+        let mut recovered_from_failure = false;
+        for job in jobs
+            .outcomes
+            .values()
+            .filter(|job| job.package_id.eq_ignore_ascii_case(app))
+        {
+            if job.status == "completed" {
+                continue;
+            }
+            if outcome_allows_recovered_admission(job) {
+                recovered_from_failure = true;
+            } else {
+                return false;
+            }
         }
         let lock_file = packages
             .iter()
@@ -305,8 +321,14 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
         } else {
             false
         };
-        active_ingress
-            || (installed && matches!(af_db::has_retained_app_ingress_config(app), Ok(false)))
+        if recovered_from_failure {
+            installed
+                && (active_ingress
+                    || matches!(af_db::has_retained_app_ingress_config(app), Ok(false)))
+        } else {
+            active_ingress
+                || (installed && matches!(af_db::has_retained_app_ingress_config(app), Ok(false)))
+        }
     };
 
     if let Some(cfg) = matched_public_cfg {
