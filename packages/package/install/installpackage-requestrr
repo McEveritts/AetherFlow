@@ -98,7 +98,8 @@ report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
 af_logged download_file "${ASSET_URL}" "${TMP_TAR}"
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
-af_logged tar -xzf "${TMP_TAR}" -C "${TMP_EXTRACT}"
+af_validate_tar_archive "${TMP_TAR}"
+af_logged tar --no-same-owner --no-same-permissions -xzf "${TMP_TAR}" -C "${TMP_EXTRACT}"
 rm -f "${TMP_TAR}"
 
 if [[ ! -f "${TMP_EXTRACT}/Requestrr.WebApi" ]]; then

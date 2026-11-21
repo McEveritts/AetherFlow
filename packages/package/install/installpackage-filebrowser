@@ -63,7 +63,8 @@ TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebrowser-XXXXXX.tar.gz")"
 af_logged download_file "$FB_URL" "$TMP_TAR"
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebrowser-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
-af_logged tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser
+af_validate_tar_archive "$TMP_TAR"
+af_logged tar --no-same-permissions --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser
 rm -f "$TMP_TAR"
 chmod 0755 "$TMP_DIR/filebrowser"
 stage_app_archive "$TMP_DIR" /usr/local/bin/filebrowser filebrowser /opt/filebrowser "$PACKAGE_NAME" "." "" "" binary

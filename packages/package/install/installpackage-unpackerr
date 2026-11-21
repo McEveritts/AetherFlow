@@ -69,7 +69,8 @@ TMP_ARCHIVE=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/unpackerr-XXXXXX")
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/unpackerr-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_ARCHIVE"' EXIT
 if af_logged download_file "$UP_TAR_URL" "$TMP_ARCHIVE"; then
-    af_logged tar --no-same-owner -xzf "$TMP_ARCHIVE" -C "$TMP_DIR" unpackerr
+    af_validate_tar_archive "$TMP_ARCHIVE"
+    af_logged tar --no-same-permissions --no-same-owner -xzf "$TMP_ARCHIVE" -C "$TMP_DIR" unpackerr
 else
     af_logged download_file "$UP_GZ_URL" "$TMP_ARCHIVE"
     gzip -dc "$TMP_ARCHIVE" > "$TMP_DIR/unpackerr"

@@ -65,7 +65,8 @@ TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/autobrr-XXXXXX.tar.gz")
 af_logged download_file "$AB_URL" "$TMP_TAR"
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/autobrr-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
-af_logged tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl
+af_validate_tar_archive "$TMP_TAR"
+af_logged tar --no-same-owner --no-same-permissions -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl
 rm -f "$TMP_TAR"
 chmod 755 "$TMP_DIR/autobrr" "$TMP_DIR/autobrrctl"
 stage_app_archive "$TMP_DIR" /usr/local/bin/autobrr autobrr /var/lib/autobrr "$PACKAGE_NAME" "." /usr/local/bin/autobrrctl "" binary

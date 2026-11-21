@@ -60,7 +60,8 @@ TMP_XZ="$(mktemp "${AF_JOB_SCRATCH_DIR}/recyclarr-XXXXXX.tar.xz")"
 af_logged download_file "$REC_URL" "$TMP_XZ"
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/recyclarr-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"; rm -f -- "$TMP_XZ"; af_cleanup_job_scratch 1 || true' EXIT
-af_logged tar -xJf "$TMP_XZ" -C "$TMP_DIR" recyclarr
+af_validate_tar_archive "$TMP_XZ"
+af_logged tar --no-same-owner --no-same-permissions -xJf "$TMP_XZ" -C "$TMP_DIR" recyclarr
 rm -f -- "$TMP_XZ"
 chmod 755 "$TMP_DIR/recyclarr"
 stage_app_archive "$TMP_DIR" /usr/local/bin/recyclarr recyclarr /var/lib/recyclarr "$PACKAGE_NAME" "." /opt/recyclarr "" binary

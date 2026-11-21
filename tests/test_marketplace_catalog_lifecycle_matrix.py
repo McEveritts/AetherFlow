@@ -3564,6 +3564,28 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
         self.assertEqual(config.parent.stat().st_mode & 0o777, 0o750)
         self.assertEqual(config.stat().st_mode & 0o777, 0o640)
 
+    def test_autobrr_checks_verified_archive_members_before_activation(self):
+        fixture = self.fixture("autobrr")
+        self.assert_success(fixture.run())
+        runtime = fixture.root / "usr/local/bin/autobrr"
+        before = runtime.read_bytes(), fixture.lock.read_bytes()
+        binary = (fixture.root / "host-command").read_bytes()
+        with tarfile.open(fixture.root / "release.tar.gz", "w:gz") as output:
+            for name in ("autobrr", "autobrrctl"):
+                member = tarfile.TarInfo(name)
+                member.mode, member.size = 0o755, len(binary)
+                output.addfile(member, io.BytesIO(binary))
+            alias = tarfile.TarInfo("autobrr-alias")
+            alias.type = tarfile.SYMTYPE
+            alias.linkname = "autobrr"
+            output.addfile(alias)
+
+        result = fixture.run("update")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disallowed non-regular tar entry: autobrr-alias", result.stderr)
+        self.assertEqual((runtime.read_bytes(), fixture.lock.read_bytes()), before)
+        self.assertTrue((fixture.root / "active-autobrr.service").exists())
+
     def test_vaultwarden_port_update_preserves_secrets_and_rejects_config_links(self):
         fixture = self.fixture("vaultwarden")
         config = fixture.file("etc/vaultwarden/vaultwarden.env", "ROCKET_PORT=8343\nADMIN_TOKEN=operator-secret\nOTHER_PORT=1234\n")
