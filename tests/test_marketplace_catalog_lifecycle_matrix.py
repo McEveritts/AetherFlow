@@ -4709,6 +4709,9 @@ if command == 'systemctl':
             # Symlinked legacy and canonical locks are rejected by both shell helpers and legacy CLI
             outside = fixture.file('srv/outside-lock', 'installed\n')
             legacy.symlink_to(outside)
+            failed_write = self.shell(fixture, 'write_lock threadfin')
+            self.assertNotEqual(failed_write.returncode, 0, failed_write.stdout + failed_write.stderr)
+            self.assertFalse((fixture.root / 'install/.threadfin.lock').exists())
             sym_update = self.run_legacy_cli(fixture, 'update', 'threadfin')
             self.assertNotEqual(sym_update.returncode, 0, sym_update.stdout + sym_update.stderr)
             sym_remove = self.shell(fixture, 'remove_lock threadfin')

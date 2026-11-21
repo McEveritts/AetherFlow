@@ -5004,8 +5004,13 @@ write_lock() {
         print_error "Refusing unsafe installation lock path: $lp"
         return 1
     fi
+    local new_lock=false
+    [[ -f "$lp" ]] || new_lock=true
     touch "$lp" || return 1
-    remove_legacy_swizzin_lock "$package_name" || return 1
+    if ! remove_legacy_swizzin_lock "$package_name"; then
+        [[ "$new_lock" != true ]] || rm -f -- "$lp"
+        return 1
+    fi
     INSTALL_COMMITTED=true
     if [[ -n "${AF_ARCHIVE_BACKUP:-}" ]]; then
         rm -f -- "$AF_ARCHIVE_BACKUP/.af-archive-pending"
@@ -5133,8 +5138,8 @@ remove_lock() {
         print_error "Refusing unsafe installation lock path: $lp"
         return 1
     fi
-    rm -f -- "$lp" || return 1
     remove_legacy_swizzin_lock "$package_name" || return 1
+    rm -f -- "$lp"
 }
 
 backup_file_once() {

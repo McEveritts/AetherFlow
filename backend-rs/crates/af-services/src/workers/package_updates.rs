@@ -1331,9 +1331,7 @@ pub(super) fn package_is_installed(pkg: &Package) -> bool {
     }
     let resolved = resolve_fs_path(&pkg.lock_file);
     let fs_root = af_models::resolve_package_fs_root(None);
-    let bound_root = fs_root
-        .as_deref()
-        .filter(|root| resolved.starts_with(root));
+    let bound_root = fs_root.as_deref().filter(|root| resolved.starts_with(root));
     af_models::inspect_receipt_file(&resolved, bound_root).unwrap_or(false)
 }
 

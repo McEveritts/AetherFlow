@@ -153,42 +153,19 @@ pub fn inspect_receipt_file(path: &Path, fs_root: Option<&Path>) -> Result<bool,
         ));
     }
 
-    if let Some(root) = fs_root {
-        if let Ok(rel) = path.strip_prefix(root) {
-            if let Some(rel_parent) = rel.parent() {
-                let mut cur = root.to_path_buf();
-                for comp in rel_parent.components() {
-                    if let Component::Normal(part) = comp {
-                        cur.push(part);
-                        if !check_ancestor_dir(&cur, path)? {
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
-        } else if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty()
-                && parent != Path::new("/")
-                && !check_ancestor_dir(parent, path)?
-            {
-                return Ok(false);
-            }
-        }
-    } else if path.starts_with("/etc/Swizzin") {
-        for ancestor in [Path::new("/etc"), Path::new("/etc/Swizzin")] {
-            if !check_ancestor_dir(ancestor, path)? {
-                return Ok(false);
-            }
-        }
-    } else if path.starts_with("/install") {
-        if !check_ancestor_dir(Path::new("/install"), path)? {
-            return Ok(false);
-        }
-    } else if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty()
-            && parent != Path::new("/")
-            && !check_ancestor_dir(parent, path)?
-        {
+    if fs_root.is_some_and(|root| !path.starts_with(root)) {
+        return Err(format!(
+            "installation lock is outside the filesystem root: {}",
+            path.display()
+        ));
+    }
+    let ancestors: Vec<_> = path
+        .ancestors()
+        .skip(1)
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .collect();
+    for ancestor in ancestors.into_iter().rev() {
+        if !check_ancestor_dir(ancestor, path)? {
             return Ok(false);
         }
     }
@@ -322,7 +299,15 @@ pub fn read_receipt_file_bounded(
         ));
     }
 
-    let file = fs::File::open(path)
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
         .map_err(|err| format!("cannot open installation lock {}: {}", path.display(), err))?;
     let fstat = file
         .metadata()

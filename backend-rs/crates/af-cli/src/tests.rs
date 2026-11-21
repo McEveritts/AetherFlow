@@ -2329,7 +2329,10 @@ fn legacy_receipt_parity_rejects_unsafe_locks_and_honors_custom_catalog_and_reta
     fs::write(root.join("custom/locks/.sonarr.receipt"), b"installed\n").unwrap();
     let custom_installed_env = execute_invocation(&custom_info, &transport);
     assert_eq!(custom_installed_env.status, "ok");
-    assert_eq!(custom_installed_env.data.as_ref().unwrap()["installed"], true);
+    assert_eq!(
+        custom_installed_env.data.as_ref().unwrap()["installed"],
+        true
+    );
 
     // 3. Unsafe lock types (symlink and directory) are rejected fail-closed
     #[cfg(unix)]

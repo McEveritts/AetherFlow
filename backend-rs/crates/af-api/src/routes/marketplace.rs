@@ -3158,9 +3158,9 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await
             }
         };
-        let fs_root_override = af_models::resolve_package_fs_root(None)
-            .map(|root| root.to_string_lossy().into_owned());
-        let fs_root_override_raw = fs_root_override.clone().unwrap_or_default();
+        let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
+        let fs_root_override =
+            Option::from(fs_root_override_raw.clone()).filter(|root| !root.trim().is_empty());
         let prior_installed = is_lock_file_present(&pkg_lock_file, fs_root_override.as_deref());
 
         // Re-check under the lifecycle mutex: a system update may have been
