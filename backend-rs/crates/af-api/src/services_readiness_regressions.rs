@@ -406,7 +406,7 @@ async fn coalesced_observations_preserve_companions_ingress_and_credential_autho
     assert_eq!(admin["Sonarr"]["external_access_enabled"], true);
     assert_eq!(admin["Sonarr"]["tls_enabled"], false);
     let before = fs::read_to_string(fixture.root.join("calls")).unwrap();
-    let member = request(router, "/api/v1/auth/services", Some(&viewer)).await;
+    let member = request(router.clone(), "/api/v1/auth/services", Some(&viewer)).await;
     assert_eq!(member.status(), StatusCode::OK);
     let member = payload(member).await;
     assert_eq!(member["Sonarr"]["status"], "unknown");
@@ -415,6 +415,12 @@ async fn coalesced_observations_preserve_companions_ingress_and_credential_autho
         fs::read_to_string(fixture.root.join("calls")).unwrap(),
         before
     );
+    for path in ["/api/v1/auth/blueprints", "/api/v1/auth/blueprints/sonarr"] {
+        let response = request(router.clone(), path, Some(&viewer)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = request(router.clone(), path, Some(&fixture.token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
 
 async fn assert_readiness_routes(

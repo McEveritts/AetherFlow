@@ -18,7 +18,14 @@ use helpers::*;
 pub fn MediaflowTab() -> impl IntoView {
     let context = app();
     let resource = use_api(Signal::derive(|| "/api/v1/auth/services".to_string()));
-    let blueprints = use_api(Signal::derive(|| "/api/v1/auth/blueprints".to_string()));
+    let blueprints = context
+        .is_admin()
+        .then(|| use_api(Signal::derive(|| "/api/v1/auth/blueprints".to_string())));
+    let refresh_blueprints = move || {
+        if let Some(blueprints) = blueprints {
+            blueprints.refresh();
+        }
+    };
     let rows = Memo::new(move |_| services(&resource.data.get()));
     let busy = RwSignal::new(false);
     let syncing = RwSignal::new(None::<String>);
@@ -74,11 +81,11 @@ pub fn MediaflowTab() -> impl IntoView {
                                 };
                                 context.toast(tt(context, message), false);
                                 resource.refresh();
-                                blueprints.refresh();
+                                refresh_blueprints();
                             } else {
                                 if data["partial_commit"].as_bool() == Some(true) {
                                     resource.refresh();
-                                    blueprints.refresh();
+                                    refresh_blueprints();
                                 }
                                 let message = data["message"]
                                     .as_str()
@@ -128,7 +135,7 @@ pub fn MediaflowTab() -> impl IntoView {
                     disabled=move || resource.loading.get()
                     on:click=move |_| {
                         resource.refresh();
-                        blueprints.refresh();
+                        refresh_blueprints();
                     }
                     aria-label=move || tt(context, "Refresh pipeline")
                 >
@@ -149,8 +156,7 @@ pub fn MediaflowTab() -> impl IntoView {
             }}
             {move || {
                 blueprints
-                    .error
-                    .get()
+                    .and_then(|blueprints| blueprints.error.get())
                     .map(|e| {
                         view! {
                             <p role="alert" class="text-rose-300">
@@ -206,8 +212,7 @@ pub fn MediaflowTab() -> impl IntoView {
                                                 let sync_id = id.clone();
                                                 let lookup_id = id.clone();
                                                 let blueprint = blueprints
-                                                    .data
-                                                    .with(|v| {
+                                                    .and_then(|blueprints| blueprints.data.with(|v| {
                                                         v["blueprints"]
                                                             .as_array()
                                                             .and_then(|all| {
@@ -219,8 +224,8 @@ pub fn MediaflowTab() -> impl IntoView {
                                                                     })
                                                             })
                                                             .cloned()
-                                                            .unwrap_or(Value::Null)
-                                                    });
+                                                    }))
+                                                    .unwrap_or(Value::Null);
                                                 let contract = super::contracts::decode::<super::contracts::MediaFlowServiceContract>(&service);
                                                 let wired = contract.wired.or(contract.auto_configured).or_else(|| blueprint["config_applied"].as_bool());
                                                 let has_key = contract.api_key.as_deref().is_some_and(|key| !key.is_empty());

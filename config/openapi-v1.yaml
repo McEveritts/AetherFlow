@@ -3090,6 +3090,7 @@ paths:
       tags:
         - Marketplace
       summary: Get blueprints
+      description: Requires a human administrator session.
       responses:
         '200':
           description: OK
@@ -3098,6 +3099,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/GenericObject'
         '401':
+          $ref: '#/components/responses/Error'
+        '403':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
@@ -3112,6 +3115,7 @@ paths:
       tags:
         - Marketplace
       summary: Get blueprints
+      description: Requires a human administrator session.
       responses:
         '200':
           description: OK
@@ -3120,6 +3124,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/GenericObject'
         '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []

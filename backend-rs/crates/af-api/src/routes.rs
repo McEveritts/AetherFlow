@@ -3507,13 +3507,23 @@ async fn dismiss_all_notifications(Extension(auth_user): Extension<AuthUser>) ->
     }
 }
 
-async fn get_blueprints() -> Json<serde_json::Value> {
+async fn get_blueprints(Extension(auth_user): Extension<AuthUser>) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     Json(serde_json::json!({
         "blueprints": af_services::get_all_blueprints()
     }))
+    .into_response()
 }
 
-async fn get_app_blueprint(Path(app_name): Path<String>) -> Response {
+async fn get_app_blueprint(
+    Extension(auth_user): Extension<AuthUser>,
+    Path(app_name): Path<String>,
+) -> Response {
+    if let Err(response) = crate::auth::require_admin(&auth_user) {
+        return *response;
+    }
     let all = af_services::get_all_blueprints();
     if let Some(bp) = all.into_iter().find(|b| b.blueprint.app_name == app_name) {
         Json(bp).into_response()
