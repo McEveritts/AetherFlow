@@ -1550,7 +1550,14 @@ fi
             archive.writestr("rclone-linux/rclone", """#!/bin/sh
 case "$1" in
     version) echo "rclone v1.75.2" ;;
-    rcd) echo "--rc-web-gui --rc-enable-metrics --rc-web-gui-no-open-browser" ;;
+    rcd)
+        if [ "${RCLONE_FIXTURE_GUI_ONLY:-0}" = 1 ]; then
+            echo "--rc-enable-metrics"
+        else
+            echo "--rc-web-gui --rc-enable-metrics --rc-web-gui-no-open-browser"
+        fi
+        ;;
+    gui) echo "--addr --api-addr --rc-enable-metrics --no-open-browser" ;;
 esac
 """)
         common = self.root / "opt/AetherFlow/packages/common.sh"
@@ -1567,6 +1574,8 @@ curl() {
         local auth
         read -r auth
         [[ -z "${EXPECTED_RCLONE_AUTH:-}" || "$auth" == "$EXPECTED_RCLONE_AUTH" ]] || return 1
+        printf 200
+    elif [[ "${RCLONE_FIXTURE_GUI_ONLY:-0}" == 1 && "$*" == *"http://127.0.0.1:${AF_APP_PORT}/"* ]]; then
         printf 200
     elif [[ "${RCLONE_READINESS_FAIL:-}" == 1 ]]; then
         printf 200
@@ -1639,6 +1648,19 @@ curl() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("space", canonical.read_text())
         self.assertFalse(legacy.exists())
+
+    def test_rclone_current_gui_enables_rc_metrics(self):
+        self.prepare_rclone_fixture()
+        result = self.run_script(
+            "rclone", AF_TARGET_VERSION="1.75.2", AF_APP_PORT="25472",
+            RCLONE_API_PORT="25473", RCLONE_FIXTURE_GUI_ONLY="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        unit = (self.root / "etc/systemd/system/rclone.service").read_text()
+        start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+        self.assertIn(" gui ", start)
+        self.assertIn(" --rc-enable-metrics ", start)
+        self.assertIn("--api-addr=127.0.0.1:25473", start)
 
     def test_rclone_failed_migration_rolls_back_legacy_units_and_keeps_global_files(self):
         distro, operator = self.prepare_rclone_fixture()

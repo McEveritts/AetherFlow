@@ -351,7 +351,9 @@ else
     RCLONE_MODE="gui"
     RCLONE_GUI_FLAGS="--config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache"
     RCLONE_GUI_HELP="$("$RCLONE_BIN" gui --help 2>&1 || true)"
-    if [[ "$RCLONE_GUI_HELP" == *--enable-metrics* ]]; then
+    if [[ "$RCLONE_GUI_HELP" == *--rc-enable-metrics* ]]; then
+        RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --rc-enable-metrics"
+    elif [[ "$RCLONE_GUI_HELP" == *--enable-metrics* ]]; then
         RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --enable-metrics"
     fi
     if [[ "$RCLONE_GUI_HELP" == *--addr* ]]; then
