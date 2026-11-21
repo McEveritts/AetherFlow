@@ -6190,7 +6190,6 @@ resolve_app_readiness_path() {
         transmission*) printf '%s\n' /transmission/rpc ;;
         filebrowser*) printf '%s\n' /health ;;
         kavita*|grafana*) printf '%s\n' /api/health ;;
-        notifiarr*) printf '%s\n' /api/version ;;
         autoscan*) printf '%s\n' / ;;
         sonarr*|radarr*|lidarr*|readarr*|prowlarr*|navidrome*|audiobookshelf*) printf '%s\n' /ping ;;
         prometheus*) printf '%s\n' /-/healthy ;;

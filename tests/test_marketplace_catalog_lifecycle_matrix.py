@@ -1,5 +1,6 @@
 """Execute catalog lifecycle entry points with synthetic releases and isolated paths."""
 import contextlib
+import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -497,6 +498,8 @@ elif command in ('curl', 'wget'):
         if 'prometheus-' in source_url: return (root / 'prometheus.tar.gz').read_bytes()
         if 'librespeed' in source_url or 'speedtest' in source_url:
             return (root / ('librespeed-src.tar.gz' if '/archive/' in source_url else 'release.tar.gz')).read_bytes()
+        if app == 'notifiarr' and source_url.endswith('.linux.gz'):
+            return (root / 'notifiarr.linux.gz').read_bytes()
         if source_url.endswith('.tar.xz'): return (root / 'release.tar.xz').read_bytes()
         if source_url.endswith('.zip'): return (root / 'release.zip').read_bytes()
         if source_url.endswith('.run'):
@@ -544,6 +547,15 @@ elif command in ('curl', 'wget'):
             pathlib.Path(target).write_text('corrupt release')
         else:
             publish(target, artifact_bytes(url), url)
+    elif app == 'notifiarr' and os.environ.get('AF_FIXTURE_NOTIFIARR_GZIP') and '/repos/Notifiarr/notifiarr/releases/' in url:
+        name = 'notifiarr.amd64.linux.gz'
+        digest = hashlib.sha256((root / 'notifiarr.linux.gz').read_bytes()).hexdigest()
+        if failure == 'corrupt-release-digest':
+            digest = '0' * 64
+        print(json.dumps({'tag_name': 'v' + version, 'assets': [{
+            'name': name, 'digest': 'sha256:' + digest,
+            'browser_download_url': 'https://github.com/Notifiarr/notifiarr/releases/download/v' + version + '/' + name,
+        }]}))
     elif any('ifconfig.me' in entry for entry in arguments): print('192.0.2.2')
     elif any('http_code' in entry for entry in arguments):
         bare_url = url.split('?', 1)[0]
@@ -561,7 +573,9 @@ elif command in ('curl', 'wget'):
 elif command == 'jq':
     incoming = sys.stdin.read()
     query = next((entry for entry in arguments if entry.startswith(('.', 'if ', '['))), '')
-    if 'token' in query: print('fixture-token')
+    if app == 'notifiarr' and os.environ.get('AF_FIXTURE_NOTIFIARR_GZIP'):
+        sys.exit(subprocess.run(['/usr/bin/jq', *arguments], input=incoming, text=True).returncode)
+    elif 'token' in query: print('fixture-token')
     elif '.layers' in query or '.manifests' in query: print('sha256:' + hashlib.sha256((root / 'release.tar.gz').read_bytes()).hexdigest())
     elif 'digest' in query: print('sha256:' + hashlib.sha256((root / 'release.tar.gz').read_bytes()).hexdigest())
     elif 'browser_download_url' in query:
@@ -2886,6 +2900,36 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
                         )
                     else:
                         self.fail(f"unexpected transmission setting {key}={value!r}")
+
+    def test_notifiarr_installs_verified_gzip_and_probes_the_local_ui(self):
+        for failure in ("", "corrupt-release-digest"):
+            with self.subTest(failure=failure):
+                fixture = self.fixture("notifiarr")
+                binary = (fixture.root / "repository/notifiarr").read_bytes()
+                (fixture.root / "notifiarr.linux.gz").write_bytes(gzip.compress(binary))
+                result = fixture.run(
+                    "install", 15454, AF_FIXTURE_VERSION="0.10.0",
+                    AF_FIXTURE_NOTIFIARR_GZIP="1", AF_FIXTURE_FAILURE=failure,
+                    AF_TEST_NO_LOCAL_SHA256="1",
+                )
+                if failure:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("SHA-256 digest mismatch", result.stderr)
+                    self.assertFalse(fixture.lock.exists())
+                    continue
+                self.assert_success(result)
+                self.assertTrue(fixture.lock.exists())
+                self.assertEqual((fixture.root / "usr/local/bin/notifiarr").read_bytes(), binary)
+                requests = [
+                    json.loads(line) for line in (fixture.root / "commands.jsonl").read_text().splitlines()
+                ]
+                download = next(call for call in requests if call[0] == "curl" and
+                                any(arg.endswith("/notifiarr.amd64.linux.gz") for arg in call))
+                self.assertIn("--proto", download)
+                self.assertIn("--proto-redir", download)
+                self.assertIn("=https", download)
+                self.assertTrue(any(call[0] == "curl" and "http://127.0.0.1:15454/" in call
+                                    for call in requests))
 
     def test_notifiarr_keeps_ui_credentials_and_integration_keys(self):
         fixture = self.fixture("notifiarr")

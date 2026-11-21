@@ -63,7 +63,7 @@ ADMIN_PASS="${MASTER_PASS}"
 
 report_progress 20 "Installing dependencies..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 python3-tomlkit curl wget jq tar ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 python3-tomlkit curl wget jq gzip tar ca-certificates
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -73,9 +73,22 @@ mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
 
 ARCH="$(dpkg --print-architecture)"
 case "${ARCH}" in
-    amd64) N_ARCH="x86_64" ;;
-    arm64) N_ARCH="arm64" ;;
-    armhf) N_ARCH="armhf" ;;
+    amd64)
+        N_GZ_ARCH="amd64"
+        N_TAR_ARCH="x86_64"
+        ;;
+    arm64)
+        N_GZ_ARCH="arm64"
+        N_TAR_ARCH="arm64"
+        ;;
+    armhf)
+        N_GZ_ARCH="arm"
+        N_TAR_ARCH="armhf"
+        ;;
+    i386)
+        N_GZ_ARCH="386"
+        N_TAR_ARCH="386"
+        ;;
     *)
         log_error "Unsupported architecture for Notifiarr: ${ARCH}"
         exit 1
@@ -92,35 +105,75 @@ fi
 LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then
     if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
-        LATEST_TAG="${AF_TARGET_VERSION:-v0.7.3}"
+        LATEST_TAG="${AF_TARGET_VERSION:-v0.10.0}"
     else
         print_error "Failed to discover latest GitHub release for Notifiarr/notifiarr"
         exit 1
     fi
 fi
 
-ASSET_URL="$(echo "${RELEASE_JSON}" | jq -r --arg arch "linux.${N_ARCH}.tar.gz" '.assets[]? | select(.name | contains("linux") and endswith($arch)) | .browser_download_url' | head -n1 || true)"
+ASSET_URL="$(printf '%s\n' "$RELEASE_JSON" | jq -r \
+    --arg binary "notifiarr.${N_GZ_ARCH}.linux.gz" \
+    --arg legacy "linux.${N_TAR_ARCH}.tar.gz" \
+    '[
+        (.assets[]? | select(.name == $binary) | .browser_download_url),
+        (.assets[]? | select(.name | endswith($legacy)) | .browser_download_url)
+    ][0] // empty' || true)"
 if [[ -z "${ASSET_URL}" ]]; then
-    ASSET_URL="https://github.com/Notifiarr/notifiarr/releases/download/${LATEST_TAG}/notifiarr.linux.${N_ARCH}.tar.gz"
+    if [[ -z "${RELEASE_JSON}" && "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        ASSET_URL="https://github.com/Notifiarr/notifiarr/releases/download/${LATEST_TAG}/notifiarr.${N_GZ_ARCH}.linux.gz"
+    else
+        print_error "No supported Linux release asset for ${ARCH} found in Notifiarr ${LATEST_TAG}"
+        exit 1
+    fi
 fi
+if [[ "${ASSET_URL}" != https://* ]]; then
+    print_error "Refusing non-HTTPS Notifiarr release asset URL: ${ASSET_URL}"
+    exit 1
+fi
+ASSET_PATH="${ASSET_URL%%\?*}"
+case "${ASSET_PATH}" in
+    *.tar.gz)
+        ASSET_FORMAT="tar.gz"
+        TMP_SUFFIX=".tar.gz"
+        ;;
+    *.gz)
+        ASSET_FORMAT="gz"
+        TMP_SUFFIX=".gz"
+        ;;
+    *)
+        print_error "Unsupported Notifiarr release asset format: ${ASSET_URL}"
+        exit 1
+        ;;
+esac
 
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
-TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/notifiarr-XXXXXX.tar.gz")"
+TMP_ARCHIVE="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/notifiarr-XXXXXX${TMP_SUFFIX}")"
+trap 'rm -f -- "${TMP_ARCHIVE:-}"; [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "${TMP_DIR}"' EXIT
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/notifiarr-extract-XXXXXX")"
-af_logged download_file "${ASSET_URL}" "${TMP_TAR}"
+af_logged download_file "${ASSET_URL}" "${TMP_ARCHIVE}"
 
-af_logged tar -xzf "${TMP_TAR}" -C "${TMP_DIR}"
-EXTRACTED_BIN="$(find "${TMP_DIR}" -type f -name "notifiarr" -print -quit)"
-if [[ -n "${EXTRACTED_BIN}" && -f "${EXTRACTED_BIN}" ]]; then
+if [[ "${ASSET_FORMAT}" == "tar.gz" ]]; then
+    af_logged tar --no-same-owner -xzf "${TMP_ARCHIVE}" -C "${TMP_DIR}"
+    EXTRACTED_BIN="$(find "${TMP_DIR}" -type f -name "notifiarr" -print -quit)"
+else
+    if ! gzip -dc "${TMP_ARCHIVE}" > "${TMP_DIR}/notifiarr"; then
+        log_error "Failed to decompress notifiarr gzip binary"
+        exit 1
+    fi
+    EXTRACTED_BIN="${TMP_DIR}/notifiarr"
+fi
+rm -f -- "${TMP_ARCHIVE}"
+TMP_ARCHIVE=""
+if [[ -n "${EXTRACTED_BIN}" && -f "${EXTRACTED_BIN}" && ! -L "${EXTRACTED_BIN}" && -s "${EXTRACTED_BIN}" ]]; then
     chmod 755 "${EXTRACTED_BIN}"
     stage_app_archive "$TMP_DIR" "$BIN_PATH" "${EXTRACTED_BIN#"$TMP_DIR"/}" "$CONFIG_DIR" "$PACKAGE_NAME" "." "$DATA_DIR" "" binary
+    TMP_DIR=""
 else
     log_error "Failed to extract notifiarr binary"
-    rm -rf "${TMP_TAR}" "${TMP_DIR}"
     exit 1
 fi
-rm -rf "${TMP_TAR}" "${TMP_DIR}"
 
 queue_app_version "${CONFIG_DIR}/.af-version" "${LATEST_TAG#v}"
 
@@ -184,7 +237,8 @@ chmod 0644 "${SERVICE_FILE}"
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now notifiarr.service
 af_logged systemctl restart notifiarr.service
-finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/version"
+# The Web UI is reachable before the external API key is configured.
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
