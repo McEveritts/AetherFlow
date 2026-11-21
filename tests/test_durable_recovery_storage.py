@@ -250,17 +250,19 @@ systemctl() {{
         self.assertEqual(list((self.root / "tmp").glob("af-state-*")), [])
 
         # 2. Clean rollback restores live file and cleans up AF_STATE_BACKUP.
-        rb_res = self._run_shell(
-            common_stub
-            + f'begin_state_transaction demoapp.service 0 / "{app_dir}"\n'
-            + f'printf "v2-corrupted" > "{sentinel}"\n'
-            + 'exit 42\n',
-            helpers=helpers,
-        )
-        self.assertEqual(rb_res.returncode, 42, rb_res.stderr)
-        self.assertEqual(sentinel.read_text(), "v1-original")
-        self.assertEqual(list(recovery_root.glob("af-state-*")), [])
-        self.assertEqual(list((self.root / "tmp").glob("af-state-*")), [])
+        for units in ("demoapp.service", "", "  "):
+            with self.subTest(units=units):
+                rb_res = self._run_shell(
+                    common_stub
+                    + f'begin_state_transaction "{units}" 0 / "{app_dir}"\n'
+                    + f'printf "v2-corrupted" > "{sentinel}"\n'
+                    + 'exit 42\n',
+                    helpers=helpers,
+                )
+                self.assertEqual(rb_res.returncode, 42, rb_res.stderr)
+                self.assertEqual(sentinel.read_text(), "v1-original")
+                self.assertEqual(list(recovery_root.glob("af-state-*")), [])
+                self.assertEqual(list((self.root / "tmp").glob("af-state-*")), [])
 
         # 3. Incomplete rollback (quiesce fails) preserves backup under persistent recovery root (0700).
         inc_res = self._run_shell(

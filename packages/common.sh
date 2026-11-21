@@ -1688,8 +1688,12 @@ restore_state_snapshot() {
 begin_state_transaction() {
     local unit="$1" port="$2" readiness_path="$3" entry
     shift 3
+    declare -ag AF_STATE_UNITS=()
     read -r -a AF_STATE_UNITS <<< "$unit"
-    AF_STATE_UNIT="${AF_STATE_UNITS[-1]}"
+    AF_STATE_UNIT=""
+    if (( ${#AF_STATE_UNITS[@]} > 0 )); then
+        AF_STATE_UNIT="${AF_STATE_UNITS[-1]}"
+    fi
     AF_STATE_PREVIOUS_UNITS=()
     AF_STATE_PORT="$port"
     AF_STATE_READINESS_PATH="$readiness_path"
@@ -1731,22 +1735,23 @@ begin_state_transaction() {
     for (( idx=${#AF_STATE_UNITS[@]} - 1; idx>=0; idx-- )); do
         stop_units+=("${AF_STATE_UNITS[$idx]}")
     done
-    stop_systemd_unit "${stop_units[@]}" || return 1
+    if (( ${#stop_units[@]} > 0 )); then
+        stop_systemd_unit "${stop_units[@]}" || return 1
+    fi
     snapshot_state_dirs "$AF_STATE_BACKUP" "$@" "$(lock_path "$PACKAGE_NAME")" || return 1
     AF_STATE_SNAPSHOT_READY=true
 }
 
 cleanup_state_transaction() {
-    local status="$1" restore_failed=false unit
+    local status="$1" restore_failed=false unit idx
+    local -a state_units=("${AF_STATE_UNITS[@]}") stop_units=()
     trap - EXIT INT TERM
     set +e
     if [[ "${INSTALL_COMMITTED:-false}" != true ]]; then
         [[ "$status" -ne 0 ]] || status=1
-        if [[ "$AF_STATE_SNAPSHOT_READY" == true ]]; then
-            local -a stop_units=()
-            local idx
-            for (( idx=${#AF_STATE_UNITS[@]} - 1; idx>=0; idx-- )); do
-                stop_units+=("${AF_STATE_UNITS[$idx]}")
+        if [[ "${AF_STATE_SNAPSHOT_READY:-false}" == true ]]; then
+            for (( idx=${#state_units[@]} - 1; idx>=0; idx-- )); do
+                stop_units+=("${state_units[$idx]}")
             done
             if ! quiesce_services_for_rollback "${stop_units[@]}"; then
                 restore_failed=true
@@ -1762,14 +1767,18 @@ cleanup_state_transaction() {
             fi
             af_logged systemctl daemon-reload || restore_failed=true
         fi
-        if [[ "$restore_failed" == false && "$AF_STATE_WAS_ACTIVE" == true && ( "$AF_STATE_SNAPSHOT_READY" != true || "${AF_STATE_RESTART_ON_ROLLBACK:-false}" == true ) ]]; then
+        if [[ "$restore_failed" == false && "${AF_STATE_WAS_ACTIVE:-false}" == true && ( "${AF_STATE_SNAPSHOT_READY:-false}" != true || "${AF_STATE_RESTART_ON_ROLLBACK:-false}" == true ) ]]; then
             for unit in "${AF_STATE_PREVIOUS_UNITS[@]}"; do
                 af_logged systemctl start "$unit" || restore_failed=true
             done
         fi
     fi
-    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$AF_STATE_SNAPSHOT_READY" == true && "$restore_failed" == false && "${AF_STATE_RESTART_ON_ROLLBACK:-false}" != true ]]; then
-        log_warn "Previous state restored; ${AF_STATE_UNITS[*]} left stopped after the failed package update"
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "${AF_STATE_SNAPSHOT_READY:-false}" == true && "$restore_failed" == false && "${AF_STATE_RESTART_ON_ROLLBACK:-false}" != true ]]; then
+        if (( ${#state_units[@]} > 0 )); then
+            log_warn "Previous state restored; ${state_units[*]} left stopped after the failed package update"
+        else
+            log_warn "Previous state restored after the failed package update"
+        fi
     fi
     if [[ "$restore_failed" == true ]]; then
         status=1
