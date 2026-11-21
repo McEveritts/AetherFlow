@@ -372,6 +372,87 @@ pub fn package_resources(package: &str, units: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
+pub fn is_timer_unit(unit: &str) -> bool {
+    unit.trim().to_ascii_lowercase().ends_with(".timer")
+}
+
+pub fn is_socket_unit(unit: &str) -> bool {
+    unit.trim().to_ascii_lowercase().ends_with(".socket")
+}
+
+pub fn is_activation_unit(unit: &str) -> bool {
+    is_timer_unit(unit) || is_socket_unit(unit)
+}
+
+/// Companion units added in newer AetherFlow releases that may legitimately be
+/// `LoadState=not-found` on pre-socket LibreSpeed or pre-companion noVNC hosts.
+pub fn is_legacy_optional_companion_unit(unit: &str) -> bool {
+    let lower = unit.trim().to_ascii_lowercase();
+    lower == "librespeed.socket" || lower.trim_end_matches(".service") == "novnc-session"
+}
+
+/// Shared stop / quiesce priority tier (lower values stop FIRST).
+///
+/// 0: socket and timer activation units (`*.socket`, `*.timer`) stop before app
+///    workers so incoming requests or timer ticks cannot reactivate a partially
+///    replaced or removed service.
+/// 1: frontend proxies that require companion services (`novnc`).
+/// 2: standard application daemons and intermediate session units (`novnc-session`).
+/// 3: underlying display/backend servers (`novnc-xvnc`).
+pub fn unit_stop_order_key(unit: &str) -> u8 {
+    let lower = unit.trim().to_ascii_lowercase();
+    if lower.ends_with(".timer") || lower.ends_with(".socket") {
+        0
+    } else {
+        match lower.trim_end_matches(".service") {
+            "novnc" => 1,
+            "novnc-session" => 2,
+            "novnc-xvnc" => 3,
+            _ => 2,
+        }
+    }
+}
+
+/// Shared start / restore / restart priority tier (lower values start FIRST).
+///
+/// 0: socket units (`*.socket`) and base display servers (`novnc-xvnc`) start
+///    before workers that depend on them (`Requires=` / `BindsTo=`).
+/// 1: intermediate companion units (`novnc-session`).
+/// 2: standard application daemons and frontend proxies (`librespeed`, `novnc`).
+/// 3: scheduled timer units (`*.timer`) start after daemons are running.
+pub fn unit_start_order_key(unit: &str) -> u8 {
+    let lower = unit.trim().to_ascii_lowercase();
+    if lower.ends_with(".socket") {
+        0
+    } else if lower.ends_with(".timer") {
+        3
+    } else {
+        match lower.trim_end_matches(".service") {
+            "novnc-xvnc" => 0,
+            "novnc-session" => 1,
+            "novnc" => 2,
+            _ => 2,
+        }
+    }
+}
+
+pub fn sort_units_for_stop(units: &mut [String]) {
+    units.sort_by_key(|unit| unit_stop_order_key(unit));
+}
+
+pub fn sort_units_for_start(units: &mut [String]) {
+    units.sort_by_key(|unit| unit_start_order_key(unit));
+}
+
+/// Orders a stop-ordered unit list for restoration/startup: reverses generic
+/// ordering first, then applies dependency-aware start tiers so sockets and
+/// base servers start before workers while timers start last.
+pub fn ordered_units_for_start(stopped_order: &[String]) -> Vec<String> {
+    let mut ordered: Vec<String> = stopped_order.iter().rev().cloned().collect();
+    sort_units_for_start(&mut ordered);
+    ordered
+}
+
 pub fn check_package_reservation(
     conn: &Connection,
     package: &str,
@@ -3868,5 +3949,92 @@ mod tests {
 
         drop(conn);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_service_activation_and_companion_ordering_rules() {
+        assert!(is_socket_unit("librespeed.socket"));
+        assert!(is_activation_unit("librespeed.socket"));
+        assert!(is_timer_unit("recyclarr.timer"));
+        assert!(is_activation_unit("recyclarr.timer"));
+        assert!(!is_activation_unit("librespeed.service"));
+
+        assert!(is_legacy_optional_companion_unit("librespeed.socket"));
+        assert!(is_legacy_optional_companion_unit("LIBRESPEED.SOCKET"));
+        assert!(is_legacy_optional_companion_unit("novnc-session"));
+        assert!(is_legacy_optional_companion_unit("novnc-session.service"));
+        assert!(!is_legacy_optional_companion_unit("librespeed.service"));
+        assert!(!is_legacy_optional_companion_unit("novnc-xvnc.service"));
+
+        let mut librespeed = vec![
+            "librespeed.service".to_string(),
+            "librespeed.socket".to_string(),
+        ];
+        sort_units_for_stop(&mut librespeed);
+        assert_eq!(librespeed, vec!["librespeed.socket", "librespeed.service"]);
+        assert_eq!(
+            ordered_units_for_start(&librespeed),
+            vec!["librespeed.socket", "librespeed.service"]
+        );
+
+        let mut novnc = vec![
+            "novnc-xvnc.service".to_string(),
+            "novnc-session.service".to_string(),
+            "novnc.service".to_string(),
+        ];
+        sort_units_for_stop(&mut novnc);
+        assert_eq!(
+            novnc,
+            vec![
+                "novnc.service",
+                "novnc-session.service",
+                "novnc-xvnc.service"
+            ]
+        );
+        assert_eq!(
+            ordered_units_for_start(&novnc),
+            vec![
+                "novnc-xvnc.service",
+                "novnc-session.service",
+                "novnc.service"
+            ]
+        );
+
+        let mut mixed = vec![
+            "app.service".to_string(),
+            "app.timer".to_string(),
+            "app.socket".to_string(),
+        ];
+        sort_units_for_stop(&mut mixed);
+        assert_eq!(mixed[2], "app.service");
+        assert!(is_activation_unit(&mixed[0]) && is_activation_unit(&mixed[1]));
+        assert_eq!(
+            ordered_units_for_start(&mixed),
+            vec!["app.socket", "app.service", "app.timer"]
+        );
+
+        let generic_stopped = vec!["web.service".to_string(), "db.service".to_string()];
+        assert_eq!(
+            ordered_units_for_start(&generic_stopped),
+            vec!["db.service", "web.service"]
+        );
+
+        let ls_res = package_resources(
+            "librespeed",
+            &["librespeed.service".into(), "librespeed.socket".into()],
+        );
+        assert!(ls_res.contains("librespeed"));
+        assert!(ls_res.contains("librespeed.socket"));
+        let novnc_res = package_resources(
+            "novnc",
+            &[
+                "novnc.service".into(),
+                "novnc-xvnc.service".into(),
+                "novnc-session.service".into(),
+            ],
+        );
+        assert!(novnc_res.contains("novnc"));
+        assert!(novnc_res.contains("novnc-xvnc"));
+        assert!(novnc_res.contains("novnc-session"));
     }
 }

@@ -19,10 +19,11 @@ fn canonical_app(app: &str) -> String {
             "paperless-ngx".into()
         }
         "dispatcharr-celery" | "dispatcharr-celerybeat" => "dispatcharr".into(),
-        "novnc-xvnc" => "novnc".into(),
+        "novnc-xvnc" | "novnc-session" => "novnc".into(),
         "xrdp-sesman" => "xrdp".into(),
         "node_exporter" => "prometheus".into(),
         "rclone-vfs" => "rclone".into(),
+        "librespeed.socket" => "librespeed".into(),
         "scrutiny-collector" | "scrutiny-collector.timer" => "scrutiny".into(),
         "recyclarr.timer" => "recyclarr".into(),
         name => name.into(),

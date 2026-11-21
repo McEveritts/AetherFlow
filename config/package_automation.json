@@ -1092,7 +1092,8 @@
       "/opt/librespeed"
     ],
     "sandbox_service_units": [
-      "librespeed.service"
+      "librespeed.service",
+      "librespeed.socket"
     ]
   },
   "thelounge": {
@@ -1375,7 +1376,8 @@
     ],
     "sandbox_service_units": [
       "novnc.service",
-      "novnc-xvnc.service"
+      "novnc-xvnc.service",
+      "novnc-session.service"
     ]
   },
   "pyload": {

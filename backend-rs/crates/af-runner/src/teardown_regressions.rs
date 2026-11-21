@@ -436,3 +436,76 @@ async fn teardown_ignore_errors_cannot_bypass_a_required_stop() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
+    let fixture = TeardownFixture::new("");
+    let systemd_dir = fixture.root.join("etc/systemd/system");
+    fs::create_dir_all(&systemd_dir).unwrap();
+    for unit in ["novnc.service", "novnc-session.service", "novnc-xvnc.service"] {
+        fs::write(systemd_dir.join(unit), "[Unit]\nDescription=fixture\n").unwrap();
+    }
+    fs::write(fixture.root.join("install/.novnc.lock"), "installed").unwrap();
+
+    let executor = DeclarativePackageExecutor::with_runner(
+        PackageExecutionEnv::isolated(&fixture.root),
+        fixture.runner.clone(),
+    );
+    executor
+        .execute_recipe(
+            &get_declarative_recipe("novnc").unwrap(),
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    let stops: Vec<String> = fixture
+        .runner
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(prog, args)| prog == "systemctl" && args.first().map(String::as_str) == Some("stop"))
+        .filter_map(|(_, args)| args.last().cloned())
+        .collect();
+    assert!(stops.len() >= 3, "expected pre-teardown stops: {stops:?}");
+    assert_eq!(
+        &stops[..3],
+        &[
+            "novnc.service".to_string(),
+            "novnc-session.service".to_string(),
+            "novnc-xvnc.service".to_string(),
+        ]
+    );
+
+    // Also verify a recipe with a .socket stops the socket before its worker service
+    let fixture2 = TeardownFixture::new("");
+    let mut recipe = get_declarative_recipe("syncthing").unwrap();
+    recipe.remove_steps.push(DeclarativeStep::PurgeSystemdUnit {
+        unit_name: "syncthing.socket".to_string(),
+        progress_pct: 25,
+        description: "fixture socket".to_string(),
+    });
+    let executor2 = DeclarativePackageExecutor::with_runner(
+        PackageExecutionEnv::isolated(&fixture2.root),
+        fixture2.runner.clone(),
+    );
+    executor2
+        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    let stops2: Vec<String> = fixture2
+        .runner
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(prog, args)| prog == "systemctl" && args.first().map(String::as_str) == Some("stop"))
+        .filter_map(|(_, args)| args.last().cloned())
+        .collect();
+    assert!(stops2.len() >= 2, "expected socket-first pre-teardown stops: {stops2:?}");
+    assert_eq!(stops2[0], "syncthing.socket");
+    assert_eq!(stops2[1], "syncthing.service");
+}

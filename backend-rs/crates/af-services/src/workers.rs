@@ -336,8 +336,9 @@ fn resolve_installed_path(path: &Path) -> PathBuf {
 
 /// Collects the list of critical systemd units (`apache2`, `aetherflow-runner`) and
 /// any installed systemd packages whose lockfile exists in `/install/`.
-fn is_component_policy_monitored(policy: &crate::ServiceComponentPolicy) -> bool {
-    matches!(policy.role, "required" | "timer") || (policy.role == "optional" && policy.configured)
+pub(crate) fn is_component_policy_monitored(policy: &crate::ServiceComponentPolicy) -> bool {
+    matches!(policy.role, "required" | "timer" | "socket")
+        || (policy.role == "optional" && policy.configured)
 }
 
 struct HealPollInventory {

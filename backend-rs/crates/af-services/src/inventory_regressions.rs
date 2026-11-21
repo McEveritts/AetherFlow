@@ -427,3 +427,348 @@ fn unobserved_service_version_remains_unknown_until_measured() {
     assert_eq!(services["fixture"].installed_version, "2.4.1");
     assert_eq!(services["fixture"].latest_version, "2.4.2");
 }
+
+#[test]
+fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
+    let name = "inventory_regressions::librespeed_and_novnc_catalog_resolution_and_component_policies";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    env::set_var(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        repo_root.join("config/packages.json"),
+    );
+    env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        repo_root.join("config/package_automation.json"),
+    );
+
+    assert_eq!(
+        resolve_service_units("librespeed"),
+        vec!["librespeed".to_string(), "librespeed.socket".to_string()]
+    );
+    assert_eq!(resolve_canonical_service_id("librespeed.socket"), "librespeed");
+    assert_eq!(
+        resolve_owning_package_id("librespeed.socket").as_deref(),
+        Some("librespeed")
+    );
+    assert_eq!(
+        authorize_service_control_target("librespeed", "librespeed.socket", "systemd-unit")
+            .unwrap(),
+        "librespeed.socket"
+    );
+
+    assert_eq!(
+        resolve_service_units("novnc"),
+        vec![
+            "novnc".to_string(),
+            "novnc-xvnc".to_string(),
+            "novnc-session".to_string()
+        ]
+    );
+    assert_eq!(resolve_canonical_service_id("novnc-session"), "novnc");
+    assert_eq!(
+        resolve_canonical_service_id("novnc-session.service"),
+        "novnc"
+    );
+    assert_eq!(
+        resolve_owning_package_id("novnc-session.service").as_deref(),
+        Some("novnc")
+    );
+    assert_eq!(
+        authorize_service_control_target("novnc", "novnc-session", "systemd-unit").unwrap(),
+        "novnc-session"
+    );
+
+    assert_eq!(
+        resolve_controllable_service_units("librespeed", "stop"),
+        vec!["librespeed.socket".to_string(), "librespeed".to_string()]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("librespeed", "start"),
+        vec!["librespeed.socket".to_string(), "librespeed".to_string()]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("novnc", "stop"),
+        vec![
+            "novnc".to_string(),
+            "novnc-session".to_string(),
+            "novnc-xvnc".to_string()
+        ]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("novnc", "restart"),
+        vec![
+            "novnc-xvnc".to_string(),
+            "novnc-session".to_string(),
+            "novnc".to_string()
+        ]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("recyclarr", "stop"),
+        vec!["recyclarr.timer".to_string(), "recyclarr".to_string()]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("recyclarr", "start"),
+        vec!["recyclarr.timer".to_string()]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("scrutiny", "stop"),
+        vec!["scrutiny-collector.timer".to_string(), "scrutiny".to_string()]
+    );
+    assert_eq!(
+        resolve_controllable_service_units("scrutiny", "start"),
+        vec!["scrutiny".to_string(), "scrutiny-collector.timer".to_string()]
+    );
+
+    let ls_policies = policies_for_units(resolve_service_units("librespeed"), false);
+    let socket_policy = ls_policies
+        .iter()
+        .find(|policy| policy.unit == "librespeed.socket")
+        .expect("librespeed.socket policy");
+    assert_eq!(socket_policy.role, "socket");
+    assert!(socket_policy.configured);
+    assert!(crate::workers::is_component_policy_monitored(socket_policy));
+    drop(fixture);
+}
+
+#[test]
+fn librespeed_and_novnc_status_handles_modern_legacy_not_found_and_unknown() {
+    let name =
+        "inventory_regressions::librespeed_and_novnc_status_handles_modern_legacy_not_found_and_unknown";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.write_packages(&[
+        Fixture::package("librespeed", "systemd", "librespeed"),
+        Fixture::package("novnc", "systemd", "novnc"),
+    ]);
+    fs::write(
+        &fixture.automation,
+        serde_json::json!({
+            "librespeed": {"sandbox_service_units": ["librespeed.service", "librespeed.socket"]},
+            "novnc": {"sandbox_service_units": ["novnc.service", "novnc-xvnc.service", "novnc-session.service"]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fixture.install("librespeed");
+    fixture.install("novnc");
+
+    // 1. Modern active installs
+    fixture.command(
+        "systemctl",
+        "case \"$2\" in \
+          librespeed.socket) printf 'LoadState=loaded\\nActiveState=active\\nSubState=listening\\nActiveEnterTimestamp=n/a\\n';; \
+          *) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nActiveEnterTimestamp=n/a\\n';; \
+        esac\n",
+    );
+    clear_service_status_cache();
+    let (ls_status, _, _, ls_components) = get_service_info_detailed("librespeed");
+    assert_eq!(ls_status, "running");
+    assert!(ls_components
+        .iter()
+        .any(|c| c.unit == "librespeed.socket" && c.role == "socket" && c.status == "running" && c.configured));
+    let (novnc_status, _, _, novnc_components) = get_service_info_detailed("novnc");
+    assert_eq!(novnc_status, "running");
+    assert!(novnc_components
+        .iter()
+        .any(|c| c.unit == "novnc-session" && c.status == "running" && c.configured));
+
+    // 2. Modern installs with loaded-but-stopped/failed companions degrade
+    fixture.command(
+        "systemctl",
+        "case \"$2\" in \
+          librespeed.socket) printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nActiveEnterTimestamp=n/a\\n';; \
+          novnc-session) printf 'LoadState=loaded\\nActiveState=failed\\nSubState=failed\\nActiveEnterTimestamp=n/a\\n';; \
+          *) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nActiveEnterTimestamp=n/a\\n';; \
+        esac\n",
+    );
+    clear_service_status_cache();
+    let (ls_status, _, _, ls_components) = get_service_info_detailed("librespeed");
+    assert_eq!(ls_status, "degraded");
+    assert!(ls_components
+        .iter()
+        .any(|c| c.unit == "librespeed.socket" && c.status == "stopped" && c.configured));
+    let (novnc_status, _, _, novnc_components) = get_service_info_detailed("novnc");
+    assert_eq!(novnc_status, "degraded");
+    assert!(novnc_components
+        .iter()
+        .any(|c| c.unit == "novnc-session" && c.status == "failed" && c.configured));
+
+    // 3. Legacy pre-socket LibreSpeed and pre-companion noVNC (confirmed LoadState=not-found)
+    fixture.command(
+        "systemctl",
+        "case \"$2\" in \
+          librespeed.socket|novnc-session) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\nActiveEnterTimestamp=n/a\\n';; \
+          *) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nActiveEnterTimestamp=n/a\\n';; \
+        esac\n",
+    );
+    clear_service_status_cache();
+    let (ls_status, _, _, ls_components) = get_service_info_detailed("librespeed");
+    assert_eq!(ls_status, "running");
+    assert!(ls_components
+        .iter()
+        .any(|c| c.unit == "librespeed.socket" && c.status == "not-found" && !c.configured));
+    let (novnc_status, _, _, novnc_components) = get_service_info_detailed("novnc");
+    assert_eq!(novnc_status, "running");
+    assert!(novnc_components
+        .iter()
+        .any(|c| c.unit == "novnc-session" && c.status == "not-found" && !c.configured));
+
+    // 4. Unknown / LoadState=error / systemctl failure fails closed to unknown
+    fixture.command(
+        "systemctl",
+        "case \"$2\" in \
+          librespeed.socket) printf 'LoadState=error\\nActiveState=inactive\\nSubState=dead\\n';; \
+          novnc-session) exit 1;; \
+          *) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nActiveEnterTimestamp=n/a\\n';; \
+        esac\n",
+    );
+    clear_service_status_cache();
+    assert_eq!(get_service_info_detailed("librespeed").0, "unknown");
+    assert_eq!(get_service_info_detailed("novnc").0, "unknown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fails_closed_on_unknown() {
+    let name = "inventory_regressions::librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fails_closed_on_unknown";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    std::env::set_var("AETHERFLOW_RUNNER_SOCK", fixture.root.join("absent.sock"));
+    fixture.write_packages(&[
+        Fixture::package("librespeed", "systemd", "librespeed"),
+        Fixture::package("novnc", "systemd", "novnc"),
+    ]);
+    fs::write(
+        &fixture.automation,
+        serde_json::json!({
+            "librespeed": {"sandbox_service_units": ["librespeed.service", "librespeed.socket"]},
+            "novnc": {"sandbox_service_units": ["novnc.service", "novnc-xvnc.service", "novnc-session.service"]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fixture.install("librespeed");
+    fixture.install("novnc");
+    fixture.command("sudo", "exit 1\n");
+
+    // 1. Modern LibreSpeed & noVNC control ordering
+    fixture.command(
+        "systemctl",
+        "if [ \"$1\" != \"show\" ]; then printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"; fi\nexit 0\n",
+    );
+    for (svc, action, expected) in [
+        (
+            "librespeed",
+            "stop",
+            vec!["stop -- librespeed.socket", "stop -- librespeed"],
+        ),
+        (
+            "librespeed",
+            "start",
+            vec!["start -- librespeed.socket", "start -- librespeed"],
+        ),
+        (
+            "novnc",
+            "stop",
+            vec!["stop -- novnc", "stop -- novnc-session", "stop -- novnc-xvnc"],
+        ),
+        (
+            "novnc",
+            "restart",
+            vec![
+                "restart -- novnc-xvnc",
+                "restart -- novnc-session",
+                "restart -- novnc",
+            ],
+        ),
+    ] {
+        let _ = fs::remove_file(&fixture.calls);
+        super::control_service_with_budget(svc, action, "systemd", Duration::from_secs(5))
+            .await
+            .unwrap();
+        let actual: Vec<String> = fs::read_to_string(&fixture.calls)
+            .unwrap()
+            .lines()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(actual, expected, "{svc} {action}");
+    }
+
+    // 2. Legacy pre-socket LibreSpeed & pre-companion noVNC: confirmed not-found companion is skipped
+    fixture.command(
+        "systemctl",
+        "if [ \"$1\" = \"show\" ]; then \
+           case \"$2\" in \
+             librespeed.socket|novnc-session) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n'; exit 0;; \
+             *) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; exit 0;; \
+           esac; \
+         fi\n\
+         printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\n\
+         case \"$3\" in \
+           librespeed.socket|novnc-session) printf 'Unit %s could not be found.\\n' \"$3\" >&2; exit 5;; \
+           *) exit 0;; \
+         esac\n",
+    );
+    let _ = fs::remove_file(&fixture.calls);
+    super::control_service_with_budget("librespeed", "stop", "systemd", Duration::from_secs(5))
+        .await
+        .unwrap();
+    let ls_calls = fs::read_to_string(&fixture.calls).unwrap();
+    assert!(ls_calls.contains("stop -- librespeed.socket"));
+    assert!(ls_calls.contains("stop -- librespeed"));
+
+    let _ = fs::remove_file(&fixture.calls);
+    super::control_service_with_budget("novnc", "restart", "systemd", Duration::from_secs(5))
+        .await
+        .unwrap();
+    let novnc_calls: Vec<String> = fs::read_to_string(&fixture.calls)
+        .unwrap()
+        .lines()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        novnc_calls,
+        vec![
+            "restart -- novnc-xvnc",
+            "restart -- novnc-session",
+            "restart -- novnc"
+        ]
+    );
+
+    // Explicit direct systemd-unit target must fail closed even when not-found
+    assert!(
+        super::control_service_with_budget(
+            "librespeed.socket",
+            "stop",
+            "systemd-unit",
+            Duration::from_secs(5),
+        )
+        .await
+        .is_err()
+    );
+
+    // 3. Unknown show state fails closed even if control returned exit 5
+    fixture.command(
+        "systemctl",
+        "if [ \"$1\" = \"show\" ]; then printf 'LoadState=error\\nActiveState=inactive\\nSubState=dead\\n'; exit 0; fi\n\
+         case \"$3\" in \
+           librespeed.socket) printf 'Unit librespeed.socket could not be found.\\n' >&2; exit 5;; \
+           *) exit 0;; \
+         esac\n",
+    );
+    assert!(
+        super::control_service_with_budget("librespeed", "stop", "systemd", Duration::from_secs(5))
+            .await
+            .is_err()
+    );
+}

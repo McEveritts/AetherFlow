@@ -2684,7 +2684,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             }
             units.sort_by_key(|unit| {
                 (
-                    !unit.ends_with(".timer") && !unit.ends_with(".socket"),
+                    af_release::lifecycle::unit_stop_order_key(unit),
                     unit.clone(),
                 )
             });

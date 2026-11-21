@@ -1016,17 +1016,24 @@ where
         && fs_root_override.trim().is_empty()
     {
         let mut units = resolve_units(clean_id);
-        units.sort();
-        units.dedup();
-        units.sort_by_key(|unit| !unit.ends_with(".timer"));
+        let mut seen = std::collections::HashSet::new();
+        units.retain(|unit| seen.insert(unit.clone()));
+        af_runner::af_release::lifecycle::sort_units_for_stop(&mut units);
         let mut running_units = Vec::new();
         for unit_name in units {
             let is_oneshot = is_oneshot_service_unit(&unit_name);
             match query_status(&unit_name).as_str() {
                 "running" => running_units.push(unit_name),
                 "restarting" if is_oneshot => running_units.push(unit_name),
-                "stopped" | "failed" | "idle" => {},
-                observation => return Err((unit_name, format!("Required service state is unconfirmed ({observation}); update was not started"))),
+                "stopped" | "failed" | "idle" | "not-found" => {}
+                observation => {
+                    return Err((
+                        unit_name,
+                        format!(
+                            "Required service state is unconfirmed ({observation}); update was not started"
+                        ),
+                    ))
+                }
             }
         }
         for unit_name in running_units {
@@ -1035,7 +1042,9 @@ where
             }
             if let Err(error) = control_unit(unit_name.clone(), "stop").await {
                 let mut errors = vec![error.to_string()];
-                for stopped_unit in stopped_units.iter().rev() {
+                for stopped_unit in
+                    af_runner::af_release::lifecycle::ordered_units_for_start(&stopped_units)
+                {
                     if let Err(restore_error) = control_unit(stopped_unit.clone(), "start").await {
                         errors.push(format!(
                             "Required restoration of {stopped_unit} failed: {restore_error}"
@@ -1928,7 +1937,7 @@ where
 {
     let ingress = apply_blueprint.await;
     let mut service_failures = Vec::new();
-    for unit in stopped_units.iter().rev() {
+    for unit in af_runner::af_release::lifecycle::ordered_units_for_start(stopped_units) {
         if let Err(error) = control_unit(unit.clone(), "start").await {
             service_failures.push(format!("Failed to restart stopped unit {unit}: {error}"));
         }
@@ -1994,7 +2003,7 @@ where
                 "Refusing to restart pre-stopped service after incomplete rollback".to_string(),
             );
         } else {
-            for unit in stopped_units.iter().rev() {
+            for unit in af_runner::af_release::lifecycle::ordered_units_for_start(stopped_units) {
                 if let Err(restore_err) = control_unit(unit.clone(), "start").await {
                     restore_errors.push(format!(
                         "Failed to restore stopped unit {}: {}",
@@ -2301,18 +2310,31 @@ where
     // Step 1: Quiesce (stop) quiesce_units BEFORE restore_candidate_receipts runs
     let mut quiesce_failures: Vec<String> = Vec::new();
     if af_services::should_pre_stop_on_update(clean_id) && !quiesce_units.is_empty() {
-        for unit in quiesce_units {
+        let mut seen = std::collections::HashSet::new();
+        let mut ordered_quiesce: Vec<String> = quiesce_units
+            .iter()
+            .filter(|unit| seen.insert((*unit).clone()))
+            .cloned()
+            .collect();
+        af_runner::af_release::lifecycle::sort_units_for_stop(&mut ordered_quiesce);
+        for unit in &ordered_quiesce {
             if let Err(e) = control_unit(unit.clone(), "stop").await {
                 let err_str = e.to_string();
                 let err_lower = err_str.to_ascii_lowercase();
                 let is_absent_err = err_lower.contains("not loaded")
                     || err_lower.contains("not-found")
+                    || err_lower.contains("not found")
                     || err_lower.contains("no such file")
                     || err_lower.contains("could not be found")
                     || err_lower.contains("exit status: 5")
                     || err_lower.contains("exit code 5");
 
-                if is_absent_err && matches!(query_status(unit).as_str(), "stopped" | "idle") {
+                if is_absent_err
+                    && matches!(
+                        query_status(unit).as_str(),
+                        "stopped" | "idle" | "not-found"
+                    )
+                {
                     tracing::info!(
                         unit = %unit,
                         error = %e,
@@ -2421,7 +2443,7 @@ where
     }
 
     if af_services::should_pre_stop_on_update(clean_id) && !restart_units.is_empty() {
-        for unit in restart_units.iter().rev() {
+        for unit in af_runner::af_release::lifecycle::ordered_units_for_start(restart_units) {
             if let Err(e) = control_unit(unit.clone(), "start").await {
                 tracing::error!(unit = %unit, error = %e, "Application service restart failed after receipt restoration");
                 restart_failures.push(format!("{unit}: {e}"));
@@ -2529,7 +2551,7 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext(
             quiesce_units.push(u);
         }
     }
-    quiesce_units.sort_by_key(|u| !u.ends_with(".timer"));
+    af_runner::af_release::lifecycle::sort_units_for_stop(&mut quiesce_units);
     let restart_units: Vec<String> = stopped_units
         .iter()
         .filter(|u| is_restart_eligible_unit(u))
@@ -2655,7 +2677,7 @@ where
                 quiesce_units.push(u);
             }
         }
-        quiesce_units.sort_by_key(|u| !u.ends_with(".timer"));
+        af_runner::af_release::lifecycle::sort_units_for_stop(&mut quiesce_units);
         let restart_units: Vec<String> = stopped_units
             .iter()
             .filter(|u| is_restart_eligible_unit(u))
@@ -3427,8 +3449,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     if refuse_restart {
                         restart_failures.push("Refusing to restart pre-stopped service after incomplete rollback".to_string());
                     } else if af_services::should_pre_stop_on_update(&clean_id) && !stopped_units.is_empty() {
-                        for unit in stopped_units.iter().rev() {
-                            if let Err(e) = af_services::control_service_with_manager(unit, "start", "systemd-unit").await {
+                        for unit in af_runner::af_release::lifecycle::ordered_units_for_start(&stopped_units) {
+                            if let Err(e) = af_services::control_service_with_manager(&unit, "start", "systemd-unit").await {
                                 restart_failures.push(format!("{unit}: {e}"));
                             }
                         }
@@ -3498,8 +3520,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
         if matches!(action, "install" | "reinstall" | "update") {
             let mut restart_failures: Vec<String> = Vec::new();
             if af_services::should_pre_stop_on_update(&clean_id) && !stopped_units.is_empty() {
-                for unit in stopped_units.iter().rev() {
-                    if let Err(e) = af_services::control_service_with_manager(unit, "start", "systemd-unit").await {
+                for unit in af_runner::af_release::lifecycle::ordered_units_for_start(&stopped_units) {
+                    if let Err(e) = af_services::control_service_with_manager(&unit, "start", "systemd-unit").await {
                         tracing::error!(unit, error = %e, "Application service restoration failed after script execution");
                         restart_failures.push(format!("{unit}: {e}"));
                     }

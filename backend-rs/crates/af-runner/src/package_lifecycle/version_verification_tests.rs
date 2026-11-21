@@ -4919,3 +4919,202 @@ fn test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_
         }
     }
 }
+
+#[test]
+fn test_librespeed_and_novnc_unit_catalog_sandbox_and_snapshot_capture_restore() {
+    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let saved_pkgs = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
+    let saved_auto = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
+    std::env::set_var(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        repo_root.join("config/packages.json"),
+    );
+    std::env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        repo_root.join("config/package_automation.json"),
+    );
+
+    let ls_units = package_service_units("librespeed").unwrap();
+    assert!(
+        ls_units.iter().any(|u| u == "librespeed.socket"),
+        "expected librespeed.socket in {ls_units:?}"
+    );
+    let novnc_units = package_service_units("novnc").unwrap();
+    assert!(
+        novnc_units.iter().any(|u| u == "novnc-session"),
+        "expected novnc-session in {novnc_units:?}"
+    );
+
+    assert!(crate::is_exempt_sandbox_unit("librespeed.socket"));
+    assert!(crate::is_exempt_sandbox_unit("novnc-session.service"));
+    assert!(crate::is_exempt_sandbox_unit("novnc-xvnc.service"));
+    assert!(!crate::is_exempt_sandbox_unit("librespeed.service"));
+    assert!(!crate::is_exempt_sandbox_unit("novnc.service"));
+
+    // 1. Pre-socket LibreSpeed snapshot removes newly created socket unit & wants symlink on rollback
+    let root = std::env::temp_dir().join(format!(
+        "af-test-ls-novnc-snap-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let systemd_dir = root.join("etc/systemd/system");
+    let sockets_wants = systemd_dir.join("sockets.target.wants");
+    let multi_wants = systemd_dir.join("multi-user.target.wants");
+    std::fs::create_dir_all(&sockets_wants).unwrap();
+    std::fs::create_dir_all(&multi_wants).unwrap();
+    std::fs::write(systemd_dir.join("librespeed.service"), "legacy-ls-unit\n").unwrap();
+    std::fs::write(systemd_dir.join("novnc.service"), "legacy-novnc-unit\n").unwrap();
+    std::fs::write(systemd_dir.join("novnc-xvnc.service"), "legacy-xvnc-unit\n").unwrap();
+    let env_cfg = crate::PackageExecutionEnv::isolated(&root);
+
+    let mut ls_snap =
+        PackageRuntimeSnapshot::capture("librespeed", &ls_units, &env_cfg, false).unwrap();
+    let mut novnc_snap =
+        PackageRuntimeSnapshot::capture("novnc", &novnc_units, &env_cfg, false).unwrap();
+
+    // Simulate failed cutover creating librespeed.socket + symlink + proxy token and novnc-session.service + symlink
+    std::fs::write(systemd_dir.join("librespeed.service"), "new-ls-unit\n").unwrap();
+    std::fs::write(systemd_dir.join("librespeed.socket"), "new-ls-socket\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "/etc/systemd/system/librespeed.socket",
+        sockets_wants.join("librespeed.socket"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("etc/aetherflow")).unwrap();
+    std::fs::write(
+        root.join("etc/aetherflow/librespeed-proxy-token.conf"),
+        "token=new\n",
+    )
+    .unwrap();
+
+    std::fs::write(systemd_dir.join("novnc-session.service"), "new-session\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "/etc/systemd/system/novnc-session.service",
+        multi_wants.join("novnc-session.service"),
+    )
+    .unwrap();
+
+    ls_snap.restore().unwrap();
+    novnc_snap.restore().unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(systemd_dir.join("librespeed.service")).unwrap(),
+        "legacy-ls-unit\n"
+    );
+    assert!(!systemd_dir.join("librespeed.socket").exists());
+    assert!(std::fs::symlink_metadata(sockets_wants.join("librespeed.socket")).is_err());
+    assert!(!root.join("etc/aetherflow/librespeed-proxy-token.conf").exists());
+    assert!(!systemd_dir.join("novnc-session.service").exists());
+    assert!(std::fs::symlink_metadata(multi_wants.join("novnc-session.service")).is_err());
+
+    force_remove_backup_tree(&root);
+    for (key, prev) in [
+        ("AETHERFLOW_PACKAGES_CONFIG", saved_pkgs),
+        ("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", saved_auto),
+    ] {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_coordinated_operation_orders_socket_timer_and_novnc_quiesce_and_restore() {
+    struct RecordingBackend {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl LifecycleBackend for RecordingBackend {
+        fn unit_active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn unit_quiescent<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn control_unit<'a>(
+            &'a self,
+            action: &'a str,
+            unit: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            self.events.lock().unwrap().push(format!("{action} {unit}"));
+            Box::pin(async { Ok(()) })
+        }
+        fn script<'a>(
+            &'a self,
+            _: &'a PackageRunnerRequest,
+            _: &'a mpsc::Sender<String>,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    for (pkg, units, expected) in [
+        (
+            "librespeed",
+            vec!["librespeed.service".to_string(), "librespeed.socket".to_string()],
+            vec![
+                "stop librespeed.socket",
+                "stop librespeed.service",
+                "start librespeed.socket",
+                "start librespeed.service",
+            ],
+        ),
+        (
+            "novnc",
+            vec![
+                "novnc-xvnc.service".to_string(),
+                "novnc-session.service".to_string(),
+                "novnc.service".to_string(),
+            ],
+            vec![
+                "stop novnc.service",
+                "stop novnc-session.service",
+                "stop novnc-xvnc.service",
+                "start novnc-xvnc.service",
+                "start novnc-session.service",
+                "start novnc.service",
+            ],
+        ),
+        (
+            "recyclarr",
+            vec!["recyclarr.service".to_string(), "recyclarr.timer".to_string()],
+            vec![
+                "stop recyclarr.timer",
+                "stop recyclarr.service",
+                "start recyclarr.service",
+                "start recyclarr.timer",
+            ],
+        ),
+    ] {
+        let backend = RecordingBackend {
+            events: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut receipt_err = None;
+        let mut restart_failures = Vec::new();
+        CoordinatedOperation::restore_and_restart_units_with_runtime(
+            &backend,
+            "job-order-check",
+            pkg,
+            &units,
+            &units,
+            &[],
+            &[],
+            &mut receipt_err,
+            &mut restart_failures,
+            false,
+            true,
+            None,
+        )
+        .await;
+        assert!(receipt_err.is_none(), "{pkg}: {receipt_err:?}");
+        assert!(restart_failures.is_empty(), "{pkg}: {restart_failures:?}");
+        assert_eq!(*backend.events.lock().unwrap(), expected, "{pkg}");
+    }
+}

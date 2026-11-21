@@ -838,10 +838,11 @@ fn resolve_canonical_service_id_with_catalog(target: &str, catalog: &[Package]) 
             "paperless-ngx".to_string()
         }
         "dispatcharr-celery" | "dispatcharr-celerybeat" => "dispatcharr".to_string(),
-        "novnc-xvnc" => "novnc".to_string(),
+        "novnc-xvnc" | "novnc-session" => "novnc".to_string(),
         "xrdp-sesman" => "xrdp".to_string(),
         "node_exporter" => "prometheus".to_string(),
         "rclone-vfs" => "rclone".to_string(),
+        "librespeed.socket" => "librespeed".to_string(),
         "scrutiny-collector" | "scrutiny-collector.timer" => "scrutiny".to_string(),
         "recyclarr.timer" => "recyclarr".to_string(),
         "apache2 web server" => "apache2".to_string(),
@@ -983,6 +984,8 @@ fn policies_for_units(
             let unit_lower = unit.to_ascii_lowercase();
             let (role, configured) = if unit_lower.ends_with(".timer") {
                 ("timer", true)
+            } else if unit_lower.ends_with(".socket") {
+                ("socket", true)
             } else if matches!(unit_lower.as_str(), "recyclarr" | "scrutiny-collector") {
                 ("oneshot", true)
             } else if unit_lower == "rclone-vfs" {
@@ -1012,7 +1015,7 @@ pub fn resolve_controllable_service_units_with(
     let mut units: Vec<String> = policies
         .into_iter()
         .filter(|p| match p.role {
-            "required" | "timer" => true,
+            "required" | "timer" | "socket" => true,
             "optional" => p.configured || action == "stop",
             "oneshot" => action == "stop",
             _ => true,
@@ -1020,7 +1023,9 @@ pub fn resolve_controllable_service_units_with(
         .map(|p| p.unit)
         .collect();
     if action == "stop" {
-        units.sort_by_key(|u| !u.ends_with(".timer"));
+        af_release::lifecycle::sort_units_for_stop(&mut units);
+    } else {
+        af_release::lifecycle::sort_units_for_start(&mut units);
     }
     units
 }
@@ -1032,7 +1037,11 @@ pub fn aggregate_component_statuses(
     let primary_unit = components
         .iter()
         .find(|c| c.role == "required")
-        .or_else(|| components.iter().find(|c| c.role == "timer"))
+        .or_else(|| {
+            components
+                .iter()
+                .find(|c| c.role == "timer" || c.role == "socket")
+        })
         .or_else(|| components.first())
         .map(|c| c.unit.clone())
         .unwrap_or_else(|| primary_fallback.to_string());
@@ -1054,8 +1063,13 @@ pub fn aggregate_component_statuses(
     let mut oneshot_failed = false;
 
     for comp in components {
+        if comp.status == "not-found"
+            && af_release::lifecycle::is_legacy_optional_companion_unit(&comp.unit)
+        {
+            continue;
+        }
         match comp.role.as_str() {
-            "required" | "timer" => {
+            "required" | "timer" | "socket" => {
                 required_or_timer_count += 1;
                 match comp.status.as_str() {
                     "running" => active_required_or_timer += 1,
@@ -1170,7 +1184,14 @@ fn resolve_service_units_with_catalog(target: &str, catalog: &[Package]) -> Vec<
             "dispatcharr-celery".to_string(),
             "dispatcharr-celerybeat".to_string(),
         ],
-        "novnc" => vec!["novnc".to_string(), "novnc-xvnc".to_string()],
+        "librespeed" | "librespeed.socket" => {
+            vec!["librespeed".to_string(), "librespeed.socket".to_string()]
+        }
+        "novnc" | "novnc-xvnc" | "novnc-session" => vec![
+            "novnc".to_string(),
+            "novnc-xvnc".to_string(),
+            "novnc-session".to_string(),
+        ],
         "xrdp" => vec!["xrdp".to_string(), "xrdp-sesman".to_string()],
         "prometheus" => vec!["prometheus".to_string(), "node_exporter".to_string()],
         "rclone" => vec!["rclone".to_string(), "rclone-vfs".to_string()],
@@ -1302,18 +1323,25 @@ fn service_info_from_observations(
 
     for policy in &policies {
         let (unit_status, unit_uptime) = observe(policy);
-        if matches!(policy.role, "required" | "timer")
+        if matches!(policy.role, "required" | "timer" | "socket")
             && unit_status == "running"
             && best_uptime == "-"
             && unit_uptime != "-"
         {
             best_uptime = unit_uptime;
         }
+        let configured = if unit_status == "not-found"
+            && af_release::lifecycle::is_legacy_optional_companion_unit(&policy.unit)
+        {
+            false
+        } else {
+            policy.configured
+        };
         components.push(ServiceComponentStatus {
             unit: policy.unit.clone(),
             role: policy.role.to_string(),
             status: unit_status,
-            configured: policy.configured,
+            configured,
         });
     }
 
@@ -1334,12 +1362,14 @@ fn service_info_from_observations(
 }
 
 pub fn classify_systemd_unit_show_output(stdout: &str, role: &str) -> (String, String) {
+    let mut load_state = String::new();
     let mut active_state = String::new();
     let mut sub_state = String::new();
     let mut enter_ts = String::new();
     for line in stdout.lines() {
         if let Some((k, v)) = line.split_once('=') {
             match k.trim() {
+                "LoadState" => load_state = v.trim().to_lowercase(),
                 "ActiveState" => active_state = v.trim().to_lowercase(),
                 "SubState" => sub_state = v.trim().to_lowercase(),
                 "ActiveEnterTimestamp" => enter_ts = v.trim().to_string(),
@@ -1347,7 +1377,7 @@ pub fn classify_systemd_unit_show_output(stdout: &str, role: &str) -> (String, S
             }
         }
     }
-    if active_state.is_empty() && sub_state.is_empty() {
+    if (active_state.is_empty() && sub_state.is_empty()) || load_state == "error" {
         ("unknown".to_string(), "-".to_string())
     } else if active_state == "active"
         || matches!(
@@ -1363,6 +1393,11 @@ pub fn classify_systemd_unit_show_output(stdout: &str, role: &str) -> (String, S
         ("restarting".to_string(), "Transitioning".to_string())
     } else if active_state == "failed" || sub_state == "failed" {
         ("failed".to_string(), "-".to_string())
+    } else if load_state == "not-found"
+        && active_state == "inactive"
+        && (sub_state.is_empty() || sub_state == "dead")
+    {
+        ("not-found".to_string(), "-".to_string())
     } else if role == "oneshot" && (active_state == "inactive" || sub_state == "dead") {
         ("idle".to_string(), "-".to_string())
     } else {
@@ -1397,7 +1432,7 @@ fn query_systemd_unit_with_timeout(
         &[
             "show",
             unit,
-            "--property=ActiveState,SubState,ActiveEnterTimestamp",
+            "--property=LoadState,ActiveState,SubState,ActiveEnterTimestamp",
         ],
         timeout,
     ) {
@@ -1470,12 +1505,16 @@ fn get_systemd_units_info(units: Vec<String>, service_name: &str) -> (String, St
 
     let mut any_running = false;
     let mut any_restarting = false;
+    let mut all_not_found = true;
     let mut best_uptime = "-".to_string();
 
     for unit in &units {
         let (status, uptime) = query_single_systemd_unit_status(unit, "required", true);
         if status == "unknown" {
             return (status, "-".to_string(), primary_unit);
+        }
+        if status != "not-found" {
+            all_not_found = false;
         }
         if status == "running" {
             any_running = true;
@@ -1495,6 +1534,8 @@ fn get_systemd_units_info(units: Vec<String>, service_name: &str) -> (String, St
             "Transitioning".to_string(),
             primary_unit,
         )
+    } else if all_not_found {
+        ("not-found".to_string(), "-".to_string(), primary_unit)
     } else {
         ("stopped".to_string(), "-".to_string(), primary_unit)
     }
@@ -2048,6 +2089,44 @@ async fn service_command_output(
     result
 }
 
+fn is_absent_systemd_unit_error(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    lower.contains("not loaded")
+        || lower.contains("not-found")
+        || lower.contains("not found")
+        || lower.contains("no such file")
+        || lower.contains("could not be found")
+        || lower.contains("exit status: 5")
+        || lower.contains("exit code 5")
+}
+
+async fn confirm_systemd_unit_not_found(unit: &str, timeout: Duration) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if timeout.is_zero() {
+            return false;
+        }
+        match async_status_command_output(
+            "systemctl",
+            &["show", unit, "--property=LoadState,ActiveState,SubState"],
+            timeout.min(Duration::from_secs(2)),
+        )
+        .await
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                classify_systemd_unit_show_output(&stdout, "optional").0 == "not-found"
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (unit, timeout);
+        false
+    }
+}
+
 pub async fn control_service_with_manager(
     service_name: &str,
     action: &str,
@@ -2096,6 +2175,7 @@ async fn control_service_with_budget(
             service_name
         );
     }
+    let allow_absent_legacy_companion = managed_by != "systemd-unit";
     let units = if managed_by == "systemd-unit" {
         vec![service_name.to_string()]
     } else {
@@ -2124,6 +2204,17 @@ async fn control_service_with_budget(
         match dispatch_runner_systemctl_unix(action, &unit).await {
             Some(Ok(())) => continue,
             Some(Err(err_msg)) => {
+                if allow_absent_legacy_companion
+                    && af_release::lifecycle::is_legacy_optional_companion_unit(&unit)
+                    && is_absent_systemd_unit_error(&err_msg.to_string())
+                    && confirm_systemd_unit_not_found(
+                        &unit,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                    .await
+                {
+                    continue;
+                }
                 clear_service_status_cache();
                 let detail = format!("systemctl {} {} failed: {}", action, unit, err_msg);
                 return Err(err_msg.context(detail));
@@ -2142,6 +2233,19 @@ async fn control_service_with_budget(
             // Timeout/output overflow is an unconfirmed mutation, not permission
             // failure. Do not execute the same action again through fallback.
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            Ok(o)
+                if allow_absent_legacy_companion
+                    && af_release::lifecycle::is_legacy_optional_companion_unit(&unit)
+                    && (o.status.code() == Some(5)
+                        || is_absent_systemd_unit_error(&String::from_utf8_lossy(&o.stderr)))
+                    && confirm_systemd_unit_not_found(
+                        &unit,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                    .await =>
+            {
+                continue;
+            }
             _ => {
                 let command =
                     guarded_service_command(&_guard, "systemctl", &[action, "--", &unit])?;
@@ -2151,13 +2255,21 @@ async fn control_service_with_budget(
                 )
                 .await?;
                 if !direct.status.success() {
+                    let stderr_str = String::from_utf8_lossy(&direct.stderr);
+                    if allow_absent_legacy_companion
+                        && af_release::lifecycle::is_legacy_optional_companion_unit(&unit)
+                        && (direct.status.code() == Some(5)
+                            || is_absent_systemd_unit_error(&stderr_str))
+                        && confirm_systemd_unit_not_found(
+                            &unit,
+                            deadline.saturating_duration_since(Instant::now()),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
                     clear_service_status_cache();
-                    anyhow::bail!(
-                        "systemctl {} {} failed: {}",
-                        action,
-                        unit,
-                        String::from_utf8_lossy(&direct.stderr)
-                    );
+                    anyhow::bail!("systemctl {} {} failed: {}", action, unit, stderr_str);
                 }
             }
         }

@@ -845,3 +845,219 @@ async fn marketplace_failed_reinstall_recovery_gate_preserves_failure_and_blocks
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn pre_stop_and_restore_order_librespeed_socket_and_novnc_companions_with_legacy_and_unknown()
+{
+    // 1. Modern LibreSpeed update & reinstall: stops librespeed.socket before librespeed, restores socket first
+    for action in ["update", "reinstall"] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let stopped = pre_stop_units_for_package_update_with(
+            action,
+            "librespeed",
+            "",
+            |_| vec!["librespeed".into(), "librespeed.socket".into()],
+            |_| "running".into(),
+            move |unit, act| {
+                recorded.lock().unwrap().push(format!("{act} {unit}"));
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stopped,
+            vec!["librespeed.socket".to_string(), "librespeed".to_string()],
+            "{action}"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["stop librespeed.socket", "stop librespeed"],
+            "{action}"
+        );
+
+        let restore_calls = Arc::new(Mutex::new(Vec::new()));
+        let restore_recorded = restore_calls.clone();
+        let (kind, _) = restore_pre_stopped_units_after_installer_failure_with(
+            "librespeed",
+            &stopped,
+            "fixture installer failure",
+            move |unit, act| {
+                restore_recorded
+                    .lock()
+                    .unwrap()
+                    .push(format!("{act} {unit}"));
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert_eq!(kind, af_services::PackageJobFailure::Installer, "{action}");
+        assert_eq!(
+            *restore_calls.lock().unwrap(),
+            vec!["start librespeed.socket", "start librespeed"],
+            "{action}"
+        );
+    }
+
+    // 2. Legacy pre-socket LibreSpeed: confirmed not-found socket is skipped while running worker is stopped
+    let legacy_calls = Arc::new(Mutex::new(Vec::new()));
+    let legacy_recorded = legacy_calls.clone();
+    let legacy_stopped = pre_stop_units_for_package_update_with(
+        "update",
+        "librespeed",
+        "",
+        |_| vec!["librespeed".into(), "librespeed.socket".into()],
+        |unit| {
+            if unit == "librespeed.socket" {
+                "not-found".into()
+            } else {
+                "running".into()
+            }
+        },
+        move |unit, act| {
+            legacy_recorded
+                .lock()
+                .unwrap()
+                .push(format!("{act} {unit}"));
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy_stopped, vec!["librespeed".to_string()]);
+    assert_eq!(*legacy_calls.lock().unwrap(), vec!["stop librespeed"]);
+
+    // 3. Unknown socket status fails closed BEFORE stopping any unit
+    assert!(pre_stop_units_for_package_update_with(
+        "update",
+        "librespeed",
+        "",
+        |_| vec!["librespeed".into(), "librespeed.socket".into()],
+        |unit| {
+            if unit == "librespeed.socket" {
+                "unknown".into()
+            } else {
+                "running".into()
+            }
+        },
+        |_, _| async { panic!("unknown companion status must fail closed before stopping") },
+    )
+    .await
+    .is_err());
+
+    // 4. Modern noVNC: stops novnc -> novnc-session -> novnc-xvnc, restores novnc-xvnc -> novnc-session -> novnc
+    let novnc_calls = Arc::new(Mutex::new(Vec::new()));
+    let novnc_recorded = novnc_calls.clone();
+    let novnc_stopped = pre_stop_units_for_package_update_with(
+        "update",
+        "novnc",
+        "",
+        |_| vec!["novnc-xvnc".into(), "novnc-session".into(), "novnc".into()],
+        |_| "running".into(),
+        move |unit, act| {
+            novnc_recorded.lock().unwrap().push(format!("{act} {unit}"));
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        novnc_stopped,
+        vec![
+            "novnc".to_string(),
+            "novnc-session".to_string(),
+            "novnc-xvnc".to_string(),
+        ]
+    );
+    let novnc_restore_calls = Arc::new(Mutex::new(Vec::new()));
+    let novnc_restore_recorded = novnc_restore_calls.clone();
+    let (novnc_kind, _) = restore_pre_stopped_units_after_installer_failure_with(
+        "novnc",
+        &novnc_stopped,
+        "fixture installer failure",
+        move |unit, act| {
+            novnc_restore_recorded
+                .lock()
+                .unwrap()
+                .push(format!("{act} {unit}"));
+            async { Ok(()) }
+        },
+    )
+    .await;
+    assert_eq!(novnc_kind, af_services::PackageJobFailure::Installer);
+    assert_eq!(
+        *novnc_restore_calls.lock().unwrap(),
+        vec!["start novnc-xvnc", "start novnc-session", "start novnc",]
+    );
+
+    // 5. Legacy pre-companion noVNC: not-found novnc-session skipped, unknown fails closed
+    let legacy_novnc_stopped = pre_stop_units_for_package_update_with(
+        "reinstall",
+        "novnc",
+        "",
+        |_| vec!["novnc".into(), "novnc-xvnc".into(), "novnc-session".into()],
+        |unit| {
+            if unit == "novnc-session" {
+                "not-found".into()
+            } else {
+                "running".into()
+            }
+        },
+        |_, _| async { Ok(()) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy_novnc_stopped,
+        vec!["novnc".to_string(), "novnc-xvnc".to_string()]
+    );
+    assert!(pre_stop_units_for_package_update_with(
+        "reinstall",
+        "novnc",
+        "",
+        |_| vec!["novnc".into(), "novnc-xvnc".into(), "novnc-session".into()],
+        |unit| {
+            if unit == "novnc-session" {
+                "unknown".into()
+            } else {
+                "running".into()
+            }
+        },
+        |_, _| async { panic!("unknown novnc-session must fail closed before stopping") },
+    )
+    .await
+    .is_err());
+
+    // 6. Rollback quiesce & restore stops librespeed.socket first and restarts librespeed.socket first
+    let rb_calls = Arc::new(Mutex::new(Vec::new()));
+    let rb_recorded = rb_calls.clone();
+    let (rb_err, rb_restart_failures) =
+        quiesce_and_restore_candidate_receipts_and_runtime_ext_with(
+            "librespeed",
+            &["librespeed".into(), "librespeed.socket".into()],
+            &["librespeed".into(), "librespeed.socket".into()],
+            &[],
+            &[],
+            false,
+            None,
+            None,
+            move |unit, act| {
+                rb_recorded.lock().unwrap().push(format!("{act} {unit}"));
+                async { Ok(()) }
+            },
+            |_| "stopped".into(),
+        )
+        .await;
+    assert!(rb_err.is_none(), "{rb_err:?}");
+    assert!(rb_restart_failures.is_empty(), "{rb_restart_failures:?}");
+    assert_eq!(
+        *rb_calls.lock().unwrap(),
+        vec![
+            "stop librespeed.socket",
+            "stop librespeed",
+            "start librespeed.socket",
+            "start librespeed",
+        ]
+    );
+}

@@ -2234,7 +2234,7 @@ impl CoordinatedOperation {
             })
             .cloned()
             .collect();
-        units.sort_by_key(|unit| !unit.ends_with(".timer"));
+        lifecycle::sort_units_for_stop(&mut units);
         units
     }
 
@@ -2256,7 +2256,7 @@ impl CoordinatedOperation {
             .filter(|unit| !unit.starts_with("port:"))
             .cloned()
             .collect();
-        units.sort_by_key(|unit| !unit.ends_with(".timer"));
+        lifecycle::sort_units_for_stop(&mut units);
         units
     }
 }
@@ -2913,10 +2913,14 @@ impl CoordinatedOperation {
         let mut quiesce_failed = false;
         if quiesce_first {
             let mut seen = std::collections::HashSet::new();
-            for unit in quiesce_units.iter().chain(restart_units.iter()) {
-                if !seen.insert(unit.as_str()) {
-                    continue;
-                }
+            let mut ordered_quiesce: Vec<String> = quiesce_units
+                .iter()
+                .chain(restart_units.iter())
+                .filter(|unit| seen.insert((*unit).clone()))
+                .cloned()
+                .collect();
+            lifecycle::sort_units_for_stop(&mut ordered_quiesce);
+            for unit in &ordered_quiesce {
                 match backend.control(unit, "stop", lifecycle_job_id).await {
                     Ok(()) => {
                         match backend.quiescent(unit).await {
@@ -3045,14 +3049,14 @@ impl CoordinatedOperation {
             }
         } else {
             restart_failures.clear();
-            for unit in restart_units.iter().rev() {
-                if let Err(error) = backend.control(unit, "start", lifecycle_job_id).await {
+            for unit in lifecycle::ordered_units_for_start(restart_units) {
+                if let Err(error) = backend.control(&unit, "start", lifecycle_job_id).await {
                     tracing::error!(unit, error = %error, "Application service restoration failed");
                     restart_failures.push(format!(
                         "Application service start for unit '{unit}' failed: {error}"
                     ));
                 } else {
-                    match backend.active(unit).await {
+                    match backend.active(&unit).await {
                         Ok(true) => {}
                         Ok(false) => {
                             let msg = format!(
@@ -3295,9 +3299,9 @@ impl CoordinatedOperation {
                     );
                 }
             } else {
-                for unit in stopped.iter().rev() {
+                for unit in lifecycle::ordered_units_for_start(&stopped) {
                     if let Err(error) = backend
-                        .control(unit, "start", &self.request.lifecycle_job_id)
+                        .control(&unit, "start", &self.request.lifecycle_job_id)
                         .await
                     {
                         tracing::error!(unit, error = %error, "Application service restoration failed");
@@ -3305,7 +3309,7 @@ impl CoordinatedOperation {
                             "Application service start for unit '{unit}' failed: {error}"
                         ));
                     } else {
-                        match backend.active(unit).await {
+                        match backend.active(&unit).await {
                             Ok(true) => {}
                             Ok(false) => {
                                 let msg = format!(
@@ -4466,7 +4470,10 @@ fn candidate_runtime_targets(
             ]);
         }
         "kavita" => dir_candidates.push("/opt/Kavita".into()),
-        "librespeed" => dir_candidates.push("/var/www/librespeed".into()),
+        "librespeed" => dir_candidates.extend([
+            "/var/www/librespeed".into(),
+            "/etc/aetherflow/librespeed".into(),
+        ]),
         "lidarr" => dir_candidates.push("/opt/Lidarr".into()),
         "listenarr" => dir_candidates.push("/opt/Listenarr".into()),
         "maintainerr" => dir_candidates.push("/etc/systemd/system/af-maintainerr.service.d".into()),
@@ -4550,6 +4557,7 @@ fn candidate_runtime_targets(
             "af-invidious-companion.service".into(),
         ]),
         "kasmvnc" => all_units.push("af-kasmvnc.service".into()),
+        "librespeed" => all_units.push("librespeed.socket".into()),
         "maintainerr" => all_units.push("af-maintainerr.service".into()),
         "mcvnc" => all_units.push("af-mcvnc.service".into()),
         "novnc" => all_units.extend(["novnc-xvnc.service".into(), "novnc-session.service".into()]),
@@ -4603,6 +4611,8 @@ fn candidate_runtime_targets(
         format!("/usr/lib/systemd/system/{pkg_lower}.service"),
         format!("/etc/systemd/system/{pkg}.timer"),
         format!("/etc/systemd/system/{pkg_lower}.timer"),
+        format!("/etc/systemd/system/{pkg}.socket"),
+        format!("/etc/systemd/system/{pkg_lower}.socket"),
         format!("/etc/default/{pkg}"),
         format!("/etc/default/{pkg_lower}"),
         format!("/install/.{pkg_lower}.lock"),
@@ -4621,6 +4631,13 @@ fn candidate_runtime_targets(
         file_candidates.push(format!("/etc/systemd/system/{unit_file}"));
         file_candidates.push(format!("/lib/systemd/system/{unit_file}"));
         file_candidates.push(format!("/usr/lib/systemd/system/{unit_file}"));
+        if unit_file.ends_with(".socket") {
+            file_candidates.push(format!("/etc/systemd/system/sockets.target.wants/{unit_file}"));
+        } else if unit_file.ends_with(".timer") {
+            file_candidates.push(format!("/etc/systemd/system/timers.target.wants/{unit_file}"));
+        } else {
+            file_candidates.push(format!("/etc/systemd/system/multi-user.target.wants/{unit_file}"));
+        }
     }
 
     match pkg_lower.as_str() {
@@ -4653,6 +4670,9 @@ fn candidate_runtime_targets(
             "/usr/bin/Xvnc".into(),
             "/usr/bin/vncserver".into(),
         ]),
+        "librespeed" => {
+            file_candidates.push("/etc/aetherflow/librespeed-proxy-token.conf".into())
+        }
         "maintainerr" => file_candidates.push("/usr/local/bin/af-systemd-sandbox".into()),
         "netdata" => {
             file_candidates.extend(["/usr/sbin/netdata".into(), "/usr/local/sbin/netdata".into()])
@@ -8325,6 +8345,9 @@ pub fn has_independent_runtime_evidence(
     ];
     if let Ok(units) = package_service_units(package_id) {
         for u in units {
+            if lifecycle::is_activation_unit(&u) {
+                continue;
+            }
             let u_name = if u.ends_with(".service") {
                 u
             } else {

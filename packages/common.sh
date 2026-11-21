@@ -1726,7 +1726,12 @@ begin_state_transaction() {
             AF_STATE_PREVIOUS_UNITS+=("$unit")
         fi
     done
-    stop_systemd_unit "${AF_STATE_UNITS[@]}" || return 1
+    local -a stop_units=()
+    local idx
+    for (( idx=${#AF_STATE_UNITS[@]} - 1; idx>=0; idx-- )); do
+        stop_units+=("${AF_STATE_UNITS[$idx]}")
+    done
+    stop_systemd_unit "${stop_units[@]}" || return 1
     snapshot_state_dirs "$AF_STATE_BACKUP" "$@" "$(lock_path "$PACKAGE_NAME")" || return 1
     AF_STATE_SNAPSHOT_READY=true
 }
@@ -1738,14 +1743,19 @@ cleanup_state_transaction() {
     if [[ "${INSTALL_COMMITTED:-false}" != true ]]; then
         [[ "$status" -ne 0 ]] || status=1
         if [[ "$AF_STATE_SNAPSHOT_READY" == true ]]; then
-            if ! quiesce_services_for_rollback "${AF_STATE_UNITS[@]}"; then
+            local -a stop_units=()
+            local idx
+            for (( idx=${#AF_STATE_UNITS[@]} - 1; idx>=0; idx-- )); do
+                stop_units+=("${AF_STATE_UNITS[$idx]}")
+            done
+            if ! quiesce_services_for_rollback "${stop_units[@]}"; then
                 restore_failed=true
             elif ! restore_state_snapshot "$AF_STATE_BACKUP"; then
                 restore_failed=true
             elif [[ -d "$AF_TX_DIR/apt-packages" ]]; then
                 rollback_apt_packages || restore_failed=true
                 if [[ "$AF_APT_ROLLBACK_MUTATED" == true ]]; then
-                    if ! quiesce_services_for_rollback "${AF_STATE_UNITS[@]}" || ! restore_state_snapshot "$AF_STATE_BACKUP"; then
+                    if ! quiesce_services_for_rollback "${stop_units[@]}" || ! restore_state_snapshot "$AF_STATE_BACKUP"; then
                         restore_failed=true
                     fi
                 fi
@@ -5840,7 +5850,15 @@ systemd_unit_inactive() {
 quiesce_services_for_rollback() {
     local unit stop_status failed=false
     local backup="${AF_ROLLBACK_BACKUP:-${BACKUP_DIR:-${RUNTIME_BACKUP:-${ABS_BACKUP_DIR:-${AF_STATE_BACKUP:-${AF_ARCHIVE_BACKUP:-unknown}}}}}}"
+    local -a triggers=() workers=() ordered=()
     for unit in "$@"; do
+        case "$unit" in
+            *.timer|*.socket) triggers+=("$unit") ;;
+            *) workers+=("$unit") ;;
+        esac
+    done
+    ordered=("${triggers[@]}" "${workers[@]}")
+    for unit in "${ordered[@]}"; do
         stop_status=0
         af_logged systemctl stop -- "$unit" || stop_status=$?
         if [[ "$stop_status" -ne 0 ]]; then
@@ -5904,7 +5922,15 @@ quiesce_services_for_rollback() {
 
 stop_systemd_unit() {
     local unit stop_status
+    local -a triggers=() workers=() ordered=()
     for unit in "$@"; do
+        case "$unit" in
+            *.timer|*.socket) triggers+=("$unit") ;;
+            *) workers+=("$unit") ;;
+        esac
+    done
+    ordered=("${triggers[@]}" "${workers[@]}")
+    for unit in "${ordered[@]}"; do
         stop_status=0
         af_logged systemctl stop -- "$unit" || stop_status=$?
         af_logged systemctl reset-failed -- "$unit" || true

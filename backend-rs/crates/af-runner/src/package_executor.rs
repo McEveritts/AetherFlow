@@ -2683,7 +2683,8 @@ impl RollbackJournal {
         // 1. Stop any service units touched/started by the recipe and verify quiescence BEFORE
         //    restoring any files or mutable state directories.
         let mut service_quiescence_failed = false;
-        let touched_units: Vec<String> = self.touched_services.drain(..).rev().collect();
+        let mut touched_units: Vec<String> = self.touched_services.drain(..).rev().collect();
+        af_release::lifecycle::sort_units_for_stop(&mut touched_units);
         for unit_name in touched_units {
             let stop_res = runner
                 .run_command(

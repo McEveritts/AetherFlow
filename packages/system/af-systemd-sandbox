@@ -36,7 +36,7 @@ normalize_unit() {
 is_exempt_unit() {
     local unit="$1"
     case "${unit}" in
-        aetherflow-api.service|aetherflow-runner.service|wg-quick@*|wireguard*|tailscaled*|fail2ban.service|pihole-FTL.service|netdata.service|node_exporter.service|apache2.service|mariadb.service|mysql.service|mergerfs*|rclone-vfs*|scrutiny-collector*|x2goserver*|novnc-xvnc*)
+        aetherflow-api.service|aetherflow-runner.service|wg-quick@*|wireguard*|tailscaled*|fail2ban.service|pihole-FTL.service|netdata.service|node_exporter.service|apache2.service|mariadb.service|mysql.service|mergerfs*|rclone-vfs*|scrutiny-collector*|x2goserver*|novnc-xvnc*|novnc-session*)
             return 0
             ;;
         *)
@@ -277,12 +277,22 @@ case "${command_name}" in
             exit 1
         fi
 
+        restart_units=()
         for unit in "${units[@]}"; do
+            had_dropin=false
+            if [[ -f "/etc/systemd/system/${unit}.d/10-aetherflow-sandbox.conf" || -f "/etc/systemd/system/${unit}.d/aetherflow-sandbox.conf" ]]; then
+                had_dropin=true
+            fi
             apply_sandbox_dropin "${profile}" "${unit}" "${rw_paths[@]}"
+            if [[ "${unit}" == *.service ]]; then
+                if [[ -f "/etc/systemd/system/${unit}.d/10-aetherflow-sandbox.conf" || "${had_dropin}" == true ]]; then
+                    restart_units+=("${unit}")
+                fi
+            fi
         done
 
         systemctl daemon-reload >/dev/null 2>&1 || true
-        for unit in "${units[@]}"; do
+        for unit in "${restart_units[@]}"; do
             restart_if_active "${unit}"
         done
         ;;

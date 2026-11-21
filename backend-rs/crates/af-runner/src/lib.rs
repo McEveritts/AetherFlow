@@ -3353,6 +3353,7 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
         || unit.starts_with("scrutiny-collector")
         || unit.starts_with("x2goserver")
         || unit.starts_with("novnc-xvnc")
+        || unit.starts_with("novnc-session")
 }
 
 fn sandbox_master_user(credentials: &str) -> Option<String> {
