@@ -1057,10 +1057,340 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
                 self.assertEqual(retained.read_text(), "retained-unmanic-state\n")
                 self.assertTrue((root / "active-unmanic").exists())
 
+    def _install_unmanic_strict_sandbox_mocks(self, root: Path) -> None:
+        """Install Debian 13 realistic systemctl + extended Unmanic pip/curl mocks inside an Unmanic sandbox."""
+        strict_pip = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+root = Path(os.environ["AF_SANDBOX_ROOT"])
+cmd = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with (root / "commands.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps([cmd, *args]) + "\n")
+
+if "unmanic" in " ".join(args):
+    if os.environ.get("MOCK_PIP_FAIL") == "1":
+        sys.stderr.write("ERROR: Could not find a version that satisfies the requirement unmanic\n")
+        sys.exit(1)
+    spec = next((a for a in args if a.startswith("unmanic")), "unmanic")
+    req_ver = spec.split("==", 1)[1] if "==" in spec else ""
+    default_ver = os.environ.get("MOCK_DEFAULT_VER", "0.4.1")
+    meta_ver = os.environ.get("MOCK_META_VER", req_ver or default_ver)
+    cli_ver = os.environ.get("MOCK_CLI_VER", meta_ver)
+    cli_exit = int(os.environ.get("MOCK_CLI_EXIT", "0"))
+    venv_dir = root / "opt/unmanic/.venv"
+    (venv_dir / ".mock-meta-version").write_text(meta_ver + "\n")
+    pkg_dir = venv_dir / "lib/python3.13/site-packages/unmanic"
+    ver_file = pkg_dir / "version"
+    if ver_file.is_symlink() or ver_file.exists():
+        ver_file.unlink()
+    if os.environ.get("MOCK_VERSION_JSON_SYMLINK") == "1":
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        outside = root / "outside-version.json"
+        outside.write_text(json.dumps({"short": meta_ver, "long": meta_ver}))
+        ver_file.symlink_to(outside)
+    elif os.environ.get("MOCK_VERSION_JSON"):
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        ver_file.write_text(os.environ["MOCK_VERSION_JSON"])
+    unmanic_bin = venv_dir / "bin/unmanic"
+    if os.environ.get("MOCK_OMIT_CLI") == "1":
+        unmanic_bin.unlink(missing_ok=True)
+    else:
+        unmanic_bin.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' {json.dumps(cli_ver)}\nexit {cli_exit}\n"
+        )
+        unmanic_bin.chmod(0o644 if os.environ.get("MOCK_CLI_NONEXEC") == "1" else 0o755)
+sys.exit(0)
+'''
+        for name in ("pip", "pip3"):
+            p = root / "mock-bin" / name
+            p.write_text(strict_pip)
+            p.chmod(0o755)
+
+        strict_systemctl = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+root = Path(os.environ["AF_SANDBOX_ROOT"])
+args = sys.argv[1:]
+with (root / "commands.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(["systemctl", *args]) + "\n")
+
+sub = args[0] if args else ""
+units = [a.removesuffix(".service") for a in args[1:] if not a.startswith("-")]
+if sub == "is-active":
+    active = all((root / f"active-{u}").exists() for u in units)
+    if "--quiet" not in args and "-q" not in args:
+        print("active" if active else "inactive")
+    sys.exit(0 if active else 3)
+if sub == "show":
+    unit = units[0] if units else ""
+    active = (root / f"active-{unit}").exists()
+    enabled = (root / f"enabled-{unit}").exists()
+    unit_file = root / f"etc/systemd/system/{unit}.service"
+    loaded = unit_file.exists() or active
+    props = {
+        "LoadState": "loaded" if loaded else "not-found",
+        "ActiveState": "active" if active else "inactive",
+        "MainPID": "1234" if active else "0",
+        "UnitFileState": "enabled" if enabled else ("disabled" if loaded else ""),
+    }
+    requested = [a.split("=", 1)[1] for a in args[1:] if a.startswith("--property=")]
+    for key in (requested or list(props.keys())):
+        if key in props:
+            print(f"{key}={props[key]}")
+    sys.exit(0)
+if sub == "stop":
+    for u in units:
+        unit_file = root / f"etc/systemd/system/{u}.service"
+        active_file = root / f"active-{u}"
+        if not unit_file.exists() and not active_file.exists():
+            sys.stderr.write(f"Failed to stop {u}.service: Unit {u}.service not loaded.\n")
+            sys.exit(5)
+        active_file.unlink(missing_ok=True)
+    sys.exit(0)
+if sub in ("start", "restart"):
+    if sub == "restart" and os.environ.get("MOCK_RESTART_FAIL") == "1":
+        sys.stderr.write("Failed to restart unmanic.service\n")
+        sys.exit(1)
+    for u in units:
+        (root / f"active-{u}").touch()
+    sys.exit(0)
+if sub == "enable":
+    for u in units:
+        (root / f"enabled-{u}").touch()
+        if "--now" in args:
+            (root / f"active-{u}").touch()
+    sys.exit(0)
+if sub == "disable":
+    if os.environ.get("MOCK_DISABLE_FAIL") == "1":
+        sys.stderr.write("Failed to disable unit: permission denied\n")
+        sys.exit(1)
+    for u in units:
+        unit_file = root / f"etc/systemd/system/{u}.service"
+        if not unit_file.exists():
+            sys.stderr.write(f"Failed to disable unit: Unit {u}.service does not exist\n")
+            sys.exit(1)
+        (root / f"enabled-{u}").unlink(missing_ok=True)
+    sys.exit(0)
+sys.exit(0)
+'''
+        sc = root / "mock-bin/systemctl"
+        sc.write_text(strict_systemctl)
+        sc.chmod(0o755)
+
+        strict_curl = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+root = Path(os.environ["AF_SANDBOX_ROOT"])
+args = sys.argv[1:]
+with (root / "commands.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(["curl", *args]) + "\n")
+if os.environ.get("MOCK_HTTP_READY_FAIL") == "1":
+    sys.exit(22)
+sys.exit(0)
+'''
+        cr = root / "mock-bin/curl"
+        cr.write_text(strict_curl)
+        cr.chmod(0o755)
+
+        sl = root / "mock-bin/sleep"
+        sl.write_text("#!/bin/sh\nexit 0\n")
+        sl.chmod(0o755)
+
+    def test_unmanic_real_post_and_stable_cli_formats_and_strict_rejections(self):
+        root, script = self.make_sandbox("unmanic")
+        self._install_unmanic_strict_sandbox_mocks(root)
+
+        # 1. Real upstream stable/post wheel layouts (including +dirty) in ascending order succeed
+        #    with exact distribution metadata written to .af-version and HTTP readiness probed.
+        for target, cli, vjson in (
+            ("0.2.8", "unmanic 0.2.8~41aa55d+dirty", {"short": "0.2.8", "long": "0.2.8~41aa55d+dirty"}),
+            ("0.2.8.post1", "unmanic 0.2.8+925008e+dirty", {"short": "0.2.8.post1", "long": "0.2.8+925008e+dirty"}),
+            ("0.4.0.post32", "unmanic 0.4.0+9ce0a85", {"short": "0.4.0.post32", "long": "0.4.0+9ce0a85"}),
+            ("0.4.1", "unmanic 0.4.1~1c324b8", {"short": "0.4.1", "long": "0.4.1~1c324b8"}),
+        ):
+            with self.subTest(accept=target):
+                mark = len(self.read_commands(root))
+                res = self.run_sandbox(
+                    root,
+                    script,
+                    AF_TARGET_VERSION=target,
+                    MOCK_META_VER=target,
+                    MOCK_CLI_VER=cli,
+                    MOCK_VERSION_JSON=json.dumps(vjson),
+                )
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual((root / "opt/unmanic/.af-version").read_text().strip(), target)
+                self.assertTrue((root / "active-unmanic").exists())
+                if target == "0.4.0.post32":
+                    unit_text = (root / "etc/systemd/system/unmanic.service").read_text()
+                    self.assertIn("--address 127.0.0.1 --port 8888", unit_text)
+                    self.assertIn('Environment="PYTHONUNBUFFERED=1"', unit_text)
+                    delta = self.read_commands(root, mark)
+                    self.assertTrue(
+                        any(c[0] == "curl" and any("/unmanic/api/v2/version/read" in a for a in c) for c in delta),
+                        delta,
+                    )
+
+        retained = root / "var/lib/unmanic/.unmanic/userdata/library.db"
+        retained.write_text("retained-post32-state\n")
+
+        # 2. Unrelated payload, absent/non-exec/failing CLI, and mismatched post/stable payloads are rejected before activation.
+        bad_cases = (
+            ("unrelated-tool-banner", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_VER": "othertool 0.4.0+9ce0a85"}),
+            ("absent-cli", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_OMIT_CLI": "1"}),
+            ("nonexec-cli", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_NONEXEC": "1"}),
+            ("failing-cli", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_VER": "unmanic 0.4.0+9ce0a85", "MOCK_CLI_EXIT": "1"}),
+            ("unknown-version-cli", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_VER": "unmanic UNKNOWN.VERSION"}),
+            ("stable-cli-on-post-target", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_VER": "unmanic 0.4.0~75f19e6"}),
+            ("post-cli-on-stable-target", {"AF_TARGET_VERSION": "0.4.0", "MOCK_META_VER": "0.4.0", "MOCK_CLI_VER": "unmanic 0.4.0+9ce0a85"}),
+            ("post-cli-without-wheel-version", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_VER": "unmanic 0.4.0+9ce0a85"}),
+            ("different-post-commit-vs-wheel-json", {
+                "AF_TARGET_VERSION": "0.4.0.post32",
+                "MOCK_META_VER": "0.4.0.post32",
+                "MOCK_CLI_VER": "unmanic 0.4.0+4922a83",
+                "MOCK_VERSION_JSON": json.dumps({"short": "0.4.0.post32", "long": "0.4.0+9ce0a85"}),
+            }),
+            ("symlinked-version-json", {
+                "AF_TARGET_VERSION": "0.4.0.post32",
+                "MOCK_META_VER": "0.4.0.post32",
+                "MOCK_CLI_VER": "unmanic 0.4.0+9ce0a85",
+                "MOCK_VERSION_JSON_SYMLINK": "1",
+            }),
+        )
+        for label, extra in bad_cases:
+            with self.subTest(reject=label):
+                mark = len(self.read_commands(root))
+                res = self.run_sandbox(root, script, **extra)
+                self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+                delta = self.read_commands(root, mark)
+                self.assertFalse(any(c[:2] == ["systemctl", "enable"] for c in delta), delta)
+                self.assertNotIn("Rollback incomplete", res.stderr)
+                self.assertEqual((root / "opt/unmanic/.af-version").read_text().strip(), "0.4.1")
+                self.assertEqual(retained.read_text(), "retained-post32-state\n")
+                self.assertTrue((root / "active-unmanic").exists())
+                self.assertTrue((root / "enabled-unmanic").exists())
+
+    def test_unmanic_fresh_and_active_rollback_with_realistic_systemd(self):
+        root, script = self.make_sandbox("unmanic")
+        self._install_unmanic_strict_sandbox_mocks(root)
+        recovery_root = root / "var/backups/aetherflow-recovery"
+
+        # 1. Fresh install abort BEFORE unit file exists (pip fail & runtime mismatch) completes cleanly
+        #    without calling `systemctl disable` on a non-existent unit or marking rollback incomplete.
+        for label, extra in (
+            ("fresh-pip-fail", {"AF_TARGET_VERSION": "9.9.9", "MOCK_PIP_FAIL": "1"}),
+            ("fresh-runtime-mismatch", {"AF_TARGET_VERSION": "0.4.0.post32", "MOCK_META_VER": "0.4.0.post32", "MOCK_CLI_VER": "other 0.4.0+9ce0a85"}),
+        ):
+            with self.subTest(case=label):
+                mark = len(self.read_commands(root))
+                res = self.run_sandbox(root, script, **extra)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertNotIn("Rollback incomplete", res.stderr)
+                log_text = (root / "var/log/aetherflow/install-unmanic.log").read_text()
+                self.assertNotIn("Failed to disable unit", log_text)
+                delta = self.read_commands(root, mark)
+                self.assertFalse(any(c[:2] == ["systemctl", "disable"] for c in delta), delta)
+                self.assertFalse((root / "opt/unmanic").exists())
+                self.assertFalse((root / "etc/systemd/system/unmanic.service").exists())
+                self.assertFalse((root / "active-unmanic").exists())
+                self.assertFalse((root / "enabled-unmanic").exists())
+                self.assertEqual(list(recovery_root.iterdir()), [])
+
+        # 2. Fresh install abort AFTER unit creation/enablement (HTTP readiness failure) disables cleanly
+        #    while unit file still exists, removes unit & runtime, and leaves no incomplete rollback.
+        mark = len(self.read_commands(root))
+        ready_fail = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="0.4.0.post32",
+            MOCK_META_VER="0.4.0.post32",
+            MOCK_CLI_VER="0.4.0.post32",
+            MOCK_HTTP_READY_FAIL="1",
+        )
+        self.assertNotEqual(ready_fail.returncode, 0)
+        self.assertNotIn("Rollback incomplete", ready_fail.stderr)
+        delta = self.read_commands(root, mark)
+        self.assertTrue(any(c[:2] == ["systemctl", "disable"] for c in delta), delta)
+        self.assertFalse((root / "opt/unmanic").exists())
+        self.assertFalse((root / "etc/systemd/system/unmanic.service").exists())
+        self.assertFalse((root / "active-unmanic").exists())
+        self.assertFalse((root / "enabled-unmanic").exists())
+        self.assertEqual(list(recovery_root.iterdir()), [])
+
+        # 3. Real disable failure on an actually enabled fresh unit MUST still mark rollback incomplete
+        #    and preserve the recovery backup.
+        disable_fail = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="0.4.0.post32",
+            MOCK_META_VER="0.4.0.post32",
+            MOCK_CLI_VER="0.4.0.post32",
+            MOCK_HTTP_READY_FAIL="1",
+            MOCK_DISABLE_FAIL="1",
+        )
+        self.assertNotEqual(disable_fail.returncode, 0)
+        self.assertIn("Rollback incomplete", disable_fail.stderr)
+        preserved = list(recovery_root.iterdir())
+        self.assertEqual(len(preserved), 1)
+        for p in preserved:
+            shutil.rmtree(p)
+        (root / "enabled-unmanic").unlink(missing_ok=True)
+
+        # 4. Install active baseline 0.4.0.post32, then verify upgrade abort restores old active service
+        #    without ever calling `systemctl disable`, and restart failure still marks rollback incomplete.
+        ok = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="0.4.0.post32",
+            MOCK_META_VER="0.4.0.post32",
+            MOCK_CLI_VER="unmanic 0.4.0+9ce0a85",
+            MOCK_VERSION_JSON=json.dumps({"short": "0.4.0.post32", "long": "0.4.0+9ce0a85"}),
+        )
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        retained = root / "var/lib/unmanic/.unmanic/userdata/library.db"
+        retained.write_text("active-service-data\n")
+
+        mark = len(self.read_commands(root))
+        upg_fail = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="0.4.1",
+            MOCK_META_VER="0.4.1",
+            MOCK_CLI_VER="0.4.1",
+            MOCK_HTTP_READY_FAIL="1",
+        )
+        self.assertNotEqual(upg_fail.returncode, 0)
+        self.assertNotIn("Rollback incomplete", upg_fail.stderr)
+        delta = self.read_commands(root, mark)
+        self.assertFalse(any(c[:2] == ["systemctl", "disable"] for c in delta), delta)
+        self.assertEqual((root / "opt/unmanic/.af-version").read_text().strip(), "0.4.0.post32")
+        self.assertEqual(retained.read_text(), "active-service-data\n")
+        self.assertTrue((root / "active-unmanic").exists())
+        self.assertTrue((root / "enabled-unmanic").exists())
+        self.assertEqual(list(recovery_root.iterdir()), [])
+
+        # If restarting the old active service fails during rollback, rollback MUST be marked incomplete.
+        restart_fail = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="0.4.1",
+            MOCK_PIP_FAIL="1",
+            MOCK_RESTART_FAIL="1",
+        )
+        self.assertNotEqual(restart_fail.returncode, 0)
+        self.assertIn("Rollback incomplete", restart_fail.stderr)
+        self.assertEqual(len(list(recovery_root.iterdir())), 1)
+
     def test_discovery_metadata_aligns_unmanic_to_pypi(self):
         automation = json.loads((ROOT / "config/package_automation.json").read_text(encoding="utf-8"))
         self.assertEqual(automation["unmanic"]["update_source"], "pypi")
         self.assertEqual(automation["unmanic"]["update_package"], "unmanic")
+        self.assertEqual(automation["unmanic"]["version_command"][:3], ["/opt/unmanic/.venv/bin/python", "-I", "-c"])
+        self.assertIn("importlib.metadata.version('unmanic')", automation["unmanic"]["version_command"][3])
         self.assertNotIn("update_repo", automation["unmanic"])
         self.assertEqual(automation["flood"]["update_source"], "github")
         self.assertEqual(automation["flood"]["update_repo"], "jesec/flood")

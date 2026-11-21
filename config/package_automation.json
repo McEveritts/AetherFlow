@@ -1474,9 +1474,10 @@
     "update_package": "unmanic",
     "require_download_sha256": true,
     "version_command": [
-      "bash",
-      "-lc",
-      "/opt/unmanic/.venv/bin/unmanic --version 2>/dev/null"
+      "/opt/unmanic/.venv/bin/python",
+      "-I",
+      "-c",
+      "import importlib.metadata; print(importlib.metadata.version('unmanic'))"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
