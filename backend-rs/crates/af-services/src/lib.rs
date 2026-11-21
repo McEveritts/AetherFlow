@@ -900,13 +900,13 @@ pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
         // vhost can expose them, but the backend port isn't a LAN URL.
         "adguardhome" | "audiobookshelf" | "autobrr" | "autoscan" | "bazarr" | "dispatcharr"
         | "filebot" | "filebrowser" | "flaresolverr" | "flood" | "gitea" | "homeassistant"
-        | "invidious" | "kasmvnc" | "kavita" | "librespeed" | "lidarr" | "listenarr"
-        | "maintainerr" | "mcvnc" | "n8n" | "navidrome" | "netdata" | "nextcloud" | "notifiarr"
-        | "novnc" | "nzbget" | "ombi" | "organizr" | "palate" | "paperless-ngx" | "piped"
-        | "prometheus" | "prowlarr" | "pyload" | "qui" | "radarr" | "rclone" | "readarr"
-        | "rutorrent" | "sabnzbd" | "scrutiny" | "seedcross" | "sonarr" | "syncthing"
-        | "tautulli" | "thelounge" | "threadfin" | "transmission" | "unmanic" | "vaultwarden"
-        | "znc" => "loopback",
+        | "invidious" | "jackett" | "kasmvnc" | "kavita" | "librespeed" | "lidarr"
+        | "listenarr" | "maintainerr" | "mcvnc" | "n8n" | "navidrome" | "netdata" | "nextcloud"
+        | "notifiarr" | "novnc" | "nzbget" | "ombi" | "organizr" | "palate" | "paperless-ngx"
+        | "piped" | "prometheus" | "prowlarr" | "pyload" | "qui" | "radarr" | "rclone"
+        | "readarr" | "rutorrent" | "sabnzbd" | "scrutiny" | "seedcross" | "sonarr"
+        | "syncthing" | "tautulli" | "thelounge" | "threadfin" | "transmission" | "unmanic"
+        | "vaultwarden" | "znc" => "loopback",
         _ => "network",
     }
 }
@@ -3161,6 +3161,7 @@ mod tests {
             "invidious",
             "radarr",
             "adguardhome",
+            "jackett",
             "librespeed",
             "novnc",
             "prometheus",

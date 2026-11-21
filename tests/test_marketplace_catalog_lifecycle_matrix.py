@@ -2035,6 +2035,24 @@ for catalog_app in CATALOG_APPS:
 
 
 class CatalogCredentialAndFailureTests(unittest.TestCase):
+    def test_jackett_local_bind_without_an_admin_password(self):
+        for password in (None, "", "fixture-existing-hash"):
+            with self.subTest(password_configured=bool(password)):
+                fixture = self.fixture("jackett")
+                config = fixture.root / "var/lib/jackett/Jackett/ServerConfig.json"
+                if password is not None:
+                    fixture.file(str(config.relative_to(fixture.root)), json.dumps({
+                        "Port": 9117, "AllowExternal": True, "AdminPassword": password,
+                        "BasePathOverride": "/indexers",
+                    }))
+                self.assert_success(fixture.run("install" if password is None else "update", 19117))
+                settings = json.loads(config.read_text())
+                self.assertEqual(settings["AllowExternal"], bool(password))
+                self.assertEqual(settings["AdminPassword"], password if password is not None else None)
+                self.assertEqual(settings["Port"], 19117)
+                if password is not None:
+                    self.assertEqual(settings["BasePathOverride"], "/indexers")
+
     def fixture(self, app):
         fixture = InstallerFixture(app)
         self.addCleanup(fixture.close)

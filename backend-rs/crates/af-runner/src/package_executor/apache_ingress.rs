@@ -1787,6 +1787,7 @@ pub fn requires_external_app_auth(app: &str) -> bool {
             | "scrutiny"
             | "prometheus"
             | "flaresolverr"
+            | "jackett"
             | "threadfin"
             | "rutorrent"
             | "unmanic"

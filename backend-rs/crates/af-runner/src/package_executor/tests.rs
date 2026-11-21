@@ -5988,6 +5988,7 @@ fn managed_apache_vhost_routes_protected_apps_through_the_gateway() {
         "scrutiny",
         "prometheus",
         "flaresolverr",
+        "jackett",
         "threadfin",
         "unmanic",
         "netdata",

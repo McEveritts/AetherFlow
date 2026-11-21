@@ -18,6 +18,12 @@ fi
 
 PACKAGE_NAME="jackett"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9117}}"
+if [[ ! "$APP_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid Jackett listener port"
+    exit 1
+fi
+APP_PORT="$((10#$APP_PORT))"
+JACKETT_CONFIG="/var/lib/jackett/Jackett/ServerConfig.json"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p /install
@@ -34,6 +40,7 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
+validate_config_paths "$JACKETT_CONFIG"
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Jackett..."
 
@@ -72,11 +79,11 @@ if [[ -n "$JACKETT_VERSION" ]]; then
     queue_app_version /opt/Jackett/.af-version "$(resolve_installed_binary_version /opt/Jackett/jackett "${JACKETT_VERSION#v}")"
 fi
 
-if [[ ! -s /var/lib/jackett/Jackett/ServerConfig.json ]]; then
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /var/lib/jackett/Jackett/ServerConfig.json
+if [[ ! -s "$JACKETT_CONFIG" ]]; then
+    sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' | write_config_file "$JACKETT_CONFIG"
 {
   "Port": @AF_APP_PORT@,
-  "AllowExternal": true,
+  "AllowExternal": false,
   "APIKey": "",
   "AdminPassword": null,
   "InstanceId": "",
@@ -99,7 +106,21 @@ sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /var/lib/jackett/Jackett/ServerCon
 EOF
 fi
 
-set_config_value "/var/lib/jackett/Jackett/ServerConfig.json" json "Port" "$APP_PORT" ""
+safe_config_python "$JACKETT_CONFIG" "$APP_PORT" <<'PYEOF'
+import json
+import sys
+
+path, port = sys.argv[1:]
+with ManagedConfig(path, create_parents=False) as config:
+    settings = json.loads(config.read_text(max_bytes=1024 * 1024))
+    if not isinstance(settings, dict):
+        raise ValueError("Jackett server config must be a JSON object")
+    settings["Port"] = int(port)
+    password = settings.get("AdminPassword")
+    if not isinstance(password, str) or not password.strip():
+        settings["AllowExternal"] = False
+    config.write_text(json.dumps(settings, indent=2) + "\n", 0o600)
+PYEOF
 
 chown -hRP jackett:jackett /opt/Jackett /var/lib/jackett
 
