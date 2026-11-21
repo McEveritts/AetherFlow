@@ -357,7 +357,10 @@ jobs:
           package_speedtest "backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend" arm64
           package_speedtest "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" armv7
           if git rev-parse --git-dir >/dev/null 2>&1; then
-            git archive --format=tar.gz --prefix=AetherFlow/ HEAD > release-dist/aetherflow-bootstrap.tar.gz
+            # Setup and the source build need deployment files and both Rust workspaces.
+            git archive --format=tar.gz --prefix=AetherFlow/ HEAD -- \
+              . ':!.github' ':!apps' ':!docs' ':!e2e' ':!tests' \
+              > release-dist/aetherflow-bootstrap.tar.gz
           fi
           release_archives=(aetherflow-linux-amd64.tar.gz)
           if [[ -s release-dist/aetherflow-linux-arm64.tar.gz ]]; then
