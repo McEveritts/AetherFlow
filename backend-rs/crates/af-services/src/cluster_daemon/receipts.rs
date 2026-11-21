@@ -660,19 +660,19 @@ pub(crate) enum WorkerCommandDispatchPlan {
 
 #[derive(Debug, Clone, Copy)]
 enum CapacityBackpressureReason {
-    ReceiptEntryLimit,
-    ReceiptByteLimit,
-    OutboxEntryLimit,
-    OutboxByteLimit,
+    ReceiptEntry,
+    ReceiptByte,
+    OutboxEntry,
+    OutboxByte,
 }
 
 impl CapacityBackpressureReason {
     fn as_str(self) -> &'static str {
         match self {
-            Self::ReceiptEntryLimit => "receipt_entry_limit",
-            Self::ReceiptByteLimit => "receipt_byte_limit",
-            Self::OutboxEntryLimit => "outbox_entry_limit",
-            Self::OutboxByteLimit => "outbox_byte_limit",
+            Self::ReceiptEntry => "receipt_entry_limit",
+            Self::ReceiptByte => "receipt_byte_limit",
+            Self::OutboxEntry => "outbox_entry_limit",
+            Self::OutboxByte => "outbox_byte_limit",
         }
     }
 }
@@ -696,7 +696,7 @@ fn try_prepare_new_receipt_with_backpressure(
     // 1. Entry bound: recycle ONLY master-confirmed terminal receipts.
     recycle_confirmed_worker_command_receipts(&mut next_receipts, MAX_WORKER_COMMAND_RECEIPTS);
     if next_receipts.len() > MAX_WORKER_COMMAND_RECEIPTS {
-        return Err(CapacityBackpressureReason::ReceiptEntryLimit);
+        return Err(CapacityBackpressureReason::ReceiptEntry);
     }
 
     // 2. Receipt byte bound (reserving worst-case completion headroom for every active `Intent`).
@@ -715,7 +715,7 @@ fn try_prepare_new_receipt_with_backpressure(
         if let Some(pos) = next_receipts.iter().position(is_recyclable_receipt) {
             next_receipts.remove(pos);
         } else {
-            return Err(CapacityBackpressureReason::ReceiptByteLimit);
+            return Err(CapacityBackpressureReason::ReceiptByte);
         }
     }
 
@@ -737,7 +737,7 @@ fn try_prepare_new_receipt_with_backpressure(
         .count();
     if projected_pending.len().saturating_add(pending_intent_slots) > MAX_WORKER_ACK_OUTBOX_ENTRIES
     {
-        return Err(CapacityBackpressureReason::OutboxEntryLimit);
+        return Err(CapacityBackpressureReason::OutboxEntry);
     }
     let outbox_pretty_len = serde_json::to_vec_pretty(&projected_pending)
         .map(|buf| buf.len())
@@ -745,7 +745,7 @@ fn try_prepare_new_receipt_with_backpressure(
     let outbox_headroom =
         pending_intent_slots.saturating_mul(OUTBOX_INTENT_COMPLETION_HEADROOM_BYTES);
     if outbox_pretty_len.saturating_add(outbox_headroom) > MAX_WORKER_ACK_OUTBOX_BYTES {
-        return Err(CapacityBackpressureReason::OutboxByteLimit);
+        return Err(CapacityBackpressureReason::OutboxByte);
     }
 
     Ok(next_receipts)
@@ -1749,7 +1749,7 @@ mod tests {
             body["confirmed_command_ids"],
             serde_json::json!([cmd_rec.id])
         );
-        worker.mark_confirmed(&[cmd_rec.id.clone()]);
+        worker.mark_confirmed(std::slice::from_ref(&cmd_rec.id));
         assert!(load_worker_ack_outbox_nofollow(&outbox_path).is_empty());
         assert!(load_worker_command_receipts_strict(&receipts_path).unwrap()[0].ack_confirmed);
 
