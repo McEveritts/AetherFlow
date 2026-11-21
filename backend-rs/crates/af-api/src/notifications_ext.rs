@@ -1756,6 +1756,9 @@ async fn drain_due_deliveries_once() {
                 ))
             });
 
+            if tokio::time::Instant::now() >= dispatch_deadline {
+                return;
+            }
             let send_outcome = match context_res {
                 Ok((_channel, prepared)) => match tokio::time::timeout_at(
                     dispatch_deadline,
@@ -2957,6 +2960,8 @@ mod tests {
         assert_eq!(claim_b.attempts, 2);
         assert!(claim_b.reclaimed_expired_lease);
         assert_ne!(claim_b.claim_token, claim_a.claim_token);
+        assert!(load_delivery_context_in_conn(&conn_a, &claim_a).is_err());
+        assert!(load_delivery_context_in_conn(&conn_b, &claim_b).is_ok());
 
         // Late Worker A tries to commit its stale receipt -> must be fenced out!
         let stale_res = complete_claimed_delivery_in_conn(
