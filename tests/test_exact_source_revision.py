@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, mock_rutorrent_backend
 
 ROOT = Path(__file__).resolve().parents[1]
 REAL_GIT = shutil.which("git") or "/usr/bin/git"
@@ -173,8 +173,8 @@ if cmd == "python3":
         )
         pip_bin.chmod(0o755)
         sys.exit(0)
-    res = subprocess.run([os.environ["AF_REAL_PYTHON3"], *args])
-    sys.exit(res.returncode)
+    python = os.environ["AF_REAL_PYTHON3"]
+    os.execv(python, [python, *args])
 
 if cmd in ("pip", "pip3"):
     if os.environ.get("AF_FAIL_STAGE") == "pip":
@@ -391,6 +391,8 @@ seed_jellyfin_master_user() { :; }
         extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         prefix = "remove" if action in ("remove", "uninstall") else "install"
+        if package == "rutorrent" and prefix == "install":
+            mock_rutorrent_backend(self.root / "mock-bin")
         script_path = ROOT / f"packages/package/{prefix}/{prefix}package-{package}"
         rebased = rebase_paths(script_path.read_text(encoding="utf-8"), self.root)
         staged_script = self.root / f"run-{prefix}-{package}.sh"

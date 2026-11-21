@@ -4,6 +4,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def mock_rutorrent_backend(bin_dir):
+    """Supply a healthy SCGI boundary in fixtures focused on other installer behavior."""
+    shim = bin_dir / "runuser"
+    shim.write_text(r"""#!/bin/bash
+[[ "$1 $2 $3 $4 $5" == '-u www-data -- php --' ]] || exit 1
+grep -Fq 'system.client_version' || exit 1
+printf 'ready\n'
+""")
+    shim.chmod(0o755)
+
+
 def common_functions(*names):
     names = tuple(dict.fromkeys((
         'af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', 'af_github_curl', 'deb_compare_versions',

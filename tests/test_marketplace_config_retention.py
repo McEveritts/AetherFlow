@@ -30,15 +30,25 @@ lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 ''' + common_functions('queue_app_version', 'commit_app_versions', 'begin_state_transaction', 'cleanup_state_transaction',
                        'snapshot_app_state', 'restore_app_state', 'snapshot_state_dirs', 'restore_state_snapshot',
                        'safe_restore_path_from_backup', 'wait_for_service_ready', 'write_app_version', 'verify_systemd_service_active', 'safe_config_python', 'validate_config_paths',
-                       'systemd_unit_inactive', 'stop_systemd_unit', 'safe_rm_rf')
+                       'systemd_unit_inactive', 'stop_systemd_unit', 'prepare_rtorrent_scoped_stop', 'safe_rm_rf')
         marker_root = '/var/lib/aetherflow/apt-reinstall-required/'
-        common_sh = replace_paths_once(common_sh, [(marker_root, str(self.root) + marker_root)])
+        unit_file = '/etc/systemd/system/rtorrent.service'
+        common_sh = replace_paths_once(common_sh, [(path, str(self.root) + path) for path in (marker_root, unit_file)])
         (self.root / 'opt/AetherFlow/packages/common.sh').write_text(common_sh)
         for command in ('apt-get', 'systemctl', 'id', 'usermod', 'chown', 'useradd', 'dpkg-query'):
             path = self.root / 'bin' / command
             path.write_text('''#!/bin/bash
 printf '%s %s\n' "${0##*/}" "$*" >> "$TEST_ROOT/commands"
-if [[ "${0##*/}" == systemctl && "$1" == "${FAIL_ACTIVATION:-}" ]]; then exit 73; fi
+if [[ "${0##*/}" == systemctl ]]; then
+    if [[ "$1" == "${FAIL_ACTIVATION:-}" ]]; then exit 73; fi
+    if [[ "$1" == show && "$*" == *rtorrent.service ]]; then
+        if [[ -f "$TEST_ROOT/etc/systemd/system/rtorrent.service" ]]; then
+            printf 'LoadState=loaded\\nKillMode=control-group\\nExecStop=\\nExecStopPost=\\n'
+        else
+            printf 'LoadState=not-found\\nActiveState=inactive\\nMainPID=0\\n'
+        fi
+    fi
+fi
 if [[ "${0##*/}" == dpkg-query ]]; then
     [[ "$*" != *'db:Status-Status'* ]] || printf 'installed '
     printf '1.1.0\\n'

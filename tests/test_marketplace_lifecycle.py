@@ -11,7 +11,7 @@ import unittest
 import zipfile
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, mock_rutorrent_backend
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK = r'''#!/usr/bin/python3
@@ -118,7 +118,8 @@ class MarketplaceLifecycleTests(unittest.TestCase):
             shutil.copy2(path, self.root / 'usr/bin' / command)
         source = (ROOT / 'packages/common.sh').read_text()
         helpers = source[source.index('command_exists()'):source.index('lock_path()')]
-        helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit', 'verify_systemd_service_active', 'wait_for_service_ready')
+        helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit', 'verify_systemd_service_active',
+                                    'wait_for_service_ready', 'af_write_failure_receipt')
         helpers = self.rebase(helpers)
         user_helper = source[source.index('purge_system_user()'):source.index('load_master_credentials()')]
         user_helper = user_helper.replace('/home/', str(self.root) + '/home/')
@@ -164,6 +165,8 @@ purge_systemd_unit() { :; }
         marker.parent.chmod(0o755)
 
     def run_script(self, package, action='install', **environment):
+        if package == 'rutorrent' and action == 'install':
+            mock_rutorrent_backend(self.root / 'mock-bin')
         source = (ROOT / f'packages/package/{action}/{action}package-{package}').read_text()
         (self.root / 'tmp').mkdir(exist_ok=True)
         source = self.rebase(source)

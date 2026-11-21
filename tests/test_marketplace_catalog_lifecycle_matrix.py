@@ -24,7 +24,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, mock_rutorrent_backend
 
 
 CATALOG_APPS = (
@@ -971,11 +971,7 @@ class InstallerFixture:
                 shutil.copyfile(self.root / "host-command", directory / name)
                 (directory / name).chmod(0o755)
         if app == "rutorrent":
-            self.file("mock-bin/runuser", """#!/bin/bash
-[[ "$1 $2 $3 $4 $5" == '-u www-data -- php --' ]] || exit 1
-grep -q system.client_version || exit 1
-printf 'ready\\n'
-""").chmod(0o755)  # The Apache readiness fixture covers backend failures and transport.
+            mock_rutorrent_backend(self.commands)
         self.file("usr/lib/systemd/system/" + self.metadata["service_name"] + ".service", "[Service]\nExecStart=/fixture/vendor-service\n")
         source = (ROOT / "packages/common.sh").read_text()
         names = re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_-]*)\(\) [({]$", source)
@@ -3782,6 +3778,31 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
         self.assertNotIn("/manifests/latest", registry_calls)
         self.assertEqual((fixture.root / "opt/vaultwarden/.af-version").read_text().strip(), "2.1.0")
 
+    def test_vaultwarden_update_preserves_admin_env_and_signup_policy(self):
+        fixture = self.fixture("vaultwarden")
+        env_file = fixture.file(
+            "etc/vaultwarden/vaultwarden.env",
+            "ROCKET_PORT=8343\n"
+            "SIGNUPS_ALLOWED=false\n"
+            "INVITATIONS_ALLOWED=false\n"
+            "ADMIN_TOKEN=existing-custom-admin-token\n"
+            "SMTP_HOST=mail.custom.org\n",
+        )
+        token = fixture.file(
+            "opt/AetherFlow/logs/vaultwarden_admin_token.txt",
+            "Vaultwarden Admin Token: existing-custom-admin-token\n",
+        )
+
+        self.assert_success(fixture.run("update", 8350, AF_TARGET_VERSION="2.1.0"))
+
+        env_after = env_file.read_text().splitlines()
+        for setting in (
+            "ROCKET_PORT=8350", "SIGNUPS_ALLOWED=false", "INVITATIONS_ALLOWED=false",
+            "ADMIN_TOKEN=existing-custom-admin-token", "SMTP_HOST=mail.custom.org",
+        ):
+            self.assertIn(setting, env_after)
+        self.assertEqual(token.read_text().strip(), "Vaultwarden Admin Token: existing-custom-admin-token")
+
     def test_vaultwarden_missing_or_mismatched_image_preserves_previous_runtime(self):
         fixture = self.fixture("vaultwarden")
         self.assert_success(fixture.run())
@@ -3825,19 +3846,23 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
         self.assertFalse(fixture.lock.exists())
 
     def test_explicit_purge_erases_archive_copies_of_all_seven_app_secrets(self):
-        for app, state in (
-            ("vaultwarden", "var/lib/vaultwarden"), ("scrutiny", "etc/scrutiny"),
-            ("rclone", "etc/rclone"), ("unpackerr", "etc/unpackerr"),
-            ("recyclarr", "var/lib/recyclarr"), ("notifiarr", "etc/notifiarr"),
-            ("requestrr", "var/lib/requestrr"),
+        for app, secret in (
+            ("vaultwarden", "var/lib/vaultwarden/secret.txt"), ("scrutiny", "etc/scrutiny/secret.txt"),
+            ("rclone", "etc/rclone/rclone.env"), ("unpackerr", "etc/unpackerr/secret.txt"),
+            ("recyclarr", "var/lib/recyclarr/secret.txt"), ("notifiarr", "etc/notifiarr/secret.txt"),
+            ("requestrr", "var/lib/requestrr/secret.txt"),
         ):
             with self.subTest(app=app):
                 fixture = self.fixture(app)
-                fixture.file(state + "/secret.txt", "operator-secret\n")
+                contents = "operator-secret\n"
+                if app == "rclone":
+                    contents = 'RCLONE_RC_USER="operator"\nRCLONE_RC_PASS="operator-secret"\n'
+                fixture.file(secret, contents)
+                filename = Path(secret).name
                 self.assert_success(fixture.run("install"))
-                self.assertGreater(len(list(fixture.root.rglob("secret.txt"))), 1, "No archived secret was exercised")
+                self.assertGreater(len(list(fixture.root.rglob(filename))), 1, "No archived secret was exercised")
                 self.assert_success(fixture.run("uninstall", DELETE_DATA="true"))
-                self.assertEqual(list(fixture.root.rglob("secret.txt")), [])
+                self.assertEqual(list(fixture.root.rglob(filename)), [])
 
     def test_explicit_purge_removes_legacy_ownerless_backups_but_keeps_default_retention(self):
         for app, destination in (

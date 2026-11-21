@@ -280,11 +280,6 @@ EOF
         done
         mkdir -p "$c_dir"
         case "$*" in
-            *vaultwarden*)
-                printf '#!/bin/sh\nexit 0\n' > "${c_dir}/vaultwarden"
-                chmod +x "${c_dir}/vaultwarden"
-                mkdir -p "${c_dir}/web-vault"
-                ;;
             *speedtest*|*librespeed*)
                 printf '#!/bin/sh\nexit 0\n' > "${c_dir}/speedtest-backend"
                 chmod +x "${c_dir}/speedtest-backend"
@@ -534,7 +529,6 @@ class SafeMarketplaceUpdatesTests(unittest.TestCase):
             "var/log/aetherflow",
             "var/backups",
             "etc/systemd/system",
-            "etc/vaultwarden",
             "etc/mcvnc",
             "etc/kasmvnc",
             "run/lock",
@@ -873,29 +867,6 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
                 self.assertEqual((app / "src/manage.py").read_text(), "old-code")
                 self.assertEqual((app / ".af-version").read_text(), "old-version")
                 self.assertTrue((self.root / "service_active_paperless-webserver").exists())
-
-    def test_vaultwarden_update_preserves_admin_env_and_signup_policy(self):
-        env_file = self.root / "etc/vaultwarden/vaultwarden.env"
-        env_file.write_text(
-            "ROCKET_PORT=8343\n"
-            "SIGNUPS_ALLOWED=false\n"
-            "INVITATIONS_ALLOWED=false\n"
-            "ADMIN_TOKEN=existing-custom-admin-token\n"
-            "SMTP_HOST=mail.custom.org\n"
-        )
-        token_txt = self.root / "opt/AetherFlow/logs/vaultwarden_admin_token.txt"
-        token_txt.write_text("Vaultwarden Admin Token: existing-custom-admin-token\n")
-
-        result = self.run_script("vaultwarden", AF_APP_PORT="8350")
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        env_after = env_file.read_text()
-        self.assertIn("ROCKET_PORT=8350", env_after)
-        self.assertIn("SIGNUPS_ALLOWED=false", env_after)
-        self.assertIn("INVITATIONS_ALLOWED=false", env_after)
-        self.assertIn("ADMIN_TOKEN=existing-custom-admin-token", env_after)
-        self.assertIn("SMTP_HOST=mail.custom.org", env_after)
-        self.assertEqual(token_txt.read_text().strip(), "Vaultwarden Admin Token: existing-custom-admin-token")
 
     def test_librespeed_update_preserves_tuning(self):
         toml_file = self.root / "opt/librespeed/settings.toml"
