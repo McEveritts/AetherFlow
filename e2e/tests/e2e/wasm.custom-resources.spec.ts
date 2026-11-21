@@ -204,7 +204,10 @@ test('Network replaces held diagnostics on provider and status refresh and cance
     return (await reads(page, diagnosticsPath)).attempts.map(attempt => attempt.outcome);
   }
   try {
-    await page.goto('/?tab=network');
+    await Promise.all([
+      page.waitForRequest(request => new URL(request.url()).pathname === diagnosticsPath),
+      page.goto('/?tab=network'),
+    ]);
     await expect.poll(outcomes).toEqual(['pending']);
     await page.getByLabel('VPN diagnostic provider').selectOption('tailscale');
     await expect.poll(outcomes).toEqual(['aborted', 'pending']);
