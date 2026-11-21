@@ -3651,23 +3651,23 @@ wait_for_apache_app_ready() {
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if systemctl is-active --quiet apache2; then
             : >"$probe_file"
-            if curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+            if curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
                 if apache_app_probe_body_is_healthy "$package_name" "$probe_file"; then
                     rm -f -- "$probe_file"
                     return 0
                 fi
             else
-                http_status="$(curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || true)"
+                http_status="$(curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || true)"
                 if [[ "$http_status" == "401" ]]; then
                     if [[ -n "$auth_credentials" ]]; then
                         : >"$probe_file"
-                        if printf 'user = "%s"\n' "$auth_credentials" | curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+                        if printf 'user = "%s"\n' "$auth_credentials" | curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
                             if apache_app_probe_body_is_healthy "$package_name" "$probe_file"; then
                                 rm -f -- "$probe_file"
                                 return 0
                             fi
                         else
-                            http_status="$(printf 'user = "%s"\n' "$auth_credentials" | curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || true)"
+                            http_status="$(printf 'user = "%s"\n' "$auth_credentials" | curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || true)"
                             if [[ "$http_status" == "401" ]]; then
                                 rm -f -- "$probe_file"
                                 return 0

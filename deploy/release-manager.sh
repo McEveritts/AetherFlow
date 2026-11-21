@@ -1532,7 +1532,7 @@ build_from_source() {
         --exclude='/packages/README.md' --exclude='/web/dist/' --exclude='/frontend-rs/dist/' \
         --exclude='/.github/' --exclude='/apps/' --exclude='/docs/' --exclude='/e2e/' \
         --exclude='/plugins/' --exclude='/setup/' --exclude='/tests/' \
-        --exclude='/CHANGELOG.md' --exclude='/LICENSE.md' --exclude='/README.md' --exclude='/SECURITY.md' \
+        --exclude='/CHANGELOG.md' --exclude='/README.md' --exclude='/SECURITY.md' \
         --exclude='/package.json' --exclude='/package-lock.json' --exclude='/.gitleaks.toml' \
         --exclude='/.gitignore' --exclude='/.gitattributes' --exclude='/.nvmrc' --exclude='/.env.example' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1; then
