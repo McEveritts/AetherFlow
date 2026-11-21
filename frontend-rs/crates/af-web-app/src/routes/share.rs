@@ -112,6 +112,86 @@ fn preview_mime(content_type: &str, name: &str) -> String {
 
 const MEDIA_PREVIEW_MAX_BYTES: u32 = 20 * 1024 * 1024;
 const TEXT_PREVIEW_MAX_BYTES: u32 = 1024 * 1024;
+const PREVIEW_LONG_LINE_TRIGGER_BYTES: usize = 16 * 1024;
+const PREVIEW_TEXT_SEGMENT_MAX_BYTES: usize = 8 * 1024;
+
+fn split_preview_text_segments(text: &str) -> Option<Vec<String>> {
+    split_preview_text_segments_with(
+        text,
+        PREVIEW_LONG_LINE_TRIGGER_BYTES,
+        PREVIEW_TEXT_SEGMENT_MAX_BYTES,
+    )
+}
+
+fn split_preview_text_segments_with(
+    text: &str,
+    trigger_line_bytes: usize,
+    max_segment_bytes: usize,
+) -> Option<Vec<String>> {
+    debug_assert!(max_segment_bytes >= 4);
+    if !text
+        .split_inclusive('\n')
+        .any(|line| line.len() > trigger_line_bytes)
+    {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+
+    for line in text.split_inclusive('\n') {
+        if line.len() <= max_segment_bytes {
+            if !current.is_empty() && current.len() + line.len() > max_segment_bytes {
+                segments.push(std::mem::take(&mut current));
+            }
+            current.push_str(line);
+            continue;
+        }
+
+        if !current.is_empty() {
+            segments.push(std::mem::take(&mut current));
+        }
+
+        let mut remaining = line;
+        while remaining.len() > max_segment_bytes {
+            let mut end = max_segment_bytes;
+            while end > 0 && !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end > 1
+                && remaining.as_bytes()[end - 1] == b'\r'
+                && remaining.as_bytes().get(end) == Some(&b'\n')
+            {
+                end -= 1;
+            }
+            let tail = &remaining[end..];
+            if (tail == "\n" || tail == "\r\n") && end > 1 {
+                end -= 1;
+                while end > 0 && !remaining.is_char_boundary(end) {
+                    end -= 1;
+                }
+            }
+            if end == 0 {
+                end = remaining
+                    .chars()
+                    .next()
+                    .map_or(remaining.len(), char::len_utf8);
+            }
+            let (chunk, rest) = remaining.split_at(end);
+            segments.push(chunk.to_string());
+            remaining = rest;
+        }
+        if !remaining.is_empty() {
+            segments.push(remaining.to_string());
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    Some(segments)
+}
 
 enum PreviewContent {
     Media(String, web_sys::Blob),
@@ -590,9 +670,20 @@ fn ShareContent(token: String) -> impl IntoView {
                     <Show when=move || preview_busy.get()>
                         <p role="status">{move || context.t("Share.loadingPreview")}</p>
                     </Show>
-                    <Show when=move || !preview_text.get().is_empty()>
+                    <Show when=move || preview_text.with(|text| !text.is_empty())>
                         <pre class="glass-card p-5 obs-scroller max-h-[65vh] text-sm whitespace-pre-wrap break-words">
-                            {move || preview_text.get()}
+                            {move || {
+                                preview_text.with(|text| match split_preview_text_segments(text) {
+                                    Some(segments) => segments
+                                        .into_iter()
+                                        .map(|segment| {
+                                            view! { <span class="af-share-text-chunk">{segment}</span> }
+                                        })
+                                        .collect_view()
+                                        .into_any(),
+                                    None => text.clone().into_any(),
+                                })
+                            }}
                         </pre>
                     </Show>
                     {move || {
@@ -618,7 +709,9 @@ fn ShareContent(token: String) -> impl IntoView {
 mod tests {
     use super::{
         display_filename, listing_entry_path, normalize_path, owned_resource_reads, preview_mime,
-        run_resource_read, valid_token, ResourceReads,
+        run_resource_read, split_preview_text_segments, split_preview_text_segments_with,
+        valid_token, ResourceReads, PREVIEW_LONG_LINE_TRIGGER_BYTES,
+        PREVIEW_TEXT_SEGMENT_MAX_BYTES, TEXT_PREVIEW_MAX_BYTES,
     };
     use leptos::prelude::*;
     use std::{
@@ -786,5 +879,47 @@ mod tests {
         assert!(normalize_path(&"./".repeat(2048)).is_some());
         assert!(normalize_path(&"./".repeat(2049)).is_none());
         assert!(normalize_path(&"é".repeat(128)).is_none());
+    }
+
+    #[test]
+    fn preview_text_leaves_normal_multiline_files_unsegmented() {
+        assert_eq!(split_preview_text_segments(""), None);
+        assert_eq!(split_preview_text_segments("hello\nworld\n"), None);
+        let at_trigger = format!(
+            "{}\nshort\n",
+            "a".repeat(PREVIEW_LONG_LINE_TRIGGER_BYTES - 1)
+        );
+        assert_eq!(split_preview_text_segments(&at_trigger), None);
+    }
+
+    #[test]
+    fn preview_text_segments_long_lines_preserving_exact_utf8_and_crlf_bytes() {
+        let suffix = "λ🙂 original text\n";
+        let exact_limit = format!(
+            "{}{suffix}",
+            "a".repeat(TEXT_PREVIEW_MAX_BYTES as usize - suffix.len())
+        );
+        let segments = split_preview_text_segments(&exact_limit).expect("1 MiB line must segment");
+        assert!(segments.len() > 1);
+        assert!(segments
+            .iter()
+            .all(|segment| !segment.is_empty() && segment.len() <= PREVIEW_TEXT_SEGMENT_MAX_BYTES));
+        assert_eq!(segments.concat(), exact_limit);
+
+        let mixed = format!("header\n\n{}λ🙂\r\nfooter\n", "b".repeat(20_000));
+        let mixed_segments = split_preview_text_segments(&mixed).expect("mixed long line segments");
+        assert_eq!(mixed_segments.concat(), mixed);
+        assert!(mixed_segments
+            .iter()
+            .all(|segment| segment != "\n" && segment != "\r\n"));
+
+        // Exercise multibyte UTF-8 and CRLF right on a small synthetic boundary.
+        let crlf_edge = "1234567\r\n";
+        let crlf_segments = split_preview_text_segments_with(crlf_edge, 8, 8).unwrap();
+        assert_eq!(crlf_segments, vec!["123456", "7\r\n"]);
+
+        let emoji_edge = "aaaa🙂\n";
+        let emoji_segments = split_preview_text_segments_with(emoji_edge, 8, 8).unwrap();
+        assert_eq!(emoji_segments, vec!["aaaa", "🙂\n"]);
     }
 }

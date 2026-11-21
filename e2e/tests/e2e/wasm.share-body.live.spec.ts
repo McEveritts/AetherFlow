@@ -538,10 +538,17 @@ for (const type of ['media', 'text'] as const) {
     } else {
       const preview = page.locator('main pre');
       await expect(preview).toBeVisible();
-      expect(await preview.evaluate(async element => {
+      const rendered = await preview.evaluate(async element => {
         const bytes = new TextEncoder().encode(element.textContent!);
-        return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
-      })).toEqual(Array.from(createHash('sha256').update(bytes).digest()));
+        return {
+          sha256: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))),
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+        };
+      });
+      expect(rendered.sha256).toEqual(Array.from(createHash('sha256').update(bytes).digest()));
+      expect(rendered.clientWidth).toBeGreaterThan(0);
+      expect(rendered.scrollWidth).toBeLessThanOrEqual(rendered.clientWidth + 1);
     }
     expect(await waitClose(body)).toEqual({ written: limit, tailReleased: true, finished: true });
     await expectUnlocked(page, name);

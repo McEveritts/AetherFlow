@@ -1735,3 +1735,12 @@ html[data-theme="light"] .af-editor-input.af-editor-plain { color: #0f172a; }
   max-width: 100%;
   white-space: normal;
 }
+/* Isolate long-line public share text previews into bounded formatting contexts so
+   WebKit wraps within the container without multi-second single-run layout stalls. */
+.af-share-text-chunk {
+  display: inline-block;
+  width: 100%;
+  vertical-align: top;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 12rem;
+}
