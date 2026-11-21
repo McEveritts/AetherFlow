@@ -6,6 +6,7 @@ test('renders the login glass shell consistently @visual', async ({ page }) => {
   await stabilizeVisuals(page);
 
   await page.goto('/login');
+  await expect(page.getByRole('button', { name: 'Unlock the Aether' })).toBeVisible();
   await expect(page).toHaveScreenshot('login-glass-shell.png', { fullPage: true });
 });
 
@@ -16,7 +17,8 @@ test('renders the marketplace glass cards consistently @visual', async ({ page }
   await page.goto('/');
   await page.locator('aside').first().hover();
   await page.getByRole('button', { name: 'Marketplace' }).click();
-  await expect(page.getByText('AetherMarketplace')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'AetherMarketplace' })).toBeVisible();
+  await expect(page.getByText('Update v4.0.1', { exact: true })).toBeVisible();
 
   await expect(page).toHaveScreenshot('marketplace-glass-cards.png', { fullPage: true });
 });
