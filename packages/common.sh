@@ -458,6 +458,89 @@ node_build() (
     "$@"
 )
 
+# Strip supported release/tag prefixes (v/V, release-, rel-, version-, ver-)
+# to align shell version normalization with af_release::lifecycle::strip_version_prefix.
+af_strip_version_prefix() {
+    local value="${1:-}" prev="" lower=""
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    while [[ "$value" != "$prev" ]]; do
+        prev="$value"
+        lower="${value,,}"
+        if [[ "$lower" == release-* || "$lower" == release_* || "$lower" == version-* || "$lower" == version_* ]]; then
+            value="${value:8}"
+        elif [[ "$lower" == rel-* || "$lower" == rel_* || "$lower" == ver-* || "$lower" == ver_* ]]; then
+            value="${value:4}"
+        elif [[ "$value" =~ ^[vV]([0-9].*)$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+    done
+    printf '%s\n' "$value"
+}
+
+# Validate and normalize a concrete exact registry target version for npm or pypi.
+# Rejects floating tags, ranges, wildcards, comparators, URLs, and unsafe characters.
+af_normalize_exact_registry_version() {
+    local ecosystem="${1:-}" raw="${2:-}" trimmed="" normalized="" lower="" msg=""
+    trimmed="${raw#"${raw%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" || ${#trimmed} -gt 256 || "$trimmed" =~ [[:space:][:cntrl:]] || "$trimmed" == *..* || "$trimmed" == */* || "$trimmed" == *\\* ]]; then
+        msg="Invalid ${ecosystem} target version: ${raw}"
+    else
+        normalized="$(af_strip_version_prefix "$trimmed")"
+        lower="${normalized,,}"
+        case "$lower" in
+            ""|latest|next|canary|stable|beta|alpha|rc|nightly|edge|dev|devel|unknown|none|null|undefined|current|installed|pending|default|auto|head|main|master|release|true|false)
+                msg="Refusing non-concrete ${ecosystem} target version: ${raw}"
+                ;;
+        esac
+        if [[ -z "$msg" ]]; then
+            case "$ecosystem" in
+                npm)
+                    if [[ ! "$normalized" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+                        msg="Invalid exact npm target version: ${raw}"
+                    fi
+                    ;;
+                pypi)
+                    if [[ ! "$normalized" =~ ^([1-9][0-9]*!)?[0-9]+(\.[0-9]+)+((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?(\+[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+                        msg="Invalid exact PyPI target version: ${raw}"
+                    fi
+                    ;;
+                *)
+                    msg="Unsupported registry ecosystem: ${ecosystem}"
+                    ;;
+            esac
+        fi
+    fi
+    if [[ -n "$msg" ]]; then
+        if declare -F print_error >/dev/null 2>&1; then
+            print_error "$msg"
+        elif declare -F log_error >/dev/null 2>&1; then
+            log_error "$msg"
+        else
+            printf 'ERROR: %s\n' "$msg" >&2
+        fi
+        return 1
+    fi
+    printf '%s\n' "$normalized"
+}
+
+af_read_npm_package_version() {
+    local manifest="${1:-}"
+    [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
+    python3 - "$manifest" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+version = data.get("version") if isinstance(data, dict) else None
+if not isinstance(version, str) or not version.strip():
+    sys.exit(1)
+print(version.strip())
+PYEOF
+}
+
 # Install npm applications locally so Git dependencies can prepare with their
 # own complete toolchains. Build before replacing any existing application and
 # expose only the application's executable, rather than global build tools.
@@ -465,7 +548,28 @@ install_npm_app() (
     set -e
     umask 022
     local package="$1" destination="$2" executable="$3" staged="" bin_name
+    local pkg_name="" requested_ver="" installed_ver="" pkg_manifest=""
     bin_name="$(basename "$executable")"
+
+    if [[ "$package" =~ ^(@[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)@(.+)$ ]]; then
+        pkg_name="${BASH_REMATCH[1]}"
+        requested_ver="${BASH_REMATCH[2]}"
+    elif [[ "$package" =~ ^([a-zA-Z0-9][a-zA-Z0-9._-]*)@(.+)$ && "$package" != *://* && "$package" != *:* ]]; then
+        pkg_name="${BASH_REMATCH[1]}"
+        requested_ver="${BASH_REMATCH[2]}"
+    elif [[ "$package" =~ ^(@[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9][a-zA-Z0-9._-]*)$ && ! -e "$package" ]]; then
+        pkg_name="$package"
+        if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+            requested_ver="$(af_normalize_exact_registry_version npm "${AF_TARGET_VERSION}")" || return 1
+            package="${pkg_name}@${requested_ver}"
+        fi
+    fi
+
+    if [[ -n "$requested_ver" ]]; then
+        requested_ver="$(af_normalize_exact_registry_version npm "$requested_ver")" || return 1
+        package="${pkg_name}@${requested_ver}"
+    fi
+
     mkdir -p "$(dirname "$destination")" "$(dirname "$executable")"
     staged="$(mktemp -d "${destination}.af-build.XXXXXX")"
     trap '[[ -z "$staged" ]] || rm -rf -- "$staged"' EXIT
@@ -473,10 +577,25 @@ install_npm_app() (
     trap 'exit 143' TERM
     # mktemp creates a private directory; the service user must traverse it.
     chmod 755 "$staged"
-    af_logged node_build npm install --prefix "$staged" --no-audit --no-fund "$package" || return $?
+    if [[ -n "$requested_ver" ]]; then
+        af_logged node_build npm install --prefix "$staged" --no-audit --no-fund --save-exact "$package" || return $?
+    else
+        af_logged node_build npm install --prefix "$staged" --no-audit --no-fund "$package" || return $?
+    fi
     if [[ ! -x "$staged/node_modules/.bin/$bin_name" ]]; then
         print_error "npm package $package did not provide executable $bin_name"
         return 1
+    fi
+    if [[ -n "$requested_ver" && -n "$pkg_name" ]]; then
+        pkg_manifest="$staged/node_modules/${pkg_name}/package.json"
+        if [[ -e "$pkg_manifest" || -L "$pkg_manifest" ]]; then
+            installed_ver="$(af_read_npm_package_version "$pkg_manifest" || true)"
+            installed_ver="$(af_strip_version_prefix "$installed_ver")"
+            if [[ -z "$installed_ver" || "$installed_ver" != "$requested_ver" ]]; then
+                print_error "Installed npm package ${pkg_name} version (${installed_ver:-unknown}) does not match requested version (${requested_ver})"
+                return 1
+            fi
+        fi
     fi
     replace_app_tree "$staged" "$destination" || return $?
     staged=""
@@ -512,18 +631,16 @@ commit_app_versions() {
     local index
     [[ -v AF_PENDING_VERSION_PATHS ]] || declare -ag AF_PENDING_VERSION_PATHS=()
     [[ -v AF_PENDING_VERSION_VALUES ]] || declare -ag AF_PENDING_VERSION_VALUES=()
-    if [[ -n "${AF_TARGET_VERSION:-}" ]] && (( ${#AF_PENDING_VERSION_VALUES[@]} > 0 )); then
-        local clean_target="${AF_TARGET_VERSION#release-}"
-        clean_target="${clean_target#Release-}"
-        clean_target="${clean_target#v}"
-        clean_target="${clean_target#V}"
-        local primary_ver="${AF_PENDING_VERSION_VALUES[0]}"
-        local norm_ver="${primary_ver#release-}"
-        norm_ver="${norm_ver#Release-}"
-        norm_ver="${norm_ver#v}"
-        norm_ver="${norm_ver#V}"
-        local target_matches=0
-        if [[ "$norm_ver" == "$clean_target" ]]; then
+    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+        if (( ${#AF_PENDING_VERSION_VALUES[@]} == 0 )); then
+            echo "ERROR: No application version receipt queued to verify against requested target version (${AF_TARGET_VERSION})" >&2
+            return 1
+        fi
+        local clean_target primary_ver norm_ver target_matches=0
+        clean_target="$(af_strip_version_prefix "${AF_TARGET_VERSION}")"
+        primary_ver="${AF_PENDING_VERSION_VALUES[0]}"
+        norm_ver="$(af_strip_version_prefix "${primary_ver}")"
+        if [[ -n "$clean_target" && -n "$norm_ver" && "$norm_ver" == "$clean_target" ]]; then
             target_matches=1
         elif [[ "$norm_ver" =~ ^[0-9a-fA-F]{7,64}$ && "$clean_target" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
             local lower_ver="${norm_ver,,}" lower_target="${clean_target,,}"

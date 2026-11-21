@@ -41,6 +41,11 @@ if ! declare -F af_logged >/dev/null 2>&1; then
     af_logged() { local target="${LOGFILE:-/dev/null}"; if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; else "$@" >>"$target" 2>&1; fi; }
 fi
 
+UNMANIC_TARGET_VER=""
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    UNMANIC_TARGET_VER="$(af_normalize_exact_registry_version pypi "${AF_TARGET_VERSION}")" || exit 1
+fi
+
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 
@@ -57,7 +62,6 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
     useradd --system --user-group --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
 fi
-mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/.unmanic/config" "${DATA_DIR}/.unmanic/userdata"
 
 if getent group video >/dev/null 2>&1; then
     usermod -aG video "${APP_USER}" || true
@@ -69,8 +73,13 @@ fi
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/unmanic" "/var/lib/unmanic" "/etc/systemd/system/unmanic.service")
 RUNTIME_HAD_PREVIOUS=false
+RUNTIME_WAS_ACTIVE=0
+RUNTIME_QUIESCE_STARTED=0
 RUNTIME_MUTATED=0
-[[ ! -e "/opt/unmanic" ]] || RUNTIME_HAD_PREVIOUS=true
+if systemctl is-active --quiet unmanic 2>/dev/null; then RUNTIME_WAS_ACTIVE=1; fi
+if [[ -e "/opt/unmanic" || -f /etc/systemd/system/unmanic.service || "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+    RUNTIME_HAD_PREVIOUS=true
+fi
 rollback_runtime() {
     local status="$?" runtime_index runtime_path restore_failed=false
     trap - EXIT INT TERM
@@ -83,12 +92,18 @@ rollback_runtime() {
         done
         af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-            af_logged systemctl restart unmanic || restore_failed=true
+            if [[ "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+                af_logged systemctl restart unmanic || restore_failed=true
+            fi
+        else
+            af_logged systemctl disable unmanic || restore_failed=true
         fi
+    elif [[ "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 0 && "$RUNTIME_WAS_ACTIVE" -eq 1 && "$RUNTIME_QUIESCE_STARTED" -eq 1 ]]; then
+        af_logged systemctl restart unmanic || restore_failed=true
     fi
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
     if [[ "$restore_failed" == true ]]; then
-        status=1
+        [[ "$RUNTIME_MUTATED" -eq 0 ]] || status=1
         print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
     else
         rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
@@ -98,7 +113,8 @@ rollback_runtime() {
 trap rollback_runtime EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [[ "$RUNTIME_HAD_PREVIOUS" == true || -f /etc/systemd/system/unmanic.service ]] || systemctl is-active --quiet unmanic 2>/dev/null; then
+if [[ "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+    RUNTIME_QUIESCE_STARTED=1
     stop_systemd_unit unmanic
 fi
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
@@ -109,19 +125,47 @@ for runtime_index in "${!RUNTIME_PATHS[@]}"; do
 done
 report_progress 55 "Creating Python virtualenv and installing Unmanic..."
 RUNTIME_MUTATED=1
+mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/.unmanic/config" "${DATA_DIR}/.unmanic/userdata"
 if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
     af_logged python3 -m venv "${INSTALL_DIR}/.venv"
 fi
 af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel
-af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir unmanic
+if [[ -n "$UNMANIC_TARGET_VER" ]]; then
+    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "unmanic==${UNMANIC_TARGET_VER}"
+else
+    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir unmanic
+fi
 
-UNMANIC_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('unmanic'))" 2>/dev/null || true)"
+UNMANIC_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('unmanic'))" 2>/dev/null | head -n1 | tr -d '\r' || true)"
+UNMANIC_VER="$(af_strip_version_prefix "$UNMANIC_VER")"
 if [[ -z "${UNMANIC_VER}" ]]; then
-    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+    if [[ -z "$UNMANIC_TARGET_VER" && "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
         UNMANIC_VER="0.4.1"
     else
         print_error "Failed to determine installed Unmanic version"
         exit 1
+    fi
+fi
+if [[ ! -x "${INSTALL_DIR}/.venv/bin/unmanic" ]]; then
+    print_error "Unmanic installation did not provide executable ${INSTALL_DIR}/.venv/bin/unmanic"
+    exit 1
+fi
+if [[ -n "$UNMANIC_TARGET_VER" ]]; then
+    if [[ "$UNMANIC_VER" != "$UNMANIC_TARGET_VER" ]]; then
+        print_error "Installed Unmanic version (${UNMANIC_VER}) does not match requested target version (${UNMANIC_TARGET_VER})"
+        exit 1
+    fi
+    if ! UNMANIC_CLI_VER="$("${INSTALL_DIR}/.venv/bin/unmanic" --version 2>/dev/null | head -n1 | tr -d '\r')" || [[ -z "$UNMANIC_CLI_VER" ]]; then
+        print_error "Failed to verify installed Unmanic runtime version against target (${UNMANIC_TARGET_VER})"
+        exit 1
+    fi
+    UNMANIC_CLI_VER_NORM="$(af_strip_version_prefix "$UNMANIC_CLI_VER")"
+    if [[ "$UNMANIC_CLI_VER_NORM" != "$UNMANIC_TARGET_VER" ]]; then
+        UNMANIC_CLI_VER_EXTRACTED="$(printf '%s\n' "$UNMANIC_CLI_VER" | grep -Eo '([1-9][0-9]*!)?[0-9]+(\.[0-9]+)+((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?(\+[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?' | head -n1 || true)"
+        if [[ "$UNMANIC_CLI_VER_EXTRACTED" != "$UNMANIC_TARGET_VER" ]]; then
+            print_error "Installed Unmanic runtime version (${UNMANIC_CLI_VER}) does not match requested target version (${UNMANIC_TARGET_VER})"
+            exit 1
+        fi
     fi
 fi
 queue_app_version "${INSTALL_DIR}/.af-version" "${UNMANIC_VER}"

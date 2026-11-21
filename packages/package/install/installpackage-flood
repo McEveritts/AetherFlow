@@ -34,6 +34,12 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
+FLOOD_TARGET_VER=""
+FLOOD_PACKAGE="@jesec/flood"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    FLOOD_TARGET_VER="$(af_normalize_exact_registry_version npm "${AF_TARGET_VERSION}")" || exit 1
+    FLOOD_PACKAGE="@jesec/flood@${FLOOD_TARGET_VER}"
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Node.js 20 LTS for Flood..."
 
@@ -101,9 +107,9 @@ for runtime_index in "${!RUNTIME_PATHS[@]}"; do
         cp -a -- "$runtime_path" "$BACKUP_DIR/$runtime_index"
     fi
 done
-report_progress 55 "Installing @jesec/flood with its complete dependency build toolchain..."
+report_progress 55 "Installing ${FLOOD_PACKAGE} with its complete dependency build toolchain..."
 RUNTIME_MUTATED=1
-install_npm_app @jesec/flood /opt/flood /usr/local/bin/flood
+install_npm_app "$FLOOD_PACKAGE" /opt/flood /usr/local/bin/flood
 
 FLOOD_BIN=/usr/local/bin/flood
 if [[ ! -x /usr/bin/flood && -x "$FLOOD_BIN" ]]; then
@@ -111,10 +117,24 @@ if [[ ! -x /usr/bin/flood && -x "$FLOOD_BIN" ]]; then
 fi
 
 FLOOD_VER="$("$FLOOD_BIN" --version 2>/dev/null | head -n1 | tr -d '\r')"
+FLOOD_VER="$(af_strip_version_prefix "$FLOOD_VER")"
 if [[ -z "$FLOOD_VER" ]]; then
     print_error "Failed to determine installed Flood version"
     exit 1
 fi
+if [[ -e /opt/flood/node_modules/@jesec/flood/package.json || -L /opt/flood/node_modules/@jesec/flood/package.json ]]; then
+    FLOOD_PKG_VER="$(af_read_npm_package_version /opt/flood/node_modules/@jesec/flood/package.json || true)"
+    FLOOD_PKG_VER="$(af_strip_version_prefix "$FLOOD_PKG_VER")"
+    if [[ -z "$FLOOD_PKG_VER" || "$FLOOD_PKG_VER" != "$FLOOD_VER" ]]; then
+        print_error "Installed Flood package metadata (${FLOOD_PKG_VER:-unknown}) does not match runtime version (${FLOOD_VER})"
+        exit 1
+    fi
+fi
+if [[ -n "$FLOOD_TARGET_VER" && "$FLOOD_VER" != "$FLOOD_TARGET_VER" ]]; then
+    print_error "Installed Flood version (${FLOOD_VER}) does not match requested target version (${FLOOD_TARGET_VER})"
+    exit 1
+fi
+queue_app_version /var/lib/flood/.af-version "$FLOOD_VER"
 chown -hRP flood:flood /var/lib/flood
 
 report_progress 85 "Configuring and starting flood.service on port ${APP_PORT}..."
@@ -143,7 +163,6 @@ af_logged systemctl restart flood
 systemctl is-active --quiet flood
 wait_for_service_ready flood "$APP_PORT" "/"
 
-queue_app_version /var/lib/flood/.af-version "${FLOOD_VER#v}"
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Flood installed on port ${APP_PORT}."

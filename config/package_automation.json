@@ -1470,9 +1470,9 @@
     ]
   },
   "unmanic": {
-    "update_source": "github",
+    "update_source": "pypi",
+    "update_package": "unmanic",
     "require_download_sha256": true,
-    "update_repo": "Unmanic/unmanic",
     "version_command": [
       "bash",
       "-lc",

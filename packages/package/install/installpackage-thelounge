@@ -35,6 +35,12 @@ fi
 
 require_root
 validate_config_paths /etc/systemd/system/thelounge.service
+TL_TARGET_VER=""
+TL_PACKAGE="thelounge"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TL_TARGET_VER="$(af_normalize_exact_registry_version npm "${AF_TARGET_VERSION}")" || exit 1
+    TL_PACKAGE="thelounge@${TL_TARGET_VER}"
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Setting up Node.js runtime and prerequisites for The Lounge..."
 
@@ -109,15 +115,29 @@ for runtime_index in "${!RUNTIME_PATHS[@]}"; do
         cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
     fi
 done
-report_progress 40 "Installing The Lounge with its complete dependency build toolchain..."
+report_progress 40 "Installing ${TL_PACKAGE} with its complete dependency build toolchain..."
 RUNTIME_MUTATED=1
-install_npm_app thelounge /opt/thelounge /usr/local/bin/thelounge
+install_npm_app "$TL_PACKAGE" /opt/thelounge /usr/local/bin/thelounge
 
-TL_VER="$("${NODE_PATH}" "${NODE_ARGS[@]}" "${TL_BIN}" -v)"
+TL_VER="$("${NODE_PATH}" "${NODE_ARGS[@]}" "${TL_BIN}" -v | head -n1 | tr -d '\r')"
 if [[ ! "$TL_VER" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
     log_error "The Lounge did not report a valid installed version."
     exit 1
 fi
+TL_VER="$(af_strip_version_prefix "$TL_VER")"
+if [[ -e /opt/thelounge/node_modules/thelounge/package.json || -L /opt/thelounge/node_modules/thelounge/package.json ]]; then
+    TL_PKG_VER="$(af_read_npm_package_version /opt/thelounge/node_modules/thelounge/package.json || true)"
+    TL_PKG_VER="$(af_strip_version_prefix "$TL_PKG_VER")"
+    if [[ -z "$TL_PKG_VER" || "$TL_PKG_VER" != "$TL_VER" ]]; then
+        log_error "Installed The Lounge package metadata (${TL_PKG_VER:-unknown}) does not match runtime version (${TL_VER})."
+        exit 1
+    fi
+fi
+if [[ -n "$TL_TARGET_VER" && "$TL_VER" != "$TL_TARGET_VER" ]]; then
+    log_error "Installed The Lounge version (${TL_VER}) does not match requested target version (${TL_TARGET_VER})."
+    exit 1
+fi
+queue_app_version /var/lib/thelounge/.af-version "$TL_VER"
 
 report_progress 65 "Configuring The Lounge state and ports..."
 if [[ ! -f /var/lib/thelounge/config.js ]]; then
@@ -187,7 +207,6 @@ if ! af_logged curl --fail --silent --show-error --output /dev/null --connect-ti
     exit 1
 fi
 
-queue_app_version /var/lib/thelounge/.af-version "${TL_VER#v}"
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "The Lounge installed on port ${APP_PORT}."
