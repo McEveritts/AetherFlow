@@ -550,7 +550,10 @@ fi
 : "${MAX_RELEASES:=5}"
 : "${HEALTH_RETRIES:=15}"
 : "${HEALTH_INTERVAL:=2}"
-: "${HEALTH_ENDPOINT:=http://127.0.0.1:8080/api/v1/system/health}"
+# Default to the public deep readiness gate. Explicit HEALTH_ENDPOINT overrides
+# are preserved; any override used for deployment must report full application
+# readiness to supply an equivalent release gate.
+: "${HEALTH_ENDPOINT:=http://127.0.0.1:8080/health/ready}"
 if [[ -z "${ARTIFACT_NAME:-}" ]]; then
     if [[ -n "${RELEASE_ASSET_NAME:-}" ]]; then
         ARTIFACT_NAME="${RELEASE_ASSET_NAME}"
@@ -2036,7 +2039,8 @@ restart_systemd_units() {
 }
 
 # Top-level "status" from a /health/ready body. Key order and whitespace do not matter.
-# v4 Rust returns exactly {"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}.
+# v4 Rust returns {"database":"ok","runner":"ok","redis":"disabled","status":"ready","uptime":"0.0s","version":"..."}
+# (older supported v4 rollback slots without "runner" or with {"status":"ok"} remain accepted).
 parse_health_status() {
     local response="$1"
     if command -v python3 >/dev/null 2>&1; then

@@ -71,7 +71,8 @@ if url.endswith("/SHA256SUMS"):
     target = Path(arguments[arguments.index("-o") + 1])
     shutil.copyfile(root / "SHA256SUMS", target)
     sys.exit(0)
-if url.endswith("/health/ready"):
+custom_health_url = os.environ.get("TEST_ALLOW_HEALTH_URL", "")
+if url.endswith("/health/ready") or (custom_health_url and url == custom_health_url):
     is_rollback = (root / "current").exists() and (root / "current").resolve().name == "100"
     if is_rollback and "TEST_ROLLBACK_HEALTH_CODE" in os.environ:
         body = os.environ.get("TEST_ROLLBACK_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
@@ -259,7 +260,11 @@ os.execvp(inner[0], inner)
             "MAX_RELEASES": "3",
             "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
         })
-        env.update(extra)
+        for key, value in extra.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         return env
 
     def run_manager(self, *args, **extra):
@@ -531,6 +536,69 @@ os.execvp(inner[0], inner)
             self.assertEqual(companion.read_bytes(), b"speedtest-fixture")
             self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
         self.assertEqual(self.marker(self.snapshot()), "env")
+
+        # Standalone Bash fallback defaults to /health/ready when neither env nor config sets HEALTH_ENDPOINT.
+        standalone_conf = self.root / "standalone.conf"
+        standalone_conf.write_text("# no HEALTH_ENDPOINT override\n")
+        self.commands.write_text("")
+        standalone_body = (
+            '{"database":"ok","runner":"ok","redis":"disabled","status":"ready","uptime":"0.1s","version":"v4.0.0"}\n'
+        )
+        default_res = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            "--config",
+            str(standalone_conf),
+            HEALTH_ENDPOINT=None,
+            TEST_HEALTH_BODY=standalone_body,
+        )
+        self.assertEqual(default_res.returncode, 0, default_res.stdout + default_res.stderr)
+        self.assertIn("Health probe PASSED", default_res.stdout)
+        default_commands = self.commands.read_text()
+        self.assertIn("http://127.0.0.1:8080/health/ready", default_commands)
+        self.assertNotIn("/api/v1/system/health", default_commands)
+
+        # Explicit HEALTH_ENDPOINT overrides (env and config) are preserved.
+        env_override = "http://127.0.0.1:18080/custom/readiness"
+        self.commands.write_text("")
+        override_res = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            "--config",
+            str(standalone_conf),
+            HEALTH_ENDPOINT=env_override,
+            TEST_ALLOW_HEALTH_URL=env_override,
+            TEST_HEALTH_BODY='{"status":"ok"}\n',
+        )
+        self.assertEqual(override_res.returncode, 0, override_res.stdout + override_res.stderr)
+        self.assertIn("Health probe PASSED", override_res.stdout)
+        override_commands = self.commands.read_text()
+        self.assertIn(env_override, override_commands)
+        self.assertNotIn("http://127.0.0.1:8080/health/ready", override_commands)
+        self.assertNotIn("/api/v1/system/health", override_commands)
+
+        conf_override = "http://127.0.0.1:18081/conf/readiness"
+        override_conf = self.root / "override.conf"
+        override_conf.write_text(f'HEALTH_ENDPOINT="{conf_override}"\n')
+        self.commands.write_text("")
+        conf_res = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            "--config",
+            str(override_conf),
+            HEALTH_ENDPOINT=None,
+            TEST_ALLOW_HEALTH_URL=conf_override,
+            TEST_HEALTH_BODY=standalone_body,
+        )
+        self.assertEqual(conf_res.returncode, 0, conf_res.stdout + conf_res.stderr)
+        self.assertIn("Health probe PASSED", conf_res.stdout)
+        conf_commands = self.commands.read_text()
+        self.assertIn(conf_override, conf_commands)
+        self.assertNotIn("http://127.0.0.1:8080/health/ready", conf_commands)
+        self.assertNotIn("/api/v1/system/health", conf_commands)
 
     def test_prebuilt_release_without_external_assets_is_rejected_before_swap(self):
         for index, wasm in ((b"", b"wasm"), (b"<html>", b"")):

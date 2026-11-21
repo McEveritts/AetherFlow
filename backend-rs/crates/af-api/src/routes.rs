@@ -756,20 +756,56 @@ async fn health_live() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "alive" }))
 }
 
-async fn health_ready() -> Response {
-    let healthy = database_is_ready().await;
-    let (code, db_state, ready_state) = if healthy {
-        (StatusCode::OK, "ok", "ready")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadinessStatus {
+    http_status: StatusCode,
+    status: &'static str,
+    database: &'static str,
+    runner: &'static str,
+}
+
+fn privileged_runner_is_enabled() -> bool {
+    env::var("PRIVILEGED_RUNNER_ENABLED").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    })
+}
+
+async fn evaluate_readiness() -> ReadinessStatus {
+    let runner_enabled = privileged_runner_is_enabled();
+    let (db_ready, runner_state) = if runner_enabled {
+        let (db_ready, runner_ready) =
+            tokio::join!(database_is_ready(), af_runner::runner_is_ready());
+        (db_ready, if runner_ready { "ok" } else { "unreachable" })
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "unreachable", "not_ready")
+        (database_is_ready().await, "disabled")
     };
+
+    let ready = db_ready && (!runner_enabled || runner_state == "ok");
+    ReadinessStatus {
+        http_status: if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        status: if ready { "ready" } else { "not_ready" },
+        database: if db_ready { "ok" } else { "unreachable" },
+        runner: runner_state,
+    }
+}
+
+async fn health_ready() -> Response {
+    let readiness = evaluate_readiness().await;
     (
-        code,
+        readiness.http_status,
         Json(serde_json::json!({
-            "database": db_state,
+            "database": readiness.database,
+            "runner": readiness.runner,
             "redis": "disabled",
             "uptime": format!("{:.1}s", START_TIME.elapsed().as_secs_f64()),
-            "status": ready_state,
+            "status": readiness.status,
             "version": af_runner::af_release::runtime::runtime_identity().version,
         })),
     )
@@ -786,18 +822,15 @@ pub(crate) async fn database_is_ready() -> bool {
 }
 
 async fn authenticated_ready() -> Response {
-    let healthy = database_is_ready().await;
+    let readiness = evaluate_readiness().await;
     (
-        if healthy {
-            StatusCode::OK
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE
-        },
+        readiness.http_status,
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
             "service": "aetherflow-api",
-            "status": if healthy { "ready" } else { "not_ready" },
-            "database": if healthy { "ok" } else { "unreachable" },
+            "status": readiness.status,
+            "database": readiness.database,
+            "runner": readiness.runner,
         })),
     )
         .into_response()
@@ -4364,12 +4397,8 @@ async fn upsert_app_ingress_config(
 }
 
 fn apache_ingress_is_managed() -> bool {
-    env::var("PRIVILEGED_RUNNER_ENABLED").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "true" | "1" | "yes" | "on"
-        )
-    }) || af_services::mutators::resolve_config_path("/etc/apache2/sites-available").is_dir()
+    privileged_runner_is_enabled()
+        || af_services::mutators::resolve_config_path("/etc/apache2/sites-available").is_dir()
         || std::path::Path::new(&af_runner::runner_socket_path()).exists()
 }
 

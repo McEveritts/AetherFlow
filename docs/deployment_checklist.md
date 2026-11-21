@@ -46,6 +46,7 @@ Configure runtime variables in `/etc/aetherflow/aetherflow.env` (`chmod 0640`, o
 | `ALLOWED_CORS_ORIGIN` | Comma-separated allowed CORS origins | Localhost origins (`http://localhost:8080`, etc.) |
 | `COOKIE_SECURE` | Set `Secure` attribute on auth cookies | `true` in production HTTPS deployments |
 | `AETHERFLOW_RUNNER_SOCK` | Path to the privileged runner Unix socket | `/run/aetherflow/runner.sock` |
+| `PRIVILEGED_RUNNER_ENABLED` | Enables privileged runner readiness probing alongside SQLite (`1`, `true`, `yes`, `on`, trimmed and case-insensitive) | `false` (`aetherflow-api.service` sets `true`) |
 | `AF_GITHUB_TOKEN` | Optional token for GitHub release discovery (falls back to `GITHUB_TOKEN`, `GH_TOKEN`) | Unauthenticated public API requests |
 
 ### Generating Cryptographic Secrets
@@ -127,12 +128,16 @@ Expected `/health/ready` response:
 ```json
 {
   "database": "ok",
+  "runner": "ok",
   "redis": "disabled",
   "status": "ready",
   "uptime": "12.4s",
   "version": "v4.0.0"
 }
 ```
+
+- `runner` reports `"ok"`, `"unreachable"`, or `"disabled"`. With `PRIVILEGED_RUNNER_ENABLED` set to a trimmed, case-insensitive `1`, `true`, `yes`, or `on` (set to `true` in `aetherflow-api.service`), SQLite and the runner socket (`/v1/health`) are checked concurrently under two-second budgets; with it unset or false, `runner` is `"disabled"` and SQLite alone determines readiness.
+- If a required check fails, both `/health/ready` and `/api/v1/auth/ready` (`Cache-Control: no-store` on `200` and `503`) return HTTP `503` with `"status": "not_ready"`, while keeping `"database": "ok"` when only the runner is unreachable.
 
 ---
 
@@ -164,7 +169,7 @@ During every deployment:
 1. **Lock Serialization**: Acquires `/opt/AetherFlow/releases/.release.lock` and the shared `/run/aetherflow/.snapshot.lock` (or an explicitly configured, protected maintenance-lock path). The runtime lock anchor is root-owned; the service-owned data directory is not repurposed as a root lock anchor.
 2. **Stage 0 & 1**: Verifies `SHA256SUMS`, validates tar entries against symlink/traversal attacks, extracts into `/opt/AetherFlow/releases/<epoch>`, and verifies `aetherflow` service-user read/execute access.
 3. **Stage 1.5**: Captures a WAL-safe online SQLite backup (`sqlite3 --readonly .backup` / `rusqlite::backup::Backup`), verifies `PRAGMA integrity_check == ok`, and writes `data-snapshot/MANIFEST.sha256`.
-4. **Stage 2 & 3**: Atomically swaps `/opt/AetherFlow/current`, updates `/usr/local/bin/af`, restarts `aetherflow-runner.service` and `aetherflow-api.service`, and polls `http://127.0.0.1:8080/health/ready`.
+4. **Stage 2 & 3**: Atomically swaps `/opt/AetherFlow/current`, updates `/usr/local/bin/af`, restarts `aetherflow-runner.service` and `aetherflow-api.service`, and polls `http://127.0.0.1:8080/health/ready` (the default in `deploy/release-manager.conf`, `af-release`, and the standalone `deploy/release-manager.sh` fallback). Explicit `HEALTH_ENDPOINT` overrides are preserved; any override used for deployment must report full application readiness to supply an equivalent gate. Rollback preserves acceptance of older supported v4 readiness replies containing `{"status":"ready"}` or `{"status":"ok"}`.
 
 ---
 
@@ -173,9 +178,9 @@ During every deployment:
 ### Readiness and Dashboard Serving
 
 ```bash
-# 1. Deep readiness probe (verifies SQLite pool health)
+# 1. Deep readiness probe (verifies SQLite pool health and enabled privileged runner health)
 curl -fsS http://127.0.0.1:8080/health/ready
-# Expected JSON: {"database":"ok","redis":"disabled","status":"ready","uptime":"..."}
+# Expected JSON: {"database":"ok","runner":"ok","redis":"disabled","status":"ready","uptime":"...","version":"..."}
 
 # 2. Verify the WASM dashboard entry point is served.
 curl -fsSI http://127.0.0.1:8080/

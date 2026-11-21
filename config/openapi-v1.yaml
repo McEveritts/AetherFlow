@@ -4685,16 +4685,102 @@ paths:
     get:
       tags:
         - Auth
-      summary: Get ready
+      summary: Authenticated control-plane readiness probe
+      description: >-
+        Reports control-plane readiness for SQLite and, when `PRIVILEGED_RUNNER_ENABLED`
+        is set to a trimmed, case-insensitive `1`, `true`, `yes`, or `on`, the configured
+        privileged runner Unix socket health check (`/v1/health`). When
+        `PRIVILEGED_RUNNER_ENABLED` is unset or false, SQLite alone determines readiness
+        and `runner` reports `disabled`. SQLite and runner probes run concurrently under
+        bounded two-second timeouts. Always sets `Cache-Control: no-store` on both `200`
+        and `503` responses.
       responses:
         '200':
-          description: OK
+          description: 'Control plane is ready (`status: ready`).'
+          headers:
+            Cache-Control:
+              description: Always `no-store` to prevent caching readiness responses.
+              schema:
+                type: string
+                enum:
+                  - no-store
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: object
+                required:
+                  - service
+                  - status
+                  - database
+                  - runner
+                properties:
+                  service:
+                    type: string
+                    enum:
+                      - aetherflow-api
+                  status:
+                    type: string
+                    enum:
+                      - ready
+                  database:
+                    type: string
+                    enum:
+                      - ok
+                  runner:
+                    type: string
+                    enum:
+                      - ok
+                      - disabled
+              example:
+                service: aetherflow-api
+                status: ready
+                database: ok
+                runner: ok
         '401':
           $ref: '#/components/responses/Error'
+        '503':
+          description: 'One or more required readiness checks failed (`status: not_ready`).'
+          headers:
+            Cache-Control:
+              description: Always `no-store` to prevent caching readiness responses.
+              schema:
+                type: string
+                enum:
+                  - no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - service
+                  - status
+                  - database
+                  - runner
+                properties:
+                  service:
+                    type: string
+                    enum:
+                      - aetherflow-api
+                  status:
+                    type: string
+                    enum:
+                      - not_ready
+                  database:
+                    type: string
+                    enum:
+                      - ok
+                      - unreachable
+                  runner:
+                    type: string
+                    enum:
+                      - ok
+                      - unreachable
+                      - disabled
+              example:
+                service: aetherflow-api
+                status: not_ready
+                database: ok
+                runner: unreachable
       security:
         - cookieAuth: []
   /auth/refresh:

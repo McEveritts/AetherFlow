@@ -79,6 +79,7 @@
 | `PORT` | No | `8080` | Loopback HTTP/WS listen port |
 | `AF_MCBROWSER_ROOT` | No | `/var/lib/aetherflow/mcbrowser` | Private directory for Native McBrowser storage |
 | `AF_HEAL_AUTO_APPROVE` | No | `false` | Set `true` for autonomous service restart healing |
+| `PRIVILEGED_RUNNER_ENABLED` | No | `false` (`aetherflow-api.service` sets `true`) | Trimmed, case-insensitive `1`, `true`, `yes`, or `on` enables privileged runner readiness probing alongside SQLite |
 
 ### Managing the Control Plane Units
 
@@ -107,6 +108,7 @@ Expected response:
 ```json
 {
   "database": "ok",
+  "runner": "ok",
   "redis": "disabled",
   "status": "ready",
   "uptime": "1420.5s",
@@ -114,8 +116,11 @@ Expected response:
 }
 ```
 
+- `runner` reports `"ok"`, `"unreachable"`, or `"disabled"`. When `PRIVILEGED_RUNNER_ENABLED` is set to a trimmed, case-insensitive `1`, `true`, `yes`, or `on` (default in the packaged `aetherflow-api.service`), readiness probes SQLite and the configured privileged runner socket (`/v1/health`) concurrently under bounded two-second budgets. When `PRIVILEGED_RUNNER_ENABLED` is unset or false, `runner` reports `"disabled"` and SQLite alone determines readiness.
+- If any required check fails, both `GET /health/ready` and `GET /api/v1/auth/ready` (which sets `Cache-Control: no-store` on both `200` and `503`) return HTTP `503` with `"status": "not_ready"`. A healthy database still reports `"database": "ok"` when `"runner": "unreachable"`. Process liveness (`GET /health/live`) remains independent and returns HTTP `200`.
 - `version` is captured from the physical running executable on startup (not the mutable `/opt/AetherFlow/current` symlink).
 - `redis` reports `"disabled"` in v4.0.0 because JWT revocation and active session tracking are persisted directly in SQLite (`af-db`).
+- **Release Gate & `HEALTH_ENDPOINT` Overrides**: `deploy/release-manager.conf`, `af-release`, and the standalone `deploy/release-manager.sh` fallback all default `HEALTH_ENDPOINT` to `http://127.0.0.1:8080/health/ready`. Explicit `HEALTH_ENDPOINT` overrides are preserved; any override used for deployment must report full application readiness to supply an equivalent gate. During rollback, older supported v4 readiness payloads containing `{"status":"ready"}` or `{"status":"ok"}` remain accepted.
 
 ---
 

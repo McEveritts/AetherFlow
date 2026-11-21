@@ -30,7 +30,7 @@ Handles login, TOTP 2FA verification, OAuth2/OIDC handshakes, and Subdomain Gate
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/v1/auth/ready` | Authenticated readiness probe returning control-plane status and database health (unauthenticated probe: `/health/ready`). |
+| `GET` | `/api/v1/auth/ready` | Authenticated readiness probe returning control-plane status, SQLite `database` health, and privileged `runner` health (`ok`, `unreachable`, or `disabled`) with `Cache-Control: no-store` on both `200` (`status: "ready"`) and `503` (`status: "not_ready"`). Unauthenticated probe: `/health/ready`. |
 | `POST` | `/api/v1/public/auth/login` | Authenticates credentials and issues the JWT session + CSRF token. |
 | `POST` | `/api/v1/public/auth/mfa/verify` | Validates a 6-digit TOTP code or recovery code during login. |
 | `GET` | `/api/v1/public/auth/verify` | Perimeter SSO verification for Apache2 Subdomain Gateway (`X-Aetherflow-User` injection). Enforces active, unrevoked administrator sessions (rejecting revoked, expired, non-admin, or plugin-scoped tokens). |
@@ -40,6 +40,8 @@ Handles login, TOTP 2FA verification, OAuth2/OIDC handshakes, and Subdomain Gate
 | `POST` | `/api/v1/auth/logout` | Revokes the active JWT (`revoked_tokens`) and clears `aetherflow_session`. |
 
 > [!NOTE]
+> **Readiness Contract**: Both `GET /health/ready` and `GET /api/v1/auth/ready` include `"runner"` (`"ok"`, `"unreachable"`, or `"disabled"`) alongside existing fields and return HTTP `503` (`"status": "not_ready"`) if any required check fails, while keeping `"database": "ok"` when only the runner is unreachable. When `PRIVILEGED_RUNNER_ENABLED` is set to a trimmed, case-insensitive `1`, `true`, `yes`, or `on`, SQLite and the runner socket (`/v1/health`) are probed concurrently within two-second budgets; when unset or false, `"runner"` reports `"disabled"` and SQLite determines readiness. `GET /api/v1/auth/ready` sets `Cache-Control: no-store` on both `200` and `503`, and neither route exposes diagnostic addresses or runner error bodies. Deployment release managers default `HEALTH_ENDPOINT` to `http://127.0.0.1:8080/health/ready`; explicit `HEALTH_ENDPOINT` overrides are preserved and must report full application readiness to provide an equivalent deployment gate.
+>
 > Protected external application requests routed through the Rust gateway require an active administrator session or rate-limited Basic authentication. Administrators enrolled in TOTP use a verified session. Apache-authenticated vhosts and applications with native logins retain their respective policies. See the [external subdomain authentication details](security.md).
 
 ### 2. System, Services & Self-Update (`/api/v1/auth`, `/api/v1/admin`)

@@ -6323,6 +6323,12 @@ async fn post_runner_json<T: Serialize + ?Sized>(
         {
             return Err(LifecycleBusy.into());
         }
+        if endpoint == "/v1/health" && !resp.status().is_success() {
+            anyhow::bail!(
+                "runner health probe returned non-success status {}",
+                resp.status()
+            );
+        }
         let collected = resp.into_body().collect().await?.to_bytes();
         let decoded: RunnerResponse = serde_json::from_slice(&collected)?;
         Ok::<RunnerResponse, anyhow::Error>(decoded)
