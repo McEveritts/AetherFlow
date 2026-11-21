@@ -2683,20 +2683,140 @@ fn map_pending_action_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingActi
     })
 }
 
-pub fn queue_action(classification: &str, source: &str, action: &str, reason: &str) -> (i64, bool) {
-    if classification == "safe" {
-        return (0, false);
+pub const MAX_PENDING_ACTIONS: i64 = 50;
+
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueActionOutcome {
+    Queued { action_id: i64 },
+    SkippedSafe,
+    AlreadyPending,
+    CapacityReached { pending_count: i64, limit: i64 },
+    DbError(String),
+}
+
+impl QueueActionOutcome {
+    pub fn queued_action_id(&self) -> Option<i64> {
+        match *self {
+            Self::Queued { action_id } if action_id > 0 => Some(action_id),
+            _ => None,
+        }
     }
-    let Ok(conn) = get_conn() else {
-        return (0, true);
+}
+
+pub fn count_pending_actions() -> anyhow::Result<i64> {
+    let conn = get_read_conn()?;
+    count_pending_actions_with_connection(&conn)
+}
+
+fn count_pending_actions_with_connection(conn: &Connection) -> anyhow::Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM pending_actions WHERE COALESCE(status, 'pending') = 'pending'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?)
+}
+
+pub fn queue_action(
+    classification: &str,
+    source: &str,
+    action: &str,
+    reason: &str,
+) -> QueueActionOutcome {
+    queue_action_inner(classification, source, action, reason, false)
+}
+
+pub fn queue_action_if_not_pending(
+    classification: &str,
+    source: &str,
+    action: &str,
+    reason: &str,
+) -> QueueActionOutcome {
+    queue_action_inner(classification, source, action, reason, true)
+}
+
+fn queue_action_inner(
+    classification: &str,
+    source: &str,
+    action: &str,
+    reason: &str,
+    deduplicate_pending: bool,
+) -> QueueActionOutcome {
+    if classification == "safe" {
+        return QueueActionOutcome::SkippedSafe;
+    }
+    let mut conn = match get_conn() {
+        Ok(conn) => conn,
+        Err(err) => return QueueActionOutcome::DbError(err.to_string()),
     };
-    match conn.execute(
+    queue_action_with_connection(
+        &mut conn,
+        classification,
+        source,
+        action,
+        reason,
+        deduplicate_pending,
+    )
+}
+
+fn queue_action_with_connection(
+    conn: &mut Connection,
+    classification: &str,
+    source: &str,
+    action: &str,
+    reason: &str,
+    deduplicate_pending: bool,
+) -> QueueActionOutcome {
+    if classification == "safe" {
+        return QueueActionOutcome::SkippedSafe;
+    }
+    // Invariant: pending count, optional dedup check, and insert share one IMMEDIATE
+    // transaction so competing writers cannot bypass MAX_PENDING_ACTIONS, and Queued
+    // is returned only after commit confirms a positive row ID.
+    let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(err) => return QueueActionOutcome::DbError(err.to_string()),
+    };
+    if deduplicate_pending {
+        let already_pending = match tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_actions WHERE COALESCE(status, 'pending') = 'pending' AND source = ?1 AND action = ?2)",
+            params![source, action],
+            |r| r.get::<_, bool>(0),
+        ) {
+            Ok(exists) => exists,
+            Err(err) => return QueueActionOutcome::DbError(err.to_string()),
+        };
+        if already_pending {
+            return QueueActionOutcome::AlreadyPending;
+        }
+    }
+    let pending_count = match count_pending_actions_with_connection(&tx) {
+        Ok(count) => count,
+        Err(err) => return QueueActionOutcome::DbError(err.to_string()),
+    };
+    if pending_count >= MAX_PENDING_ACTIONS {
+        return QueueActionOutcome::CapacityReached {
+            pending_count,
+            limit: MAX_PENDING_ACTIONS,
+        };
+    }
+    let inserted = match tx.execute(
         "INSERT INTO pending_actions (classification, source, action, reason, status) VALUES (?1, ?2, ?3, ?4, 'pending')",
         params![classification, source, action, reason],
     ) {
-        Ok(_) => (conn.last_insert_rowid(), true),
-        Err(_) => (0, true),
+        Ok(rows) => rows,
+        Err(err) => return QueueActionOutcome::DbError(err.to_string()),
+    };
+    let action_id = tx.last_insert_rowid();
+    if inserted != 1 || action_id <= 0 {
+        return QueueActionOutcome::DbError(format!(
+            "pending_actions insert did not yield a positive row id (rows={inserted}, id={action_id})"
+        ));
     }
+    if let Err(err) = tx.commit() {
+        return QueueActionOutcome::DbError(err.to_string());
+    }
+    QueueActionOutcome::Queued { action_id }
 }
 
 pub fn mark_action_executed(action_id: i64, execution_log: &str) {
@@ -4289,6 +4409,263 @@ mod pending_action_query_tests {
                 .status,
             "executed"
         );
+    }
+
+    #[test]
+    fn queue_action_enforces_typed_outcomes_hidden_pending_cap_and_write_rejection() {
+        let mut conn = connection();
+
+        assert_eq!(
+            queue_action_with_connection(&mut conn, "safe", "FlowAI", "noop", "safe check", false),
+            QueueActionOutcome::SkippedSafe
+        );
+        assert_eq!(count_pending_actions_with_connection(&conn).unwrap(), 0);
+
+        // Seed 50 older pending rows (including NULL status and mixed sources) hidden
+        // behind 150 newer resolved rows so unfiltered LIMIT 100 scans miss them.
+        for idx in 1..=MAX_PENDING_ACTIONS {
+            let status = if idx == 1 { None } else { Some("pending") };
+            let source = if idx % 2 == 0 { "af-heal" } else { "FlowAI" };
+            conn.execute(
+                "INSERT INTO pending_actions (id, classification, source, action, reason, status, created_at) \
+                 VALUES (?1, 'warn', ?2, ?3, 'older pending', ?4, '2020-01-01')",
+                params![idx, source, format!("Restart svc-{idx}"), status],
+            )
+            .unwrap();
+        }
+        for idx in 1..=150i64 {
+            conn.execute(
+                "INSERT INTO pending_actions (id, classification, source, action, reason, status, created_at) \
+                 VALUES (?1, 'warn', 'FlowAI', 'Restart resolved', 'recent history', 'executed', '2026-01-01')",
+                params![1000 + idx],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            count_pending_actions_with_connection(&conn).unwrap(),
+            MAX_PENDING_ACTIONS
+        );
+        assert_eq!(
+            queue_action_with_connection(
+                &mut conn,
+                "warn",
+                "FlowAI",
+                "Restart apache2",
+                "cap blocked",
+                false
+            ),
+            QueueActionOutcome::CapacityReached {
+                pending_count: MAX_PENDING_ACTIONS,
+                limit: MAX_PENDING_ACTIONS,
+            }
+        );
+
+        // Resolving one pending row frees exactly one slot and preserves history rows.
+        conn.execute(
+            "UPDATE pending_actions SET status = 'executed' WHERE id = 2",
+            [],
+        )
+        .unwrap();
+        let queued = queue_action_with_connection(
+            &mut conn,
+            "warn",
+            "af-heal",
+            "systemctl restart fixture-main",
+            "heal",
+            true,
+        );
+        let action_id = queued.queued_action_id().expect("expected positive row id");
+        assert!(action_id > 0);
+        assert_eq!(
+            queue_action_with_connection(
+                &mut conn,
+                "warn",
+                "af-heal",
+                "systemctl restart fixture-main",
+                "heal dup",
+                true
+            ),
+            QueueActionOutcome::AlreadyPending
+        );
+        assert_eq!(
+            queue_action_with_connection(
+                &mut conn,
+                "warn",
+                "FlowAI",
+                "Restart apache2",
+                "cap restored",
+                false
+            ),
+            QueueActionOutcome::CapacityReached {
+                pending_count: MAX_PENDING_ACTIONS,
+                limit: MAX_PENDING_ACTIONS,
+            }
+        );
+
+        // Free a slot, then reject writes via trigger and verify DbError leaves zero phantom rows.
+        conn.execute(
+            "UPDATE pending_actions SET status = 'rejected' WHERE id = 3",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_pending_insert BEFORE INSERT ON pending_actions \
+             BEGIN SELECT RAISE(ABORT, 'simulated write rejection'); END;",
+        )
+        .unwrap();
+        let rejected = queue_action_with_connection(
+            &mut conn,
+            "warn",
+            "FlowAI",
+            "Restart apache2",
+            "rejected write",
+            false,
+        );
+        assert!(matches!(rejected, QueueActionOutcome::DbError(_)));
+        assert_eq!(rejected.queued_action_id(), None);
+        assert_eq!(
+            count_pending_actions_with_connection(&conn).unwrap(),
+            MAX_PENDING_ACTIONS - 1
+        );
+        conn.execute_batch("DROP TRIGGER reject_pending_insert;")
+            .unwrap();
+
+        // Read-only connection mode also fails cleanly with DbError.
+        conn.execute_batch("PRAGMA query_only = ON;").unwrap();
+        let ro_err = queue_action_with_connection(
+            &mut conn,
+            "warn",
+            "FlowAI",
+            "Restart apache2",
+            "read only",
+            false,
+        );
+        assert!(matches!(ro_err, QueueActionOutcome::DbError(_)));
+        assert_eq!(ro_err.queued_action_id(), None);
+    }
+
+    #[test]
+    fn queue_action_immediate_transaction_enforces_cap_across_competing_writers() {
+        let dir = env::temp_dir().join(format!("af-db-pending-cap-{}", rand::random::<u64>()));
+        fs::create_dir_all(&dir).unwrap();
+        let db_file = dir.join("pending-cap.sqlite");
+
+        {
+            let setup = Connection::open(&db_file).unwrap();
+            setup
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL;
+                     PRAGMA busy_timeout=5000;
+                     CREATE TABLE pending_actions (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         classification TEXT DEFAULT 'warn',
+                         source TEXT DEFAULT '',
+                         action TEXT DEFAULT '',
+                         reason TEXT DEFAULT '',
+                         status TEXT DEFAULT 'pending',
+                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                         resolved_at DATETIME,
+                         resolved_by TEXT,
+                         execution_log TEXT
+                     );",
+                )
+                .unwrap();
+            for idx in 1..=(MAX_PENDING_ACTIONS - 3) {
+                setup
+                    .execute(
+                        "INSERT INTO pending_actions (classification, source, action, reason, status, created_at) \
+                         VALUES ('warn', 'FlowAI', ?1, 'seed', 'pending', '2020-01-01')",
+                        params![format!("Restart seed-{idx}")],
+                    )
+                    .unwrap();
+            }
+            for idx in 1..=120i64 {
+                setup
+                    .execute(
+                        "INSERT INTO pending_actions (classification, source, action, reason, status, created_at) \
+                         VALUES ('warn', 'FlowAI', ?1, 'resolved', 'executed', '2026-01-01')",
+                        params![format!("Restart done-{idx}")],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let workers = 12usize;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let mut handles = Vec::with_capacity(workers);
+        for idx in 0..workers {
+            let db_path = db_file.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut conn = Connection::open(&db_path).unwrap();
+                conn.busy_timeout(Duration::from_secs(5)).unwrap();
+                barrier.wait();
+                queue_action_with_connection(
+                    &mut conn,
+                    "warn",
+                    if idx % 2 == 0 { "FlowAI" } else { "af-heal" },
+                    &format!("Restart worker-{idx}"),
+                    "concurrent cap test",
+                    false,
+                )
+            }));
+        }
+
+        let mut queued_ids = Vec::new();
+        let mut capacity_hits = 0usize;
+        for handle in handles {
+            match handle.join().unwrap() {
+                QueueActionOutcome::Queued { action_id } => {
+                    assert!(action_id > 0);
+                    queued_ids.push(action_id);
+                }
+                QueueActionOutcome::CapacityReached {
+                    pending_count,
+                    limit,
+                } => {
+                    assert_eq!(pending_count, MAX_PENDING_ACTIONS);
+                    assert_eq!(limit, MAX_PENDING_ACTIONS);
+                    capacity_hits += 1;
+                }
+                other => panic!("unexpected competing writer outcome: {other:?}"),
+            }
+        }
+        queued_ids.sort_unstable();
+        queued_ids.dedup();
+        assert_eq!(queued_ids.len(), 3);
+        assert_eq!(capacity_hits, workers - 3);
+
+        // Verify locked-writer timeout returns DbError without advertising a row ID.
+        let locker = Connection::open(&db_file).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let mut contender = Connection::open(&db_file).unwrap();
+        contender.busy_timeout(Duration::from_millis(50)).unwrap();
+        let busy = queue_action_with_connection(
+            &mut contender,
+            "warn",
+            "FlowAI",
+            "Restart locked",
+            "locked test",
+            false,
+        );
+        assert!(matches!(busy, QueueActionOutcome::DbError(_)));
+        assert_eq!(busy.queued_action_id(), None);
+        locker.execute_batch("ROLLBACK;").unwrap();
+
+        let verify = Connection::open(&db_file).unwrap();
+        assert_eq!(
+            count_pending_actions_with_connection(&verify).unwrap(),
+            MAX_PENDING_ACTIONS
+        );
+        let (_, history_total) =
+            query_pending_actions_with_connection(&verify, "executed", 10, 0).unwrap();
+        assert_eq!(history_total, 120);
+
+        drop(verify);
+        drop(contender);
+        drop(locker);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

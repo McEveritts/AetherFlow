@@ -332,9 +332,10 @@ impl Fixture {
     }
 
     fn queue_action(&self, action: &str, classification: &str) -> i64 {
-        let (id, queued) = af_db::queue_action(classification, "FlowAI", action, "fixture test");
-        assert!(queued && id > 0);
-        id
+        match af_db::queue_action(classification, "FlowAI", action, "fixture test") {
+            af_db::QueueActionOutcome::Queued { action_id } if action_id > 0 => action_id,
+            other => panic!("expected committed pending action id, got {other:?}"),
+        }
     }
 }
 

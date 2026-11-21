@@ -486,28 +486,41 @@ fn notify_all_admin_users(level: &str, title: &str, message: &str) {
     }
 }
 
-fn queue_pending_heal_restart_dedup(unit: &str, display_name: &str) -> bool {
+fn queue_pending_heal_restart_dedup(unit: &str, display_name: &str) -> Option<i64> {
     let action_cmd = format!("systemctl restart {unit}");
-    let already_pending = af_db::get_conn()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pending_actions WHERE status = 'pending' AND source = 'af-heal' AND action = ?1)",
-                params![action_cmd],
-                |r| r.get::<_, bool>(0),
-            )
-            .ok()
-        })
-        .unwrap_or(false);
-    if already_pending {
-        return false;
-    }
     let reason = format!(
         "Service {} ({}) reported unhealthy; approve supervised systemd restart.",
         display_name, unit
     );
-    let (action_id, _) = af_db::queue_action("warn", "af-heal", &action_cmd, &reason);
-    action_id > 0
+    // Invariant: emit queued admin notifications only after SQLite commits a positive row ID.
+    match af_db::queue_action_if_not_pending("warn", "af-heal", &action_cmd, &reason) {
+        af_db::QueueActionOutcome::Queued { action_id } if action_id > 0 => Some(action_id),
+        af_db::QueueActionOutcome::CapacityReached {
+            pending_count,
+            limit,
+        } => {
+            tracing::warn!(
+                unit = %unit,
+                service = %display_name,
+                pending_count,
+                limit,
+                "af-heal: skipped queueing restart approval because pending_actions cap was reached"
+            );
+            None
+        }
+        af_db::QueueActionOutcome::DbError(error) => {
+            tracing::warn!(
+                unit = %unit,
+                service = %display_name,
+                %error,
+                "af-heal: failed to persist pending restart action; suppressing queued notification"
+            );
+            None
+        }
+        af_db::QueueActionOutcome::AlreadyPending
+        | af_db::QueueActionOutcome::SkippedSafe
+        | af_db::QueueActionOutcome::Queued { .. } => None,
+    }
 }
 
 async fn perform_heal_check() {
@@ -610,8 +623,9 @@ async fn perform_heal_check() {
         }
 
         if !auto_approve {
-            if queue_pending_heal_restart_dedup(&unit, &display_name) {
+            if let Some(action_id) = queue_pending_heal_restart_dedup(&unit, &display_name) {
                 tracing::warn!(
+                    action_id,
                     unit = %unit,
                     service = %display_name,
                     "af-heal: queued pending restart action (AF_HEAL_AUTO_APPROVE=false)"

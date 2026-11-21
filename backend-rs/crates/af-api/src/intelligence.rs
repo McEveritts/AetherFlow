@@ -1901,21 +1901,15 @@ async fn run_chat_session(
 
     if is_admin {
         if let Some(mut proposal) = extract_proposed_action(&reply_text, &message) {
-            let pending_flow_ai = af_db::list_pending_actions(100, 0)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|r| r.status == "pending" && r.source == "FlowAI")
-                        .count()
-                })
-                .unwrap_or(0);
-            if pending_flow_ai < 50 {
-                let (action_id, needs_approval) = af_db::queue_action(
-                    &proposal.danger_level,
-                    "FlowAI",
-                    &proposal.title,
-                    &proposal.description,
-                );
-                if needs_approval {
+            // Invariant: only advertise a proposal or record its audit event after
+            // SQLite commits a positive pending_actions row ID.
+            match af_db::queue_action(
+                &proposal.danger_level,
+                "FlowAI",
+                &proposal.title,
+                &proposal.description,
+            ) {
+                af_db::QueueActionOutcome::Queued { action_id } if action_id > 0 => {
                     proposal.action_id = action_id;
                     let (uid, uname) = user
                         .map(|u| (u.user_id, u.username))
@@ -1939,6 +1933,27 @@ async fn run_chat_session(
                     }))
                     .into_response();
                 }
+                af_db::QueueActionOutcome::CapacityReached {
+                    pending_count,
+                    limit,
+                } => {
+                    tracing::warn!(
+                        pending_count,
+                        limit,
+                        title = %proposal.title,
+                        "FlowAI proposed action skipped: Approval Inbox pending cap reached"
+                    );
+                }
+                af_db::QueueActionOutcome::DbError(error) => {
+                    tracing::warn!(
+                        %error,
+                        title = %proposal.title,
+                        "FlowAI proposed action persistence failed; returning plain chat reply"
+                    );
+                }
+                af_db::QueueActionOutcome::SkippedSafe
+                | af_db::QueueActionOutcome::AlreadyPending
+                | af_db::QueueActionOutcome::Queued { .. } => {}
             }
         }
     }
@@ -7701,6 +7716,214 @@ mod tests {
             extract_proposed_action("You should stop redis immediately.", "cache issue")
                 .expect("affirmative stop proposal");
         assert_eq!(valkey_action.title, "Stop valkey");
+    }
+
+    #[tokio::test]
+    async fn flowai_chat_only_advertises_committed_proposals_and_recovers_plain_reply_on_queue_failure(
+    ) {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        super::audit_tests::init_ai_test_settings();
+
+        let reply_msg = "Logs show a wedged worker. Please restart apache to recover.";
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || async move {
+                axum::Json(serde_json::json!({
+                    "choices": [{ "message": { "content": reply_msg } }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "UPDATE settings SET ollama_endpoint = ?1 WHERE id = 1",
+                [endpoint.as_str()],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM pending_actions", []).unwrap();
+            conn.execute(
+                "DELETE FROM admin_audit_log WHERE action = 'ai_action_proposed'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".into(),
+            role: "admin".into(),
+            jti: "jti-admin".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let non_admin = AuthUser {
+            user_id: 2,
+            username: "viewer".into(),
+            role: "user".into(),
+            jti: "jti-viewer".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+
+        let parse_body = |resp: Response| async move {
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            (status, json)
+        };
+
+        // 1. Non-admin users receive plain chat replies without queueing proposals.
+        let (st, body) = parse_body(
+            run_chat_session(
+                Some(non_admin),
+                "127.0.0.1",
+                "test",
+                "",
+                "fixture-installed-model",
+                "localai",
+                vec![],
+                "help with apache".to_string(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["reply"], reply_msg);
+        assert!(body.get("proposed_action").is_none());
+        assert_eq!(af_db::count_pending_actions().unwrap(), 0);
+
+        // 2. Admin receives a committed positive row ID and matching audit entry.
+        let (st, body) = parse_body(
+            run_chat_session(
+                Some(admin.clone()),
+                "127.0.0.1",
+                "test",
+                "",
+                "fixture-installed-model",
+                "localai",
+                vec![],
+                "help with apache".to_string(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["reply"], reply_msg);
+        let action_id = body["proposed_action"]["action_id"].as_i64().unwrap();
+        assert!(action_id > 0);
+        assert_eq!(body["proposed_action"]["title"], "Restart apache2");
+        assert_eq!(body["proposed_action"]["danger_level"], "warn");
+        let persisted = af_db::get_pending_action_by_id(action_id)
+            .unwrap()
+            .expect("committed pending_actions row");
+        assert_eq!(persisted.status, "pending");
+        assert_eq!(persisted.source, "FlowAI");
+
+        let audit_count = || -> i64 {
+            af_db::get_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM admin_audit_log WHERE action = 'ai_action_proposed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(audit_count(), 1);
+
+        // 3. Hidden older pending rows reaching the 50-pending cap suppress proposals
+        //    and return a recoverable plain chat reply.
+        {
+            let conn = af_db::get_conn().unwrap();
+            for idx in 1..af_db::MAX_PENDING_ACTIONS {
+                conn.execute(
+                    "INSERT INTO pending_actions (classification, source, action, reason, status, created_at) \
+                     VALUES ('warn', 'FlowAI', ?1, 'older pending', 'pending', '2020-01-01')",
+                    [format!("Restart old-{idx}")],
+                )
+                .unwrap();
+            }
+            for idx in 1..=120i64 {
+                conn.execute(
+                    "INSERT INTO pending_actions (classification, source, action, reason, status, created_at) \
+                     VALUES ('warn', 'FlowAI', ?1, 'recent executed', 'executed', '2026-01-01')",
+                    [format!("Restart done-{idx}")],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            af_db::count_pending_actions().unwrap(),
+            af_db::MAX_PENDING_ACTIONS
+        );
+        let (st, body) = parse_body(
+            run_chat_session(
+                Some(admin.clone()),
+                "127.0.0.1",
+                "test",
+                "",
+                "fixture-installed-model",
+                "localai",
+                vec![],
+                "help with apache".to_string(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["reply"], reply_msg);
+        assert!(body.get("proposed_action").is_none());
+        assert_eq!(
+            af_db::count_pending_actions().unwrap(),
+            af_db::MAX_PENDING_ACTIONS
+        );
+        assert_eq!(audit_count(), 1);
+
+        // 4. DB write rejection returns a plain chat reply with no phantom proposal or audit.
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM pending_actions", []).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_flowai_pending_insert BEFORE INSERT ON pending_actions \
+                 BEGIN SELECT RAISE(ABORT, 'fixture write rejection'); END;",
+            )
+            .unwrap();
+        }
+        let (st, body) = parse_body(
+            run_chat_session(
+                Some(admin),
+                "127.0.0.1",
+                "test",
+                "",
+                "fixture-installed-model",
+                "localai",
+                vec![],
+                "help with apache".to_string(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["reply"], reply_msg);
+        assert!(body.get("proposed_action").is_none());
+        assert_eq!(af_db::count_pending_actions().unwrap(), 0);
+        assert_eq!(audit_count(), 1);
+
+        af_db::get_conn()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_flowai_pending_insert;")
+            .unwrap();
+        server.abort();
     }
 
     #[tokio::test]

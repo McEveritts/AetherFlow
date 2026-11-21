@@ -4893,6 +4893,127 @@ fn test_heal_auto_approve_false_queues_deduplicated_action_and_notifies_all_admi
 }
 
 #[cfg(unix)]
+#[test]
+fn test_heal_suppresses_queued_notification_on_db_write_rejection_and_capacity() {
+    use crate::inventory_regressions::{isolated, Fixture};
+    let name =
+        "workers::tests::test_heal_suppresses_queued_notification_on_db_write_rejection_and_capacity";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let db_path = fixture.root.join("heal-persist-guard.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &db_path);
+    }
+    env::remove_var("AF_HEAL_AUTO_APPROVE");
+    af_db::init_db().unwrap();
+
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute("DELETE FROM users", []).unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, role) VALUES (10, 'admin_a', 'x', 'admin'), (20, 'admin_b', 'x', 'admin')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fixture.write_packages(&[Fixture::package("fixture", "systemd", "fixture-main")]);
+    fixture.command(
+        "systemctl",
+        "printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\ncase \"$1 $2\" in 'is-active fixture-main') echo inactive; exit 3;; is-active*) echo active;; show*) printf 'LoadState=loaded\\nType=simple\\n';; *) exit 92;; esac\n",
+    );
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    *HEAL_STATES.lock().unwrap() = HashMap::new();
+
+    // 1. DB write rejection must suppress both pending row creation and queued notification.
+    af_db::get_conn()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_heal_pending_insert BEFORE INSERT ON pending_actions \
+             BEGIN SELECT RAISE(ABORT, 'fixture write rejection'); END;",
+        )
+        .unwrap();
+    runtime.block_on(perform_heal_check());
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(af_db::count_pending_actions().unwrap(), 0);
+        let notif_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notif_count, 0);
+        conn.execute_batch("DROP TRIGGER reject_heal_pending_insert;")
+            .unwrap();
+    }
+
+    // 2. Hidden older pending rows reaching the 50-pending cap suppress queueing and notification.
+    {
+        let conn = af_db::get_conn().unwrap();
+        for idx in 1..=af_db::MAX_PENDING_ACTIONS {
+            conn.execute(
+                "INSERT INTO pending_actions (classification, source, action, reason, status, created_at) \
+                 VALUES ('warn', 'FlowAI', ?1, 'older pending', 'pending', '2020-01-01')",
+                [format!("Restart old-{idx}")],
+            )
+            .unwrap();
+        }
+        for idx in 1..=120i64 {
+            conn.execute(
+                "INSERT INTO pending_actions (classification, source, action, reason, status, created_at) \
+                 VALUES ('warn', 'FlowAI', ?1, 'recent executed', 'executed', '2026-01-01')",
+                [format!("Restart done-{idx}")],
+            )
+            .unwrap();
+        }
+    }
+    runtime.block_on(perform_heal_check());
+    {
+        let conn = af_db::get_conn().unwrap();
+        let heal_pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_actions WHERE source = 'af-heal' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(heal_pending, 0);
+        assert_eq!(
+            af_db::count_pending_actions().unwrap(),
+            af_db::MAX_PENDING_ACTIONS
+        );
+        let notif_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notif_count, 0);
+
+        // 3. Resolving one pending row frees a slot; heal now commits a positive ID and notifies admins.
+        conn.execute(
+            "UPDATE pending_actions SET status = 'executed' WHERE id = (SELECT MIN(id) FROM pending_actions WHERE status = 'pending')",
+            [],
+        )
+        .unwrap();
+    }
+    runtime.block_on(perform_heal_check());
+    {
+        let conn = af_db::get_conn().unwrap();
+        let committed_id: i64 = conn
+            .query_row(
+                "SELECT id FROM pending_actions WHERE source = 'af-heal' AND action = 'systemctl restart fixture-main' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(committed_id > 0);
+        let notif_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notif_count, 2);
+    }
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn test_mediaflow_3yr_mtime_retention_sigpipe_large_stderr_0644_perms_and_intent_recovery() {
     let name = "workers::tests::test_mediaflow_3yr_mtime_retention_sigpipe_large_stderr_0644_perms_and_intent_recovery";

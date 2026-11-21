@@ -51,7 +51,7 @@ export const aiNativeLoopData = {
     },
     {
       title: "The Action Approval Inbox",
-      copy: "AI cannot arbitrarily mutate host state. Every proposed service restart, lock cleanup, or quota change is serialized into pending_actions for explicit administrator approval."
+      copy: "AI cannot arbitrarily mutate host state. Every proposed service start, stop, or restart action is serialized into pending_actions for explicit administrator approval."
     }
   ]
 };
