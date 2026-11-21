@@ -826,6 +826,120 @@ pub struct RunnerResponse {
     pub error: String,
 }
 
+/// Permitted loopback port range for AetherFlow plugin backends.
+pub const PLUGIN_PORT_RANGE_START: u16 = 21000;
+pub const PLUGIN_PORT_RANGE_END: u16 = 21999;
+
+/// Validates a plugin identifier (`^[a-z0-9][a-z0-9-_]{1,62}$`).
+pub fn is_valid_plugin_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    if !(2..=63).contains(&bytes.len()) {
+        return false;
+    }
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Returns the canonical transient systemd service unit name for a managed plugin backend.
+pub fn plugin_systemd_unit_name(plugin_id: &str) -> Option<String> {
+    if is_valid_plugin_id(plugin_id) {
+        Some(format!("aetherflow-plugin-{plugin_id}.service"))
+    } else {
+        None
+    }
+}
+
+/// Returns the canonical transient systemd service unit name for a one-shot plugin stop hook.
+pub fn plugin_stop_hook_unit_name(plugin_id: &str) -> Option<String> {
+    if is_valid_plugin_id(plugin_id) {
+        Some(format!("aetherflow-plugin-{plugin_id}-stop.service"))
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRunnerStartRequest {
+    pub plugin_id: String,
+    pub port: u16,
+    pub runtime_id: String,
+    pub api_base_url: String,
+    pub initial_token: String,
+}
+
+impl std::fmt::Debug for PluginRunnerStartRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRunnerStartRequest")
+            .field("plugin_id", &self.plugin_id)
+            .field("port", &self.port)
+            .field("runtime_id", &self.runtime_id)
+            .field("api_base_url", &self.api_base_url)
+            .field("initial_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRunnerStopRequest {
+    pub plugin_id: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default)]
+    pub api_base_url: String,
+    #[serde(default)]
+    pub run_stop_hook: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRunnerStatusRequest {
+    pub plugin_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRunnerTokenRotateRequest {
+    pub plugin_id: String,
+    pub runtime_id: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for PluginRunnerTokenRotateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRunnerTokenRotateRequest")
+            .field("plugin_id", &self.plugin_id)
+            .field("runtime_id", &self.runtime_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PluginRunnerStatusResponse {
+    pub plugin_id: String,
+    pub unit_name: String,
+    pub active: bool,
+    #[serde(default)]
+    pub sub_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn normalize_path_for_comparison(path: &std::path::Path) -> String {
     let raw = path.to_string_lossy().replace('\\', "/");
@@ -2138,6 +2252,43 @@ mod tests {
             r#"{"app_name":"sonarr","vhost_content":"arbitrary Apache configuration"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_plugin_runner_ipc_models_reject_unknown_fields_and_redact_tokens() {
+        assert!(is_valid_plugin_id("telemetry-inspector"));
+        assert!(!is_valid_plugin_id("../escape"));
+        assert!(!is_valid_plugin_id("a"));
+        assert_eq!(
+            plugin_systemd_unit_name("telemetry-inspector").as_deref(),
+            Some("aetherflow-plugin-telemetry-inspector.service")
+        );
+        assert_eq!(
+            plugin_stop_hook_unit_name("telemetry-inspector").as_deref(),
+            Some("aetherflow-plugin-telemetry-inspector-stop.service")
+        );
+        assert!(plugin_systemd_unit_name("../bad").is_none());
+
+        // Reject arbitrary caller-supplied executable/path fields (`deny_unknown_fields`).
+        assert!(serde_json::from_str::<PluginRunnerStartRequest>(
+            r#"{"plugin_id":"demo","port":21000,"runtime_id":"00000000-0000-0000-0000-000000000000","api_base_url":"http://127.0.0.1:8080","initial_token":"t","executable":"/bin/sh"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<PluginRunnerStopRequest>(
+            r#"{"plugin_id":"demo","hook_path":"/tmp/evil.sh"}"#
+        )
+        .is_err());
+
+        let start = PluginRunnerStartRequest {
+            plugin_id: "demo".into(),
+            port: 21000,
+            runtime_id: "00000000-0000-0000-0000-000000000000".into(),
+            api_base_url: "http://127.0.0.1:8080".into(),
+            initial_token: "secret-start-token".into(),
+        };
+        let dbg = format!("{start:?}");
+        assert!(!dbg.contains("secret-start-token"));
+        assert!(dbg.contains("[REDACTED]"));
     }
 }
 

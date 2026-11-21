@@ -317,6 +317,9 @@ async fn async_main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             af_services::mutators::provision_all_installed_app_subdomains().await;
         });
+        tokio::spawn(async move {
+            plugins::reconcile_managed_plugins_on_startup().await;
+        });
     } else {
         tracing::info!(
             "Background mutating workers disabled via AETHERFLOW_DISABLE_BACKGROUND_WORKERS / AETHERFLOW_DISABLE_WORKERS / AETHERFLOW_E2E_ISOLATED"
@@ -356,6 +359,8 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::info!("shutdown signal received, draining connections");
     })
     .await?;
+
+    plugins::shutdown_managed_plugins().await;
 
     Ok(())
 }

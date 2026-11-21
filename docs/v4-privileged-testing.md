@@ -141,3 +141,21 @@ sudo env AETHERFLOW_DISPOSABLE_GUEST=1 \
   - Independently trusted custom database ownership is configured through `AETHERFLOW_TRUSTED_SQLITE_UID` / `AETHERFLOW_TRUSTED_SQLITE_GID`, not inferred from archive metadata. The guest ownership fixture explicitly supplies those server-owned values. The CLI WAL fixture copies the verified backup generation inside its isolated root rather than weakening the outside-root rejection.
   - Publication uses an executor-private, descriptor-pinned installation directory rather than a loose temporary filename in a service-writable directory. The SQLite identity regression substitutes a different regular database during connection opening, restores the original name before validation, and keeps an independent original connection open; the connection-specific VFS identity check must reject it.
   - **What crate tests do NOT replace:** Deterministic crate tests use mock/scripted `QuiescenceController` implementations and temporary directories; they do **not** exercise live `systemd` service unit stop/start transitions, Unix domain socket `SO_PEERCRED` enforcement on `aetherflow-api runner`, or full guest-level CLI-to-runner IPC. Those remain the exclusive domain of `scripts/v4_privileged_guest_drills.py` inside a disposable QEMU/systemd Linux guest VM.
+
+---
+
+## Disposable Real-Systemd Guest Validation: Managed Plugin Isolation
+
+Non-root crate tests verify runner manifest/path validation, `systemd-run` property construction, token redaction/atomic staging, fail-closed `503 PLUGIN_ISOLATION_UNAVAILABLE`, rollback, and runner IPC using harmless fixture shims. To validate live kernel and `systemd` enforcement in a disposable QEMU/systemd Linux guest (never on a live host):
+
+1. **Stage isolated roots & runner** inside `/var/tmp/aetherflow-v4-guest-drills*`:
+   - Start `aetherflow-api runner` as `root` with `AETHERFLOW_RUNNER_SOCK=/var/tmp/.../run/runner.sock`, `AETHERFLOW_PLUGINS_DIR=/var/tmp/.../plugins`, `DATA_DIR=/var/tmp/.../data`, `AETHERFLOW_PLUGIN_TOKENS_ROOT=/run/aetherflow-runner-plugin-tokens`.
+   - Start `aetherflow-api` as the unprivileged `aetherflow` user with `PRIVILEGED_RUNNER_ENABLED=true`, pointing `AETHERFLOW_RUNNER_SOCK` and `AETHERFLOW_PLUGINS_DIR` at the same staged paths and holding a `0600 aetherflow:aetherflow` sentinel file inside `DATA_DIR`.
+2. **Start a harmless managed plugin fixture** (such as `telemetry-inspector` or a fixture that reports `os.geteuid()`, `os.getegid()`, `os.getgroups()`, whether `DATA_DIR`/control-plane sentinel/runner socket can be opened, and whether `PLUGIN_STATE_DIR` is writable) via `POST /api/v1/admin/plugins/<id>/control` `{"action":"start"}`.
+3. **Assert real systemd/kernel isolation invariants**:
+   - `systemctl show -p ActiveState -p MainPID -p UID -p GID aetherflow-plugin-<id>.service` reports `ActiveState=active`, `UID != 0`, `UID != id -u aetherflow`, and `GID != id -g aetherflow`.
+   - The plugin's loopback `/healthz` and `/api/v1/auth/plugins/<id>/proxy/...` succeed on `127.0.0.1:<21000..21999>` and its scoped API call (`GET /api/v1/auth/system/metrics`) succeeds via `AETHERFLOW_PLUGIN_TOKEN_FILE=/run/aetherflow-plugin-token/runtime.token` (while `/proc/<MainPID>/cmdline` and `/proc/<MainPID>/environ` never contain the raw JWT).
+   - Inside the plugin process: reading/writing `DATA_DIR`, `/var/lib/aetherflow`, `/etc/aetherflow`, `/run/aetherflow/runner.sock`, and `/run/aetherflow-plugin-app` (writes) fails with `EACCES`/`ENOENT`/`EROFS`, while reading validated assets in `/run/aetherflow-plugin-app` and writing plugin-private state in `$PLUGIN_STATE_DIR` (`/var/lib/aetherflow-plugin-<id>`) succeeds.
+   - `POST /api/v1/admin/plugins/<id>/control` `{"action":"revoke_tokens"}` immediately rotates `/run/aetherflow-plugin-token/runtime.token` and invalidates the prior token.
+   - `POST /api/v1/admin/plugins/<id>/control` `{"action":"stop"}` runs `lifecycle_hooks.on_stop` inside the same isolated unit, terminates the entire cgroup (`KillMode=control-group`), removes `/run/aetherflow-runner-plugin-tokens/<id>`, and revokes tokens.
+   - Stopping `aetherflow-api runner` and invoking `start` fails closed with HTTP `503` (`PLUGIN_ISOLATION_UNAVAILABLE`) and spawns no process under the `aetherflow` user.

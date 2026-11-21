@@ -1,4 +1,13 @@
 use crate::auth::{api_error, jwt_secret_bytes, AuthUser};
+use af_models::{
+    plugin_systemd_unit_name, PluginRunnerStartRequest, PluginRunnerStatusRequest,
+    PluginRunnerStopRequest, PluginRunnerTokenRotateRequest, PLUGIN_PORT_RANGE_END,
+    PLUGIN_PORT_RANGE_START,
+};
+use af_runner::{
+    dispatch_plugin_start, dispatch_plugin_status, dispatch_plugin_stop,
+    dispatch_plugin_token_rotate, PluginRunnerError,
+};
 use axum::body::Body;
 use axum::extract::{Extension, Path, Request};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -7,7 +16,6 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
-use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -18,24 +26,18 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::process::{Child, Command};
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants & Security Policies
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PLUGIN_PORT_RANGE_START: u16 = 21000;
-const PLUGIN_PORT_RANGE_END: u16 = 21999;
 const MAX_PLUGIN_PROXY_BODY_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 const DEFAULT_PLUGIN_TOKEN_TTL_SECS: i64 = 300; // 5 minutes
 const MAX_PLUGIN_TOKEN_TTL_SECS: i64 = 900; // 15 minutes
 pub const PLUGIN_TOKEN_ISSUER: &str = "aetherflow-plugin";
 pub const PLUGIN_TOKEN_TYP: &str = "plugin";
 pub const PLUGIN_TOKEN_AUDIENCE: &str = "aetherflow-plugin-api";
-
-static PLUGIN_ID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9-_]{1,62}$").expect("valid regex"));
 
 const DEFAULT_DENY_ROUTE_PREFIXES: &[&str] = &[
     "/api/v1/admin",
@@ -235,16 +237,64 @@ fn default_plugin_aud() -> String {
     PLUGIN_TOKEN_AUDIENCE.to_string()
 }
 
-struct ActivePluginProcess {
-    child: Child,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginLifecycleError {
+    IsolationUnavailable(String),
+    InvalidInput(String),
+    Runtime(String),
+}
+
+impl std::fmt::Display for PluginLifecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IsolationUnavailable(msg) | Self::InvalidInput(msg) | Self::Runtime(msg) => {
+                f.write_str(msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for PluginLifecycleError {}
+
+impl From<PluginRunnerError> for PluginLifecycleError {
+    fn from(value: PluginRunnerError) -> Self {
+        match value {
+            PluginRunnerError::IsolationUnavailable(msg) => Self::IsolationUnavailable(msg),
+            PluginRunnerError::InvalidRequest(msg) => Self::InvalidInput(msg),
+            PluginRunnerError::Runtime(msg) => Self::Runtime(msg),
+        }
+    }
+}
+
+impl PluginLifecycleError {
+    pub fn into_api_response(self) -> Response {
+        match self {
+            Self::IsolationUnavailable(msg) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PLUGIN_ISOLATION_UNAVAILABLE",
+                msg,
+            ),
+            Self::InvalidInput(msg) => {
+                api_error(StatusCode::BAD_REQUEST, "INVALID_PLUGIN_CONFIG", msg)
+            }
+            Self::Runtime(msg) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PLUGIN_LIFECYCLE_ERROR",
+                msg,
+            ),
+        }
+    }
+}
+
+struct ActivePluginRuntime {
     port: u16,
-    pgid: Option<i32>,
-    token_file: Option<PathBuf>,
-    runtime_id: Option<Uuid>,
+    #[allow(dead_code)]
+    unit_name: String,
+    runtime_id: Uuid,
     monitor: Option<tokio::task::JoinHandle<()>>,
 }
 
-static ACTIVE_PROCESSES: Lazy<Mutex<HashMap<String, ActivePluginProcess>>> =
+static ACTIVE_PROCESSES: Lazy<Mutex<HashMap<String, ActivePluginRuntime>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static PLUGIN_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PLUGIN_HEALTH: Lazy<Mutex<HashMap<String, (u16, bool)>>> =
@@ -269,7 +319,7 @@ fn plugin_signing_key() -> Vec<u8> {
 }
 
 pub fn is_valid_plugin_id(id: &str) -> bool {
-    PLUGIN_ID_RE.is_match(id)
+    af_models::is_valid_plugin_id(id)
 }
 
 pub fn is_route_default_denied(path: &str) -> bool {
@@ -473,6 +523,16 @@ pub fn validate_relative_plugin_subpath(
     if trimmed.is_empty() {
         return Err("Empty path is not allowed".to_string());
     }
+    if trimmed.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '%' | ':' | ';' | '"' | '\'' | '\\' | '$' | '`')
+    }) {
+        return Err(format!(
+            "Path '{}' contains disallowed characters",
+            trimmed
+        ));
+    }
     let rel_path = StdPath::new(trimmed);
     if rel_path.is_absolute() {
         return Err(format!(
@@ -492,10 +552,25 @@ pub fn validate_relative_plugin_subpath(
         }
     }
 
-    let joined = plugin_dir.join(rel_path);
     let canon_root = fs::canonicalize(plugin_dir)
         .map_err(|e| format!("Failed to canonicalize plugin dir: {}", e))?;
+    let mut cursor = canon_root.clone();
+    for comp in rel_path.components() {
+        if let Component::Normal(seg) = comp {
+            cursor.push(seg);
+            if let Ok(sym_meta) = fs::symlink_metadata(&cursor) {
+                if sym_meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "Symlink '{}' inside plugin directory is forbidden",
+                        trimmed
+                    ));
+                }
+                check_trusted_ownership(&cursor)?;
+            }
+        }
+    }
 
+    let joined = plugin_dir.join(rel_path);
     if joined.exists() || fs::symlink_metadata(&joined).is_ok() {
         let sym_meta = fs::symlink_metadata(&joined)
             .map_err(|e| format!("Failed to inspect '{}': {}", trimmed, e))?;
@@ -576,15 +651,44 @@ pub fn validate_plugin_manifest(
 
     check_trusted_ownership(plugin_dir)?;
 
-    if raw.name.trim().is_empty() || raw.version.trim().is_empty() {
-        return Err("Plugin manifest requires non-empty 'name' and 'version'".to_string());
+    if raw.name.trim().is_empty()
+        || raw.version.trim().is_empty()
+        || raw.name.len() > 256
+        || raw.version.len() > 256
+        || raw.name.chars().any(char::is_control)
+        || raw.version.chars().any(char::is_control)
+    {
+        return Err(
+            "Plugin manifest requires non-empty, printable 'name' and 'version'".to_string(),
+        );
     }
 
-    if !raw.backend.health_path.starts_with('/') || raw.backend.health_path.contains("..") {
+    if !raw.backend.health_path.starts_with('/')
+        || raw.backend.health_path.contains("..")
+        || raw.backend.health_path.chars().any(char::is_control)
+    {
         return Err(format!(
             "Invalid backend.health_path '{}'",
             raw.backend.health_path
         ));
+    }
+
+    if !raw.backend.binary_name.trim().is_empty() {
+        let bin = raw.backend.binary_name.trim();
+        if bin.contains('/')
+            || bin.contains('\\')
+            || bin.contains("..")
+            || bin.chars().any(|c| {
+                c.is_whitespace()
+                    || c.is_control()
+                    || matches!(c, '%' | ':' | ';' | '"' | '\'' | '$' | '`')
+            })
+        {
+            return Err(format!("Invalid backend.binary_name '{}'", bin));
+        }
+    }
+    if !raw.backend.manifest_path.trim().is_empty() {
+        validate_relative_plugin_subpath(plugin_dir, &raw.backend.manifest_path, false)?;
     }
 
     for hook in [&raw.lifecycle_hooks.on_start, &raw.lifecycle_hooks.on_stop] {
@@ -959,11 +1063,10 @@ pub fn decode_and_verify_plugin_token(token: &str) -> Result<PluginTokenClaims, 
         let run = runtime_jti
             .split_once(':')
             .and_then(|(id, _)| Uuid::parse_str(id).ok());
-        let active = ACTIVE_PROCESSES.lock().ok().and_then(|processes| {
-            processes
-                .get(&claims.plugin_id)
-                .and_then(|process| process.runtime_id)
-        });
+        let active = ACTIVE_PROCESSES
+            .lock()
+            .ok()
+            .and_then(|processes| processes.get(&claims.plugin_id).map(|p| p.runtime_id));
         if run.is_none() || run != active {
             return Err("Managed plugin process is no longer active".to_string());
         }
@@ -1068,42 +1171,41 @@ fn resolve_plugin_executable(manifest: &ValidatedPluginManifest) -> Option<(Path
     None
 }
 
-fn configure_unprivileged_command(
-    cmd: &mut Command,
-    manifest: &ValidatedPluginManifest,
-    port: u16,
-) {
-    cmd.env_clear();
-    let safe_path = env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+fn resolve_api_base_url() -> Result<String, PluginLifecycleError> {
     let api_port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let api_base = env::var("AETHERFLOW_INTERNAL_API_URL")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", api_port));
+    let raw = env::var("AETHERFLOW_INTERNAL_API_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{api_port}"));
+    af_runner::plugins::validate_loopback_api_base_url(&raw).map_err(PluginLifecycleError::from)
+}
 
-    cmd.current_dir(&manifest.plugin_dir)
-        .kill_on_drop(true)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env("PATH", safe_path)
-        .env("PLUGIN_ID", &manifest.id)
-        .env("PLUGIN_NAME", &manifest.name)
-        .env("PLUGIN_VERSION", &manifest.version)
-        .env("PLUGIN_BIND_ADDR", "127.0.0.1")
-        .env("PLUGIN_PORT", port.to_string())
-        .env("PORT", port.to_string())
-        .env("AETHERFLOW_API_BASE_URL", api_base);
+fn privileged_runner_explicitly_disabled() -> bool {
+    env::var("PRIVILEGED_RUNNER_ENABLED")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+}
 
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-        unsafe {
-            cmd.pre_exec(|| {
-                // Ensure no new privileges can be acquired by plugin child processes
-                let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                Ok(())
-            });
-        }
+fn check_plugin_isolation_available() -> Result<(), PluginLifecycleError> {
+    if privileged_runner_explicitly_disabled() {
+        return Err(PluginLifecycleError::IsolationUnavailable(
+            "Managed plugin isolation is unavailable because PRIVILEGED_RUNNER_ENABLED is disabled. Enable PRIVILEGED_RUNNER_ENABLED=true with aetherflow-runner.service on a systemd-managed Linux host (af-api refuses to spawn managed plugins as the API OS user), or configure this plugin as an external backend."
+                .to_string(),
+        ));
     }
+    if !af_runner::is_runner_available() {
+        let sock = af_runner::resolve_runner_socket_path();
+        return Err(PluginLifecycleError::IsolationUnavailable(format!(
+            "Managed plugin isolation is unavailable because aetherflow-runner.service is not reachable at '{sock}'. Start aetherflow-runner.service on a systemd-managed Linux host (af-api refuses to spawn managed plugins as the API OS user), or configure this plugin as an external backend."
+        )));
+    }
+    Ok(())
 }
 
 pub async fn probe_plugin_health(port: u16, health_path: &str) -> Result<bool, String> {
@@ -1134,182 +1236,285 @@ pub async fn probe_plugin_health(port: u16, health_path: &str) -> Result<bool, S
     }
 }
 
-#[cfg(unix)]
-fn write_runtime_token(path: &StdPath, token: &str) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind, Write};
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-
-    let dir = path.parent().expect("runtime token has a parent");
-    fs::create_dir_all(dir.parent().expect("runtime directory has a parent"))?;
-    match fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    };
-    let metadata = fs::symlink_metadata(dir)?;
-    if !metadata.is_dir()
-        || metadata.mode() & 0o777 != 0o700
-        || metadata.uid() != unsafe { libc::geteuid() }
-    {
-        return Err(Error::new(
-            ErrorKind::PermissionDenied,
-            "Unsafe plugin token directory",
-        ));
-    }
-
-    let temp = dir.join(format!(".{}.tmp", Uuid::new_v4()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp)?;
-    let result = file
-        .write_all(token.as_bytes())
-        .and_then(|_| fs::rename(&temp, path));
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
-}
-
-#[cfg(not(unix))]
-fn write_runtime_token(_path: &StdPath, _token: &str) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "Private plugin token files require Unix",
-    ))
-}
-
-fn runtime_token_path(plugin_id: &str) -> Result<PathBuf, String> {
-    if !is_valid_plugin_id(plugin_id) {
-        return Err("Invalid plugin identifier".into());
-    }
-    let data_dir = env::var_os("DATA_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/aetherflow"));
-    let data_dir = std::path::absolute(data_dir).map_err(|error| error.to_string())?;
-    Ok(data_dir
-        .join("plugin-tokens")
-        .join(format!("{plugin_id}.token")))
-}
-
-// The lifecycle lock serializes publication of a new token with stop/restart.
+// The lifecycle lock serializes status reaping and token rotation with stop/restart.
 async fn monitor_plugin(
     manifest: ValidatedPluginManifest,
     port: u16,
-    token_file: PathBuf,
     runtime_id: Uuid,
     mut epoch: i64,
 ) {
     let mut rotated_at = std::time::Instant::now();
+    let mut consecutive_status_errors: u8 = 0;
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         let healthy = probe_plugin_health(port, &manifest.backend.health_path)
             .await
             .unwrap_or(false);
-        let lifecycle = PLUGIN_LIFECYCLE.lock().await;
-        let manifest = manifest.clone();
-        let token_file = token_file.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let _lifecycle = lifecycle;
-            let mut processes = ACTIVE_PROCESSES.lock().unwrap_or_else(|e| e.into_inner());
-            let process = processes.get_mut(&manifest.id)?;
-            if process.runtime_id != Some(runtime_id) {
-                return None;
-            }
-            if !matches!(process.child.try_wait(), Ok(None)) {
-                let pgid = process.pgid;
-                processes.remove(&manifest.id);
-                drop(processes);
-                #[cfg(unix)]
-                send_signal_to_process_group(pgid, libc::SIGKILL);
-                let _ = fs::remove_file(&token_file);
-                PLUGIN_HEALTH.lock().unwrap_or_else(|e| e.into_inner()).remove(&manifest.id);
-                update_registry_state(&manifest.id, false, port, "error", "Plugin process exited", true);
+        let _lifecycle = PLUGIN_LIFECYCLE.lock().await;
+        let still_current = ACTIVE_PROCESSES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&manifest.id)
+            .is_some_and(|runtime| runtime.runtime_id == runtime_id);
+        if !still_current {
+            return;
+        }
+
+        let status_req = PluginRunnerStatusRequest {
+            plugin_id: manifest.id.clone(),
+            runtime_id: Some(runtime_id.to_string()),
+        };
+        match dispatch_plugin_status(&status_req).await {
+            Ok(status) if !status.active => {
+                ACTIVE_PROCESSES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&manifest.id);
+                PLUGIN_HEALTH
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&manifest.id);
+                let _ = dispatch_plugin_stop(&PluginRunnerStopRequest {
+                    plugin_id: manifest.id.clone(),
+                    port,
+                    runtime_id: Some(runtime_id.to_string()),
+                    api_base_url: resolve_api_base_url()
+                        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
+                    run_stop_hook: false,
+                })
+                .await;
+                update_registry_state(
+                    &manifest.id,
+                    false,
+                    port,
+                    "error",
+                    "Plugin process exited",
+                    true,
+                );
                 revoke_all_tokens_for_plugin(&manifest.id);
-                return None;
+                return;
             }
-            drop(processes);
-            PLUGIN_HEALTH.lock().unwrap_or_else(|e| e.into_inner()).insert(manifest.id.clone(), (port, healthy));
-            let state = read_registry_state(&manifest.id);
-            if state.enabled && (state.token_epoch != epoch || rotated_at.elapsed() >= Duration::from_secs(180)) {
-                let result = sign_plugin_token(&manifest, state.token_epoch, None, Some(runtime_id))
-                    .and_then(|(token, _)| write_runtime_token(&token_file, &token).map_err(|error| error.to_string()));
-                match result {
-                    Ok(()) => return Some((state.token_epoch, std::time::Instant::now())),
-                    Err(error) => tracing::warn!(plugin = %manifest.id, %error, "Plugin token rotation failed"),
+            Ok(_) => {
+                consecutive_status_errors = 0;
+            }
+            Err(error) => {
+                consecutive_status_errors = consecutive_status_errors.saturating_add(1);
+                tracing::warn!(
+                    plugin = %manifest.id,
+                    %error,
+                    failures = consecutive_status_errors,
+                    "Managed plugin isolation status check failed"
+                );
+                if consecutive_status_errors >= 3 && !healthy {
+                    ACTIVE_PROCESSES
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&manifest.id);
+                    PLUGIN_HEALTH
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&manifest.id);
+                    update_registry_state(
+                        &manifest.id,
+                        false,
+                        port,
+                        "error",
+                        "Managed plugin isolation runner became unreachable",
+                        true,
+                    );
+                    revoke_all_tokens_for_plugin(&manifest.id);
+                    return;
+                }
+                continue;
+            }
+        }
+
+        PLUGIN_HEALTH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(manifest.id.clone(), (port, healthy));
+        let state = read_registry_state(&manifest.id);
+        if state.enabled
+            && (state.token_epoch != epoch || rotated_at.elapsed() >= Duration::from_secs(180))
+        {
+            match sign_plugin_token(&manifest, state.token_epoch, None, Some(runtime_id)) {
+                Ok((token, _)) => {
+                    let rotate_req = PluginRunnerTokenRotateRequest {
+                        plugin_id: manifest.id.clone(),
+                        runtime_id: runtime_id.to_string(),
+                        token,
+                    };
+                    match dispatch_plugin_token_rotate(&rotate_req).await {
+                        Ok(()) => {
+                            epoch = state.token_epoch;
+                            rotated_at = std::time::Instant::now();
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                plugin = %manifest.id,
+                                %error,
+                                "Isolated plugin token rotation failed"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        plugin = %manifest.id,
+                        %error,
+                        "Failed to sign rotated plugin token"
+                    );
                 }
             }
-            Some((epoch, rotated_at))
-        }).await;
-        match result {
-            Ok(Some((next_epoch, at))) => {
-                epoch = next_epoch;
-                rotated_at = at;
-            }
-            _ => return,
+        }
+    }
+}
+
+async fn stop_tracked_runtime_without_hook(plugin_id: &str) {
+    let maybe_runtime = ACTIVE_PROCESSES
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(plugin_id));
+    PLUGIN_HEALTH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(plugin_id);
+    if let Some(mut runtime) = maybe_runtime {
+        if let Some(monitor) = runtime.monitor.take() {
+            monitor.abort();
+            let _ = monitor.await;
+        }
+        if af_runner::is_runner_available() && !privileged_runner_explicitly_disabled() {
+            let _ = dispatch_plugin_stop(&PluginRunnerStopRequest {
+                plugin_id: plugin_id.to_string(),
+                port: runtime.port,
+                runtime_id: Some(runtime.runtime_id.to_string()),
+                api_base_url: resolve_api_base_url()
+                    .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
+                run_stop_hook: false,
+            })
+            .await;
         }
     }
 }
 
 pub async fn start_plugin_instance(
     manifest: &ValidatedPluginManifest,
-) -> Result<PluginRuntimeView, String> {
-    let resolved_exec = resolve_plugin_executable(manifest);
-    stop_running_process(&manifest.id).await;
+) -> Result<PluginRuntimeView, PluginLifecycleError> {
+    start_plugin_instance_with_port(manifest, None).await
+}
+
+pub async fn start_plugin_instance_with_port(
+    manifest: &ValidatedPluginManifest,
+    preferred_port: Option<u16>,
+) -> Result<PluginRuntimeView, PluginLifecycleError> {
+    let spawned_managed = resolve_plugin_executable(manifest).is_some();
     let existing = read_registry_state(&manifest.id);
-    let port = allocate_plugin_port(&manifest.id, existing.allocated_port)?;
+
+    if spawned_managed {
+        if let Err(err) = check_plugin_isolation_available() {
+            let msg = err.to_string();
+            update_registry_state(
+                &manifest.id,
+                false,
+                existing.allocated_port,
+                "error",
+                &msg,
+                false,
+            );
+            return Err(err);
+        }
+    }
+
+    stop_tracked_runtime_without_hook(&manifest.id).await;
+    let port = allocate_plugin_port(
+        &manifest.id,
+        preferred_port.unwrap_or(existing.allocated_port),
+    )
+    .map_err(PluginLifecycleError::Runtime)?;
+
+    let api_base_url = if spawned_managed {
+        resolve_api_base_url()?
+    } else {
+        String::new()
+    };
 
     let state = update_registry_state(&manifest.id, true, port, "running", "", true);
     if !state.enabled || state.allocated_port != port || state.token_epoch == existing.token_epoch {
-        return Err("Could not enable plugin registry entry".into());
+        return Err(PluginLifecycleError::Runtime(
+            "Could not enable plugin registry entry".into(),
+        ));
     }
-    let spawned_managed = resolved_exec.is_some();
-    if let Some((program, args)) = resolved_exec {
-        let outcome = (|| -> Result<(), String> {
-            let token_file = runtime_token_path(&manifest.id)?;
-            let runtime_id = Uuid::new_v4();
-            let (token, _) =
-                sign_plugin_token(manifest, state.token_epoch, None, Some(runtime_id))?;
-            write_runtime_token(&token_file, &token).map_err(|error| error.to_string())?;
-            let mut cmd = Command::new(&program);
-            cmd.args(&args);
-            configure_unprivileged_command(&mut cmd, manifest, port);
-            cmd.env("AETHERFLOW_PLUGIN_TOKEN_FILE", &token_file);
-            let child = cmd.spawn().map_err(|error| {
-                let _ = fs::remove_file(&token_file);
-                format!("Failed to spawn plugin binary: {error}")
-            })?;
-            let pgid = child.id().and_then(|id| i32::try_from(id).ok());
-            let monitor = tokio::spawn(monitor_plugin(
-                manifest.clone(),
-                port,
-                token_file.clone(),
-                runtime_id,
-                state.token_epoch,
-            ));
+
+    if spawned_managed {
+        let runtime_id = Uuid::new_v4();
+        let unit_name = plugin_systemd_unit_name(&manifest.id).ok_or_else(|| {
+            PluginLifecycleError::InvalidInput("Invalid plugin identifier".to_string())
+        })?;
+        let (initial_token, _) =
+            sign_plugin_token(manifest, state.token_epoch, None, Some(runtime_id))
+                .map_err(PluginLifecycleError::Runtime)?;
+
+        // Register runtime_id prior to launching the isolated systemd unit so immediate
+        // startup API calls with the scoped token validate cleanly.
+        ACTIVE_PROCESSES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                manifest.id.clone(),
+                ActivePluginRuntime {
+                    port,
+                    unit_name: unit_name.clone(),
+                    runtime_id,
+                    monitor: None,
+                },
+            );
+
+        let start_req = PluginRunnerStartRequest {
+            plugin_id: manifest.id.clone(),
+            port,
+            runtime_id: runtime_id.to_string(),
+            api_base_url,
+            initial_token,
+        };
+        if let Err(runner_err) = dispatch_plugin_start(&start_req).await {
             ACTIVE_PROCESSES
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    manifest.id.clone(),
-                    ActivePluginProcess {
-                        child,
-                        port,
-                        pgid,
-                        token_file: Some(token_file),
-                        runtime_id: Some(runtime_id),
-                        monitor: Some(monitor),
-                    },
-                );
-            Ok(())
-        })();
-        if let Err(error) = outcome {
-            update_registry_state(&manifest.id, false, port, "error", &error, true);
+                .remove(&manifest.id);
+            PLUGIN_HEALTH
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&manifest.id);
+            let lifecycle_err = PluginLifecycleError::from(runner_err);
+            let msg = lifecycle_err.to_string();
+            update_registry_state(
+                &manifest.id,
+                false,
+                existing.allocated_port,
+                "error",
+                &msg,
+                true,
+            );
             revoke_all_tokens_for_plugin(&manifest.id);
-            return Err(error);
+            return Err(lifecycle_err);
+        }
+
+        let monitor = tokio::spawn(monitor_plugin(
+            manifest.clone(),
+            port,
+            runtime_id,
+            state.token_epoch,
+        ));
+        let mut procs = ACTIVE_PROCESSES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = procs.get_mut(&manifest.id) {
+            if entry.runtime_id == runtime_id {
+                entry.monitor = Some(monitor);
+            } else {
+                monitor.abort();
+            }
+        } else {
+            monitor.abort();
         }
     }
 
@@ -1335,94 +1540,94 @@ pub async fn start_plugin_instance(
     Ok(build_runtime_view(manifest, &state, healthy))
 }
 
-fn send_signal_to_process_group(pgid: Option<i32>, sig: i32) {
-    #[cfg(unix)]
-    if let Some(pg) = pgid.filter(|&p| p > 0) {
-        unsafe {
-            libc::kill(-pg, sig);
+pub async fn stop_plugin_instance(
+    manifest: &ValidatedPluginManifest,
+) -> Result<PluginRuntimeView, PluginLifecycleError> {
+    let existing = read_registry_state(&manifest.id);
+    let has_managed_exec = resolve_plugin_executable(manifest).is_some();
+    let has_stop_hook = !manifest.lifecycle_hooks.on_stop.trim().is_empty();
+
+    // Pause the background monitor before running stop/on_stop, while preserving
+    // runtime_id in ACTIVE_PROCESSES so an isolated on_stop hook can still call the API.
+    let (active_monitor, active_runtime_id, active_port) = {
+        let mut procs = ACTIVE_PROCESSES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = procs.get_mut(&manifest.id) {
+            (entry.monitor.take(), Some(entry.runtime_id), Some(entry.port))
+        } else {
+            (None, None, None)
+        }
+    };
+    if let Some(monitor) = active_monitor {
+        monitor.abort();
+        let _ = monitor.await;
+    }
+
+    let needs_isolated_stop =
+        active_runtime_id.is_some() || has_stop_hook || (has_managed_exec && existing.enabled);
+
+    if needs_isolated_stop {
+        if let Err(err) = check_plugin_isolation_available() {
+            ACTIVE_PROCESSES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&manifest.id);
+            PLUGIN_HEALTH
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&manifest.id);
+            revoke_all_tokens_for_plugin(&manifest.id);
+            let msg = err.to_string();
+            let _ = update_registry_state(
+                &manifest.id,
+                false,
+                existing.allocated_port,
+                "error",
+                &msg,
+                true,
+            );
+            return Err(err);
+        }
+
+        let stop_req = PluginRunnerStopRequest {
+            plugin_id: manifest.id.clone(),
+            port: active_port.unwrap_or(existing.allocated_port),
+            runtime_id: active_runtime_id.map(|id| id.to_string()),
+            api_base_url: resolve_api_base_url()
+                .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
+            run_stop_hook: has_stop_hook,
+        };
+        if let Err(runner_err) = dispatch_plugin_stop(&stop_req).await {
+            ACTIVE_PROCESSES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&manifest.id);
+            PLUGIN_HEALTH
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&manifest.id);
+            revoke_all_tokens_for_plugin(&manifest.id);
+            let lifecycle_err = PluginLifecycleError::from(runner_err);
+            let msg = lifecycle_err.to_string();
+            let _ = update_registry_state(
+                &manifest.id,
+                false,
+                existing.allocated_port,
+                "error",
+                &msg,
+                true,
+            );
+            return Err(lifecycle_err);
         }
     }
-    #[cfg(not(unix))]
-    let _ = (pgid, sig);
-}
 
-async fn stop_running_process(plugin_id: &str) {
-    let maybe_proc = ACTIVE_PROCESSES
+    ACTIVE_PROCESSES
         .lock()
-        .ok()
-        .and_then(|mut map| map.remove(plugin_id));
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&manifest.id);
     PLUGIN_HEALTH
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(plugin_id);
-    if let Some(mut proc_entry) = maybe_proc {
-        if let Some(monitor) = proc_entry.monitor.take() {
-            monitor.abort();
-            let _ = monitor.await;
-        }
-        if let Some(path) = proc_entry.token_file.take() {
-            let _ = fs::remove_file(path);
-        }
-        #[cfg(unix)]
-        send_signal_to_process_group(proc_entry.pgid, libc::SIGTERM);
-        let exited = tokio::time::timeout(Duration::from_secs(2), proc_entry.child.wait())
-            .await
-            .is_ok();
-        if !exited {
-            let _ = proc_entry.child.kill().await;
-            let _ = tokio::time::timeout(Duration::from_secs(1), proc_entry.child.wait()).await;
-        }
-        // Always sweep any surviving background descendants in the plugin process group,
-        // even when the immediate leader process exited cleanly after SIGTERM.
-        #[cfg(unix)]
-        send_signal_to_process_group(proc_entry.pgid, libc::SIGKILL);
-    }
-}
-
-async fn run_plugin_stop_hook(manifest: &ValidatedPluginManifest, port: u16) {
-    let raw_hook = manifest.lifecycle_hooks.on_stop.trim();
-    if raw_hook.is_empty() || !cfg!(unix) {
-        return;
-    }
-    let Ok(hook_path) = validate_relative_plugin_subpath(&manifest.plugin_dir, raw_hook, true)
-    else {
-        return;
-    };
-    if !hook_path.is_file() {
-        return;
-    }
-    let mut cmd = Command::new("/bin/bash");
-    cmd.arg(&hook_path);
-    configure_unprivileged_command(&mut cmd, manifest, port);
-    let token_file = ACTIVE_PROCESSES
-        .lock()
-        .ok()
-        .and_then(|processes| processes.get(&manifest.id)?.token_file.clone());
-    if let Some(path) = token_file.filter(|path| path.is_file()) {
-        cmd.env("AETHERFLOW_PLUGIN_TOKEN_FILE", path);
-    }
-    if let Ok(mut child) = cmd.spawn() {
-        let pgid = child.id().and_then(|id| i32::try_from(id).ok());
-        if tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .is_err()
-        {
-            #[cfg(unix)]
-            send_signal_to_process_group(pgid, libc::SIGTERM);
-            let _ = child.kill().await;
-            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
-        }
-        #[cfg(unix)]
-        send_signal_to_process_group(pgid, libc::SIGKILL);
-    }
-}
-
-pub async fn stop_plugin_instance(
-    manifest: &ValidatedPluginManifest,
-) -> Result<PluginRuntimeView, String> {
-    let existing = read_registry_state(&manifest.id);
-    run_plugin_stop_hook(manifest, existing.allocated_port).await;
-    stop_running_process(&manifest.id).await;
+        .remove(&manifest.id);
     revoke_all_tokens_for_plugin(&manifest.id);
     let existing = read_registry_state(&manifest.id);
     let state = update_registry_state(
@@ -1434,16 +1639,117 @@ pub async fn stop_plugin_instance(
         true,
     );
     if state.enabled || state.token_epoch == existing.token_epoch {
-        return Err("Could not disable plugin registry entry".into());
+        return Err(PluginLifecycleError::Runtime(
+            "Could not disable plugin registry entry".into(),
+        ));
     }
     Ok(build_runtime_view(manifest, &state, false))
 }
 
 pub async fn restart_plugin_instance(
     manifest: &ValidatedPluginManifest,
-) -> Result<PluginRuntimeView, String> {
+) -> Result<PluginRuntimeView, PluginLifecycleError> {
+    restart_plugin_instance_with_port(manifest, None).await
+}
+
+pub async fn restart_plugin_instance_with_port(
+    manifest: &ValidatedPluginManifest,
+    preferred_port: Option<u16>,
+) -> Result<PluginRuntimeView, PluginLifecycleError> {
+    if resolve_plugin_executable(manifest).is_some() {
+        check_plugin_isolation_available()?;
+    }
     stop_plugin_instance(manifest).await?;
-    start_plugin_instance(manifest).await
+    start_plugin_instance_with_port(manifest, preferred_port).await
+}
+
+/// Reconciles managed plugins after API startup: auto-starts enabled managed plugins in fresh
+/// isolated systemd units and reaps orphaned units belonging to disabled managed plugins.
+pub async fn reconcile_managed_plugins_on_startup() {
+    let _lifecycle = PLUGIN_LIFECYCLE.lock().await;
+    let (manifests, _) = discover_plugins();
+    for manifest in manifests {
+        if resolve_plugin_executable(&manifest).is_none() {
+            continue;
+        }
+        let state = read_registry_state(&manifest.id);
+        if state.enabled || state.status == "running" {
+            let preferred = (PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END)
+                .contains(&state.allocated_port)
+                .then_some(state.allocated_port);
+            if let Err(err) = start_plugin_instance_with_port(&manifest, preferred).await {
+                tracing::warn!(
+                    plugin = %manifest.id,
+                    %err,
+                    "Failed to auto-start managed plugin during startup reconciliation"
+                );
+            }
+        } else if af_runner::is_runner_available() && !privileged_runner_explicitly_disabled() {
+            if let Ok(status) = dispatch_plugin_status(&PluginRunnerStatusRequest {
+                plugin_id: manifest.id.clone(),
+                runtime_id: None,
+            })
+            .await
+            {
+                if status.active {
+                    let _ = dispatch_plugin_stop(&PluginRunnerStopRequest {
+                        plugin_id: manifest.id.clone(),
+                        port: state.allocated_port,
+                        runtime_id: None,
+                        api_base_url: resolve_api_base_url()
+                            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
+                        run_stop_hook: false,
+                    })
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+/// Gracefully tears down active managed plugin systemd units during API shutdown while
+/// preserving their `enabled` preference in SQLite so the next startup reconciles them cleanly.
+pub async fn shutdown_managed_plugins() {
+    let _lifecycle = PLUGIN_LIFECYCLE.lock().await;
+    let active: Vec<(String, u16, Uuid, Option<tokio::task::JoinHandle<()>>)> = {
+        let mut procs = ACTIVE_PROCESSES.lock().unwrap_or_else(|e| e.into_inner());
+        if procs.is_empty() {
+            return;
+        }
+        procs
+            .drain()
+            .map(|(id, mut r)| (id, r.port, r.runtime_id, r.monitor.take()))
+            .collect()
+    };
+    let (manifests, _) = discover_plugins();
+    let stop_hooks: HashSet<String> = manifests
+        .into_iter()
+        .filter(|m| !m.lifecycle_hooks.on_stop.trim().is_empty())
+        .map(|m| m.id)
+        .collect();
+    let api_base_url =
+        resolve_api_base_url().unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    for (plugin_id, port, runtime_id, monitor) in active {
+        if let Some(handle) = monitor {
+            handle.abort();
+            let _ = handle.await;
+        }
+        PLUGIN_HEALTH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&plugin_id);
+        revoke_all_tokens_for_plugin(&plugin_id);
+        if af_runner::is_runner_available() && !privileged_runner_explicitly_disabled() {
+            let _ = dispatch_plugin_stop(&PluginRunnerStopRequest {
+                plugin_id: plugin_id.clone(),
+                port,
+                runtime_id: Some(runtime_id.to_string()),
+                api_base_url: api_base_url.clone(),
+                run_stop_hook: stop_hooks.contains(&plugin_id),
+            })
+            .await;
+        }
+    }
 }
 
 fn build_runtime_view(
@@ -1589,22 +1895,13 @@ pub async fn control_plugin_handler(
                 ),
             );
         }
-        let existing = read_registry_state(&manifest.id);
-        let _ = update_registry_state(
-            &manifest.id,
-            existing.enabled,
-            custom_port,
-            &existing.status,
-            &existing.last_error,
-            false,
-        );
     }
 
     let action = req.action.trim().to_lowercase();
     let result = match action.as_str() {
-        "start" | "enable" => start_plugin_instance(&manifest).await,
+        "start" | "enable" => start_plugin_instance_with_port(&manifest, req.port).await,
         "stop" | "disable" => stop_plugin_instance(&manifest).await,
-        "restart" => restart_plugin_instance(&manifest).await,
+        "restart" => restart_plugin_instance_with_port(&manifest, req.port).await,
         "revoke_tokens" => {
             revoke_all_tokens_for_plugin(&manifest.id);
             let existing = read_registry_state(&manifest.id);
@@ -1616,7 +1913,30 @@ pub async fn control_plugin_handler(
                 "",
                 true,
             );
-            Ok(build_runtime_view(&manifest, &updated, false))
+            let active_rid = ACTIVE_PROCESSES
+                .lock()
+                .ok()
+                .and_then(|procs| procs.get(&manifest.id).map(|r| r.runtime_id));
+            if let Some(runtime_id) = active_rid {
+                if updated.enabled {
+                    if let Ok((token, _)) =
+                        sign_plugin_token(&manifest, updated.token_epoch, None, Some(runtime_id))
+                    {
+                        let _ = dispatch_plugin_token_rotate(&PluginRunnerTokenRotateRequest {
+                            plugin_id: manifest.id.clone(),
+                            runtime_id: runtime_id.to_string(),
+                            token,
+                        })
+                        .await;
+                    }
+                }
+            }
+            let healthy = PLUGIN_HEALTH
+                .lock()
+                .ok()
+                .and_then(|h| h.get(&manifest.id).copied())
+                .is_some_and(|(p, ok)| p == updated.allocated_port && ok);
+            Ok(build_runtime_view(&manifest, &updated, healthy))
         }
         _ => {
             return api_error(
@@ -1650,11 +1970,7 @@ pub async fn control_plugin_handler(
             }))
             .into_response()
         }
-        Err(err) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "PLUGIN_LIFECYCLE_ERROR",
-            err,
-        ),
+        Err(err) => err.into_api_response(),
     }
 }
 
@@ -2348,6 +2664,43 @@ pub(crate) mod tests {
         };
         assert!(validate_plugin_manifest(&plugin_dir, forbidden_scope_manifest).is_err());
 
+        let systemd_specifier_manifest = RawPluginManifest {
+            id: "valid-plugin".to_string(),
+            name: "Valid".to_string(),
+            version: "0.1.0".to_string(),
+            sdk: "rust".to_string(),
+            contract_version: "v1".to_string(),
+            runtime_status: "managed".to_string(),
+            description: String::new(),
+            author: String::new(),
+            permissions: vec![],
+            api_scopes: vec![],
+            lifecycle_hooks: PluginLifecycleHooks {
+                on_start: "hooks/%i.sh".to_string(),
+                on_stop: String::new(),
+            },
+            backend: PluginBackendSpec::default(),
+            frontend: PluginFrontendSpec::default(),
+        };
+        assert!(validate_plugin_manifest(&plugin_dir, systemd_specifier_manifest).is_err());
+
+        let control_char_name_manifest = RawPluginManifest {
+            id: "valid-plugin".to_string(),
+            name: "Bad\nINJECT=1".to_string(),
+            version: "0.1.0".to_string(),
+            sdk: "rust".to_string(),
+            contract_version: "v1".to_string(),
+            runtime_status: "managed".to_string(),
+            description: String::new(),
+            author: String::new(),
+            permissions: vec![],
+            api_scopes: vec![],
+            lifecycle_hooks: PluginLifecycleHooks::default(),
+            backend: PluginBackendSpec::default(),
+            frontend: PluginFrontendSpec::default(),
+        };
+        assert!(validate_plugin_manifest(&plugin_dir, control_char_name_manifest).is_err());
+
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -2466,40 +2819,144 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn managed_runtime_token_replace_is_private_and_does_not_follow_symlinks() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+    #[tokio::test]
+    async fn managed_plugin_fails_closed_with_actionable_503_when_isolation_unavailable() {
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
 
-        let root = env::temp_dir().join(format!("af-runtime-token-{}", Uuid::new_v4()));
-        let dir = root.join("plugin-tokens");
-        let path = dir.join("fixture.token");
-        write_runtime_token(&path, "first").unwrap();
-        assert_eq!(
-            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        let mut old_reader = fs::File::open(&path).unwrap();
-        write_runtime_token(&path, "rotated").unwrap();
-        let mut old_contents = String::new();
-        std::io::Read::read_to_string(&mut old_reader, &mut old_contents).unwrap();
-        assert_eq!(old_contents, "first");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "rotated");
+        let _env_guard = test_env_lock().lock().await;
+        let db = ensure_shared_test_db();
+        let tmp = db
+            .parent()
+            .unwrap()
+            .join(format!("fail-closed-{}", Uuid::new_v4()));
+        let plugins_root = tmp.join("plugins");
+        let plugin_dir = plugins_root.join("managed-fixture");
+        let hooks_dir = plugin_dir.join("backend/hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::set_permissions(&plugins_root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&plugin_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(plugin_dir.join("backend"), fs::Permissions::from_mode(0o755))
+            .unwrap();
+        fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let outside = root.join("untouched");
-        fs::write(&outside, "original").unwrap();
-        fs::remove_file(&path).unwrap();
-        symlink(&outside, &path).unwrap();
-        write_runtime_token(&path, "replacement").unwrap();
-        assert_eq!(fs::read_to_string(&outside).unwrap(), "original");
-        assert!(!fs::symlink_metadata(path).unwrap().is_symlink());
-        let symlink_dir = root.join("linked");
-        symlink(&dir, &symlink_dir).unwrap();
-        assert!(write_runtime_token(&symlink_dir.join("fixture.token"), "rejected").is_err());
-        fs::remove_dir_all(root).unwrap();
+        let forbidden_marker = tmp.join("api-user-executed.marker");
+        let start_hook = hooks_dir.join("start.sh");
+        fs::write(
+            &start_hook,
+            format!("#!/bin/bash\ntouch {:?}\n", forbidden_marker),
+        )
+        .unwrap();
+        fs::set_permissions(&start_hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let stop_hook = hooks_dir.join("stop.sh");
+        fs::write(
+            &stop_hook,
+            format!("#!/bin/bash\ntouch {:?}\n", forbidden_marker),
+        )
+        .unwrap();
+        fs::set_permissions(&stop_hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manifest_json = serde_json::json!({
+            "id": "managed-fixture",
+            "name": "Managed Fixture",
+            "version": "1.0.0",
+            "permissions": ["system:metrics:read"],
+            "api_scopes": ["GET /api/v1/auth/system/metrics"],
+            "lifecycle_hooks": {
+                "on_start": "backend/hooks/start.sh",
+                "on_stop": "backend/hooks/stop.sh"
+            },
+            "backend": { "health_path": "/healthz" }
+        });
+        fs::write(
+            plugin_dir.join("plugin.manifest.json"),
+            serde_json::to_vec_pretty(&manifest_json).unwrap(),
+        )
+        .unwrap();
+
+        env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+        env::set_var("AETHERFLOW_RUNNER_SOCK", tmp.join("absent-runner.sock"));
+        env::remove_var("PRIVILEGED_RUNNER_ENABLED");
+
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".into(),
+            role: "admin".into(),
+            jti: "op-1".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+
+        // 1. Start must fail closed with 503 PLUGIN_ISOLATION_UNAVAILABLE and never spawn locally
+        let start_resp = control_plugin_handler(
+            Path("managed-fixture".into()),
+            Extension(admin.clone()),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "start".into(),
+                port: Some(21444),
+            }),
+        )
+        .await;
+        assert_eq!(start_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(start_resp.into_body(), 8192)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("PLUGIN_ISOLATION_UNAVAILABLE"), "body={text}");
+        assert!(
+            text.contains("aetherflow-runner.service"),
+            "actionable runner hint missing: {text}"
+        );
+        assert!(
+            !forbidden_marker.exists(),
+            "af-api MUST NOT fall back to spawning plugin hooks as the API user"
+        );
+        let reg = read_registry_state("managed-fixture");
+        assert!(!reg.enabled);
+        assert_eq!(
+            reg.allocated_port, 0,
+            "failed start must not persist custom port mutation"
+        );
+        assert_eq!(reg.status, "error");
+
+        // 2. Stop with on_stop hook also fails closed without running hook as API user
+        let stop_resp = control_plugin_handler(
+            Path("managed-fixture".into()),
+            Extension(admin.clone()),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "stop".into(),
+                port: None,
+            }),
+        )
+        .await;
+        assert_eq!(stop_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!forbidden_marker.exists());
+
+        // 3. Explicitly disabled PRIVILEGED_RUNNER_ENABLED=false also fails closed with 503
+        env::set_var("PRIVILEGED_RUNNER_ENABLED", "false");
+        let disabled_resp = control_plugin_handler(
+            Path("managed-fixture".into()),
+            Extension(admin),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "start".into(),
+                port: None,
+            }),
+        )
+        .await;
+        assert_eq!(disabled_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let disabled_body = axum::body::to_bytes(disabled_resp.into_body(), 8192)
+            .await
+            .unwrap();
+        let disabled_text = String::from_utf8_lossy(&disabled_body);
+        assert!(disabled_text.contains("PRIVILEGED_RUNNER_ENABLED"));
+        assert!(!forbidden_marker.exists());
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2673,95 +3130,308 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn stop_running_process_terminates_detached_grandchild_in_process_group() {
-        let plugin_id = format!("pgid-test-{}", uuid::Uuid::new_v4());
-        let tmp = env::temp_dir().join(&plugin_id);
-        fs::create_dir_all(&tmp).unwrap();
+    async fn managed_plugin_lifecycle_delegates_to_runner_with_rotation_restart_and_rollback() {
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder;
+        use hyper_util::service::TowerToHyperService;
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
-        let pid_file = tmp.join("grandchild.pid");
-        let token_file = tmp.join("runtime.token");
-        write_runtime_token(&token_file, "file-only-test-token").unwrap();
+
+        let _env_guard = test_env_lock().lock().await;
+        let db = ensure_shared_test_db();
+        let tmp = db
+            .parent()
+            .unwrap()
+            .join(format!("runner-delegated-{}", Uuid::new_v4()));
+        let plugins_root = tmp.join("plugins");
+        let tokens_root = tmp.join("runner-tokens");
+        let plugin_dir = plugins_root.join("isolated-demo");
+        let hooks_dir = plugin_dir.join("backend/hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::set_permissions(&plugins_root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&plugin_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(plugin_dir.join("backend"), fs::Permissions::from_mode(0o755))
+            .unwrap();
+        fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let start_hook = hooks_dir.join("start.sh");
+        fs::write(&start_hook, "#!/bin/bash\nexit 0\n").unwrap();
+        fs::set_permissions(&start_hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let stop_hook = hooks_dir.join("stop.sh");
+        fs::write(&stop_hook, "#!/bin/bash\nexit 0\n").unwrap();
+        fs::set_permissions(&stop_hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manifest_json = serde_json::json!({
+            "id": "isolated-demo",
+            "name": "Isolated Demo",
+            "version": "1.0.0",
+            "permissions": ["system:metrics:read"],
+            "api_scopes": ["GET /api/v1/auth/system/metrics"],
+            "lifecycle_hooks": {
+                "on_start": "backend/hooks/start.sh",
+                "on_stop": "backend/hooks/stop.sh"
+            },
+            "backend": { "health_path": "/healthz" }
+        });
         fs::write(
-            tmp.join("stop.sh"),
-            r#"
-            test -z "${AETHERFLOW_PLUGIN_TOKEN+x}" || exit 1
-            test "$AETHERFLOW_PLUGIN_TOKEN_FILE" = "$PWD/runtime.token" || exit 2
-            test -f "$AETHERFLOW_PLUGIN_TOKEN_FILE" || exit 3
-            touch stop-hook-verified
-        "#,
+            plugin_dir.join("plugin.manifest.json"),
+            serde_json::to_vec_pretty(&manifest_json).unwrap(),
         )
         .unwrap();
 
-        let manifest = ValidatedPluginManifest {
-            id: plugin_id.clone(),
-            name: "pgid-test".to_string(),
-            version: "1.0.0".to_string(),
-            sdk: "rust".to_string(),
-            contract_version: "v1".to_string(),
-            runtime_status: "managed".to_string(),
-            description: String::new(),
-            author: String::new(),
-            permissions: Vec::new(),
-            granted_scopes: Vec::new(),
-            lifecycle_hooks: PluginLifecycleHooks {
-                on_stop: "stop.sh".into(),
-                ..Default::default()
-            },
-            backend: PluginBackendSpec::default(),
-            frontend: PluginFrontendSpec::default(),
-            plugin_dir: tmp.clone(),
+        let unit_state = tmp.join("unit.state");
+        let args_log = tmp.join("systemd-run.args");
+        let fail_flag = tmp.join("fail-start.flag");
+        let fake_sdrun = tmp.join("fake-systemd-run");
+        fs::write(
+            &fake_sdrun,
+            format!(
+                r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$@" >> {args:?}
+if [[ -f {fail:?} ]]; then
+  echo "simulated systemd-run failure" >&2
+  exit 1
+fi
+echo active > {state:?}
+"#,
+                args = args_log,
+                fail = fail_flag,
+                state = unit_state
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_sdrun, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fake_sdctl = tmp.join("fake-systemctl");
+        fs::write(
+            &fake_sdctl,
+            format!(
+                r#"#!/bin/bash
+set -euo pipefail
+case "${{1:-}}" in
+  show)
+    st="inactive"
+    if [[ -f {state:?} ]]; then st="$(cat {state:?})"; fi
+    echo "ActiveState=$st"
+    echo "SubState=running"
+    echo "MainPID=0"
+    echo "UID=62444"
+    echo "GID=62444"
+    ;;
+  stop)
+    echo inactive > {state:?}
+    ;;
+  reset-failed)
+    ;;
+esac
+"#,
+                state = unit_state
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_sdctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sock_path = env::temp_dir().join(format!(
+            "af-plg-{}.sock",
+            &Uuid::new_v4().simple().to_string()[..12]
+        ));
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let runner_app = af_runner::build_runner_router();
+        let runner_task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let svc = TowerToHyperService::new(runner_app.clone());
+                tokio::spawn(async move {
+                    let _ = Builder::new(TokioExecutor::new())
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+        env::set_var("AETHERFLOW_PLUGIN_TOKENS_ROOT", &tokens_root);
+        env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", &fake_sdrun);
+        env::set_var("AETHERFLOW_SYSTEMCTL_BIN", &fake_sdctl);
+        env::set_var("PRIVILEGED_RUNNER_ENABLED", "true");
+
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".into(),
+            role: "admin".into(),
+            jti: "op-2".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
         };
 
-        let script = format!("sleep 30 & echo $! > {:?}; wait", pid_file);
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(&script);
-        configure_unprivileged_command(&mut cmd, &manifest, 21111);
-        let child = cmd.spawn().unwrap();
-        let pgid = child.id().and_then(|id| i32::try_from(id).ok());
-        {
-            let mut map = ACTIVE_PROCESSES.lock().unwrap();
-            map.insert(
-                plugin_id.clone(),
-                ActivePluginProcess {
-                    child,
-                    port: 21111,
-                    pgid,
-                    token_file: Some(token_file.clone()),
-                    runtime_id: None,
-                    monitor: None,
-                },
-            );
-        }
+        // 1. Start succeeds through af-runner and stages a valid runtime token outside DATA_DIR
+        let start_resp = control_plugin_handler(
+            Path("isolated-demo".into()),
+            Extension(admin.clone()),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "start".into(),
+                port: Some(21222),
+            }),
+        )
+        .await;
+        assert_eq!(start_resp.status(), StatusCode::OK);
 
-        let mut gc_pid: i32 = -1;
-        for _ in 0..40 {
-            if let Ok(raw) = fs::read_to_string(&pid_file) {
-                if let Ok(parsed) = raw.trim().parse::<i32>() {
-                    gc_pid = parsed;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert!(gc_pid > 0, "grandchild pid should be recorded");
-
-        run_plugin_stop_hook(&manifest, 21111).await;
-        assert!(tmp.join("stop-hook-verified").is_file());
-        stop_running_process(&plugin_id).await;
-        assert!(!token_file.exists());
-        for _ in 0..20 {
-            let alive = unsafe { libc::kill(gc_pid, 0) == 0 };
-            if !alive {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert_ne!(
-            unsafe { libc::kill(gc_pid, 0) },
-            0,
-            "grandchild pid {gc_pid} must be terminated when plugin process group stops"
+        let runtime_id_1 = ACTIVE_PROCESSES
+            .lock()
+            .unwrap()
+            .get("isolated-demo")
+            .unwrap()
+            .runtime_id
+            .to_string();
+        let token_path_1 = tokens_root
+            .join("isolated-demo")
+            .join(&runtime_id_1)
+            .join("runtime.token");
+        let token_1 = fs::read_to_string(&token_path_1).unwrap();
+        assert!(decode_and_verify_plugin_token(&token_1).is_ok());
+        assert!(
+            !fs::read_to_string(&args_log).unwrap().contains(&token_1),
+            "runtime token must never appear in systemd-run argv"
         );
+
+        // 2. revoke_tokens bumps epoch, invalidates token_1, and rotates staged token immediately
+        let revoke_resp = control_plugin_handler(
+            Path("isolated-demo".into()),
+            Extension(admin.clone()),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "revoke_tokens".into(),
+                port: None,
+            }),
+        )
+        .await;
+        assert_eq!(revoke_resp.status(), StatusCode::OK);
+        assert!(decode_and_verify_plugin_token(&token_1).is_err());
+        let token_2 = fs::read_to_string(&token_path_1).unwrap();
+        assert_ne!(token_1, token_2);
+        assert!(decode_and_verify_plugin_token(&token_2).is_ok());
+
+        // 3. Restart rotates runtime_id and invalidates prior runtime token
+        let restart_resp = control_plugin_handler(
+            Path("isolated-demo".into()),
+            Extension(admin.clone()),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "restart".into(),
+                port: None,
+            }),
+        )
+        .await;
+        assert_eq!(restart_resp.status(), StatusCode::OK);
+        let runtime_id_2 = ACTIVE_PROCESSES
+            .lock()
+            .unwrap()
+            .get("isolated-demo")
+            .unwrap()
+            .runtime_id
+            .to_string();
+        assert_ne!(runtime_id_1, runtime_id_2);
+        assert!(decode_and_verify_plugin_token(&token_2).is_err());
+
+        // 4. Stop clears runner unit, wipes token dir, and disables plugin
+        let stop_resp = control_plugin_handler(
+            Path("isolated-demo".into()),
+            Extension(admin.clone()),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "stop".into(),
+                port: None,
+            }),
+        )
+        .await;
+        assert_eq!(stop_resp.status(), StatusCode::OK);
+        assert!(!tokens_root.join("isolated-demo").exists());
+        assert!(!read_registry_state("isolated-demo").enabled);
+
+        // 5. Rollback when runner fails to launch transient unit
+        fs::write(&fail_flag, "1").unwrap();
+        let failed_start = control_plugin_handler(
+            Path("isolated-demo".into()),
+            Extension(admin),
+            HeaderMap::new(),
+            Json(PluginControlRequest {
+                action: "start".into(),
+                port: Some(21333),
+            }),
+        )
+        .await;
+        assert_eq!(failed_start.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let reg_after_fail = read_registry_state("isolated-demo");
+        assert!(!reg_after_fail.enabled);
+        assert_eq!(reg_after_fail.status, "error");
+        assert_eq!(
+            reg_after_fail.allocated_port, 21222,
+            "failed start must restore previous allocated port"
+        );
+        assert!(!ACTIVE_PROCESSES.lock().unwrap().contains_key("isolated-demo"));
+
+        runner_task.abort();
+        let _ = fs::remove_file(&sock_path);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn external_plugin_backend_preserves_lifecycle_without_runner() {
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let _env_guard = test_env_lock().lock().await;
+        let db = ensure_shared_test_db();
+        let tmp = db
+            .parent()
+            .unwrap()
+            .join(format!("external-plugin-{}", Uuid::new_v4()));
+        let plugins_root = tmp.join("plugins");
+        let plugin_dir = plugins_root.join("external-only");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join("plugin.manifest.json"),
+            r#"{
+                "id": "external-only",
+                "name": "External Backend",
+                "version": "1.0.0",
+                "runtime_status": "external",
+                "permissions": ["system:metrics:read"],
+                "api_scopes": ["GET /api/v1/auth/system/metrics"],
+                "backend": { "health_path": "/healthz" }
+            }"#,
+        )
+        .unwrap();
+
+        env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+        env::set_var("AETHERFLOW_RUNNER_SOCK", tmp.join("absent-runner.sock"));
+        env::set_var("PRIVILEGED_RUNNER_ENABLED", "false");
+
+        let (manifests, rejected) = discover_plugins_in_dir(&plugins_root);
+        assert!(rejected.is_empty());
+        let manifest = manifests.into_iter().find(|m| m.id == "external-only").unwrap();
+
+        let started = start_plugin_instance(&manifest).await.unwrap();
+        assert!(started.enabled);
+        assert_eq!(started.status, "running");
+        assert!((PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END).contains(&started.allocated_port));
+
+        let (token, _) = mint_scoped_plugin_token(&manifest, Some(120)).unwrap();
+        assert!(decode_and_verify_plugin_token(&token).is_ok());
+
+        let stopped = stop_plugin_instance(&manifest).await.unwrap();
+        assert!(!stopped.enabled);
+        assert_eq!(stopped.status, "stopped");
+        assert!(decode_and_verify_plugin_token(&token).is_err());
+
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -2839,6 +3509,178 @@ pub(crate) mod tests {
         manifest.backend.binary_name.clear();
         assert!(resolve_plugin_executable(&manifest).is_none());
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconcile_startup_and_graceful_shutdown_preserve_enabled_and_reap_orphans() {
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder;
+        use hyper_util::service::TowerToHyperService;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_guard = test_env_lock().lock().await;
+        let db = ensure_shared_test_db();
+        let tmp = db
+            .parent()
+            .unwrap()
+            .join(format!("reconcile-shutdown-{}", Uuid::new_v4()));
+        let plugins_root = tmp.join("plugins");
+        let tokens_root = tmp.join("tokens");
+        let state_dir = tmp.join("units");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        for id in ["auto-demo", "orphan-demo"] {
+            let pdir = plugins_root.join(id);
+            let hdir = pdir.join("backend/hooks");
+            fs::create_dir_all(&hdir).unwrap();
+            fs::set_permissions(&pdir, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(pdir.join("backend"), fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&hdir, fs::Permissions::from_mode(0o755)).unwrap();
+            let sh = hdir.join("start.sh");
+            fs::write(&sh, "#!/bin/bash\nexit 0\n").unwrap();
+            fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+            let manifest = serde_json::json!({
+                "id": id,
+                "name": id,
+                "version": "1.0.0",
+                "lifecycle_hooks": { "on_start": "backend/hooks/start.sh" },
+                "backend": { "health_path": "/healthz" }
+            });
+            fs::write(
+                pdir.join("plugin.manifest.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::set_permissions(&plugins_root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fake_sdrun = tmp.join("fake-sdrun");
+        fs::write(
+            &fake_sdrun,
+            format!(
+                r#"#!/bin/bash
+set -euo pipefail
+unit=""
+for arg in "$@"; do
+  case "$arg" in
+    --unit=*) unit="${{arg#--unit=}}" ;;
+  esac
+done
+echo active > {dir:?}/"$unit"
+"#,
+                dir = state_dir
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_sdrun, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fake_sdctl = tmp.join("fake-sdctl");
+        fs::write(
+            &fake_sdctl,
+            format!(
+                r#"#!/bin/bash
+set -euo pipefail
+cmd="${{1:-}}"
+unit="${{@: -1}}"
+case "$cmd" in
+  show)
+    st="inactive"
+    if [[ -f {dir:?}/"$unit" ]]; then st="$(cat {dir:?}/"$unit")"; fi
+    echo "ActiveState=$st"
+    echo "SubState=running"
+    echo "MainPID=0"
+    echo "UID=62555"
+    echo "GID=62555"
+    ;;
+  stop)
+    echo inactive > {dir:?}/"$unit"
+    ;;
+  reset-failed)
+    ;;
+esac
+"#,
+                dir = state_dir
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_sdctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Simulate a stale orphaned unit for disabled plugin `orphan-demo`, while `auto-demo` is enabled in DB.
+        fs::write(
+            state_dir.join("aetherflow-plugin-orphan-demo.service"),
+            "active\n",
+        )
+        .unwrap();
+        update_registry_state("auto-demo", true, 21401, "running", "", false);
+        update_registry_state("orphan-demo", false, 21402, "stopped", "", false);
+
+        let sock_path = env::temp_dir().join(format!(
+            "af-plg-{}.sock",
+            &Uuid::new_v4().simple().to_string()[..12]
+        ));
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let runner_app = af_runner::build_runner_router();
+        let runner_task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let svc = TowerToHyperService::new(runner_app.clone());
+                tokio::spawn(async move {
+                    let _ = Builder::new(TokioExecutor::new())
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+        env::set_var("AETHERFLOW_PLUGIN_TOKENS_ROOT", &tokens_root);
+        env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", &fake_sdrun);
+        env::set_var("AETHERFLOW_SYSTEMCTL_BIN", &fake_sdctl);
+        env::set_var("PRIVILEGED_RUNNER_ENABLED", "true");
+
+        reconcile_managed_plugins_on_startup().await;
+
+        assert_eq!(
+            fs::read_to_string(state_dir.join("aetherflow-plugin-auto-demo.service"))
+                .unwrap()
+                .trim(),
+            "active"
+        );
+        assert_eq!(
+            fs::read_to_string(state_dir.join("aetherflow-plugin-orphan-demo.service"))
+                .unwrap()
+                .trim(),
+            "inactive",
+            "disabled plugin's orphaned unit must be reaped on startup"
+        );
+        assert!(ACTIVE_PROCESSES.lock().unwrap().contains_key("auto-demo"));
+
+        // Graceful shutdown stops active unit via runner while preserving enabled=true in SQLite
+        shutdown_managed_plugins().await;
+        assert_eq!(
+            fs::read_to_string(state_dir.join("aetherflow-plugin-auto-demo.service"))
+                .unwrap()
+                .trim(),
+            "inactive"
+        );
+        assert!(!ACTIVE_PROCESSES.lock().unwrap().contains_key("auto-demo"));
+        assert!(
+            read_registry_state("auto-demo").enabled,
+            "graceful shutdown must preserve enabled=true so next startup auto-starts the plugin"
+        );
+        assert!(!tokens_root.join("auto-demo").exists());
+
+        runner_task.abort();
+        let _ = fs::remove_file(&sock_path);
         let _ = fs::remove_dir_all(&tmp);
     }
 }

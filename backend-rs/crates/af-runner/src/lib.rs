@@ -1,9 +1,18 @@
 use af_models::{
     AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse, NetworkRunnerRequest, Package,
-    PackageAutomation, PackageLifecycleSnapshotRequest, PackageRunnerRequest, QuotaRunnerRequest,
+    PackageAutomation, PackageLifecycleSnapshotRequest, PackageRunnerRequest,
+    PluginRunnerStartRequest, PluginRunnerStatusRequest, PluginRunnerStatusResponse,
+    PluginRunnerStopRequest, PluginRunnerTokenRotateRequest, QuotaRunnerRequest,
     RunnerApacheVhostRequest, RunnerResponse, SandboxRunnerRequest, SelfUpdateJobStatus,
     SelfUpdateRequest, SelfUpdateStatusRequest, SystemctlRequest,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerPeerCred {
+    pub uid: u32,
+    pub gid: u32,
+    pub pid: Option<i32>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct HostsUpdateRequest {
@@ -53,6 +62,8 @@ pub mod network;
 pub mod package_executor;
 pub use package_executor::check_domain_tls_ready;
 pub mod package_lifecycle;
+pub mod plugins;
+pub use plugins::PluginRunnerError;
 pub mod probe_metadata;
 pub mod quota;
 
@@ -350,6 +361,13 @@ pub fn build_runner_router() -> Router {
         )
         .route("/v1/ingress/vhost", post(handle_ingress_vhost))
         .route("/v1/certbot-sync", post(handle_certbot_sync))
+        .route("/v1/plugins/start", post(plugins::handle_plugin_start))
+        .route("/v1/plugins/stop", post(plugins::handle_plugin_stop))
+        .route("/v1/plugins/status", post(plugins::handle_plugin_status))
+        .route(
+            "/v1/plugins/token",
+            post(plugins::handle_plugin_token_rotate),
+        )
 }
 
 async fn handle_health() -> Json<RunnerResponse> {
@@ -6334,6 +6352,149 @@ pub async fn runner_is_ready() -> bool {
         .is_ok_and(|response| response.success && response.output == "ready")
 }
 
+#[cfg(unix)]
+async fn post_runner_plugin_json<T: Serialize + ?Sized>(
+    endpoint: &str,
+    payload: &T,
+    timeout: Duration,
+) -> Result<(StatusCode, RunnerResponse), PluginRunnerError> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper_util::rt::TokioIo;
+
+    let sock_path = resolve_runner_socket_path();
+    let body_bytes = serde_json::to_vec(payload)
+        .map_err(|err| PluginRunnerError::InvalidRequest(format!("Serialization error: {err}")))?;
+
+    let fut = async {
+        let stream = tokio::net::UnixStream::connect(&sock_path)
+            .await
+            .map_err(|err| {
+                PluginRunnerError::IsolationUnavailable(format!(
+                    "Managed plugin isolation is unavailable: cannot connect to aetherflow-runner socket '{}' ({err}). Start aetherflow-runner.service on a systemd-managed Linux host or run this plugin as an external backend.",
+                    sock_path
+                ))
+            })?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|err| {
+                PluginRunnerError::IsolationUnavailable(format!(
+                    "Managed plugin isolation is unavailable: runner IPC handshake failed on '{}' ({err}).",
+                    sock_path
+                ))
+            })?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let req = hyper::Request::builder()
+            .method(hyper::Method::POST)
+            .uri(endpoint)
+            .header("Host", "unix")
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|err| PluginRunnerError::Runtime(format!("Failed to build runner request: {err}")))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|err| PluginRunnerError::Runtime(format!("Runner request failed ({endpoint}): {err}")))?;
+        let status = resp.status();
+        let collected = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|err| PluginRunnerError::Runtime(format!("Failed to read runner response ({endpoint}): {err}")))?
+            .to_bytes();
+        let decoded: RunnerResponse = serde_json::from_slice(&collected).map_err(|err| {
+            PluginRunnerError::Runtime(format!(
+                "Invalid JSON response from runner ({endpoint}, HTTP {}): {err}",
+                status.as_u16()
+            ))
+        })?;
+        Ok((status, decoded))
+    };
+
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| PluginRunnerError::Runtime(format!("Runner plugin request timed out ({endpoint})")))?
+}
+
+#[cfg(not(unix))]
+async fn post_runner_plugin_json<T: Serialize + ?Sized>(
+    endpoint: &str,
+    _payload: &T,
+    _timeout: Duration,
+) -> Result<(StatusCode, RunnerResponse), PluginRunnerError> {
+    Err(PluginRunnerError::IsolationUnavailable(format!(
+        "Managed plugin isolation is unavailable: UNIX domain socket runner requires Linux/Unix ({endpoint})."
+    )))
+}
+
+fn map_plugin_runner_failure(status: StatusCode, resp: RunnerResponse) -> PluginRunnerError {
+    let msg = if resp.error.trim().is_empty() {
+        format!("Runner returned HTTP {}", status.as_u16())
+    } else {
+        resp.error
+    };
+    match status {
+        StatusCode::SERVICE_UNAVAILABLE => PluginRunnerError::IsolationUnavailable(msg),
+        StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN => PluginRunnerError::InvalidRequest(msg),
+        _ => PluginRunnerError::Runtime(msg),
+    }
+}
+
+pub async fn dispatch_plugin_start(
+    req: &PluginRunnerStartRequest,
+) -> Result<PluginRunnerStatusResponse, PluginRunnerError> {
+    let (status, resp) =
+        post_runner_plugin_json("/v1/plugins/start", req, Duration::from_secs(25)).await?;
+    if status != StatusCode::OK || !resp.success {
+        return Err(map_plugin_runner_failure(status, resp));
+    }
+    serde_json::from_str(&resp.output).map_err(|err| {
+        PluginRunnerError::Runtime(format!("Invalid plugin start response payload: {err}"))
+    })
+}
+
+pub async fn dispatch_plugin_stop(
+    req: &PluginRunnerStopRequest,
+) -> Result<PluginRunnerStatusResponse, PluginRunnerError> {
+    let (status, resp) =
+        post_runner_plugin_json("/v1/plugins/stop", req, Duration::from_secs(30)).await?;
+    if status != StatusCode::OK || !resp.success {
+        return Err(map_plugin_runner_failure(status, resp));
+    }
+    serde_json::from_str(&resp.output).map_err(|err| {
+        PluginRunnerError::Runtime(format!("Invalid plugin stop response payload: {err}"))
+    })
+}
+
+pub async fn dispatch_plugin_status(
+    req: &PluginRunnerStatusRequest,
+) -> Result<PluginRunnerStatusResponse, PluginRunnerError> {
+    let (status, resp) =
+        post_runner_plugin_json("/v1/plugins/status", req, Duration::from_secs(10)).await?;
+    if status != StatusCode::OK || !resp.success {
+        return Err(map_plugin_runner_failure(status, resp));
+    }
+    serde_json::from_str(&resp.output).map_err(|err| {
+        PluginRunnerError::Runtime(format!("Invalid plugin status response payload: {err}"))
+    })
+}
+
+pub async fn dispatch_plugin_token_rotate(
+    req: &PluginRunnerTokenRotateRequest,
+) -> Result<(), PluginRunnerError> {
+    let (status, resp) =
+        post_runner_plugin_json("/v1/plugins/token", req, Duration::from_secs(10)).await?;
+    if status != StatusCode::OK || !resp.success {
+        return Err(map_plugin_runner_failure(status, resp));
+    }
+    Ok(())
+}
+
 pub async fn dispatch_heal_restart(service_name: &str) -> anyhow::Result<bool> {
     let req = SystemctlRequest {
         service: service_name.to_string(),
@@ -7258,7 +7419,13 @@ async fn serve_runner_connections(
                                         .body(Body::from(body))
                                         .unwrap());
                                 }
-                                svc.call(request.map(axum::body::Body::new)).await
+                                let mut req = request.map(axum::body::Body::new);
+                                req.extensions_mut().insert(RunnerPeerCred {
+                                    uid: peer_uid,
+                                    gid: peer_gid,
+                                    pid: peer_pid,
+                                });
+                                svc.call(req).await
                             }
                         },
                     );

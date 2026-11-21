@@ -34,6 +34,7 @@ This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0*
 | Component | Threat | Mitigation |
 |-----------|--------|------------|
 | Privileged Runner (`af-runner`) | Unprivileged API or plugin process executing arbitrary root commands | `SO_PEERCRED` + `/proc/<pid>/exe` caller verification rejecting plugin binaries and scripting interpreters; zero shell evaluation in `DeclarativeStep` (direct `execve` argv vectors with `stdin(Stdio::null())` and `process_group(0)`). Strict regex allowlists on unit names (`SAFE_SERVICE_NAME`), package IDs (`SAFE_PKG_ID`), usernames (`SAFE_USERNAME`), and APT packages (`SAFE_APT_PKG_NAME`). |
+| Managed Plugin Backends (`af-api` -> `af-runner`) | Managed plugin backend or `on_stop` hook inheriting `aetherflow` API OS identity to read/write `/var/lib/aetherflow/aetherflow.sqlite`, `/etc/aetherflow`, or `/run/aetherflow/runner.sock` | `af-api` never spawns managed plugin binaries or `on_stop` hooks directly. Lifecycle control delegates over `runner.sock` (`/v1/plugins/{start,stop,status,token}`) to `af-runner`, which re-validates `plugin.manifest.json` from its own root and launches hardened transient systemd units (`DynamicUser=yes`, empty `SupplementaryGroups=`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `ProtectProc=invisible`, `NoNewPrivileges=yes`, `StateDirectory=aetherflow-plugin-<id>`, `BindReadOnlyPaths` for validated assets and per-runtime token dir, `InaccessiblePaths` for control-plane state), verifies post-start UID/GID separation from `root`/`aetherflow`/caller, and fails closed (`503 PLUGIN_ISOLATION_UNAVAILABLE`) when isolation is unavailable. |
 | Human-Gated FlowAI (`af-api`) | Prompt injection triggering destructive host commands | LLM output is untrusted; proposed mutations are queued into `pending_actions` (Approval Inbox) and cannot execute without explicit administrator authorization (`POST /api/v1/admin/actions/:id/approve`). |
 | Self-Updater (`af-runner` `/v1/self-update`) | Command injection or credential leak via updater launch | Request channel/command validated via `af_release::validate_self_update_request`; launched in isolated `aetherflow-self-update.service` with atomic `0600` environment handoff removed immediately after systemd accepts execution. |
 
@@ -77,7 +78,8 @@ This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0*
              [aetherflow-runner.service (Root Daemon / af-runner)]
                   ├──> [systemd Service Manager]
                   ├──> [Declarative Rust Recipes / Locked Package Scripts]
-                  └──> [aetherflow-self-update.service (af-release)]
+                  ├──> [aetherflow-self-update.service (af-release)]
+                  └──> [aetherflow-plugin-<id>.service (DynamicUser=yes • RO assets/token • 0700 StateDirectory • Inaccessible control-plane paths)]
 ```
 
 ---
@@ -87,6 +89,7 @@ This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0*
 | Risk | Likelihood | Impact | Severity | Status |
 |------|-----------|--------|----------|--------|
 | Privilege escalation across `runner.sock` | Low | Critical | HIGH | Mitigated (strict struct/regex allowlists + zero arbitrary shell eval + `lstat` guards) |
+| Managed plugin reading/writing API control-plane state | Low | Critical | HIGH | Mitigated (`af-runner` transient systemd `DynamicUser=yes` units + `InaccessiblePaths` + read-only `/run/aetherflow-plugin-{app,token}` mounts + fail-closed `503 PLUGIN_ISOLATION_UNAVAILABLE`) |
 | Tenant file escape in McBrowser | Low | High | HIGH | Mitigated (`af-files` capability scoping + symlink/traversal rejection + admin-only `/fs`) |
 | Zombie sessions during cache outage | None | Low | LOW | Eliminated (revocation persisted directly in bundled SQLite WAL; Redis removed) |
 | Broken update killing the updater mid-restart | Low | High | HIGH | Mitigated (isolated `aetherflow-self-update.service` + WAL-safe snapshot + binary path check) |
