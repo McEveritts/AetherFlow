@@ -1091,6 +1091,18 @@ youtube_private_port() {
 
 
 class CatalogLifecycleMatrix(unittest.TestCase):
+    def test_librespeed_installs_group_readable_dashboard_assets(self):
+        with InstallerFixture("librespeed") as fixture:
+            fixture.file("packages/package/assets/librespeed/index.html", "<h1>LibreSpeed</h1>")
+            fixture.file("packages/package/assets/librespeed/styling/index.css", "body {}")
+            result = fixture.run("install", 19988)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assets = fixture.root / "opt/librespeed/assets"
+            self.assertEqual(assets.stat().st_mode & 0o077, 0o050)
+            self.assertEqual((assets / "index.html").stat().st_mode & 0o077, 0o040)
+            self.assertEqual((assets / "styling").stat().st_mode & 0o077, 0o050)
+            self.assertEqual((assets / "styling/index.css").stat().st_mode & 0o077, 0o040)
+
     def test_pihole_release_target_matches_installed_ftl(self):
         automation = json.loads((ROOT / "config/package_automation.json").read_text())["pihole"]
         self.assertEqual(automation["update_repo"], "pi-hole/FTL")

@@ -199,6 +199,8 @@ if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then
     rm -rf -- /opt/librespeed/assets.new
     mkdir -p /opt/librespeed/assets.new
     cp -R --no-preserve=ownership "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets.new/
+    # The service reads these bundled assets through its group under the installer umask.
+    chmod -R g+rX,o-rwx -- /opt/librespeed/assets.new
     rm -rf -- /opt/librespeed/assets
     mv -fT /opt/librespeed/assets.new /opt/librespeed/assets
 else
