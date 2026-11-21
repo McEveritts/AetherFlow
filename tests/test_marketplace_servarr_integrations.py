@@ -542,7 +542,8 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
             ))
             up_conf = write_file(
                 "etc/unpackerr/unpackerr.conf",
-                "interval = \"2m\"\n\n[[sonarr]]\n  url = 'http://127.0.0.1:8989' # legacy\n"
+                "interval = \"2m\"\n\n[[\"sonarr\"]] # keep this heading\n"
+                "  url = 'http://127.0.0.1:8989' # legacy\n"
                 f"  api_key = '{valid_tok}'\n",
             )
             up_program = (
@@ -561,6 +562,8 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
             parsed_up = parse_toml(up_conf.read_text())
             self.assertEqual(parsed_up["sonarr"][0]["url"], "http://127.0.0.1:18999/sonarr")
             self.assertEqual(parsed_up["sonarr"][0]["api_key"], valid_tok)
+            self.assertIn("# keep this heading", up_conf.read_text())
+            self.assertIn("# legacy", up_conf.read_text())
             self.assertNotIn(valid_tok, res1.stdout + res1.stderr)
 
             before_stat = (up_conf.stat().st_ino, up_conf.stat().st_mtime_ns, up_conf.read_bytes())

@@ -57,7 +57,7 @@ jobs:
       - name: Install Python & Shell Test Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq sqlite3 bc
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml python3-tomlkit apache2-bin jq sqlite3 bc
 
       - name: Test Dependency Preparation and Marketplace Lifecycle
         run: |

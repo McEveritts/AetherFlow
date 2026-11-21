@@ -63,7 +63,7 @@ ADMIN_PASS="${MASTER_PASS}"
 
 report_progress 20 "Installing dependencies..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 curl wget jq tar ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 python3-tomlkit curl wget jq tar ca-certificates
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
