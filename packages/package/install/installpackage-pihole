@@ -210,8 +210,8 @@ fi
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now pihole-FTL
 af_logged systemctl restart pihole-FTL
-systemctl is-active --quiet pihole-FTL
 af_verify_local_dns_lookup 53
+wait_for_service_ready pihole-FTL "$APP_PORT" /admin/
 PIHOLE_VERSION="$(pihole-FTL -v | head -n1)"
 queue_app_version /etc/pihole/.af-version "${PIHOLE_VERSION#v}"
 

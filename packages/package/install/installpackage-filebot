@@ -229,8 +229,7 @@ chmod 0644 "${SERVICE_FILE}"
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now filebot.service
 af_logged systemctl restart filebot.service
-systemctl is-active --quiet filebot.service
-systemctl is-active --quiet filebot.service
+wait_for_service_ready filebot.service "$APP_PORT" /
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

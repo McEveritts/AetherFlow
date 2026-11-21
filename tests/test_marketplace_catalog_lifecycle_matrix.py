@@ -4529,9 +4529,10 @@ if command == 'systemctl':
             server.server_close()
             worker.join(timeout=5)
 
-    def test_six_http_apps_rollback_when_systemd_active_but_http_fails(self):
+    def test_http_apps_rollback_when_systemd_active_but_http_fails(self):
         runtimes = {'bazarr': 'opt/bazarr', 'overseerr': 'opt/overseerr', 'tautulli': 'opt/Tautulli',
-                    'flaresolverr': 'opt/flaresolverr', 'sabnzbd': 'opt/SABnzbd', 'listenarr': 'opt/Listenarr'}
+                    'flaresolverr': 'opt/flaresolverr', 'sabnzbd': 'opt/SABnzbd', 'listenarr': 'opt/Listenarr',
+                    'filebot': 'opt/filebot-node', 'pihole': 'etc/pihole'}
         for app, directory in runtimes.items():
             with self.subTest(app=app), InstallerFixture(app) as fixture:
                 retained = {
@@ -4548,7 +4549,10 @@ if command == 'systemctl':
                 previous_version = version.read_bytes()
                 previous_lock = fixture.lock.stat().st_mtime_ns
                 self.patch_host_command(fixture, 'curl', "if command == 'systemctl':\n", """if command == 'curl' and any(argument.startswith(('http://127.0.0.1:', 'http://[::1]:')) for argument in arguments):
-    sys.exit(7)
+    if '-w' in arguments:
+        print('503', end='')
+        sys.exit(0)
+    sys.exit(22)
 if command == 'systemctl':
 """)
                 offset = len(self.commands(fixture))
@@ -4561,6 +4565,26 @@ if command == 'systemctl':
                 self.assertTrue(any(command[0] == 'curl' and any('http://127.0.0.1:' in argument for argument in command) for command in commands))
                 if app in retained:
                     self.assertTrue(any(command[0] == 'curl' and any(f'/{app}/' in argument for argument in command) for command in commands))
+                if app == 'pihole':
+                    self.assertTrue(any(command[0] == 'curl' and command[-1].endswith('/admin/') for command in commands))
+
+    def test_auth_protected_filebot_and_pihole_web_interfaces_are_ready(self):
+        for app, endpoint, status in (('filebot', '/', 401), ('pihole', '/admin/', 403)):
+            with self.subTest(app=app), InstallerFixture(app) as fixture:
+                self.patch_host_command(fixture, 'curl', "elif command in ('curl', 'wget'):\n", f'''elif command in ('curl', 'wget'):
+    if any(url.startswith('http://127.0.0.1:') and url.endswith({endpoint!r}) for url in arguments):
+        if '-w' in arguments:
+            print({status!r}, end='')
+            sys.exit(0)
+        sys.exit(22)
+''')
+                installed = fixture.run('install')
+                self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+                self.assertTrue(fixture.lock.exists())
+                self.assertTrue(any(
+                    command[0] == 'curl' and '-w' in command and command[-1].endswith(endpoint)
+                    for command in self.commands(fixture)
+                ))
 
     def test_wireguard_fresh_identity_failure_rolls_back_apt_and_state(self):
         with InstallerFixture('wireguard') as fixture:

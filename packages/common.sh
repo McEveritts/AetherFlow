@@ -6356,7 +6356,7 @@ wait_for_service_ready() {
                 fi
             elif curl "${curl_tls_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
                 return 0
-            elif [[ "$app_name" =~ ^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr)$ ]]; then
+            elif [[ "$app_name" =~ ^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr|filebot|pihole-ftl)$ ]]; then
                 if http_status="$(curl "${curl_tls_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
                     case "$http_status" in 200|204|401|403) return 0 ;; esac
                 fi
