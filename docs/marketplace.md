@@ -36,6 +36,12 @@ Piped and Invidious are experimental and have [additional installation requireme
 
 ## Operating Marketplace Apps
 
+### ruTorrent and rTorrent
+
+- ruTorrent needs a working rTorrent SCGI backend. For a fresh installation, start Marketplace rTorrent with its default `127.0.0.1:15000` endpoint, or have an existing backend ready at the endpoint configured for ruTorrent.
+- Install, update, and reinstall check Apache and issue a read-only rTorrent version request as `www-data` using ruTorrent's PHP configuration and the first login in the managed Apache password file. Set the endpoint in `/var/www/rutorrent/conf` so the CLI and web processes can both read it. If the SCGI check fails, verify that `www-data` can connect to the host and port or Unix socket. The job rolls back and reports the failure in Deployment logs.
+- Removing Marketplace rTorrent stops `rtorrent.service` and retains its configuration and session data. Explicit purge removes that data. Any ruTorrent instance configured to use this service needs another working SCGI endpoint to remain usable.
+
 ### Palate
 
 - **Palate** ([McEveritts/Palate](https://github.com/McEveritts/Palate)) builds the latest stable release tag with a private, checksum-verified Node.js 22 runtime and runs as `af-palate.service`. It listens on `127.0.0.1:28014`, or AetherFlow's allocated port, behind the AetherFlow gateway.

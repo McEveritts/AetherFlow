@@ -27,6 +27,30 @@ with (root / 'commands').open('a') as output:
 operation = arguments[0] if program == 'systemctl' and arguments else program
 if program == 'apt-get' and 'autoremove' in arguments:
     operation = 'autoremove'
+if program == 'systemctl' and 'rtorrent.service' in arguments:
+    unit = root / 'etc/systemd/system/rtorrent.service'
+    group = root / 'sys/fs/cgroup/system.slice/rtorrent.service'
+    if operation == 'show':
+        load_state = 'loaded' if unit.is_file() else 'not-found'
+        if '--property=KillMode' in arguments:
+            unit_lines = unit.read_text().splitlines() if unit.is_file() else []
+            stop_hook = next((line for line in unit_lines if line.startswith('ExecStop=')), 'ExecStop=')
+            if os.environ.get('CUSTOM_STOP_HOOK') == '1':
+                stop_hook = 'ExecStop=/fixture/custom-stop'
+            print('LoadState=' + load_state + '\\nKillMode=control-group\\n' + stop_hook + '\\nExecStopPost=')
+        elif '--property=ControlGroup' in arguments:
+            print('/system.slice/rtorrent.service' if unit.is_file() else '')
+        else:
+            print('LoadState=' + load_state + '\\nActiveState=inactive\\nMainPID=0\\nUnitFileState=disabled')
+        sys.exit(0)
+    if operation == 'stop':
+        if not unit.is_file():
+            sys.exit(5)
+        if 'killall' in unit.read_text():
+            raise RuntimeError('host-wide legacy stop hook was still installed')
+        if os.environ.get('MANAGED_PROCESS_STAYS') != '1':
+            (group / 'cgroup.events').write_text('populated 0\\n')
+        sys.exit(0)
 if operation == 'show':
     print(os.environ.get('UNIT_STATE', ''))
     sys.exit(int(os.environ.get('STATE_EXIT', '1')))
@@ -78,13 +102,13 @@ class MarketplaceTeardownTests(unittest.TestCase):
     def rebase(self, source):
         import re
         rebased = replace_paths_once(source, [(prefix, str(self.root) + prefix) for prefix in
-                                              ('/etc/', '/var/', '/opt/', '/home/', '/install/', '/usr/local/', '/usr/bin/', '/run/', '/srv/')])
+                                              ('/etc/', '/var/', '/opt/', '/home/', '/install/', '/usr/local/', '/usr/bin/', '/run/', '/srv/', '/sys/')])
         return re.sub(r'(?<![A-Za-z0-9_./-])/data(?=[/"\'\s]|$)', str(self.root) + '/data', rebased)
 
     def run_remove(self, package='syncthing', **environment):
         names = ('purge_systemd_unit', 'purge_system_user', 'remove_apache_app_listener', 'command_exists', 'purge_app_archive_backups', 'safe_rm_rf', 'validate_config_paths', 'safe_config_python', 'read_app_database_config', 'nextcloud_database_ownership')
         source = (ROOT / 'packages/common.sh').read_text()
-        names += tuple(name for name in ('systemd_unit_inactive', 'stop_systemd_unit', 'purge_systemd_units')
+        names += tuple(name for name in ('systemd_unit_inactive', 'stop_systemd_unit', 'purge_systemd_units', 'prepare_rtorrent_scoped_stop')
                        if f'\n{name}() ' in source)
         helpers = self.rebase(common_functions(*names))
         common = '''set -euo pipefail
@@ -238,19 +262,56 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                 result = self.run_remove(DELETE_DATA='true', ACCOUNT_EXIT=account_exit)
                 self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
 
-    def test_rtorrent_processes_must_be_proven_absent_after_kill(self):
-        for process_exit in ('0', '2', '1'):
-            with self.subTest(process_exit=process_exit):
-                self.file('install/.rtorrent.lock', 'installed')
-                self.file('var/lib/rtorrent/sentinel', 'data')
-                result = self.run_remove('rtorrent', DELETE_DATA='true', FAIL_OPERATION='killall', PROCESS_EXIT=process_exit)
-                if process_exit == '1':
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertFalse((self.root / 'install/.rtorrent.lock').exists())
-                else:
-                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertTrue((self.root / 'install/.rtorrent.lock').is_file())
-                    self.assertTrue((self.root / 'var/lib/rtorrent/sentinel').is_file())
+    def seed_rtorrent(self):
+        self.file('etc/systemd/system/rtorrent.service', self.rebase(
+            '[Unit]\nDescription=Retained description\n[Service]\nExecStop=/usr/bin/killall -w -s 2 /usr/bin/rtorrent\n'))
+        self.file('install/.rtorrent.lock', 'installed')
+        self.file('var/lib/rtorrent/sentinel', 'managed data')
+        managed = self.file('sys/fs/cgroup/system.slice/rtorrent.service/cgroup.events', 'populated 1\n')
+        independent = self.file('sys/fs/cgroup/system.slice/independent-rtorrent.service/cgroup.events', 'populated 1\n')
+        self.file('commands', '')
+        return managed, independent
+
+    def test_rtorrent_removes_only_the_managed_instance(self):
+        for purge in ('false', 'true'):
+            with self.subTest(purge=purge):
+                managed, independent = self.seed_rtorrent()
+                result = self.run_remove('rtorrent', DELETE_DATA=purge, PROCESS_EXIT='0')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(managed.read_text(), 'populated 0\n')
+                self.assertEqual(independent.read_text(), 'populated 1\n')
+                self.assertFalse((self.root / 'install/.rtorrent.lock').exists())
+                self.assertEqual((self.root / 'var/lib/rtorrent/sentinel').exists(), purge == 'false')
+                commands = (self.root / 'commands').read_text().splitlines()
+                self.assertLess(commands.index('systemctl daemon-reload'), commands.index('systemctl stop -- rtorrent.service'))
+                self.assertIn(f"apt-get {'remove' if purge == 'false' else 'purge'} -y -qq rtorrent", commands)
+                self.assertFalse(any(line.startswith(('killall ', 'pgrep ')) or 'independent-rtorrent' in line for line in commands))
+
+    def test_rtorrent_refuses_teardown_if_managed_cgroup_is_populated_or_stop_is_unscoped(self):
+        for blocker in ('MANAGED_PROCESS_STAYS', 'CUSTOM_STOP_HOOK'):
+            with self.subTest(blocker=blocker):
+                managed, independent = self.seed_rtorrent()
+                result = self.run_remove('rtorrent', DELETE_DATA='true', **{blocker: '1'})
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(managed.read_text(), 'populated 1\n')
+                self.assertEqual(independent.read_text(), 'populated 1\n')
+                self.assertTrue((self.root / 'install/.rtorrent.lock').is_file())
+                self.assertTrue((self.root / 'var/lib/rtorrent/sentinel').is_file())
+                self.assertIn('Description=Retained description', (self.root / 'etc/systemd/system/rtorrent.service').read_text())
+                commands = (self.root / 'commands').read_text()
+                self.assertNotIn('apt-get ', commands)
+                if blocker == 'CUSTOM_STOP_HOOK':
+                    self.assertNotIn('systemctl stop ', commands)
+
+    def test_rtorrent_retained_removal_with_missing_unit(self):
+        managed, independent = self.seed_rtorrent()
+        managed.unlink()
+        (self.root / 'etc/systemd/system/rtorrent.service').unlink()
+        result = self.run_remove('rtorrent', PROCESS_EXIT='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(independent.read_text(), 'populated 1\n')
+        self.assertFalse((self.root / 'install/.rtorrent.lock').exists())
+        self.assertTrue((self.root / 'var/lib/rtorrent/sentinel').is_file())
 
     def test_final_marker_unlink_failure_is_not_success(self):
         result = self.run_remove(FAIL_PATH=str(self.root / 'install/.syncthing.lock'))

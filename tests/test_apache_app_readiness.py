@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -19,11 +20,27 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from installer_test_helpers import common_functions
+
+
+def _php_with_simplexml():
+    for candidate in (shutil.which("php"), *Path("/usr/bin").glob("php[0-9]*")):
+        if candidate and subprocess.run([str(candidate), "-r", 'exit(extension_loaded("SimpleXML") ? 0 : 1);'],
+                                        capture_output=True, timeout=3).returncode == 0:
+            return str(candidate)
+    return None
+
+
+PHP_SIMPLEXML = _php_with_simplexml()
+SCGI_VERSION_REPLY = (
+    b"Status: 200 OK\r\nContent-Type: text/xml\r\n\r\n"
+    b"<methodResponse><params><param><value><string>0.10.0</string></value></param></params></methodResponse>"
+)
 
 
 MOCK_HOST = r'''#!/usr/bin/python3 -B
@@ -94,7 +111,11 @@ elif command == "git":
         ver = os.environ.get("AF_FIXTURE_VERSION", "2.1.0")
         if any("ruTorrent" in a for a in args):
             (dest / "conf").mkdir(exist_ok=True)
-            (dest / "conf/config.php").write_text('<?php $scgi_port = 15000; $scgi_host = "127.0.0.1";\n')
+            (dest / "conf/config.php").write_text(
+                "<?php\n$scgi_port = $_ENV['RU_SCGI_PORT'] ?? 5000;\n$scgi_host = '127.0.0.1';\n"
+                "if (is_readable(__DIR__ . '/config.local.php')) { require __DIR__ . '/config.local.php'; }\n"
+            )
+            shutil.copytree(root / "rutorrent-php", dest / "php")
             (dest / "js").mkdir(exist_ok=True)
             (dest / "js/webui.js").write_text(f"version: '{ver}'\n")
             (dest / "index.html").write_text(f"<!doctype html><title>ruTorrent {ver}</title>\n")
@@ -167,6 +188,82 @@ elif command in ("apt-get", "chown", "a2enmod", "a2dismod", "a2dissite", "sleep"
 else:
     raise RuntimeError(f"Unexpected mock command: {command} {args}")
 '''
+
+
+RUTORRENT_RUNUSER_FIXTURE = '''#!/usr/bin/python3 -B
+import os, pathlib, sys
+
+root = pathlib.Path(sys.argv[0]).resolve().parent.parent
+args = sys.argv[1:]
+assert args[:5] == ['-u', 'www-data', '--', 'php', '--']
+assert args[5] == str(root / 'var/www/rutorrent')
+assert 'MASTER_PASS' not in os.environ
+probe_port = root / 'scgi-probe-port'
+if probe_port.exists():
+    os.environ['AF_TEST_ROOT'] = str(root)
+    os.environ['AF_FIXTURE_SCGI_PORT'] = probe_port.read_text()
+    os.execv((root / 'php-cli').read_text(), args[3:])
+print('ready')  # HTTP-only cases isolate Apache behavior.
+'''
+
+
+# Minimal ruTorrent API double. The transport uses real confined sockets with
+# a fixture-only wire format, rather than implementing upstream XML-RPC.
+RUTORRENT_XMLRPC_FIXTURE = """<?php
+require __DIR__ . '/../conf/config.php';
+$userConfig = __DIR__ . '/../conf/users/' . $_SERVER['REMOTE_USER'] . '/config.php';
+if (is_file($userConfig)) {
+    require $userConfig;
+}
+class rXMLRPCRequest {
+    public static function send($request) {
+        global $scgi_host, $scgi_port;
+        $allowedPort = (int) getenv('AF_FIXTURE_SCGI_PORT');
+        if ($scgi_host === '127.0.0.1' && $scgi_port === 15000) {
+            $scgi_port = $allowedPort; // Reserve no fixed port on the test host.
+        }
+        if (!(($scgi_host === '127.0.0.1' && $allowedPort > 0 && $scgi_port === $allowedPort)
+            || ($scgi_port === 0 && str_starts_with($scgi_host, 'unix://' . getenv('AF_TEST_ROOT') . '/')))) {
+            return false;
+        }
+        $socket = @fsockopen($scgi_host, $scgi_port, $errno, $error, 1);
+        if (!$socket) {
+            return false;
+        }
+        stream_set_timeout($socket, 1);
+        fwrite($socket, $request . "\\n");
+        $reply = stream_get_contents($socket, 65536);
+        fclose($socket);
+        return $reply;
+    }
+}
+"""
+
+
+class _LocalScgiResponder:
+    def __init__(self, address, reply=SCGI_VERSION_REPLY):
+        self.methods = []
+        methods = self.methods
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self):
+                self.connection.settimeout(2)
+                request = ET.fromstring(self.rfile.readline(512))
+                methods.append(request.findtext("methodName"))
+                self.wfile.write(reply)
+
+        server_type = socketserver.TCPServer if isinstance(address, tuple) else socketserver.UnixStreamServer
+        self.server = server_type(address, Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
 
 
 def _free_loopback_port() -> int:
@@ -247,6 +344,10 @@ class ApacheAppReadinessFixture:
             p = self.root / "mock-bin" / cmd
             p.write_text(MOCK_HOST, encoding="utf-8")
             p.chmod(0o755)
+        self.file("rutorrent-php/xmlrpc.php", RUTORRENT_XMLRPC_FIXTURE)
+        self.file("mock-bin/runuser", RUTORRENT_RUNUSER_FIXTURE).chmod(0o755)
+        if PHP_SIMPLEXML:
+            self.file("php-cli", PHP_SIMPLEXML)
 
         source = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
         names = re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_-]*)\(\) [({]$", source)
@@ -318,6 +419,11 @@ remove_lock() { rm -f "$AF_TEST_ROOT/install/.$1.lock"; }
         }
         if extra_env:
             env.update(extra_env)
+        probe_port = env.pop("AF_FIXTURE_SCGI_PORT", None)
+        if probe_port is not None:
+            self.file("scgi-probe-port", probe_port)
+        else:
+            (self.root / "scgi-probe-port").unlink(missing_ok=True)
         return subprocess.run(
             ["/bin/bash", str(script_path)],
             env=env,
@@ -447,6 +553,78 @@ class ApacheAppReadinessTests(unittest.TestCase):
             self.assertFalse((fx_fail.root / "etc/apache2/sites-enabled/rutorrent.conf").is_symlink())
             self.assertFalse((fx_fail.root / "etc/apache2/conf-enabled/aetherflow-rutorrent-listen.conf").is_symlink())
             self.assertNotIn("Rollback incomplete", res.stdout + res.stderr)
+
+    @unittest.skipUnless(PHP_SIMPLEXML, "PHP CLI with SimpleXML required for the SCGI fixture")
+    def test_rutorrent_fresh_install_requires_scgi_even_when_apache_is_ready(self):
+        def healthy_web(_req):
+            return 200, {"Content-Type": "text/html"}, "<!doctype html><title>ruTorrent</title>"
+
+        with _LocalProbeServer(healthy_web) as web, socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))  # Keep the port reserved without listening.
+            result = self.fx.run_installer("rutorrent", web.port, {"AF_FIXTURE_SCGI_PORT": str(closed.getsockname()[1])})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(web.requests)
+            self.assertIn("install or start Marketplace rTorrent", result.stderr)
+            receipt = next(line.removeprefix("AF_DIAG_FAILURE=") for line in result.stderr.splitlines()
+                           if line.startswith("AF_DIAG_FAILURE="))
+            self.assertEqual(json.loads(receipt)["category"], "dependency_unavailable")
+            self.assertFalse((self.fx.root / "install/.rutorrent.lock").exists())
+            self.assertFalse((self.fx.root / "var/www/rutorrent").exists())
+            self.assertFalse((self.fx.root / "etc/apache2/sites-enabled/rutorrent.conf").is_symlink())
+
+            with _LocalScgiResponder(("127.0.0.1", 0), b"HTTP/1.1 200 OK\r\n\r\n<html>Wrong service</html>") as backend:
+                result = self.fx.run_installer("rutorrent", web.port, {"AF_FIXTURE_SCGI_PORT": str(backend.server.server_address[1])})
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse((self.fx.root / "install/.rutorrent.lock").exists())
+
+            with _LocalScgiResponder(("127.0.0.1", 0)) as backend:
+                result = self.fx.run_installer("rutorrent", web.port, {"AF_FIXTURE_SCGI_PORT": str(backend.server.server_address[1])})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(backend.methods, ["system.client_version"])
+            self.assertIn("?? 15000;", (self.fx.root / "var/www/rutorrent/conf/config.php").read_text())
+            self.assertTrue((self.fx.root / "install/.rutorrent.lock").is_file())
+
+    @unittest.skipUnless(PHP_SIMPLEXML, "PHP CLI with SimpleXML required for the SCGI fixture")
+    def test_rutorrent_retains_working_custom_endpoints_and_rolls_back_backend_failure(self):
+        for transport in ("tcp", "unix"):
+            with self.subTest(transport=transport):
+                fx = ApacheAppReadinessFixture()
+                self.addCleanup(fx.cleanup)
+                socket_path = str(fx.root / "tmp/rpc.sock")
+                address = ("127.0.0.1", 0) if transport == "tcp" else socket_path
+                with _LocalProbeServer(lambda _: (200, {}, "<!doctype html><title>ruTorrent</title>")) as web:
+                    with _LocalScgiResponder(address) as backend:
+                        port = backend.server.server_address[1] if transport == "tcp" else 0
+                        host = "127.0.0.1" if transport == "tcp" else f"unix://{socket_path}"
+                        config_path = "var/www/rutorrent/conf/config.php"
+                        if transport == "tcp":
+                            override = "config.local.php"
+                        else:
+                            fx.file(config_path, "<?php $scgi_host = '127.0.0.1'; $scgi_port = 5000;\n")
+                            override = "users/operator/config.php"
+                        local_text = f"<?php $scgi_host = {host!r}; $scgi_port = {port}; // retained\n"
+                        local = fx.file(f"var/www/rutorrent/conf/{override}", local_text)
+                        fx.file("etc/apache2/AetherFlow/rutorrent.htpasswd", "operator:fixture-hash\n")
+                        env = {"AF_FIXTURE_SCGI_PORT": str(port)}
+                        result = fx.run_installer("rutorrent", web.port, env)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertEqual(backend.methods, ["system.client_version"])
+                    config = fx.root / config_path
+                    config_text = config.read_text()
+                    self.assertIn("?? 15000;" if transport == "tcp" else "$scgi_port = 5000;", config_text)
+                    vhost = fx.root / "etc/apache2/sites-available/rutorrent.conf"
+                    old_vhost = vhost.read_text()
+                    failed = fx.run_installer("rutorrent", web.port, {**env, "AF_PACKAGE_ACTION": "update", "AF_FIXTURE_VERSION": "3.0.0"})
+                    self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+                    self.assertIn("SCGI response", failed.stderr)
+                    self.assertNotIn("Rollback incomplete", failed.stderr)
+                    self.assertEqual(config.read_text(), config_text)
+                    self.assertEqual(local.read_text(), local_text)
+                    self.assertEqual(vhost.read_text(), old_vhost)
+                    self.assertEqual((fx.root / "var/www/rutorrent/.af-version").read_text().strip(), "2.1.0")
+                    self.assertTrue((fx.root / "install/.rutorrent.lock").is_file())
+                    commands = [json.loads(line) for line in (fx.root / "commands.jsonl").read_text().splitlines()]
+                    self.assertFalse(any(command[0] in ("systemctl", "apt-get") and "rtorrent" in command for command in commands))
 
     def test_organizr_installer_accepts_200_setup_redirect_auth_and_alias_host(self):
         cases = [

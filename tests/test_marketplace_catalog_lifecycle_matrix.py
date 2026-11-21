@@ -430,7 +430,11 @@ if command == 'systemctl':
         sys.exit(0 if all((root / ('enabled-' + unit)).exists() for unit in names) else 1)
     elif operation == 'show':
         active = any((root / ('active-' + unit)).exists() for unit in names)
-        if 'ExecMainPID' in arguments and '--value' in arguments:
+        if names == ['rtorrent.service'] and '--property=KillMode' in arguments:
+            print('LoadState=loaded\nKillMode=control-group\nExecStop=\nExecStopPost=')
+        elif names == ['rtorrent.service'] and '--property=ControlGroup' in arguments:
+            print('')
+        elif 'ExecMainPID' in arguments and '--value' in arguments:
             print('123' if active else '0')
         elif '-P' in arguments and 'User' in arguments:
             print(app)
@@ -966,6 +970,12 @@ class InstallerFixture:
             for directory in (self.commands, self.root / "usr/bin", self.root / "usr/sbin"):
                 shutil.copyfile(self.root / "host-command", directory / name)
                 (directory / name).chmod(0o755)
+        if app == "rutorrent":
+            self.file("mock-bin/runuser", """#!/bin/bash
+[[ "$1 $2 $3 $4 $5" == '-u www-data -- php --' ]] || exit 1
+grep -q system.client_version || exit 1
+printf 'ready\\n'
+""").chmod(0o755)  # The Apache readiness fixture covers backend failures and transport.
         self.file("usr/lib/systemd/system/" + self.metadata["service_name"] + ".service", "[Service]\nExecStart=/fixture/vendor-service\n")
         source = (ROOT / "packages/common.sh").read_text()
         names = re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_-]*)\(\) [({]$", source)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # AetherFlow Package Installer: rTorrent
-# Port: 0 (SCGI on /run/rtorrent/rpc.sock and 127.0.0.1:15000)
+# Port: 0 (default SCGI on 127.0.0.1:15000)
 
 set -euo pipefail
 
@@ -34,6 +34,7 @@ fi
 require_root
 validate_config_paths /var/lib/rtorrent/.af-directory-check /run/rtorrent/.af-directory-check
 PACKAGE_NAME="${PACKAGE_NAME:-rtorrent}"
+prepare_rtorrent_scoped_stop
 begin_state_transaction "rtorrent" "0" "/" "/var/lib/rtorrent" "/etc/rtorrent" "/etc/systemd/system/rtorrent.service" "/usr/bin/rtorrent" "/usr/share/rtorrent"
 
 prepare_apt_package_transaction /var/lib/rtorrent/.af-version rtorrent
@@ -41,7 +42,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing rTorrent, screen, and dependencies via apt..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq rtorrent screen curl psmisc ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq rtorrent screen curl ca-certificates
 
 report_progress 40 "Configuring rtorrent service user and session directories..."
 if ! id -u rtorrent >/dev/null 2>&1; then
@@ -112,7 +113,8 @@ RuntimeDirectoryMode=0775
 WorkingDirectory=/var/lib/rtorrent
 ExecStartPre=-/bin/rm -f /var/lib/rtorrent/session/rtorrent.lock
 ExecStart=/usr/bin/screen -d -m -fa -S rtorrent /usr/bin/rtorrent -n -o import=/var/lib/rtorrent/.rtorrent.rc
-ExecStop=/usr/bin/killall -w -s 2 /usr/bin/rtorrent
+KillMode=control-group
+KillSignal=SIGINT
 Restart=on-failure
 RestartSec=5
 
@@ -130,5 +132,5 @@ queue_app_version /var/lib/rtorrent/.af-version "$(dpkg-query -W -f='${Version}'
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "rTorrent installed successfully (SCGI 127.0.0.1:15000 / /run/rtorrent/rpc.sock)."
+report_progress 100 "rTorrent service is active. Check /var/lib/rtorrent/.rtorrent.rc for its configured SCGI endpoint."
 log_info "${PACKAGE_NAME} installed successfully"

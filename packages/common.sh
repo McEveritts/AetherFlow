@@ -6994,6 +6994,45 @@ systemd_unit_inactive() {
     fi
 }
 
+prepare_rtorrent_scoped_stop() {
+    local unit_file=/etc/systemd/system/rtorrent.service policy
+    local line load_state="" kill_mode="" exec_stop=unknown exec_stop_post=unknown
+    if [[ -e "$unit_file" || -L "$unit_file" ]]; then
+        # Migrate the exact stop hook written by older Marketplace installs.
+        safe_config_python "$unit_file" <<'PYEOF' || return 1
+import re, sys
+
+path = sys.argv[1]
+with ManagedConfig(path, create_parents=False) as config:
+    previous = config.read_text()
+    updated = re.sub(r'^ExecStop=/usr/bin/killall -w -s 2 /usr/bin/rtorrent[ \t]*$',
+                     'KillSignal=SIGINT', previous, flags=re.MULTILINE)
+    if updated != previous:
+        config.write_text(updated)
+PYEOF
+        af_logged systemctl daemon-reload || { print_error "Failed to reload systemd before stopping rtorrent.service."; return 1; }
+    fi
+
+    if policy="$(systemctl show --property=LoadState --property=KillMode --property=ExecStop --property=ExecStopPost -- rtorrent.service)"; then
+        while IFS= read -r line; do
+            case "$line" in
+                LoadState=*) load_state="${line#LoadState=}" ;;
+                KillMode=*) kill_mode="${line#KillMode=}" ;;
+                ExecStop=*) exec_stop="${line#ExecStop=}" ;;
+                ExecStopPost=*) exec_stop_post="${line#ExecStopPost=}" ;;
+            esac
+        done <<< "$policy"
+        if [[ "$load_state" == not-found ]] && systemd_unit_inactive rtorrent.service; then
+            return 0
+        fi
+        if [[ ( "$load_state" == loaded || "$load_state" == masked ) && "$kill_mode" == control-group && -z "$exec_stop" && -z "$exec_stop_post" ]]; then
+            return 0
+        fi
+    fi
+    print_error "Cannot verify a scoped stop for rtorrent.service. Check that its systemd unit and drop-ins use KillMode=control-group with no ExecStop or ExecStopPost hooks."
+    return 1
+}
+
 quiesce_services_for_rollback() {
     local unit stop_status failed=false
     local backup="${AF_ROLLBACK_BACKUP:-${BACKUP_DIR:-${RUNTIME_BACKUP:-${ABS_BACKUP_DIR:-${AF_STATE_BACKUP:-${AF_ARCHIVE_BACKUP:-unknown}}}}}}"

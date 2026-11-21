@@ -33,17 +33,36 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Stopping and purging rtorrent.service..."
 
-purge_systemd_unit "rtorrent"
-af_logged killall -9 rtorrent || true
-if af_logged pgrep -x rtorrent; then
-    print_error "rTorrent processes remain; refusing teardown and data deletion."
+prepare_rtorrent_scoped_stop
+if ! unit_cgroup="$(systemctl show --property=ControlGroup --value -- rtorrent.service)" ||
+    [[ -n "$unit_cgroup" && ( "$unit_cgroup" != /* || "$unit_cgroup" == / || "$unit_cgroup" == */../* || "$unit_cgroup" == */.. ) ]]; then
+    print_error "Cannot identify the rtorrent.service cgroup; refusing teardown and data deletion."
     exit 1
-else
-    status=$?
-    [[ "$status" == 1 ]] || exit 1
 fi
+stop_systemd_unit rtorrent.service
+if ! systemd_unit_inactive rtorrent.service; then
+    print_error "Cannot prove rtorrent.service is stopped; refusing teardown and data deletion."
+    exit 1
+fi
+# Systemd can report an inactive unit even if a process could not be killed.
+# Inspect only the unit's former cgroup, including any delegated children.
+if [[ -n "$unit_cgroup" ]]; then
+    for cgroup_root in /sys/fs/cgroup /sys/fs/cgroup/systemd /sys/fs/cgroup/unified; do
+        unit_cgroup_path="${cgroup_root}${unit_cgroup}"
+        [[ -d "$unit_cgroup_path" ]] || continue
+        if [[ -f "$unit_cgroup_path/cgroup.events" ]]; then
+            if grep -qx 'populated 0' "$unit_cgroup_path/cgroup.events"; then continue; fi
+        elif [[ -r "$unit_cgroup_path/cgroup.procs" ]] &&
+            unit_pids="$(find -P "$unit_cgroup_path" -name cgroup.procs -exec cat {} +)" && [[ -z "$unit_pids" ]]; then
+            continue
+        fi
+        print_error "Cannot prove the rtorrent.service cgroup is empty; refusing teardown and data deletion."
+        exit 1
+    done
+fi
+purge_systemd_unit "rtorrent"
 
-report_progress 65 "Removing rTorrent session data and system user..."
+report_progress 65 "Removing the rTorrent package..."
 APT_REMOVE_ACTION=remove
 if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq rtorrent

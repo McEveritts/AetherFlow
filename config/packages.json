@@ -421,7 +421,7 @@
     {
         "name": "rutorrent",
         "label": "ruTorrent",
-        "description": "Popular web frontend for rTorrent with extensive plugin support.",
+        "description": "Web frontend for rTorrent with extensive plugin support. Requires a reachable rTorrent SCGI backend.",
         "lock_file": "/install/.rutorrent.lock",
         "category": "Downloaders",
         "service_type": "systemd",
