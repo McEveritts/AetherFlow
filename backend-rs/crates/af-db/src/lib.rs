@@ -968,6 +968,7 @@ pub fn init_db() -> anyhow::Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             previous_base_domain TEXT NOT NULL DEFAULT '',
             target_base_domain TEXT NOT NULL DEFAULT '',
+            source_domains_json TEXT NOT NULL DEFAULT '[]',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -1502,6 +1503,12 @@ pub fn init_db() -> anyhow::Result<()> {
     ensure_security_schema_invariants(&conn)?;
     ensure_notification_schema_invariants(&conn)?;
     ensure_pending_actions_schema_invariants(&conn)?;
+    ensure_column(
+        &conn,
+        "base_domain_sync_state",
+        "source_domains_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
 
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
     let _ = conn.execute(

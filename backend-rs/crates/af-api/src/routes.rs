@@ -1615,6 +1615,19 @@ fn get_settings_for_role(role: &str) -> Response {
     }
 }
 
+static ADMIN_SETTINGS_WRITE_LOCK: Lazy<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    Lazy::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+
+#[cfg(test)]
+type BaseDomainSyncPauseHook = (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+#[cfg(test)]
+static BASE_DOMAIN_SYNC_STAGE_HOOK: Lazy<std::sync::Mutex<Option<BaseDomainSyncPauseHook>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+
 async fn update_settings(
     Extension(user): Extension<AuthUser>,
     Json(mut req): Json<SettingsPayload>,
@@ -1686,6 +1699,32 @@ async fn update_settings(
             .is_ok_and(|ip| ip.to_canonical().is_loopback())
     }
 
+    let channel = if req.update_channel == "nightly" {
+        "nightly"
+    } else if req.update_channel == "experimental" {
+        "experimental"
+    } else {
+        "stable"
+    };
+    let norm_domain = if req.base_domain.trim().is_empty() {
+        String::new()
+    } else {
+        let n = af_db::normalize_base_domain(&req.base_domain);
+        if n.is_empty() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_DOMAIN",
+                "Invalid base domain",
+            );
+        }
+        n
+    };
+
+    // Serialize all PUT /admin/settings writes (including fast-path and blank saves)
+    // against in-flight base-domain syncs without requiring the privileged runner for
+    // unrelated saves.
+    let settings_guard = ADMIN_SETTINGS_WRITE_LOCK.clone().lock_owned().await;
+
     let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1750,27 +1789,6 @@ async fn update_settings(
         );
     }
 
-    let channel = if req.update_channel == "nightly" {
-        "nightly"
-    } else if req.update_channel == "experimental" {
-        "experimental"
-    } else {
-        "stable"
-    };
-    let norm_domain = if req.base_domain.trim().is_empty() {
-        String::new()
-    } else {
-        let n = af_db::normalize_base_domain(&req.base_domain);
-        if n.is_empty() {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_DOMAIN",
-                "Invalid base domain",
-            );
-        }
-        n
-    };
-
     let sync_needed =
         !norm_domain.is_empty() && (norm_domain != db_prev_base_domain || pending_sync.is_some());
     if !sync_needed {
@@ -1779,7 +1797,30 @@ async fn update_settings(
                 conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             persist_settings_in_tx(&transaction, &req, channel, &norm_domain)?;
             if norm_domain.is_empty() {
-                af_db::clear_pending_base_domain_sync(&transaction)?;
+                if let Some(ref pending) = pending_sync {
+                    if !db_prev_base_domain.is_empty()
+                        && !pending
+                            .source_base_domains
+                            .iter()
+                            .any(|existing| existing == &db_prev_base_domain)
+                    {
+                        let mut sources = pending.source_base_domains.clone();
+                        sources.push(db_prev_base_domain.clone());
+                        af_db::set_pending_base_domain_sync(
+                            &transaction,
+                            &pending.previous_base_domain,
+                            &pending.target_base_domain,
+                            &sources,
+                        )?;
+                    }
+                } else if !db_prev_base_domain.is_empty() {
+                    af_db::set_pending_base_domain_sync(
+                        &transaction,
+                        &db_prev_base_domain,
+                        "",
+                        std::slice::from_ref(&db_prev_base_domain),
+                    )?;
+                }
             }
             transaction.commit()?;
             Ok(())
@@ -1796,6 +1837,7 @@ async fn update_settings(
         drop(conn);
         af_db::invalidate_ingress_cache();
         af_db::get_base_domain();
+        drop(settings_guard);
 
         req.gemini_api_key.clear();
         req.openai_api_key.clear();
@@ -1814,9 +1856,10 @@ async fn update_settings(
     let sync_req = req.clone();
     let sync_domain = norm_domain.clone();
     let sync_channel = channel;
-    // Keep lifecycle admission active until host synchronization or rollback finishes,
-    // including when the HTTP client disconnects.
+    // Keep settings write serialization and lifecycle admission active until host
+    // synchronization or rollback finishes, including when the HTTP client disconnects.
     let synchronized = tokio::spawn(async move {
+        let _settings_guard = settings_guard;
         af_services::mutators::with_blueprint_admission(async move {
             Ok(synchronize_base_domain_update(sync_req, sync_channel, sync_domain).await)
         })
@@ -2016,7 +2059,8 @@ fn base_domain_sync_failure_response(failure: BaseDomainSyncFailure) -> Response
 
 fn restore_base_domain_after_sync_failure(
     restore_domain: &str,
-    partial_commit: bool,
+    prior_pending: Option<&af_db::PendingBaseDomainSync>,
+    target_committed: bool,
 ) -> anyhow::Result<()> {
     let mut conn = af_db::get_conn()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2024,8 +2068,16 @@ fn restore_base_domain_after_sync_failure(
         "UPDATE settings SET base_domain = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
         params![restore_domain],
     )?;
-    if !partial_commit {
-        af_db::clear_pending_base_domain_sync(&tx)?;
+    if !target_committed {
+        match prior_pending {
+            Some(pending) => af_db::set_pending_base_domain_sync(
+                &tx,
+                &pending.previous_base_domain,
+                &pending.target_base_domain,
+                &pending.source_base_domains,
+            )?,
+            None => af_db::clear_pending_base_domain_sync(&tx)?,
+        }
     }
     tx.commit()?;
     drop(conn);
@@ -2142,7 +2194,8 @@ async fn synchronize_base_domain_update(
     let (
         db_prev_base_domain,
         origin_base_domain,
-        prior_pending_exists,
+        prior_pending,
+        source_base_domains,
         active_updates,
         retained_updates,
     ) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -2175,20 +2228,28 @@ async fn synchronize_base_domain_update(
         };
 
         let mut source_base_domains = Vec::new();
-        for candidate in [
-            Some(origin_base.as_str()),
-            Some(db_prev.as_str()),
-            pending
-                .as_ref()
-                .map(|item| item.target_base_domain.as_str()),
-            if db_prev.is_empty() {
-                Some(env_base.as_str())
-            } else {
-                None
-            },
-        ]
-        .into_iter()
-        .flatten()
+        for candidate in [Some(origin_base.as_str()), Some(db_prev.as_str())]
+            .into_iter()
+            .flatten()
+            .chain(
+                pending
+                    .iter()
+                    .flat_map(|item| item.source_base_domains.iter().map(String::as_str)),
+            )
+            .chain(
+                [
+                    pending
+                        .as_ref()
+                        .map(|item| item.target_base_domain.as_str()),
+                    if db_prev.is_empty() {
+                        Some(env_base.as_str())
+                    } else {
+                        None
+                    },
+                ]
+                .into_iter()
+                .flatten(),
+            )
         {
             if !candidate.is_empty()
                 && !source_base_domains
@@ -2337,7 +2398,8 @@ async fn synchronize_base_domain_update(
         Ok((
             db_prev,
             origin_base,
-            pending.is_some(),
+            pending,
+            source_base_domains,
             active_updates,
             retained_updates,
         ))
@@ -2353,6 +2415,10 @@ async fn synchronize_base_domain_update(
         partial_commit: false,
         error,
     })?;
+
+    let prior_partial_commit = prior_pending
+        .as_ref()
+        .is_some_and(|pending| !pending.target_base_domain.is_empty());
 
     // Preflight lifecycle reservations for all affected apps before any DB or host write.
     let mut checked_apps = std::collections::HashSet::new();
@@ -2387,7 +2453,7 @@ async fn synchronize_base_domain_update(
             }
             return Err(BaseDomainSyncFailure::Phase {
                 failed_phase: "preflight",
-                partial_commit: prior_pending_exists,
+                partial_commit: prior_partial_commit,
                 error,
             });
         }
@@ -2397,6 +2463,14 @@ async fn synchronize_base_domain_update(
     // mutators and DNS sync observe the target base domain and crashes remain retryable.
     let stage_origin = origin_base_domain.clone();
     let stage_target = norm_domain.clone();
+    let mut stage_sources = source_base_domains;
+    if !stage_target.is_empty()
+        && !stage_sources
+            .iter()
+            .any(|existing| existing == &stage_target)
+    {
+        stage_sources.push(stage_target.clone());
+    }
     let staged = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let mut conn = af_db::get_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2405,7 +2479,7 @@ async fn synchronize_base_domain_update(
             params![stage_target],
         )?;
         anyhow::ensure!(updated == 1, "Settings row is missing");
-        af_db::set_pending_base_domain_sync(&tx, &stage_origin, &stage_target)?;
+        af_db::set_pending_base_domain_sync(&tx, &stage_origin, &stage_target, &stage_sources)?;
         tx.commit()?;
         drop(conn);
         af_db::invalidate_ingress_cache();
@@ -2419,22 +2493,38 @@ async fn synchronize_base_domain_update(
         return Err(BaseDomainSyncFailure::Persistence(error));
     }
 
-    let restore_domain = if prior_pending_exists && db_prev_base_domain == norm_domain {
+    #[cfg(test)]
+    {
+        let stage_hook = BASE_DOMAIN_SYNC_STAGE_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((entered, release)) = stage_hook {
+            entered.notify_one();
+            release.notified().await;
+        }
+    }
+
+    let restore_domain = if prior_pending.as_ref().is_some_and(|pending| {
+        !pending.target_base_domain.is_empty()
+            && (db_prev_base_domain == norm_domain
+                || db_prev_base_domain == pending.target_base_domain)
+    }) {
         origin_base_domain.clone()
     } else {
         db_prev_base_domain.clone()
     };
 
-    let mut partial_commit = prior_pending_exists;
+    let mut target_committed = false;
     let mut sync_error: Option<(&'static str, anyhow::Error)> = None;
 
     for item in active_updates {
         match Box::pin(apply_planned_active_ingress_update(item)).await {
             Ok(()) => {
-                partial_commit = true;
+                target_committed = true;
             }
             Err(("ingress_partial", error)) => {
-                partial_commit = true;
+                target_committed = true;
                 sync_error = Some(("ingress", error));
                 break;
             }
@@ -2451,10 +2541,16 @@ async fn synchronize_base_domain_update(
         }
     }
 
+    let partial_commit = prior_partial_commit || target_committed;
     if let Some((failed_phase, error)) = sync_error {
         let restore_for_task = restore_domain.clone();
+        let restore_pending = prior_pending.clone();
         if let Err(restore_err) = tokio::task::spawn_blocking(move || {
-            restore_base_domain_after_sync_failure(&restore_for_task, partial_commit)
+            restore_base_domain_after_sync_failure(
+                &restore_for_task,
+                restore_pending.as_ref(),
+                target_committed,
+            )
         })
         .await
         .map_err(anyhow::Error::new)
@@ -2497,8 +2593,13 @@ async fn synchronize_base_domain_update(
     .and_then(|res| res);
     if let Err(error) = finalized {
         let restore_for_task = restore_domain.clone();
+        let restore_pending = prior_pending.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            restore_base_domain_after_sync_failure(&restore_for_task, partial_commit)
+            restore_base_domain_after_sync_failure(
+                &restore_for_task,
+                restore_pending.as_ref(),
+                target_committed,
+            )
         })
         .await;
         return Err(BaseDomainSyncFailure::Persistence(error));

@@ -1476,6 +1476,7 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
             Some(af_db::PendingBaseDomainSync {
                 previous_base_domain: "old.example".into(),
                 target_base_domain: "new.example".into(),
+                source_base_domains: vec!["old.example".into(), "new.example".into()],
             })
         );
     }
@@ -1621,11 +1622,12 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
         );
     }
 
-    // 4. Reverting back to the committed base domain after a partial failure toward a third domain
-    //    must still converge partially-migrated apps back cleanly.
-    std::fs::remove_file(&hosts_path).unwrap();
-    std::fs::create_dir(&hosts_path).unwrap();
-    let (third_fail_status, _) = Box::pin(send_admin_settings_put(
+    // 4. Failed A->B followed by failed C (both partial and pre-commit) and clearing base_domain
+    //    must preserve all outstanding generated source domains so a later revert/retry reconciles
+    //    every partially-migrated host while honoring custom domains.
+    std::fs::remove_file(&sonarr_ext_vhost).unwrap();
+    std::fs::create_dir(&sonarr_ext_vhost).unwrap();
+    let (third_fail_status, third_fail_body) = Box::pin(send_admin_settings_put(
         &app,
         &token,
         "third.example",
@@ -1633,15 +1635,147 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
     ))
     .await;
     assert_eq!(third_fail_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(third_fail_body["failed_phase"], "ingress");
+    assert_eq!(third_fail_body["partial_commit"], true);
+    assert_eq!(
+        af_db::get_app_ingress_config("bazarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "bazarr.third.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("sabnzbd")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sabnzbd.third.example"
+    );
     assert_eq!(
         af_db::get_app_ingress_config("sonarr")
             .unwrap()
             .unwrap()
             .public_domain,
-        "sonarr.third.example"
+        "sonarr.new.example"
     );
-    std::fs::remove_dir(&hosts_path).unwrap();
-    std::fs::write(&hosts_path, "127.0.0.1 localhost\n").unwrap();
+
+    // Next attempt targets fourth.example: bazarr moves to fourth.example while sabnzbd fails
+    // Apache and rolls back to third.example -> active hosts now span new, third, and fourth.
+    let sab_ext_vhost = root.join("etc/apache2/sites-available/aetherflow-ext-sabnzbd.conf");
+    std::fs::remove_file(&sab_ext_vhost).unwrap();
+    std::fs::create_dir(&sab_ext_vhost).unwrap();
+    let (fourth_fail_status, fourth_fail_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "fourth.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(fourth_fail_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fourth_fail_body["failed_phase"], "ingress");
+    assert_eq!(fourth_fail_body["partial_commit"], true);
+    assert_eq!(
+        af_db::get_app_ingress_config("bazarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "bazarr.fourth.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("sabnzbd")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sabnzbd.third.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.new.example"
+    );
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(
+            af_db::get_pending_base_domain_sync(&conn).unwrap(),
+            Some(af_db::PendingBaseDomainSync {
+                previous_base_domain: "new.example".into(),
+                target_base_domain: "fourth.example".into(),
+                source_base_domains: vec![
+                    "new.example".into(),
+                    "third.example".into(),
+                    "fourth.example".into(),
+                ],
+            })
+        );
+    }
+
+    // A subsequent attempt that fails on the first app before committing anything must restore
+    // the prior pending source set intact without forgetting third.example or fourth.example.
+    let bazarr_int_vhost = root.join("etc/apache2/sites-available/aetherflow-app-bazarr.conf");
+    let _ = std::fs::remove_file(&bazarr_int_vhost);
+    std::fs::create_dir(&bazarr_int_vhost).unwrap();
+    let (fifth_fail_status, fifth_fail_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "fifth.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(fifth_fail_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fifth_fail_body["partial_commit"], true);
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(
+            af_db::get_pending_base_domain_sync(&conn).unwrap(),
+            Some(af_db::PendingBaseDomainSync {
+                previous_base_domain: "new.example".into(),
+                target_base_domain: "fourth.example".into(),
+                source_base_domains: vec![
+                    "new.example".into(),
+                    "third.example".into(),
+                    "fourth.example".into(),
+                ],
+            })
+        );
+    }
+    std::fs::remove_dir(&bazarr_int_vhost).unwrap();
+
+    // Clearing base_domain must not depend on the privileged runner and must preserve all
+    // outstanding generated source domains so a later revert still reconciles third/fourth.
+    env::set_var("PRIVILEGED_RUNNER_ENABLED", "1");
+    let (clear_status, clear_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "",
+        "cleared-while-pending",
+    ))
+    .await;
+    assert_eq!(clear_status, StatusCode::OK);
+    assert_eq!(clear_body["data"]["baseDomain"], "");
+    assert_eq!(af_db::get_base_domain(), "");
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(
+            af_db::get_pending_base_domain_sync(&conn).unwrap(),
+            Some(af_db::PendingBaseDomainSync {
+                previous_base_domain: "new.example".into(),
+                target_base_domain: "fourth.example".into(),
+                source_base_domains: vec![
+                    "new.example".into(),
+                    "third.example".into(),
+                    "fourth.example".into(),
+                ],
+            })
+        );
+    }
+    env::remove_var("PRIVILEGED_RUNNER_ENABLED");
+    std::fs::remove_dir(&sab_ext_vhost).unwrap();
+    std::fs::remove_dir(&sonarr_ext_vhost).unwrap();
+
+    // Reverting to new.example reconciles bazarr (fourth), sabnzbd (third), and sonarr (new)
+    // back to new.example while leaving custom radarr and retained readarr untouched.
     let (revert_status, _) = Box::pin(send_admin_settings_put(
         &app,
         &token,
@@ -1650,6 +1784,13 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
     ))
     .await;
     assert_eq!(revert_status, StatusCode::OK);
+    assert_eq!(
+        af_db::get_app_ingress_config("bazarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "bazarr.new.example"
+    );
     assert_eq!(
         af_db::get_app_ingress_config("sonarr")
             .unwrap()
@@ -1664,6 +1805,9 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
             .public_domain,
         "sabnzbd.new.example"
     );
+    let sab_reverted_ini = std::fs::read_to_string(&sab_ini).unwrap();
+    assert!(sab_reverted_ini.contains("sabnzbd.new.example"));
+    assert!(!sab_reverted_ini.contains("sabnzbd.third.example"));
     assert_eq!(
         af_db::get_app_ingress_config("radarr")
             .unwrap()
@@ -1671,6 +1815,24 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
             .public_domain,
         "movies.old.example"
     );
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("lidarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "lidarr.new.example"
+    );
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("readarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "books.old.example"
+    );
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(af_db::get_pending_base_domain_sync(&conn).unwrap(), None);
+    }
 
     // 5. Unmanaged Apache: base-domain update still succeeds via apply_ingress_vhost_policy.
     std::fs::remove_dir_all(root.join("etc/apache2")).unwrap();
@@ -1712,6 +1874,168 @@ async fn admin_settings_base_domain_update_handles_partial_failure_same_value_re
             .public_domain,
         "books.old.example"
     );
+
+    // 6. Unrelated fast-path saves require no privileged runner, and competing PUT settings writes
+    //    (both fast-path and blank saves) serialize behind in-flight domain syncs without clobber.
+    env::set_var("PRIVILEGED_RUNNER_ENABLED", "1");
+    let (fast_no_runner_status, fast_no_runner_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "unmanaged.example",
+        "fast-no-runner",
+    ))
+    .await;
+    assert_eq!(fast_no_runner_status, StatusCode::OK);
+    assert_eq!(
+        fast_no_runner_body["data"]["systemPrompt"],
+        "fast-no-runner"
+    );
+    env::remove_var("PRIVILEGED_RUNNER_ENABLED");
+
+    // 6a. Serialize competing fast-path PUT behind an in-flight domain sync.
+    let entered_fast = Arc::new(tokio::sync::Notify::new());
+    let release_fast = Arc::new(tokio::sync::Notify::new());
+    *BASE_DOMAIN_SYNC_STAGE_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some((entered_fast.clone(), release_fast.clone()));
+    let app_sync1 = app.clone();
+    let token_sync1 = token.clone();
+    let mut sync_task1 = tokio::spawn(async move {
+        send_admin_settings_put(&app_sync1, &token_sync1, "serial.example", "sync-prompt-1").await
+    });
+    entered_fast.notified().await;
+
+    let app_fast = app.clone();
+    let token_fast = token.clone();
+    let mut fast_task = tokio::spawn(async move {
+        send_admin_settings_put(&app_fast, &token_fast, "serial.example", "fast-after-sync").await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut fast_task)
+            .await
+            .is_err(),
+        "fast-path PUT must wait until the in-flight base-domain sync finishes"
+    );
+    {
+        let conn = af_db::get_conn().unwrap();
+        let prompt: String = conn
+            .query_row("SELECT system_prompt FROM settings WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(prompt, "fast-no-runner");
+    }
+    release_fast.notify_one();
+    let (sync1_status, _) = (&mut sync_task1).await.unwrap();
+    let (fast_status, fast_body) = fast_task.await.unwrap();
+    assert_eq!(sync1_status, StatusCode::OK);
+    assert_eq!(fast_status, StatusCode::OK);
+    assert_eq!(fast_body["data"]["baseDomain"], "serial.example");
+    assert_eq!(fast_body["data"]["systemPrompt"], "fast-after-sync");
+    let (_, after_fast_body) = Box::pin(send_auth_settings_get(&app, &token)).await;
+    assert_eq!(after_fast_body["baseDomain"], "serial.example");
+    assert_eq!(after_fast_body["systemPrompt"], "fast-after-sync");
+
+    // 6b. Serialize competing blank-domain PUT behind an in-flight domain sync, and preserve
+    //     the cleared committed domain as a generated source for a subsequent domain change.
+    let entered_blank = Arc::new(tokio::sync::Notify::new());
+    let release_blank = Arc::new(tokio::sync::Notify::new());
+    *BASE_DOMAIN_SYNC_STAGE_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some((entered_blank.clone(), release_blank.clone()));
+    let app_sync2 = app.clone();
+    let token_sync2 = token.clone();
+    let mut sync_task2 = tokio::spawn(async move {
+        send_admin_settings_put(&app_sync2, &token_sync2, "serial2.example", "sync-prompt-2").await
+    });
+    entered_blank.notified().await;
+
+    let app_blank = app.clone();
+    let token_blank = token.clone();
+    let mut blank_task = tokio::spawn(async move {
+        send_admin_settings_put(&app_blank, &token_blank, "", "blank-after-sync").await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut blank_task)
+            .await
+            .is_err(),
+        "blank-domain PUT must wait until the in-flight base-domain sync finishes"
+    );
+    release_blank.notify_one();
+    let (sync2_status, _) = (&mut sync_task2).await.unwrap();
+    let (blank_status, blank_body) = blank_task.await.unwrap();
+    assert_eq!(sync2_status, StatusCode::OK);
+    assert_eq!(blank_status, StatusCode::OK);
+    assert_eq!(blank_body["data"]["baseDomain"], "");
+    assert_eq!(blank_body["data"]["systemPrompt"], "blank-after-sync");
+    assert_eq!(af_db::get_base_domain(), "");
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(
+            af_db::get_pending_base_domain_sync(&conn).unwrap(),
+            Some(af_db::PendingBaseDomainSync {
+                previous_base_domain: "serial2.example".into(),
+                target_base_domain: String::new(),
+                source_base_domains: vec!["serial2.example".into()],
+            })
+        );
+    }
+
+    let (reconcile_status, _) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "reconciled.example",
+        "final-prompt",
+    ))
+    .await;
+    assert_eq!(reconcile_status, StatusCode::OK);
+    assert_eq!(af_db::get_base_domain(), "reconciled.example");
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.reconciled.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("sabnzbd")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sabnzbd.reconciled.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("bazarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "bazarr.reconciled.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("radarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "movies.old.example"
+    );
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("lidarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "lidarr.reconciled.example"
+    );
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("readarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "books.old.example"
+    );
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(af_db::get_pending_base_domain_sync(&conn).unwrap(), None);
+    }
 
     let _ = std::fs::remove_dir_all(root);
 }

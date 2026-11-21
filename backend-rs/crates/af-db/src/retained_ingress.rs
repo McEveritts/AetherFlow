@@ -210,6 +210,34 @@ pub fn check_app_ingress_reservation(app: &str) -> anyhow::Result<()> {
 pub struct PendingBaseDomainSync {
     pub previous_base_domain: String,
     pub target_base_domain: String,
+    pub source_base_domains: Vec<String>,
+}
+
+fn normalize_pending_source_domains(
+    previous_base_domain: &str,
+    target_base_domain: &str,
+    extra_sources: &[String],
+) -> Vec<String> {
+    let mut domains = Vec::new();
+    for candidate in std::iter::once(previous_base_domain)
+        .chain(extra_sources.iter().map(String::as_str))
+        .chain(std::iter::once(target_base_domain))
+    {
+        let normalized = crate::normalize_base_domain(candidate);
+        if !normalized.is_empty() && !domains.iter().any(|existing| existing == &normalized) {
+            domains.push(normalized);
+        }
+    }
+    domains
+}
+
+fn has_base_domain_sync_column(conn: &Connection, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(base_domain_sync_state)")?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name.eq_ignore_ascii_case(column));
+    Ok(exists)
 }
 
 fn base_domain_sync_schema(conn: &Connection) -> anyhow::Result<()> {
@@ -218,9 +246,16 @@ fn base_domain_sync_schema(conn: &Connection) -> anyhow::Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             previous_base_domain TEXT NOT NULL DEFAULT '',
             target_base_domain TEXT NOT NULL DEFAULT '',
+            source_domains_json TEXT NOT NULL DEFAULT '[]',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );",
     )?;
+    if !has_base_domain_sync_column(conn, "source_domains_json")? {
+        conn.execute(
+            "ALTER TABLE base_domain_sync_state ADD COLUMN source_domains_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -235,17 +270,38 @@ pub fn get_pending_base_domain_sync(
     if !exists {
         return Ok(None);
     }
-    let row: Option<(String, String)> = conn
-        .query_row(
+    let has_sources = has_base_domain_sync_column(conn, "source_domains_json")?;
+    let row: Option<(String, String, String)> = if has_sources {
+        conn.query_row(
+            "SELECT COALESCE(previous_base_domain, ''), COALESCE(target_base_domain, ''), COALESCE(source_domains_json, '[]')
+             FROM base_domain_sync_state WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
             "SELECT COALESCE(previous_base_domain, ''), COALESCE(target_base_domain, '')
              FROM base_domain_sync_state WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, "[]".to_string())),
         )
-        .optional()?;
-    Ok(row.map(|(prev, target)| PendingBaseDomainSync {
-        previous_base_domain: crate::normalize_base_domain(&prev),
-        target_base_domain: crate::normalize_base_domain(&target),
+        .optional()?
+    };
+    Ok(row.map(|(prev, target, raw_sources)| {
+        let previous_base_domain = crate::normalize_base_domain(&prev);
+        let target_base_domain = crate::normalize_base_domain(&target);
+        let parsed_sources: Vec<String> = serde_json::from_str(&raw_sources).unwrap_or_default();
+        let source_base_domains = normalize_pending_source_domains(
+            &previous_base_domain,
+            &target_base_domain,
+            &parsed_sources,
+        );
+        PendingBaseDomainSync {
+            previous_base_domain,
+            target_base_domain,
+            source_base_domains,
+        }
     }))
 }
 
@@ -253,18 +309,22 @@ pub fn set_pending_base_domain_sync(
     conn: &Connection,
     previous_base_domain: &str,
     target_base_domain: &str,
+    source_base_domains: &[String],
 ) -> anyhow::Result<()> {
     base_domain_sync_schema(conn)?;
     let prev = crate::normalize_base_domain(previous_base_domain);
     let target = crate::normalize_base_domain(target_base_domain);
+    let sources = normalize_pending_source_domains(&prev, &target, source_base_domains);
+    let sources_json = serde_json::to_string(&sources)?;
     conn.execute(
-        "INSERT INTO base_domain_sync_state (id, previous_base_domain, target_base_domain, updated_at)
-         VALUES (1, ?1, ?2, CURRENT_TIMESTAMP)
+        "INSERT INTO base_domain_sync_state (id, previous_base_domain, target_base_domain, source_domains_json, updated_at)
+         VALUES (1, ?1, ?2, ?3, CURRENT_TIMESTAMP)
          ON CONFLICT(id) DO UPDATE SET
              previous_base_domain = excluded.previous_base_domain,
              target_base_domain = excluded.target_base_domain,
+             source_domains_json = excluded.source_domains_json,
              updated_at = CURRENT_TIMESTAMP",
-        params![prev, target],
+        params![prev, target, sources_json],
     )?;
     Ok(())
 }
@@ -836,14 +896,52 @@ mod tests {
         assert!(read_all_retained_configs(&conn).unwrap().is_empty());
         clear_pending_base_domain_sync(&conn).unwrap();
 
-        // Pending base-domain sync round-trip + normalization
-        set_pending_base_domain_sync(&conn, "https://Old.Example.Test/", "*.New.Example.Test")
-            .unwrap();
+        // Legacy 2-column base_domain_sync_state table remains readable on query_only connections
+        // and upgrades cleanly when preserving accumulated source domains across retries.
+        conn.execute_batch(
+            "CREATE TABLE base_domain_sync_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                previous_base_domain TEXT NOT NULL DEFAULT '',
+                target_base_domain TEXT NOT NULL DEFAULT '',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO base_domain_sync_state (id, previous_base_domain, target_base_domain)
+            VALUES (1, 'https://Old.Example.Test/', '*.New.Example.Test');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "query_only", true).unwrap();
         assert_eq!(
             get_pending_base_domain_sync(&conn).unwrap(),
             Some(PendingBaseDomainSync {
                 previous_base_domain: "old.example.test".into(),
                 target_base_domain: "new.example.test".into(),
+                source_base_domains: vec!["old.example.test".into(), "new.example.test".into()],
+            })
+        );
+        conn.pragma_update(None, "query_only", false).unwrap();
+
+        // Pending base-domain sync round-trip + normalization + multi-source preservation
+        set_pending_base_domain_sync(
+            &conn,
+            "https://Old.Example.Test/",
+            "Third.Example.Test.",
+            &[
+                "https://Old.Example.Test/".into(),
+                "*.New.Example.Test".into(),
+                "new.example.test".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            get_pending_base_domain_sync(&conn).unwrap(),
+            Some(PendingBaseDomainSync {
+                previous_base_domain: "old.example.test".into(),
+                target_base_domain: "third.example.test".into(),
+                source_base_domains: vec![
+                    "old.example.test".into(),
+                    "new.example.test".into(),
+                    "third.example.test".into(),
+                ],
             })
         );
         clear_pending_base_domain_sync(&conn).unwrap();
