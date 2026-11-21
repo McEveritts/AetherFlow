@@ -247,7 +247,9 @@ build_target() {
   fi
 
   mkdir -p "${target_dir}/config"
-  tar -C "${cfg_src}" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/config" -xpf -
+  # The API embeds the source OpenAPI document.
+  tar -C "${cfg_src}" "${runtime_excludes[@]}" --exclude='./openapi-v1.yaml' -cf - . \
+    | tar -C "${target_dir}/config" -xpf -
   tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" --exclude='packages/ui' --exclude='packages/plugin' \
     --exclude='packages/README.md' -cf - packages deploy | tar -C "${target_dir}" -xpf -
   if managed_plugin_assets_present "${PLUGINS_DIR}/telemetry-inspector"; then

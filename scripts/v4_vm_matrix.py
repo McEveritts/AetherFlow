@@ -162,7 +162,6 @@ class PendingArtifactContract:
         "deploy/release-manager.conf",
         "config/packages.json",
         "config/package_automation.json",
-        "config/openapi-v1.yaml",
         "plugins/telemetry-inspector/plugin.manifest.json",
         "plugins/telemetry-inspector/backend/hooks/start.sh",
         "plugins/telemetry-inspector/backend/runtime.py",

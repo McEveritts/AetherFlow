@@ -230,7 +230,6 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             "deploy/release-manager.conf": (b"config\n", 0o644),
             "config/packages.json": (b"{}\n", 0o644),
             "config/package_automation.json": (b"{}\n", 0o644),
-            "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
             "plugins/telemetry-inspector/plugin.manifest.json": (b'{"id":"telemetry-inspector"}\n', 0o644),
             "plugins/telemetry-inspector/backend/hooks/start.sh": (b"#!/usr/bin/env bash\nexit 0\n", 0o755),
             "plugins/telemetry-inspector/backend/runtime.py": (b"print('ok')\n", 0o644),

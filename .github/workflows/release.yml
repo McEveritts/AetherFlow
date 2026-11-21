@@ -391,10 +391,11 @@ jobs:
           for duplicate in af speedtest-backend; do
             test ! -e "${RELEASE_E2E_DIR}/${duplicate}"
           done
-          for asset in packages.json package_automation.json openapi-v1.yaml; do
+          for asset in packages.json package_automation.json; do
             test -f "${RELEASE_E2E_DIR}/config/${asset}"
             test -s "${RELEASE_E2E_DIR}/config/${asset}"
           done
+          test ! -e "${RELEASE_E2E_DIR}/config/openapi-v1.yaml"
           for plugin_asset in plugin.manifest.json backend/hooks/start.sh backend/runtime.py frontend/dist/index.html; do
             test -f "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/${plugin_asset}"
             test -s "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/${plugin_asset}"

@@ -273,7 +273,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("sha256sum --strict --check SHA256SUMS", gate)
         self.assertIn("aetherflow-api bin/af bin/speedtest-backend", gate)
         self.assertIn("plugins/telemetry-inspector/${plugin_asset}", gate)
-        self.assertIn("packages.json package_automation.json openapi-v1.yaml", gate)
+        self.assertIn("for asset in packages.json package_automation.json; do", gate)
+        self.assertIn('test ! -e "${RELEASE_E2E_DIR}/config/openapi-v1.yaml"', gate)
         self.assertIn('test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"', gate)
         package = "Package Release Tarball & SHA-256 Manifest"
         self.assertIn("BUILD_FRONTEND=0", step_script(package))
