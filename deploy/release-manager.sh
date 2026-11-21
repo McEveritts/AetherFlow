@@ -1528,7 +1528,13 @@ build_from_source() {
         --exclude='target/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.pyo' \
         --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.mypy_cache/' \
         --exclude='.ruff_cache/' --exclude='.tox/' --exclude='.venv/' --exclude='.turbo/' \
-        --exclude='*.tsbuildinfo' --exclude='/packages/ui/' --exclude='/web/dist/' --exclude='/frontend-rs/dist/' \
+        --exclude='*.tsbuildinfo' --exclude='/packages/ui/' --exclude='/packages/plugin/' \
+        --exclude='/packages/README.md' --exclude='/web/dist/' --exclude='/frontend-rs/dist/' \
+        --exclude='/.github/' --exclude='/apps/' --exclude='/docs/' --exclude='/e2e/' \
+        --exclude='/plugins/' --exclude='/setup/' --exclude='/tests/' \
+        --exclude='/CHANGELOG.md' --exclude='/LICENSE.md' --exclude='/README.md' --exclude='/SECURITY.md' \
+        --exclude='/package.json' --exclude='/package-lock.json' --exclude='/.gitleaks.toml' \
+        --exclude='/.gitignore' --exclude='/.gitattributes' --exclude='/.nvmrc' --exclude='/.env.example' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1; then
         log_error "rsync source tree into ${RELEASE_DIR} failed."
         return 1
@@ -1619,8 +1625,10 @@ build_from_source() {
     done
 
     # Keep external web/dist beside the binaries after removing build-only files.
+    cd "${RELEASE_DIR}" || return 1
     rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/frontend-rs" \
-        "${RELEASE_DIR}/backend-rs/target"
+        "${RELEASE_DIR}/backend-rs" "${RELEASE_DIR}/scripts" \
+        "${RELEASE_DIR}/rust-toolchain.toml" "${RELEASE_DIR}/packages/README.md"
 }
 
 simulate_offline_artifact() {

@@ -149,12 +149,6 @@ function _depends() {
 	fi
 }
 
-# build openssl from source to combat recent apt source updates
-# shellcheck disable=2312
-function _openssl() {
-	echo "Using system OpenSSL. Skipping manual build of OpenSSL 1.0.2p."
-}
-
 # Pre-processing scripts,  giving permissions
 # shellcheck disable=2312
 function _syscommands() {

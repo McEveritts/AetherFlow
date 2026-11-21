@@ -14,29 +14,6 @@ function _version_ge() {
 	[[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
-function _af_parallel_wait() {
-	local exit_code=0
-	local pid
-	for pid in "$@"; do
-		if ! wait "${pid}"; then
-			exit_code=1
-		fi
-	done
-	return "${exit_code}"
-}
-
-function _af_build_jobs() {
-	local cpu_count=2
-	if command -v nproc >/dev/null 2>&1; then
-		cpu_count="$(nproc)"
-	fi
-	if [[ "${cpu_count}" -lt 2 ]]; then
-		echo 1
-		return
-	fi
-	echo $((cpu_count / 2))
-}
-
 function _af_truthy() {
 	case "${1,,}" in
 	1 | true | yes | y | on) return 0 ;;

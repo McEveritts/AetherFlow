@@ -78,12 +78,14 @@ class ModernStackSourceBuildTests(unittest.TestCase):
     def test_source_build_copies_external_ui_into_current_release(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for path in ("scripts", "frontend-rs", "backend-rs/crates/af-librespeed", "config", "tools/bin"):
+            for path in ("scripts", "frontend-rs", "backend-rs/crates/af-librespeed", "config", "packages", "tools/bin"):
                 (root / path).mkdir(parents=True)
             (root / "frontend-rs/Cargo.toml").write_text("[workspace]\n")
             (root / "backend-rs/Cargo.lock").write_text("# lock\n")
             (root / "backend-rs/crates/af-librespeed/Cargo.toml").touch()
             (root / "config/packages.json").write_text("[]\n")
+            (root / "packages/common.sh").write_text("# runtime helper\n")
+            (root / "packages/README.md").write_text("# developer docs\n")
             (root / "scripts/install_wasm_build_tools.sh").write_text("exit 0\n")
             (root / "scripts/build_wasm_frontend.sh").write_text(
                 'mkdir -p "$FRONTEND_DIST_DIR/locale"\n'
@@ -110,6 +112,9 @@ class ModernStackSourceBuildTests(unittest.TestCase):
             self.assertEqual((root / "current/web/dist/locale/en.json.gz").read_text(), "locale")
             self.assertEqual((root / "current/af").read_text(), "cli")
             self.assertEqual((root / "current/config/packages.json").read_text(), "[]\n")
+            self.assertEqual((root / "current/packages/common.sh").read_text(), "# runtime helper\n")
+            self.assertFalse((root / "current/packages/README.md").exists())
+            self.assertTrue((root / "packages/README.md").exists())
             for relpath in ("speedtest-backend", "bin/speedtest-backend"):
                 companion = root / "current" / relpath
                 self.assertEqual(companion.read_text(), "speedtest")

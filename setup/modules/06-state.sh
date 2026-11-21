@@ -562,7 +562,7 @@ ALL_STEPS=(
     bashrc intro checkroot logcheck checkkernel hostname locale
     ssdpblock askcontinue askpartition ask10g
     adduser askffmpeg askvsftpd denyhosts askbbr
-    repos updates depends syscommands skel lshell ffmpeg
+    repos updates depends syscommands skel ffmpeg
     apachesudo
     build_modern
     apacheconf fix_cert makedirs

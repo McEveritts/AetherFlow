@@ -27,6 +27,9 @@ TOOL_PATH = ('${WASM_TOOL_DIR:-/usr/local/lib/aetherflow-wasm-tools}/bin:'
 class WasmBuildPipelineTests(unittest.TestCase):
     def test_obsolete_unreferenced_logo_is_not_shipped(self):
         self.assertFalse((ROOT / "frontend-rs/public/img/af-logo.png").exists())
+        self.assertFalse((ROOT / "frontend-rs/public/icon.svg").exists())
+        self.assertTrue((ROOT / "frontend-rs/public/img/aetherflow-icon.svg").is_file())
+        self.assertTrue((ROOT / "frontend-rs/public/img/aetherflow-mark.svg").is_file())
 
     def test_wsl_helpers_use_the_rust_and_wasm_build_pipeline(self):
         for filename in ["build_wsl.ps1", "setup_wsl_dev.sh"]:
@@ -441,11 +444,21 @@ directory.mkdir(parents=True, exist_ok=True)
     def test_source_release_excludes_targets_and_retires_frontend_sources(self):
         repo = self.root / "repo"
         release = self.root / "release"
-        for relative in ("scripts", "deploy/.pytest_cache", "frontend-rs/target", "backend-rs/target", "packages/ui/src", "packages/package"):
+        for relative in (
+            "scripts", "deploy/.pytest_cache", "frontend-rs/target", "backend-rs/target",
+            "packages/ui/src", "packages/package", "docs", "tests", "e2e", "apps/website",
+            "setup", "plugins", ".github",
+        ):
             (repo / relative).mkdir(parents=True)
         (release).mkdir()
-        for relative in ("frontend-rs/target/cache", "backend-rs/target/cache", "packages/ui/src/unused"):
+        for relative in (
+            "frontend-rs/target/cache", "backend-rs/target/cache", "packages/ui/src/unused",
+            "docs/guide.md", "tests/test_sample.py", "e2e/spec.ts", "apps/website/page.tsx",
+            "setup/AetherFlow-Setup", "plugins/sample.json", ".github/ci.yml",
+            "packages/README.md", "CHANGELOG.md",
+        ):
             (repo / relative).write_text("host-generated")
+        (repo / "rust-toolchain.toml").write_text((ROOT / "rust-toolchain.toml").read_text())
         (repo / "backend-rs/Cargo.lock").write_text("# lock\n")
         (repo / "packages/package/install").write_text("runtime package script")
         (repo / "deploy/.pytest_cache/unused").write_text("host-generated")
@@ -484,7 +497,12 @@ cargo() {
         self.assertEqual((release / "packages/package/install").read_text(), "runtime package script")
         self.assertEqual((release / "bin/af").read_text(), "cli")
         self.assertFalse((release / "frontend-rs").exists())
-        self.assertFalse((release / "backend-rs/target").exists())
+        self.assertFalse((release / "backend-rs").exists())
+        self.assertFalse((release / "scripts").exists())
+        self.assertFalse((release / "rust-toolchain.toml").exists())
+        self.assertFalse((release / "packages/README.md").exists())
+        for excluded in ("docs", "tests", "e2e", "apps", "setup", "plugins", ".github", "CHANGELOG.md"):
+            self.assertFalse((release / excluded).exists(), f"{excluded} must not remain in release slot")
         self.assertFalse((release / "deploy/.pytest_cache").exists())
         for name in ("verify-provenance.py", "log-retention.py"):
             self.assertEqual((release / "deploy" / name).stat().st_mode & 0o777, 0o755)

@@ -1,18 +1,6 @@
 #!/bin/bash
 set -e
 
-_af_ensure_path_entry() {
-    local path_entry="$1"
-    local profile_line="$2"
-
-    case ":${PATH}:" in
-        *:"${path_entry}":*) ;;
-        *) export PATH="${path_entry}:${PATH}" ;;
-    esac
-
-    grep -qxF "${profile_line}" /etc/profile 2>/dev/null || echo "${profile_line}" >> /etc/profile
-}
-
 _af_modern_from_source_enabled() {
     if type _af_build_from_source_enabled &>/dev/null; then
         _af_build_from_source_enabled
@@ -605,6 +593,7 @@ _build_modern_stack_from_source() {
                 cp -R "${af_root}/${runtime_dir}" "${release_dir}/${runtime_dir}" || exit 1
             fi
         done
+        rm -f "${release_dir}/packages/README.md"
         printf 'source-%s\n' "${epoch}" > "${release_dir}/.version" || exit 1
         find "${release_dir}" -type d -exec chmod 0755 {} + || exit 1
         find "${release_dir}" -type f -exec chmod a+r,go-w {} + || exit 1

@@ -176,23 +176,6 @@ function _denyhosts() {
 	echo
 }
 
-# Setup LShell configuration file
-function _lshell() {
-	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
-	if ! command -v lshell >/dev/null 2>&1; then
-		if ! _af_apt_install lshell >>"${OUTTO}" 2>&1; then
-			printf -- "%s\n" "ERROR: Failed to install verified lshell package via apt; refusing unpinned source git clone." >>"${OUTTO}"
-			return 1
-		fi
-	fi
-	\cp -f "${local_setup}templates/lshell.conf.template" /etc/lshell.conf
-	grep -qxF "/usr/bin/lshell" /etc/shells 2>/dev/null || echo "/usr/bin/lshell" >>/etc/shells
-	groupadd -f lshell
-	mkdir -p /var/log/lshell
-	chown :lshell /var/log/lshell
-	chmod 770 /var/log/lshell
-}
-
 # Purge legacy sudoers drop-ins without overwriting /etc/sudoers (privileged actions use af-runner)
 function _apachesudo() {
 	if [[ -d /etc/sudoers.d && ! -L /etc/sudoers.d ]]; then

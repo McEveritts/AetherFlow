@@ -422,7 +422,6 @@ pub const CANONICAL_ALL_STEPS: &[&str] = &[
     "depends",
     "syscommands",
     "skel",
-    "lshell",
     "ffmpeg",
     "apachesudo",
     "build_modern",

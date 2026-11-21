@@ -4008,11 +4008,6 @@ rollback_file() {
     fi
 }
 
-cleanup_backup_file() {
-    local target="$1"
-    rm -f "${target}.bak-af"
-}
-
 fetch_and_run() {
     local url="$1"
     local checksum="${2:-}"
@@ -5717,58 +5712,6 @@ github_latest_tag() {
     fi
 
     printf '%s\n' "$tag"
-}
-
-github_highest_semver_tag() {
-    local repo="$1"
-    local fallback="${2:-}"
-    local strip_v="${3:-true}"
-    if [[ "$fallback" == "true" || "$fallback" == "false" ]] && [[ $# -eq 2 ]]; then
-        strip_v="$fallback"
-        fallback=""
-    fi
-    local tag=""
-
-    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-        tag="${AF_TARGET_VERSION}"
-        if [[ "$strip_v" == "true" ]]; then
-            tag="${tag#release-v}"
-            tag="${tag#[vV]}"
-        else
-            tag="${tag#release-}"
-            if [[ "$tag" =~ ^[0-9] ]]; then
-                tag="v${tag}"
-            elif [[ "$tag" =~ ^V([0-9].*)$ ]]; then
-                tag="v${BASH_REMATCH[1]}"
-            fi
-        fi
-        printf '%s\n' "$tag"
-        return 0
-    fi
-
-    local ls_tag
-    ls_tag="$(git ls-remote --tags --refs "https://github.com/${repo}.git" 2>/dev/null \
-        | sed -E 's#^[0-9a-fA-F]+[[:space:]]+refs/tags/##' \
-        | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)*$' \
-        | sort -V | tail -n1 || true)"
-    if [[ -n "$ls_tag" ]]; then
-        tag="$ls_tag"
-        if [[ "$strip_v" == "true" ]]; then
-            tag="${tag#release-v}"
-            tag="${tag#[vV]}"
-        else
-            tag="${tag#release-}"
-            if [[ "$tag" =~ ^[0-9] ]]; then
-                tag="v${tag}"
-            elif [[ "$tag" =~ ^V([0-9].*)$ ]]; then
-                tag="v${BASH_REMATCH[1]}"
-            fi
-        fi
-        printf '%s\n' "$tag"
-        return 0
-    fi
-
-    github_latest_tag "$repo" "$fallback" "$strip_v"
 }
 
 sync_node_global_bins() {

@@ -809,6 +809,10 @@ state_snapshot
         self.assertEqual(ftpd_ports, "22/tcp 80/tcp 443/tcp 21/tcp 10090:10100/tcp")
         self.assertNotIn("fileshare.conf.template", sec_sh)
         self.assertNotIn("lshell.conf-focal.template", sec_sh)
+        self.assertNotIn("lshell.conf.template", sec_sh)
+        self.assertNotIn("function _lshell", sec_sh)
+        state_sh = (ROOT / "setup/modules/06-state.sh").read_text(encoding="utf-8")
+        self.assertNotIn("lshell", state_sh)
 
         fin_sh = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
         self.assertIn("chmod 0600 /etc/ssl/private/vsftpd.pem", fin_sh)
@@ -824,6 +828,7 @@ state_snapshot
         self.assertIn("AETHERFLOW_ENABLE_FTPD", setup_sh)
         for retired_tpl in (
             "setup/templates/lshell.conf-focal.template",
+            "setup/templates/lshell.conf.template",
             "setup/templates/fileshare.conf.template",
         ):
             self.assertFalse((ROOT / retired_tpl).exists(), f"Orphan template {retired_tpl} must be deleted")

@@ -39,6 +39,7 @@ class RustBuildToolsTests(unittest.TestCase):
             path.chmod(0o755)
         (self.root / "packages/system/af-tune").chmod(0o775)
         for name in ("packages/ui/src/App.tsx", "packages/ui/tsconfig.tsbuildinfo",
+                     "packages/README.md",
                      "packages/node_modules/unused/index.js", "deploy/__pycache__/unused.pyc",
                      "packages/system/target/cache", "deploy/.pytest_cache/unused",
                      "deploy/unused.pyo", "backend/config/__pycache__/unused.pyc"):
@@ -146,6 +147,7 @@ for binary in bins:
                 self.assertEqual(members, sorted(members))
                 self.assertFalse(any(part in name for name in members for part in
                                      ("/ui/", "node_modules", "__pycache__", ".pytest_cache", ".pyc", ".pyo", "tsbuildinfo", "/target/")))
+                self.assertNotIn("./packages/README.md", members)
                 for nested in ("./config/config", "./packages/packages", "./deploy/deploy"):
                     self.assertFalse(any(name == nested or name.startswith(nested + "/") for name in members))
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
