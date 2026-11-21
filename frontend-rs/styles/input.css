@@ -1291,7 +1291,9 @@ button:not(:disabled) { cursor: pointer; }
 .af-badge-violet { border-color: #8b5cf6; background: #4c1d95; color: #ede9fe; }
 .af-badge-muted { border-color: #64748b; background: #1e293b; color: #cbd5e1; }
 .af-warning-banner,.af-danger-banner { padding: 14px 18px; border-radius: 12px; border: 1px solid rgba(245,158,11,.23); background: rgba(120,53,15,.13); color: #fcd34d; font-size: 13px; overflow-wrap: anywhere; }.af-danger-banner { border-color: rgba(251,113,133,.28); background: rgba(127,29,29,.12); color: #fda4af; }
-.af-modal { position: fixed; color: #e2e8f0; width: min(650px,calc(100% - 32px)); max-height: calc(100dvh - 48px); margin: auto; padding: 24px; border: 1px solid rgba(129,140,248,.25); background: #0f1422; box-shadow: 0 40px 100px #0009; overflow: auto; backdrop-filter: none; -webkit-backdrop-filter: none; transition: none; }.af-modal.glass-card:hover { transform: none; }.af-modal::backdrop { background: rgba(2,6,23,.78); backdrop-filter: blur(8px); }
+.af-modal { position: fixed; color: #e2e8f0; width: min(650px,calc(100% - 32px)); max-height: calc(100dvh - 48px); margin: auto; padding: 24px; border: 1px solid rgba(129,140,248,.25); background: #0f1422; box-shadow: 0 40px 100px #0009; overflow: auto; backdrop-filter: none; -webkit-backdrop-filter: none; transition: none; }.af-modal.glass-card:hover { transform: none; }
+/* A full-screen blur makes dialog interactions slow with software compositing. */
+.af-modal::backdrop { background: rgba(2,6,23,.78); }
 .af-drawer .af-modal { margin: 0 0 0 auto; min-height: 100dvh; max-height: 100dvh; width: min(440px,100%); border-radius: 0; }
 .af-public-route { position: relative; padding-block-start: 6rem; }
 .af-public-toolbar {
