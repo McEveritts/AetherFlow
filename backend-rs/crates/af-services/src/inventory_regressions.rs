@@ -798,7 +798,8 @@ fn legacy_swizzin_receipt_does_not_mark_package_installed_and_unsafe_locks_fail_
         return;
     }
     let fixture = Fixture::new();
-    fixture.write_packages(&[Fixture::package("fixture", "systemd", "fixture-main")]);
+    let canonical_lock = fixture.root.join("install/.fixture.lock");
+    fs::remove_file(&canonical_lock).unwrap();
 
     // Legacy /etc/Swizzin lock alone is upgrade input, not a canonical installed receipt.
     let swizzin = fixture.root.join("etc/Swizzin");
@@ -823,7 +824,6 @@ fn legacy_swizzin_receipt_does_not_mark_package_installed_and_unsafe_locks_fail_
     // Symlink canonical lock must fail closed in both get_packages() and is_package_installed().
     let outside = fixture.root.join("outside-lock");
     fs::write(&outside, "installed\n").unwrap();
-    let canonical_lock = fixture.root.join("install/.fixture.lock");
     symlink(&outside, &canonical_lock).unwrap();
     assert!(!super::is_package_installed("fixture"));
     assert!(get_packages().is_err());
