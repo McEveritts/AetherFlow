@@ -85,7 +85,6 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("-p af-librespeed", ci_text)
         self.assertIn("cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend", ci_text)
         self.assertIn("backend-rs/target/release/speedtest-backend", ci_text)
-        self.assertIn("python3-yaml apache2-bin jq sqlite3 bc", ci_text)
         for forbidden in ("actions/setup-go", "go vet ./...", "backend/go.mod", "backend/web/dist"):
             self.assertNotIn(forbidden, ci_text)
 
@@ -100,7 +99,6 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("aetherflow-api af bin/af speedtest-backend bin/speedtest-backend", rel_text)
         self.assertIn("ATTEST_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}", rel_text)
         self.assertIn("aetherflow-linux-amd64.tar.gz.sigstore.json", rel_text)
-        self.assertIn("python3-yaml apache2-bin jq sqlite3 bc", rel_text)
         for forbidden in (
             "Legacy Go Backend",
             "actions/setup-go",
@@ -111,6 +109,22 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
             "backend/config",
         ):
             self.assertNotIn(forbidden, rel_text)
+
+    def test_python_verification_workflows_install_marketplace_dependencies(self) -> None:
+        required = {"python3-yaml", "python3-tomlkit", "apache2-bin", "jq", "sqlite3", "bc"}
+        for filename in ("ci.yml", "release.yml"):
+            with self.subTest(workflow=filename):
+                workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+                workflow = re.sub(r"\\\n[ \t]*", " ", workflow)
+                install_commands = [
+                    shlex.split(line)
+                    for line in workflow.splitlines()
+                    if line.lstrip().startswith("sudo apt-get install ")
+                ]
+                self.assertTrue(
+                    any(required.issubset(command) for command in install_commands),
+                    f"Expected an install command with {sorted(required)}",
+                )
 
     def test_security_workflow_retains_gitleaks_rust_zero_go_and_npm_gates(self) -> None:
         sec_text = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
