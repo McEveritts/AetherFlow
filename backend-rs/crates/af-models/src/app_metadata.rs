@@ -325,9 +325,7 @@ pub fn extract_xml_tag_value(content: &str, tag: &str) -> Option<String> {
         {
             let next_byte = cleaned_bytes.get(name_end).copied();
             if matches!(next_byte, Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n')) {
-                let Some(gt_rel) = cleaned[name_end..].find('>') else {
-                    return None;
-                };
+                let gt_rel = cleaned[name_end..].find('>')?;
                 let open_end = name_end + gt_rel;
                 let attrs = cleaned[name_end..open_end].trim_end();
                 if attrs.ends_with('/') {
