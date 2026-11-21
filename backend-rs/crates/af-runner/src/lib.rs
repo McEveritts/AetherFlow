@@ -3613,7 +3613,8 @@ fn apply_sandbox_dropins_in_dir(
         let dropin_dir = sys_dir.join(format!("{}.d", norm_unit));
         let dropin_aether = dropin_dir.join("aetherflow-sandbox.conf");
         let dropin_10 = dropin_dir.join("10-aetherflow-sandbox.conf");
-        if sandbox_profile == "privileged"
+        if !norm_unit.ends_with(".service")
+            || sandbox_profile == "privileged"
             || sandbox_profile == "none"
             || is_exempt_sandbox_unit(&norm_unit)
         {
@@ -3714,11 +3715,20 @@ pub(crate) async fn apply_package_sandbox_reserved(
         command.args(&args).kill_on_drop(true);
         #[cfg(unix)]
         guard.preserve_in_child(command.as_std_mut())?;
-        if let Ok(out) = command.output().await {
-            if out.status.success() {
-                return Ok("sandbox applied".to_string());
-            }
+        let out = command
+            .output()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to execute {}: {err}", script_path.display()))?;
+        if out.status.success() {
+            return Ok("sandbox applied".to_string());
         }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        anyhow::bail!(
+            "af-systemd-sandbox apply failed for {pkg_id} (exit {:?}): {detail}",
+            out.status.code()
+        );
     }
 
     // 3. Direct drop-in fallback in /etc/systemd/system/<unit>.service.d/10-aetherflow-sandbox.conf

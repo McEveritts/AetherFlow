@@ -129,6 +129,175 @@ quiesce_services_for_rollback recyclarr recyclarr.timer librespeed librespeed.so
                 )
                 self.assertEqual(output, ['media_owner'])
 
+    def _run_standalone_sandbox(self, tmp_path, args, fake_systemctl_body):
+        source = (ROOT / "packages/system/af-systemd-sandbox").read_text()
+        source = source.replace("/etc/systemd/system", str(tmp_path / "etc/systemd/system"))
+        script_dir = tmp_path / "packages/system"
+        script_dir.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "packages/common.sh").write_text(
+            'log_info() { printf "[INFO] %s\\n" "$*"; }\n'
+            'log_error() { printf "[ERROR] %s\\n" "$*" >&2; }\n'
+        )
+        script = script_dir / "af-systemd-sandbox"
+        script.write_text(source)
+        script.chmod(0o755)
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        fake_systemctl = fake_bin / "systemctl"
+        fake_systemctl.write_text("#!/bin/bash\n" + fake_systemctl_body)
+        fake_systemctl.chmod(0o755)
+        fake_getent = fake_bin / "getent"
+        fake_getent.write_text("#!/bin/bash\necho 'filebot:x:999:999::/var/lib/filebot:/usr/sbin/nologin'\n")
+        fake_getent.chmod(0o755)
+
+        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        return subprocess.run(
+            ["bash", str(script), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+        )
+
+    def test_standalone_sandbox_propagates_restart_and_reload_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # 1. Failing restart on active unit must fail non-zero
+            res = self._run_standalone_sandbox(
+                tmp_path,
+                ["apply", "--profile", "java", "--rw", "/var/lib/filebot", "filebot.service"],
+                """
+case "${1:-}" in
+    show) echo "filebot"; exit 0 ;;
+    daemon-reload) exit 0 ;;
+    is-active) exit 0 ;;
+    restart) echo "Job for filebot.service failed" >&2; exit 1 ;;
+esac
+exit 0
+""",
+            )
+            self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("Failed to restart active unit filebot.service", res.stderr)
+
+            # 2. Restart exits 0 but Type=simple unit immediately dies (inactive on post-restart check)
+            state_file = tmp_path / "restarted"
+            res = self._run_standalone_sandbox(
+                tmp_path,
+                ["apply", "--profile", "java", "--rw", "/var/lib/filebot", "filebot.service"],
+                f"""
+case "${{1:-}}" in
+    show)
+        if [[ "$*" == "show -p Type --value -- filebot.service" ]]; then
+            echo "simple"
+        elif [[ "$*" == *"Type"* ]]; then
+            exit 2
+        else
+            echo "filebot"
+        fi
+        exit 0
+        ;;
+    daemon-reload) exit 0 ;;
+    is-active)
+        if [[ -f "{state_file}" ]]; then exit 3; fi
+        exit 0
+        ;;
+    restart)
+        touch "{state_file}"
+        exit 0
+        ;;
+esac
+exit 0
+""",
+            )
+            self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("not active after sandbox restart", res.stderr)
+
+            # 3. Inactive unit (exit 3) is not restarted and succeeds
+            restart_marker = tmp_path / "should_not_restart"
+            res = self._run_standalone_sandbox(
+                tmp_path,
+                ["apply", "--profile", "java", "--rw", "/var/lib/filebot", "filebot.service"],
+                f"""
+case "${{1:-}}" in
+    show) echo "filebot"; exit 0 ;;
+    daemon-reload) exit 0 ;;
+    is-active) exit 3 ;;
+    restart) touch "{restart_marker}"; exit 1 ;;
+esac
+exit 0
+""",
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertFalse(restart_marker.exists())
+
+            # 4. Active Type=oneshot unit that exits cleanly after restart succeeds
+            oneshot_state = tmp_path / "oneshot_done"
+            res = self._run_standalone_sandbox(
+                tmp_path,
+                ["apply", "--profile", "dotnet", "--rw", "/var/lib/recyclarr", "recyclarr.service"],
+                f"""
+case "${{1:-}}" in
+    show)
+        if [[ "$*" == "show -p Type --value -- recyclarr.service" ]]; then
+            echo "oneshot"
+        elif [[ "$*" == *"Type"* ]]; then
+            exit 2
+        else
+            echo "recyclarr"
+        fi
+        exit 0
+        ;;
+    daemon-reload) exit 0 ;;
+    is-active)
+        if [[ -f "{oneshot_state}" ]]; then exit 3; fi
+        exit 0
+        ;;
+    restart)
+        touch "{oneshot_state}"
+        exit 0
+        ;;
+esac
+exit 0
+""",
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            # 5. systemctl is-active bus error (exit 1) fails closed
+            res = self._run_standalone_sandbox(
+                tmp_path,
+                ["apply", "--profile", "java", "--rw", "/var/lib/filebot", "filebot.service"],
+                """
+case "${1:-}" in
+    show) echo "filebot"; exit 0 ;;
+    daemon-reload) exit 0 ;;
+    is-active) exit 1 ;;
+esac
+exit 0
+""",
+            )
+            self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("Unable to inspect active state", res.stderr)
+
+            # 6. Failing daemon-reload fails closed on both apply and remove
+            for cmd_args in (
+                ["apply", "--profile", "java", "--rw", "/var/lib/filebot", "filebot.service"],
+                ["remove", "filebot.service"],
+            ):
+                res = self._run_standalone_sandbox(
+                    tmp_path,
+                    cmd_args,
+                    """
+case "${1:-}" in
+    show) echo "filebot"; exit 0 ;;
+    daemon-reload) echo "Failed to reload daemon" >&2; exit 1 ;;
+esac
+exit 0
+""",
+                )
+                self.assertNotEqual(res.returncode, 0, f"{cmd_args}: {res.stdout}{res.stderr}")
+                self.assertIn("Failed to reload systemd daemon", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

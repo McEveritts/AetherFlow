@@ -231,10 +231,35 @@ apply_sandbox_dropin() {
     log_info "Applied sandbox profile ${profile} to ${unit}"
 }
 
+sandbox_error() {
+    local msg="$1"
+    if declare -F log_error >/dev/null 2>&1; then
+        log_error "${msg}"
+    fi
+    printf 'ERROR: %s\n' "${msg}" >&2
+}
+
 restart_if_active() {
     local unit="$1"
-    if systemctl is-active --quiet "${unit}"; then
-        systemctl restart "${unit}" >/dev/null 2>&1 || true
+    local is_active_rc=0
+    systemctl is-active --quiet -- "${unit}" || is_active_rc=$?
+    if [[ "${is_active_rc}" -eq 0 ]]; then
+        if ! systemctl restart -- "${unit}"; then
+            sandbox_error "Failed to restart active unit ${unit} after sandbox update"
+            return 1
+        fi
+        local unit_type
+        if ! unit_type="$(systemctl show -p Type --value -- "${unit}")"; then
+            sandbox_error "Unable to inspect service type after sandbox restart of ${unit}"
+            return 1
+        fi
+        if [[ "${unit_type}" != "oneshot" ]] && ! systemctl is-active --quiet -- "${unit}"; then
+            sandbox_error "Unit ${unit} is not active after sandbox restart"
+            return 1
+        fi
+    elif [[ "${is_active_rc}" -ne 3 && "${is_active_rc}" -ne 4 ]]; then
+        sandbox_error "Unable to inspect active state for ${unit} (systemctl is-active exited ${is_active_rc})"
+        return "${is_active_rc}"
     fi
 }
 
@@ -291,7 +316,10 @@ case "${command_name}" in
             fi
         done
 
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        if ! systemctl daemon-reload; then
+            sandbox_error "Failed to reload systemd daemon after sandbox update"
+            exit 1
+        fi
         for unit in "${restart_units[@]}"; do
             restart_if_active "${unit}"
         done
@@ -309,7 +337,10 @@ case "${command_name}" in
         for unit in "${units[@]}"; do
             remove_sandbox_dropin "${unit}"
         done
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        if ! systemctl daemon-reload; then
+            sandbox_error "Failed to reload systemd daemon after sandbox removal"
+            exit 1
+        fi
         ;;
     --help|-h)
         usage
