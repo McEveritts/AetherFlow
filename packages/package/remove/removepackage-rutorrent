@@ -34,7 +34,7 @@ log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Disabling Apache ruTorrent site..."
 
 af_logged a2dissite rutorrent.conf || true
-rm -f /etc/apache2/sites-available/rutorrent.conf /etc/apache2/sites-enabled/rutorrent.conf
+rm -f /etc/apache2/sites-available/rutorrent.conf /etc/apache2/sites-enabled/rutorrent.conf /etc/apache2/sites-available/aetherflow-rutorrent-maintenance.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
 # Detach this application before any data or database removal.

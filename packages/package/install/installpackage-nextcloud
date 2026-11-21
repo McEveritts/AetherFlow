@@ -101,18 +101,22 @@ fi
 
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
 RUNTIME_PATHS=("/var/www/nextcloud" "/etc/apache2/sites-available/nextcloud.conf" "/etc/apache2/sites-enabled/nextcloud.conf" "/etc/apache2/conf-available/aetherflow-nextcloud-listen.conf" "/etc/apache2/conf-enabled/aetherflow-nextcloud-listen.conf" "/var/lib/nextcloud" "/opt/AetherFlow/logs/nextcloud_credentials.txt" "$NC_DB_OWNER_FILE")
+APACHE_CONFIG_BACKED_UP=false
 RUNTIME_CHANGED=false
 INSTALL_COMMITTED=false
 CREATED_FRESH_DB=false
 CREATED_FRESH_DB_USER=false
 BUILD_DIR=""
 APACHE_STOPPED=false
+AF_APACHE_QUIESCE_MODE=""
+AF_APACHE_IN_MAINTENANCE=false
+AF_APACHE_ACTIVATED_NEW_VHOST=false
 rollback_web_runtime() {
     local status="$?" runtime_index runtime_path restore_failed=false
     trap - EXIT INT TERM
     set +e
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
-        quiesce_services_for_rollback apache2 || { restore_failed=true; exit 1; }
+        apache_app_quiesce_for_rollback "${PACKAGE_NAME}" "$APP_PORT" "/status.php" "$RUNTIME_BACKUP" || { restore_failed=true; exit 1; }
         for runtime_index in "${!RUNTIME_PATHS[@]}"; do
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
@@ -129,9 +133,19 @@ rollback_web_runtime() {
                 safe_restore_path_from_backup "$RUNTIME_BACKUP/0/config/config.php" /var/www/nextcloud/config/config.php || restore_failed=true
             fi
         fi
-        [[ "$restore_failed" == false ]] && af_logged apache2ctl configtest && af_logged systemctl start apache2 || restore_failed=true
-    elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$APACHE_STOPPED" == true ]]; then
-        af_logged systemctl start apache2 || restore_failed=true
+        [[ "$restore_failed" == false ]] && apache_app_resume_after_rollback "${PACKAGE_NAME}" "$RUNTIME_BACKUP" || restore_failed=true
+    elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && ( "$APACHE_CONFIG_BACKED_UP" == true || "$APACHE_STOPPED" == true ) ]]; then
+        if [[ "$APACHE_CONFIG_BACKED_UP" == true ]]; then
+            for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+                runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+                case "$runtime_path" in
+                    */etc/apache2/sites-*|*/etc/apache2/conf-*)
+                        safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+                        ;;
+                esac
+            done
+        fi
+        [[ "$restore_failed" == false ]] && apache_app_resume_after_rollback "${PACKAGE_NAME}" "$RUNTIME_BACKUP" || restore_failed=true
     fi
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$CREATED_FRESH_DB" == true ]]; then
         af_logged mysql -u root --host=localhost --protocol=SOCKET -e 'DROP DATABASE IF EXISTS nextcloud;' || restore_failed=true
@@ -162,10 +176,23 @@ fi
 af_logged download_file "$NEXTCLOUD_URL" "$TMP_ZIP"
 mkdir -p /var/www
 af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
-stop_systemd_unit apache2
-APACHE_STOPPED=true
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
     runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    case "$runtime_path" in
+        */etc/apache2/sites-*|*/etc/apache2/conf-*)
+            if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+                cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+            fi
+            ;;
+    esac
+done
+APACHE_CONFIG_BACKED_UP=true
+apache_app_enter_maintenance "${PACKAGE_NAME}" "$APP_PORT" "/status.php" "$RUNTIME_BACKUP"
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    case "$runtime_path" in
+        */etc/apache2/sites-*|*/etc/apache2/conf-*) continue ;;
+    esac
     if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
         cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
     fi
@@ -299,12 +326,7 @@ else
 EOF
 fi
 
-af_logged a2enmod rewrite headers env dir mime
-af_logged a2ensite nextcloud.conf
-af_logged apache2ctl configtest
-af_logged systemctl start apache2
-APACHE_STOPPED=false
-af_logged systemctl reload apache2
+apache_app_activate_vhost "${PACKAGE_NAME}" "$RUNTIME_BACKUP"
 
 systemctl is-active --quiet apache2
 wait_for_apache_app_ready "${PACKAGE_NAME}" "$APP_PORT" "/status.php"

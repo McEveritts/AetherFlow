@@ -34,7 +34,7 @@ log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Disabling Apache Organizr site..."
 
 af_logged a2dissite organizr.conf || true
-rm -f /etc/apache2/sites-available/organizr.conf /etc/apache2/sites-enabled/organizr.conf /etc/apache2/conf-available/organizr.conf /etc/apache2/conf-enabled/organizr.conf
+rm -f /etc/apache2/sites-available/organizr.conf /etc/apache2/sites-enabled/organizr.conf /etc/apache2/sites-available/aetherflow-organizr-maintenance.conf /etc/apache2/conf-available/organizr.conf /etc/apache2/conf-enabled/organizr.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
 # Detach this application before any data or database removal.

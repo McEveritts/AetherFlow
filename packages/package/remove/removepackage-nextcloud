@@ -87,7 +87,7 @@ log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Disabling Apache Nextcloud site..."
 
 af_logged a2dissite nextcloud.conf || true
-rm -f /etc/apache2/sites-available/nextcloud.conf /etc/apache2/sites-enabled/nextcloud.conf /etc/apache2/conf-available/nextcloud.conf /etc/apache2/conf-enabled/nextcloud.conf
+rm -f /etc/apache2/sites-available/nextcloud.conf /etc/apache2/sites-enabled/nextcloud.conf /etc/apache2/sites-available/aetherflow-nextcloud-maintenance.conf /etc/apache2/conf-available/nextcloud.conf /etc/apache2/conf-enabled/nextcloud.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
 # Detach this application before any data or database removal.

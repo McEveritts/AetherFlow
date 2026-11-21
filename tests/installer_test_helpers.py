@@ -16,8 +16,13 @@ def common_functions(*names):
                                      'validate_config_paths', 'safe_config_python')))
     if 'safe_rm_rf' in names or 'wait_for_service_ready' in names:
         names = tuple(dict.fromkeys((*names, 'validate_config_paths', 'safe_config_python', 'application_readiness_url')))
-    if 'wait_for_apache_app_ready' in names:
+    if 'wait_for_apache_app_ready' in names or 'apache_app_enter_maintenance' in names:
         names = tuple(dict.fromkeys((*names, 'apache_app_readiness_target', 'apache_app_probe_body_is_healthy',
+                                     'apache_app_prepare_maintenance_vhost', 'apache_app_capture_worker_pids',
+                                     'apache_app_drain_workers', 'apache_app_verify_quiesced',
+                                     'apache_app_swap_site_symlink', 'apache_app_enter_maintenance',
+                                     'apache_app_quiesce_for_rollback', 'apache_app_activate_vhost',
+                                     'apache_app_resume_after_rollback',
                                      'validate_config_paths', 'safe_config_python')))
     if 'begin_state_transaction' in names:
         names = tuple(dict.fromkeys((*names, 'installed_apt_package_version', 'apt_reinstall_marker_path',

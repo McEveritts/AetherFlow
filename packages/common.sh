@@ -3831,6 +3831,730 @@ wait_for_apache_app_ready() {
     return 1
 }
 
+apache_app_prepare_maintenance_vhost() {
+    local package_name="$1" port="$2" default_path="${3:-/}"
+    local apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}" maint_conf
+    local -a app_roots=("/var/www/${package_name}") optional_roots=()
+    [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 2
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 2
+    (( 10#$port > 0 && 10#$port <= 65535 )) || return 2
+    [[ "$default_path" == /* ]] || return 2
+    case "$package_name" in
+        nextcloud) optional_roots+=("/var/www/html/nextcloud") ;;
+        rutorrent) app_roots+=("/srv/rutorrent") ;;
+    esac
+    maint_conf="${apache_root}/sites-available/aetherflow-${package_name}-maintenance.conf"
+    safe_config_python "$apache_root" "$package_name" "$port" "$default_path" "$maint_conf" "${#app_roots[@]}" "${app_roots[@]}" "${optional_roots[@]}" <<'PYEOF'
+import glob, os, posixpath, re, stat, sys
+
+apache_root, package_name, fallback_port, default_path, maint_conf = sys.argv[1:6]
+primary_count = int(sys.argv[6])
+primary_roots = sys.argv[7:7 + primary_count]
+optional_roots = sys.argv[7 + primary_count:]
+
+sites_avail = os.path.join(apache_root, 'sites-available')
+sites_en = os.path.join(apache_root, 'sites-enabled')
+conf_en = os.path.join(apache_root, 'conf-enabled')
+site_name = f'{package_name}.conf'
+maint_name = f'aetherflow-{package_name}-maintenance.conf'
+listen_name = f'aetherflow-{package_name}-listen.conf'
+site_link = os.path.join(sites_en, site_name)
+site_avail = os.path.join(sites_avail, site_name)
+legacy_conf_link = os.path.join(conf_en, site_name)
+
+def norm_path(value):
+    val = value.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+        val = val[1:-1]
+    if not val:
+        return ''
+    return posixpath.normpath(val)
+
+def path_variants(path_str):
+    out = set()
+    p = norm_path(path_str)
+    if p:
+        out.add(p)
+        if os.path.lexists(p):
+            try:
+                out.add(os.path.realpath(p))
+            except OSError:
+                pass
+    return out
+
+protected_exact = set()
+protected_docroot_targets = set()
+for r in primary_roots:
+    vs = path_variants(r)
+    protected_exact.update(vs)
+    protected_docroot_targets.update(vs)
+for r in optional_roots:
+    vs = path_variants(r)
+    protected_exact.update(vs)
+    if os.path.lexists(r):
+        protected_docroot_targets.update(vs)
+
+def is_same_or_child(path_a, path_b):
+    if path_a == path_b:
+        return True
+    prefix = path_b if path_b == '/' else path_b + '/'
+    return path_a.startswith(prefix)
+
+def path_exposes_app(candidate, is_docroot=False):
+    cands = path_variants(candidate)
+    for c in cands:
+        for target in protected_exact:
+            if is_same_or_child(c, target):
+                return target
+        if is_docroot:
+            for target in protected_docroot_targets:
+                if is_same_or_child(target, c):
+                    return target
+    return None
+
+def expand_includes(pattern, optional):
+    pat = norm_path(pattern)
+    if not pat:
+        return []
+    if not os.path.isabs(pat):
+        pat = os.path.join(apache_root, pat)
+    matches = sorted(glob.glob(pat))
+    if not matches and not optional and not os.path.lexists(pat):
+        return None
+    result = []
+    for m in matches:
+        if os.path.isdir(m):
+            for entry in sorted(os.listdir(m)):
+                full = os.path.join(m, entry)
+                if os.path.isfile(full):
+                    result.append(full)
+        else:
+            result.append(m)
+    return result
+
+def scan_external_file(file_path, label, depth=0, seen=None):
+    if seen is None:
+        seen = set()
+    if depth > 3:
+        return f'deep Apache Include nesting in {label}'
+    if not os.path.exists(file_path):
+        return f'dangling or missing Apache config {label}'
+    try:
+        real = os.path.realpath(file_path)
+        st = os.stat(real)
+        if not stat.S_ISREG(st.st_mode):
+            return f'non-regular Apache config {label}'
+    except OSError:
+        return f'unreadable Apache config {label}'
+    if real in seen:
+        return None
+    seen.add(real)
+    try:
+        with open(real, 'r', encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+    except OSError:
+        return f'unreadable Apache config {label}'
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        m_dr = re.match(r'^DocumentRoot\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_dr:
+            hit = path_exposes_app(m_dr.group(1), is_docroot=True)
+            if hit:
+                return f'external Apache config {label} DocumentRoot exposes {hit}'
+            continue
+        m_al = re.match(r'^(?:Alias|AliasMatch|ScriptAlias)\s+(?:"[^"]+"|\'[^\']+\'|[^\s#]+)\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_al:
+            hit = path_exposes_app(m_al.group(1), is_docroot=True)
+            if hit:
+                return f'external Apache config {label} Alias exposes {hit}'
+            continue
+        m_dir = re.match(r'^<Directory\s+("([^"]+)"|\'([^\']+)\'|([^>\s]+))\s*>', line, re.IGNORECASE)
+        if m_dir:
+            hit = path_exposes_app(m_dir.group(1), is_docroot=False)
+            if hit:
+                return f'external Apache config {label} Directory exposes {hit}'
+            continue
+        m_inc = re.match(r'^(IncludeOptional|Include)\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_inc:
+            is_opt = m_inc.group(1).lower() == 'includeoptional'
+            inc_files = expand_includes(m_inc.group(2), is_opt)
+            if inc_files is None:
+                return f'unreadable Include in {label}'
+            for inc_file in inc_files:
+                blocker = scan_external_file(inc_file, f'{label}->{inc_file}', depth + 1, seen)
+                if blocker:
+                    return blocker
+    return None
+
+def unsupported(reason):
+    print('MODE=unsupported')
+    print(f'REASON={reason}')
+    sys.exit(0)
+
+for sub_label, dir_path, skip_names in (
+    ('sites-enabled', sites_en, {site_name}),
+    ('conf-enabled', conf_en, {site_name, listen_name}),
+):
+    if not os.path.isdir(dir_path):
+        continue
+    for entry in sorted(os.listdir(dir_path)):
+        if not entry.endswith('.conf') or entry in skip_names:
+            continue
+        blocker = scan_external_file(os.path.join(dir_path, entry), f'{sub_label}/{entry}')
+        if blocker:
+            unsupported(blocker)
+
+has_site = os.path.lexists(site_link)
+has_legacy_conf = os.path.lexists(legacy_conf_link)
+
+if not has_site and not has_legacy_conf:
+    print('MODE=none')
+    sys.exit(0)
+
+if not has_site:
+    print('MODE=maintenance')
+    print('HAS_SITE=0')
+    print('HAS_LEGACY_CONF=1')
+    sys.exit(0)
+
+# Validate sites-enabled/<app>.conf safely (fail closed on symlink escape).
+try:
+    if os.path.islink(site_link):
+        if not os.path.isdir(sites_avail):
+            raise ValueError(f'Missing Apache sites-available directory for {site_link}')
+        avail_real = os.path.realpath(sites_avail)
+        target_real = os.path.realpath(site_link)
+        if os.path.dirname(target_real) != avail_real or os.path.basename(target_real) not in (site_name, maint_name):
+            raise ValueError(f'Unsafe Apache site symlink target: {site_link}')
+        if not os.path.isfile(target_real):
+            raise ValueError(f'Apache site target is not a regular file: {site_link}')
+        raw = safe_read_text(site_avail)
+    else:
+        raw = safe_read_text(site_link)
+except Exception as exc:
+    sys.stderr.write(f'ERROR: {exc}\n')
+    sys.exit(2)
+
+def unquote(val):
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+        return val[1:-1]
+    return val
+
+def include_is_ssl_only(pattern, optional):
+    files = expand_includes(pattern, optional)
+    if files is None:
+        return False
+    for path in files:
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+                for raw_l in fh:
+                    s = raw_l.strip()
+                    if not s or s.startswith('#'):
+                        continue
+                    if not re.match(r'^SSL[A-Za-z0-9_]+\b', s, re.IGNORECASE):
+                        return False
+        except OSError:
+            return False
+    return True
+
+blocks = []
+current = None
+for raw_line in raw.splitlines():
+    stripped = raw_line.strip()
+    if not stripped or stripped.startswith('#'):
+        continue
+    m_open = re.match(r'^<VirtualHost\s+([^>]+)>\s*$', stripped, re.IGNORECASE)
+    if m_open:
+        if current is not None:
+            unsupported(f'nested VirtualHost in {site_name}')
+        current = {'header': m_open.group(1).strip(), 'lines': []}
+        blocks.append(current)
+        continue
+    if re.match(r'^</VirtualHost>\s*$', stripped, re.IGNORECASE):
+        if current is None:
+            unsupported(f'unmatched </VirtualHost> in {site_name}')
+        current = None
+        continue
+    if current is not None:
+        current['lines'].append(stripped)
+    else:
+        unsupported(f'top-level non-VirtualHost directive in {site_name}')
+
+if current is not None or not blocks:
+    unsupported(f'missing or unclosed VirtualHost block in {site_name}')
+
+allowed_identity_re = re.compile(
+    r'^(?:ServerName|ServerAlias|SSLEngine|SSLCertificateFile|SSLCertificateKeyFile|'
+    r'SSLCertificateChainFile|SSLCACertificateFile|SSLProtocol|SSLCipherSuite|'
+    r'SSLHonorCipherOrder|SSLCompression|SSLSessionTickets)\s+',
+    re.IGNORECASE,
+)
+
+def parse_vhost_endpoint(header):
+    tokens = header.split()
+    token = tokens[0] if tokens else ''
+    m = re.fullmatch(r'(\[[^\]]+\]|[^:\s]+)(?::([0-9]+|\*))?', token)
+    if not m:
+        return '127.0.0.1', None
+    raw_host, raw_port = m.group(1), m.group(2)
+    port_val = raw_port if (raw_port and raw_port.isdecimal() and 1 <= int(raw_port) <= 65535) else None
+    return raw_host, port_val
+
+host_map = {'*': '127.0.0.1', '_default_': '127.0.0.1', '0.0.0.0': '127.0.0.1', '127.0.0.1': '127.0.0.1', '::': '[::1]', '[::]': '[::1]', '::1': '[::1]', '[::1]': '[::1]'}
+expected_norm = norm_path(primary_roots[0]) or '/'
+
+rendered_blocks = []
+probes = []
+seen_probes = set()
+
+for block in blocks:
+    preserved = []
+    scheme = 'http'
+    server_name = ''
+    docroot = None
+    aliases = []
+    for line in block['lines']:
+        m_inc = re.match(r'^(IncludeOptional|Include)\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_inc:
+            is_opt = m_inc.group(1).lower() == 'includeoptional'
+            if include_is_ssl_only(m_inc.group(2), is_opt):
+                preserved.append(line)
+                continue
+            unsupported(f'non-SSL Include directive inside VirtualHost in {site_name}')
+        if allowed_identity_re.match(line):
+            preserved.append(line)
+        if re.match(r'^SSLEngine\s+on(?:\s|$|#)', line, re.IGNORECASE):
+            scheme = 'https'
+        m_sn = re.match(r'^ServerName\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_sn and not server_name:
+            cand = unquote(m_sn.group(1))
+            cand = re.sub(r'^https?://', '', cand, flags=re.IGNORECASE)
+            cand = cand.split(':', 1)[0].strip()
+            if re.fullmatch(r'[A-Za-z0-9._-]+', cand):
+                server_name = cand
+        m_dr = re.match(r'^DocumentRoot\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_dr and docroot is None:
+            docroot = unquote(m_dr.group(1)).rstrip('/') or '/'
+        m_al = re.match(r'^Alias\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+        if m_al:
+            aliases.append((unquote(m_al.group(1)), unquote(m_al.group(5)).rstrip('/') or '/'))
+
+    raw_host, parsed_port = parse_vhost_endpoint(block['header'])
+    probe_port = parsed_port or ('443' if scheme == 'https' else fallback_port)
+    probe_host = host_map.get(raw_host.lower(), raw_host)
+    if not re.fullmatch(r'[A-Za-z0-9_.:\[\]-]+', probe_host):
+        unsupported(f'unsafe VirtualHost listener {raw_host} in {site_name}')
+    if ':' in probe_host and not probe_host.startswith('['):
+        probe_host = '[' + probe_host + ']'
+
+    probe_path = default_path
+    if docroot is not None and docroot != expected_norm:
+        for prefix, target in aliases:
+            if target == expected_norm and re.fullmatch(r'/[A-Za-z0-9._/-]*', prefix):
+                parts = prefix.split('/')
+                if '..' not in parts and '.' not in parts and '//' not in prefix:
+                    clean_prefix = prefix.rstrip('/')
+                    if default_path == '/':
+                        probe_path = (clean_prefix + '/') if clean_prefix else '/'
+                    else:
+                        probe_path = clean_prefix + default_path
+                    break
+
+    probe_key = (f'{scheme}://{probe_host}:{probe_port}{probe_path}', server_name)
+    if probe_key not in seen_probes:
+        seen_probes.add(probe_key)
+        probes.append(probe_key)
+
+    lines_out = [f"<VirtualHost {block['header']}>"]
+    for pl in preserved:
+        lines_out.append(f'    {pl}')
+    lines_out.extend([
+        f'    ErrorDocument 503 "AetherFlow maintenance in progress for {package_name}"',
+        '    <IfModule mod_headers.c>',
+        '        Header always set Retry-After "30"',
+        '        Header always set Cache-Control "no-store"',
+        f'        Header always set X-AetherFlow-Maintenance "{package_name}"',
+        '    </IfModule>',
+        '    <IfModule mod_alias.c>',
+        '        RedirectMatch 503 ^',
+        '    </IfModule>',
+        '    <IfModule !mod_alias.c>',
+        '        <Location />',
+        '            Require all denied',
+        '        </Location>',
+        '    </IfModule>',
+        '</VirtualHost>',
+    ])
+    rendered_blocks.append('\n'.join(lines_out))
+
+maint_content = '# Managed temporarily by AetherFlow during application maintenance\n' + '\n\n'.join(rendered_blocks) + '\n'
+try:
+    safe_write_text(maint_conf, maint_content, 0o644)
+except Exception as exc:
+    sys.stderr.write(f'ERROR: {exc}\n')
+    sys.exit(2)
+
+print('MODE=maintenance')
+print('HAS_SITE=1')
+print(f'HAS_LEGACY_CONF={1 if has_legacy_conf else 0}')
+for url, sn in probes:
+    print(f'PROBE={url}\t{sn}')
+PYEOF
+}
+
+apache_app_capture_worker_pids() {
+    local master_pid="" pid="" ppid="" stat_file="" stat_line="" _state=""
+    local -a children=()
+    if [[ -n "${AF_APACHE_PIDFILE:-}" && -f "${AF_APACHE_PIDFILE}" && ! -L "${AF_APACHE_PIDFILE}" ]]; then
+        master_pid="$(tr -dc '0-9' < "${AF_APACHE_PIDFILE}" 2>/dev/null || true)"
+    else
+        master_pid="$(systemctl show --property=MainPID --value apache2 2>/dev/null || true)"
+    fi
+    if [[ -z "$master_pid" || ! "$master_pid" =~ ^[0-9]+$ ]] || (( 10#$master_pid <= 1 )) || [[ ! -d "/proc/${master_pid}" ]]; then
+        printf '\n\n'
+        return 0
+    fi
+    for stat_file in /proc/[0-9]*/stat; do
+        [[ -r "$stat_file" ]] || continue
+        pid="${stat_file#/proc/}"
+        pid="${pid%/stat}"
+        [[ "$pid" != "$master_pid" && "$pid" != "$$" ]] || continue
+        if IFS= read -r stat_line < "$stat_file" 2>/dev/null; then
+            stat_line="${stat_line##*) }"
+            read -r _state ppid _ <<< "$stat_line"
+            if [[ "$ppid" == "$master_pid" ]]; then
+                children+=("$pid")
+            fi
+        fi
+    done
+    printf '%s\n' "$master_pid"
+    local IFS=','
+    printf '%s\n' "${children[*]}"
+}
+
+apache_app_drain_workers() {
+    local package_name="$1" master_pid="$2" old_pids_csv="$3"
+    local attempts="${AF_APACHE_DRAIN_ATTEMPTS:-30}" attempt pid ppid stat_line="" _state="" fd_link fd_target
+    local -a pending=() next_pending=() protected_roots=("/var/www/${package_name}" "/var/lib/${package_name}")
+    [[ -n "$master_pid" && -n "$old_pids_csv" ]] || return 0
+    case "$package_name" in
+        nextcloud) protected_roots+=("/var/www/html/nextcloud") ;;
+        rutorrent) protected_roots+=("/srv/rutorrent") ;;
+    esac
+    IFS=',' read -r -a pending <<< "$old_pids_csv"
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        next_pending=()
+        for pid in "${pending[@]}"; do
+            [[ -n "$pid" && -r "/proc/${pid}/stat" ]] || continue
+            if IFS= read -r stat_line < "/proc/${pid}/stat" 2>/dev/null; then
+                stat_line="${stat_line##*) }"
+                read -r _state ppid _ <<< "$stat_line"
+                if [[ "$ppid" == "$master_pid" ]]; then
+                    next_pending+=("$pid")
+                fi
+            fi
+        done
+        if (( ${#next_pending[@]} == 0 )); then
+            return 0
+        fi
+        pending=("${next_pending[@]}")
+        if (( attempt < attempts )); then
+            sleep 0.1 2>/dev/null || sleep 1
+        fi
+    done
+    for pid in "${pending[@]}"; do
+        [[ -d "/proc/${pid}/fd" ]] || continue
+        for fd_link in "/proc/${pid}/fd"/*; do
+            [[ -L "$fd_link" ]] || continue
+            fd_target="$(readlink -- "$fd_link" 2>/dev/null || true)"
+            [[ -n "$fd_target" ]] || continue
+            local root_path
+            for root_path in "${protected_roots[@]}"; do
+                if [[ "$fd_target" == "$root_path" || "$fd_target" == "${root_path}/"* ]]; then
+                    print_warn "Apache worker ${pid} still holds open file ${fd_target} after reload drain timeout"
+                    return 1
+                fi
+            done
+        done
+    done
+    return 0
+}
+
+apache_app_verify_quiesced() {
+    local package_name="$1" probe_url="$2" server_name="${3:-}" attempts="${4:-${AF_QUIESCE_ATTEMPTS:-5}}"
+    local attempt probe_dir hdr_file body_file http_status curl_rc
+    local -a curl_tls_args=() curl_host_args=()
+    local loopback_https_re='^https://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
+
+    [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
+    if [[ "$probe_url" =~ $loopback_https_re ]]; then
+        curl_tls_args=(-k)
+    fi
+    if [[ -n "$server_name" ]]; then
+        curl_host_args=(-H "Host: ${server_name}")
+    fi
+
+    probe_dir="${TMPDIR:-/tmp}"
+    mkdir -p "$probe_dir" || return 1
+    hdr_file="$(mktemp "${probe_dir}/af-apache-quiesce-hdr.XXXXXX")" || return 1
+    body_file="$(mktemp "${probe_dir}/af-apache-quiesce-body.XXXXXX")" || { rm -f -- "$hdr_file"; return 1; }
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if ! systemctl is-active --quiet apache2; then
+            rm -f -- "$hdr_file" "$body_file"
+            return 0
+        fi
+        : >"$hdr_file"
+        : >"$body_file"
+        curl_rc=0
+        http_status="$(curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" \
+            -sS --connect-timeout 2 --max-time 5 -D "$hdr_file" -o "$body_file" -w '%{http_code}' "$probe_url" 2>/dev/null)" || curl_rc=$?
+        if [[ "$http_status" == "503" ]]; then
+            if LC_ALL=C grep -Eiq "^X-AetherFlow-Maintenance:[[:space:]]*${package_name}[[:space:]]*$" "$hdr_file" 2>/dev/null || \
+               LC_ALL=C grep -Fq "AetherFlow maintenance in progress for ${package_name}" "$body_file" 2>/dev/null; then
+                rm -f -- "$hdr_file" "$body_file"
+                return 0
+            fi
+        elif [[ "$http_status" == "403" ]]; then
+            if LC_ALL=C grep -Eiq "^X-AetherFlow-Maintenance:[[:space:]]*${package_name}[[:space:]]*$" "$hdr_file" 2>/dev/null; then
+                rm -f -- "$hdr_file" "$body_file"
+                return 0
+            fi
+        elif [[ "$curl_rc" -eq 7 && "$http_status" == "000" ]]; then
+            rm -f -- "$hdr_file" "$body_file"
+            return 0
+        fi
+        if (( attempt < attempts )); then
+            sleep 0.5 2>/dev/null || sleep 1
+        fi
+    done
+
+    rm -f -- "$hdr_file" "$body_file"
+    return 1
+}
+
+apache_app_swap_site_symlink() {
+    local link_path="$1" target="$2" tmp_link
+    tmp_link="$(mktemp -u "${link_path}.af-swap.XXXXXX")" || return 1
+    if ! ln -s -- "$target" "$tmp_link"; then
+        rm -f -- "$tmp_link" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv -Tf -- "$tmp_link" "$link_path"; then
+        rm -f -- "$tmp_link" 2>/dev/null || true
+        return 1
+    fi
+}
+
+apache_app_enter_maintenance() {
+    local package_name="$1" port="$2" default_path="${3:-/}" backup_dir="$4" for_rollback="${5:-false}"
+    local apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}"
+    local site_link="${apache_root}/sites-enabled/${package_name}.conf"
+    local legacy_conf_link="${apache_root}/conf-enabled/${package_name}.conf"
+    local maint_conf="${apache_root}/sites-available/aetherflow-${package_name}-maintenance.conf"
+    local maint_backup_dir="${backup_dir}/.af-maint-orig"
+    local prep_output="" prep_rc=0 mode="" reason="" has_site="0" has_legacy_conf="0" line
+    local -a probe_urls=() probe_hosts=()
+    local worker_info="" master_pid="" old_pids_csv=""
+    local -a worker_lines=()
+
+    if [[ "$for_rollback" == true ]]; then
+        maint_backup_dir="${backup_dir}/.af-maint-rollback"
+    else
+        AF_APACHE_ACTIVATED_NEW_VHOST=false
+    fi
+
+    AF_APACHE_QUIESCE_MODE="none"
+    AF_APACHE_IN_MAINTENANCE=false
+
+    if ! systemctl is-active --quiet apache2; then
+        return 0
+    fi
+
+    prep_output="$(apache_app_prepare_maintenance_vhost "$package_name" "$port" "$default_path")" || prep_rc=$?
+    if [[ "$prep_rc" -eq 2 ]]; then
+        print_error "Refusing unsafe Apache vhost configuration for ${package_name}."
+        return 1
+    fi
+    if [[ "$prep_rc" -eq 0 ]]; then
+        while IFS= read -r line; do
+            case "$line" in
+                MODE=*) mode="${line#MODE=}" ;;
+                REASON=*) reason="${line#REASON=}" ;;
+                HAS_SITE=*) has_site="${line#HAS_SITE=}" ;;
+                HAS_LEGACY_CONF=*) has_legacy_conf="${line#HAS_LEGACY_CONF=}" ;;
+                PROBE=*)
+                    local entry="${line#PROBE=}"
+                    probe_urls+=("${entry%%$'\t'*}")
+                    probe_hosts+=("${entry#*$'\t'}")
+                    ;;
+            esac
+        done <<< "$prep_output"
+    else
+        mode="unsupported"
+        reason="failed to prepare per-app maintenance vhost"
+    fi
+
+    if [[ "$mode" == "none" ]]; then
+        return 0
+    fi
+
+    if [[ "$mode" == "maintenance" ]]; then
+        mkdir -p -m 0700 -- "$maint_backup_dir" || return 1
+        if [[ "$has_site" == "1" && ( -e "$site_link" || -L "$site_link" ) ]]; then
+            cp -a -- "$site_link" "$maint_backup_dir/site-link" || return 1
+        fi
+        if [[ "$has_legacy_conf" == "1" && ( -e "$legacy_conf_link" || -L "$legacy_conf_link" ) ]]; then
+            cp -a -- "$legacy_conf_link" "$maint_backup_dir/legacy-conf" || return 1
+        fi
+
+        worker_info="$(apache_app_capture_worker_pids)"
+        mapfile -t worker_lines <<< "$worker_info"
+        master_pid="${worker_lines[0]:-}"
+        old_pids_csv="${worker_lines[1]:-}"
+
+        local swap_ok=true
+        if [[ "$has_site" == "1" ]]; then
+            apache_app_swap_site_symlink "$site_link" "../sites-available/aetherflow-${package_name}-maintenance.conf" || swap_ok=false
+        fi
+        if [[ "$swap_ok" == true && "$has_legacy_conf" == "1" ]]; then
+            rm -f -- "$legacy_conf_link" || swap_ok=false
+        fi
+        if [[ "$swap_ok" == true ]]; then
+            if af_logged apache2ctl configtest && af_logged systemctl reload apache2; then
+                local verified=true idx
+                if ! apache_app_drain_workers "$package_name" "$master_pid" "$old_pids_csv"; then
+                    verified=false
+                fi
+                if [[ "$verified" == true ]]; then
+                    for idx in "${!probe_urls[@]}"; do
+                        if ! apache_app_verify_quiesced "$package_name" "${probe_urls[$idx]}" "${probe_hosts[$idx]}"; then
+                            verified=false
+                            break
+                        fi
+                    done
+                fi
+                if [[ "$verified" == true ]]; then
+                    AF_APACHE_QUIESCE_MODE="maintenance"
+                    AF_APACHE_IN_MAINTENANCE=true
+                    log_info "Quiesced Apache application ${package_name} via per-app maintenance vhost"
+                    return 0
+                fi
+                reason="per-app maintenance verification did not observe quiesced traffic for ${package_name}"
+            else
+                reason="apache2ctl configtest or reload failed while entering maintenance for ${package_name}"
+            fi
+        else
+            reason="failed to stage per-app maintenance symlink for ${package_name}"
+        fi
+
+        # Revert maintenance config before falling back to safe stop.
+        if [[ -e "$maint_backup_dir/site-link" || -L "$maint_backup_dir/site-link" ]]; then
+            safe_restore_path_from_backup "$maint_backup_dir/site-link" "$site_link" || true
+        fi
+        if [[ -e "$maint_backup_dir/legacy-conf" || -L "$maint_backup_dir/legacy-conf" ]]; then
+            safe_restore_path_from_backup "$maint_backup_dir/legacy-conf" "$legacy_conf_link" || true
+        fi
+        rm -f -- "$maint_conf"
+    fi
+
+    print_warn "Per-app Apache quiescence unavailable for ${package_name} (${reason:-unsupported configuration}); falling back to stopping apache2"
+    if [[ "$for_rollback" == true ]]; then
+        quiesce_services_for_rollback apache2 || return 1
+    else
+        stop_systemd_unit apache2 || return 1
+    fi
+    AF_APACHE_QUIESCE_MODE="stopped"
+    AF_APACHE_IN_MAINTENANCE=false
+    APACHE_STOPPED=true
+    RUNTIME_STOPPED=true
+    return 0
+}
+
+apache_app_quiesce_for_rollback() {
+    local package_name="$1" port="$2" default_path="${3:-/}" backup_dir="$4"
+    if [[ "${AF_APACHE_QUIESCE_MODE:-}" == "stopped" ]]; then
+        if systemd_unit_inactive apache2; then
+            return 0
+        fi
+        quiesce_services_for_rollback apache2
+        return $?
+    fi
+    if [[ "${AF_APACHE_IN_MAINTENANCE:-false}" == true && "${AF_APACHE_QUIESCE_MODE:-}" == "maintenance" ]]; then
+        return 0
+    fi
+    if [[ "${AF_APACHE_ACTIVATED_NEW_VHOST:-false}" != true && "${AF_APACHE_QUIESCE_MODE:-none}" == "none" ]]; then
+        return 0
+    fi
+    apache_app_enter_maintenance "$package_name" "$port" "$default_path" "$backup_dir" true
+}
+
+apache_app_activate_vhost() {
+    local package_name="$1" backup_dir="${2:-}"
+    local apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}"
+    local site_link="${apache_root}/sites-enabled/${package_name}.conf"
+    local legacy_conf_link="${apache_root}/conf-enabled/${package_name}.conf"
+    local maint_conf="${apache_root}/sites-available/aetherflow-${package_name}-maintenance.conf"
+    local link_target=""
+
+    if [[ -L "$site_link" ]]; then
+        link_target="$(readlink -- "$site_link" 2>/dev/null || true)"
+        if [[ "$link_target" == *"aetherflow-${package_name}-maintenance.conf" ]]; then
+            apache_app_swap_site_symlink "$site_link" "../sites-available/${package_name}.conf" || return 1
+        fi
+    fi
+    if [[ -n "$backup_dir" && ( -e "${backup_dir}/.af-maint-orig/legacy-conf" || -L "${backup_dir}/.af-maint-orig/legacy-conf" ) ]]; then
+        safe_restore_path_from_backup "${backup_dir}/.af-maint-orig/legacy-conf" "$legacy_conf_link" || return 1
+    fi
+
+    af_logged a2enmod rewrite headers env dir mime
+    af_logged a2ensite "${package_name}.conf"
+    af_logged apache2ctl configtest
+    if systemctl is-active --quiet apache2; then
+        af_logged systemctl enable apache2 || true
+        af_logged systemctl reload apache2
+    else
+        af_logged systemctl enable --now apache2
+    fi
+
+    AF_APACHE_ACTIVATED_NEW_VHOST=true
+    AF_APACHE_IN_MAINTENANCE=false
+    AF_APACHE_QUIESCE_MODE=""
+    APACHE_STOPPED=false
+    RUNTIME_STOPPED=false
+    rm -f -- "$maint_conf"
+}
+
+apache_app_resume_after_rollback() {
+    local package_name="$1" backup_dir="${2:-}"
+    local apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}"
+    local legacy_conf_link="${apache_root}/conf-enabled/${package_name}.conf"
+    local maint_conf="${apache_root}/sites-available/aetherflow-${package_name}-maintenance.conf"
+
+    if [[ -n "$backup_dir" && ( -e "${backup_dir}/.af-maint-orig/legacy-conf" || -L "${backup_dir}/.af-maint-orig/legacy-conf" ) ]]; then
+        safe_restore_path_from_backup "${backup_dir}/.af-maint-orig/legacy-conf" "$legacy_conf_link" || return 1
+    fi
+    rm -f -- "$maint_conf"
+
+    if [[ "${AF_APACHE_QUIESCE_MODE:-}" == "stopped" || "${APACHE_STOPPED:-false}" == true || "${RUNTIME_STOPPED:-false}" == true ]]; then
+        af_logged apache2ctl configtest && af_logged systemctl start apache2
+        return $?
+    fi
+    if [[ "${AF_APACHE_QUIESCE_MODE:-}" == "maintenance" || "${AF_APACHE_ACTIVATED_NEW_VHOST:-false}" == true ]]; then
+        if systemctl is-active --quiet apache2; then
+            af_logged apache2ctl configtest && af_logged systemctl reload apache2
+            return $?
+        fi
+        af_logged apache2ctl configtest && af_logged systemctl start apache2
+        return $?
+    fi
+    return 0
+}
+
 check_dns_port_53_available() {
     local package_name="$1" competing_package="$2" self_proc_regex="$3"
     local dns_port="${4:-${AF_DNS_PORT:-53}}"

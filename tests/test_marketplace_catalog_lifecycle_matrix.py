@@ -1634,6 +1634,21 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
             with self.subTest(app=app), InstallerFixture(app) as fixture:
                 installed = fixture.run("install")
                 self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+                if app == "nextcloud":
+                    enabled_site = fixture.root / "etc/apache2/sites-enabled/nextcloud.conf"
+                    if not enabled_site.exists() and not enabled_site.is_symlink():
+                        enabled_site.symlink_to("../sites-available/nextcloud.conf")
+                    self.patch_host_command(fixture, "curl", "elif command in ('curl', 'wget'):\n", """elif command in ('curl', 'wget'):
+    if app == 'nextcloud' and any('http_code' in entry for entry in arguments):
+        site_link = root / 'etc/apache2/sites-enabled/nextcloud.conf'
+        if site_link.is_symlink() and 'aetherflow-nextcloud-maintenance.conf' in os.readlink(site_link):
+            if '-D' in arguments:
+                pathlib.Path(arguments[arguments.index('-D') + 1]).write_text('HTTP/1.1 503 Service Unavailable\\r\\nX-AetherFlow-Maintenance: nextcloud\\r\\n\\r\\n')
+            if '-o' in arguments and arguments[arguments.index('-o') + 1] != '/dev/null':
+                pathlib.Path(arguments[arguments.index('-o') + 1]).write_text('AetherFlow maintenance in progress for nextcloud')
+            print('503')
+            sys.exit(0)
+""")
                 database_path = f"var/lib/{app}/audit-stopped-state.db"
                 database = fixture.file(database_path, "")
                 with contextlib.closing(sqlite3.connect(database)) as connection, connection:
@@ -1644,7 +1659,16 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
     targets_app = any(argument.removesuffix('.service') == target_service for argument in arguments)
     stopped = root / 'old-service-flushed'
     migrated = root / 'startup-migration-ran'
-    if targets_app and arguments[0] == 'stop' and not stopped.exists():
+    site_link = root / 'etc/apache2/sites-enabled/nextcloud.conf'
+    in_nc_maint = app == 'nextcloud' and site_link.is_symlink() and 'aetherflow-nextcloud-maintenance.conf' in os.readlink(site_link)
+    if app == 'nextcloud' and targets_app and arguments[0] == 'is-active':
+        is_up = (root / 'active-apache2.service').exists()
+        if '--quiet' not in arguments and '-q' not in arguments:
+            print('active' if is_up else 'inactive')
+        sys.exit(0 if is_up else 3)
+    quiesced = (arguments[0] == 'reload' and in_nc_maint) if app == 'nextcloud' else (arguments[0] == 'stop')
+    activated = (arguments[0] == 'reload' and not in_nc_maint) if app == 'nextcloud' else (arguments[0] in ('start', 'restart') or arguments[0] == 'enable' and '--now' in arguments)
+    if targets_app and quiesced and not stopped.exists():
         import contextlib, sqlite3
         with contextlib.closing(sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE'])) as connection, connection:
             connection.execute('UPDATE audit_schema SET version=1')
@@ -1652,7 +1676,7 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
             with (root / 'var/lib/bazarr/config/config.yaml').open('a') as config:
                 config.write('audit_stopped: true\\n')
         stopped.touch()
-    if targets_app and stopped.exists() and not migrated.exists() and (arguments[0] in ('start', 'restart') or arguments[0] == 'enable' and '--now' in arguments):
+    if targets_app and stopped.exists() and not migrated.exists() and activated:
         import contextlib, sqlite3
         with contextlib.closing(sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE'])) as connection, connection:
             connection.execute('UPDATE audit_schema SET version=2')
@@ -1667,6 +1691,17 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
                     self.assertEqual(connection.execute("SELECT version FROM audit_schema").fetchone()[0], 1)
                 if app == "bazarr":
                     self.assertIn("audit_stopped: true", (fixture.root / "var/lib/bazarr/config/config.yaml").read_text())
+                if app == "nextcloud":
+                    recorded_cmds = [
+                        json.loads(line)
+                        for line in (fixture.root / "commands.jsonl").read_text().splitlines()
+                        if line.strip()
+                    ]
+                    self.assertFalse(
+                        any(cmd[0] == "systemctl" and len(cmd) >= 2 and cmd[1] == "stop" and "apache2" in " ".join(cmd)
+                            for cmd in recorded_cmds),
+                        "Nextcloud update/rollback should quiesce per-app without globally stopping apache2",
+                    )
 
     def test_rejected_deb_install_fails_closed_even_when_apt_fix_succeeds(self):
         for app, version_path in (

@@ -79,9 +79,13 @@ if [[ -e /srv/rutorrent && ! -L /srv/rutorrent ]]; then
     exit 1
 fi
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
+APACHE_CONFIG_BACKED_UP=false
 RUNTIME_SNAPSHOT_READY=false
 RUNTIME_STOPPED=false
 INSTALL_COMMITTED=false
+AF_APACHE_QUIESCE_MODE=""
+AF_APACHE_IN_MAINTENANCE=false
+AF_APACHE_ACTIVATED_NEW_VHOST=false
 RUNTIME_PATHS=(
     "/var/www/rutorrent"
     "/var/lib/rutorrent"
@@ -97,14 +101,24 @@ rollback_web_runtime() {
     trap - EXIT INT TERM
     set +e
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_SNAPSHOT_READY" == true ]]; then
-        quiesce_services_for_rollback apache2 || { restore_failed=true; exit 1; }
+        apache_app_quiesce_for_rollback "${PACKAGE_NAME}" "$APP_PORT" "/" "$RUNTIME_BACKUP" || { restore_failed=true; exit 1; }
         for runtime_index in "${!RUNTIME_PATHS[@]}"; do
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
         done
-    fi
-    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_STOPPED" == true ]]; then
-        [[ "$restore_failed" == false ]] && af_logged apache2ctl configtest && af_logged systemctl start apache2 || restore_failed=true
+        [[ "$restore_failed" == false ]] && apache_app_resume_after_rollback "${PACKAGE_NAME}" "$RUNTIME_BACKUP" || restore_failed=true
+    elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && ( "$APACHE_CONFIG_BACKED_UP" == true || "$RUNTIME_STOPPED" == true ) ]]; then
+        if [[ "$APACHE_CONFIG_BACKED_UP" == true ]]; then
+            for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+                runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+                case "$runtime_path" in
+                    */etc/apache2/sites-*|*/etc/apache2/conf-*)
+                        safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+                        ;;
+                esac
+            done
+        fi
+        [[ "$restore_failed" == false ]] && apache_app_resume_after_rollback "${PACKAGE_NAME}" "$RUNTIME_BACKUP" || restore_failed=true
     fi
     [[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"
     if [[ "$restore_failed" == true ]]; then
@@ -119,10 +133,23 @@ rollback_web_runtime() {
 trap rollback_web_runtime EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-stop_systemd_unit apache2
-RUNTIME_STOPPED=true
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
     runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    case "$runtime_path" in
+        */etc/apache2/sites-*|*/etc/apache2/conf-*)
+            if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+                cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+            fi
+            ;;
+    esac
+done
+APACHE_CONFIG_BACKED_UP=true
+apache_app_enter_maintenance "${PACKAGE_NAME}" "$APP_PORT" "/" "$RUNTIME_BACKUP"
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    case "$runtime_path" in
+        */etc/apache2/sites-*|*/etc/apache2/conf-*) continue ;;
+    esac
     if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
         cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
     fi
@@ -229,11 +256,7 @@ else
 EOF
 fi
 
-af_logged a2enmod rewrite headers env dir mime
-af_logged a2ensite rutorrent.conf
-af_logged apache2ctl configtest
-af_logged systemctl enable --now apache2
-af_logged systemctl reload apache2
+apache_app_activate_vhost "${PACKAGE_NAME}" "$RUNTIME_BACKUP"
 
 systemctl is-active --quiet apache2
 wait_for_apache_app_ready "${PACKAGE_NAME}" "$APP_PORT" "/"
