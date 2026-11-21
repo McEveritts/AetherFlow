@@ -479,7 +479,7 @@
         "service_type": "systemd",
         "service_name": "autoscan",
         "default_port": 3030,
-        "web_path": "/"
+        "web_path": "/health"
     },
     {
         "name": "recyclarr",

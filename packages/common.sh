@@ -2086,6 +2086,10 @@ verify_download_sha256() {
     done
     basename_url="${source_url%%\?*}"
     basename_url="${basename_url##*/}"
+    local autoscan_release=false
+    if [[ "$app_id" == autoscan && "$source_url" == https://github.com/Cloudbox/autoscan/releases/download/* ]]; then
+        autoscan_release=true
+    fi
     for manifest in "${AF_DOWNLOAD_CHECKSUM_FILE:-}" "$file_path.sha256" "$file_path.sha256sum" "$(dirname "$file_path")/SHA256SUMS" "$(dirname "$file_path")/SHA256SUMS.txt" "$(dirname "$file_path")/sha256sums.txt" "$(dirname "$file_path")/SHASUMS256.txt" "$(dirname "$file_path")/checksums.txt"; do
         [[ -n "$manifest" ]] || continue
         if [[ ! -f "$manifest" ]]; then
@@ -2101,7 +2105,20 @@ verify_download_sha256() {
             candidate="${candidate#\*}"
             candidate="${candidate#./}"
             if [[ -z "$candidate" && ( "$manifest" == "$file_path.sha256" || "$manifest" == "$file_path.sha256sum" ) ]] || [[ "$candidate" == "$(basename "$file_path")" || ( -n "$basename_url" && "$candidate" == "$basename_url" ) ]]; then
-                verify_sha256 "$file_path" "$digest" "$source_url" || return 1
+                if [[ "$autoscan_release" == true && "${manifest##*/}" == checksums.txt && "$digest" =~ ^[0-9a-fA-F]{128}$ ]]; then
+                    local actual_sha512=""
+                    if ! actual_sha512="$(sha512sum -- "$file_path")"; then
+                        print_error "$source_url SHA-512 verification failed"
+                        return 1
+                    fi
+                    actual_sha512="${actual_sha512%% *}"
+                    if [[ "$actual_sha512" != "${digest,,}" ]]; then
+                        print_error "$source_url SHA-512 digest mismatch"
+                        return 1
+                    fi
+                else
+                    verify_sha256 "$file_path" "$digest" "$source_url" || return 1
+                fi
                 expected="$digest"
                 found=true
             fi
@@ -2177,15 +2194,34 @@ for asset in json.load(sys.stdin).get("assets", []):
             [[ "$checksum_url" == https://* ]] && _chk_proto=(--proto '=https' --proto-redir '=https')
             if af_logged_stderr curl "${_chk_proto[@]}" -fsSL --connect-timeout 2 --max-time 4 "$checksum_url" -o "$fetched"; then
                 while read -r digest candidate || [[ -n "$digest" ]]; do
-                    [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]] || continue
-                    candidate="${candidate#\*}"
-                    candidate="${candidate#./}"
-                    if [[ ( -z "$candidate" && ( "$checksum_url" == "${source_url}.sha256" || "$checksum_url" == "${source_url}.sha256sum" ) ) || "$candidate" == "$basename_url" || "$candidate" == "$(basename "$file_path")" ]]; then
-                        if ! verify_sha256 "$file_path" "$digest" "$source_url"; then
-                            rm -rf -- "$checksum_directory"
-                            return 1
+                    if [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]]; then
+                        candidate="${candidate#\*}"
+                        candidate="${candidate#./}"
+                        if [[ ( -z "$candidate" && ( "$checksum_url" == "${source_url}.sha256" || "$checksum_url" == "${source_url}.sha256sum" ) ) || "$candidate" == "$basename_url" || "$candidate" == "$(basename "$file_path")" ]]; then
+                            if ! verify_sha256 "$file_path" "$digest" "$source_url"; then
+                                rm -rf -- "$checksum_directory"
+                                return 1
+                            fi
+                            found=true
                         fi
-                        found=true
+                    elif [[ "$autoscan_release" == true && "${checksum_url##*/}" == checksums.txt && "$digest" =~ ^[a-fA-F0-9]{128}$ ]]; then
+                        candidate="${candidate#\*}"
+                        candidate="${candidate#./}"
+                        if [[ "$candidate" == "$basename_url" || "$candidate" == "$(basename "$file_path")" ]]; then
+                            local actual_sha512=""
+                            if ! actual_sha512="$(sha512sum -- "$file_path")"; then
+                                print_error "$source_url SHA-512 verification failed"
+                                rm -rf -- "$checksum_directory"
+                                return 1
+                            fi
+                            actual_sha512="${actual_sha512%% *}"
+                            if [[ "$actual_sha512" != "${digest,,}" ]]; then
+                                print_error "$source_url SHA-512 digest mismatch"
+                                rm -rf -- "$checksum_directory"
+                                return 1
+                            fi
+                            found=true
+                        fi
                     fi
                 done < "$fetched"
             fi
@@ -7114,7 +7150,7 @@ resolve_app_readiness_path() {
         transmission*) printf '%s\n' /transmission/rpc ;;
         filebrowser*) printf '%s\n' /health ;;
         kavita*|grafana*) printf '%s\n' /api/health ;;
-        autoscan*) printf '%s\n' / ;;
+        autoscan*) printf '%s\n' /health ;;
         sonarr*|radarr*|lidarr*|readarr*|prowlarr*|navidrome*|audiobookshelf*) printf '%s\n' /ping ;;
         prometheus*) printf '%s\n' /-/healthy ;;
         syncthing*) printf '%s\n' /rest/noauth/health ;;
@@ -7214,6 +7250,99 @@ elif app in ('bazarr', 'tautulli', 'sabnzbd'):
                     port = yaml_port
                 if general.get('base_url') not in (None, ''):
                     base = str(general['base_url'])
+elif app == 'autoscan':
+    endpoint = '/health'
+    raw = read_optional('/etc/autoscan/config.yml')
+    if raw:
+        parsed_hosts = []
+        yaml_port = None
+        try:
+            import yaml
+            loaded = yaml.safe_load(raw)
+            if isinstance(loaded, dict):
+                if loaded.get('port') not in (None, ''):
+                    yaml_port = str(loaded['port']).strip()
+                raw_hosts = loaded.get('host')
+                if isinstance(raw_hosts, list):
+                    parsed_hosts = [str(item) if item is not None else '' for item in raw_hosts]
+                elif isinstance(raw_hosts, str):
+                    parsed_hosts = [raw_hosts]
+        except ImportError:
+            def strip_yaml_scalar(raw_val):
+                val = raw_val.strip()
+                if not val:
+                    return ''
+                if val[0] in ('"', "'"):
+                    q = val[0]
+                    end_q = val.find(q, 1)
+                    return val[1:end_q] if end_q != -1 else val.strip(q)
+                return val.split('#', 1)[0].strip()
+
+            in_host = False
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                indent = len(line) - len(line.lstrip(' \t'))
+                if in_host:
+                    if indent == 0:
+                        in_host = False
+                    elif stripped.startswith('-'):
+                        parsed_hosts.append(strip_yaml_scalar(stripped[1:]))
+                        continue
+                if indent == 0:
+                    m_port = re.match(r'^port\s*:\s*(.*)$', stripped)
+                    if m_port:
+                        val = strip_yaml_scalar(m_port.group(1))
+                        if val:
+                            yaml_port = val
+                        continue
+                    m_host = re.match(r'^host\s*:\s*(.*)$', stripped)
+                    if m_host:
+                        val = m_host.group(1).strip()
+                        if val.startswith('['):
+                            end_bracket = val.find(']')
+                            inner = val[1:end_bracket] if end_bracket != -1 else val[1:]
+                            if inner.strip():
+                                parsed_hosts = [strip_yaml_scalar(part) for part in inner.split(',')]
+                            in_host = False
+                        elif val and not val.startswith('#'):
+                            parsed_hosts = [strip_yaml_scalar(val)]
+                            in_host = False
+                        else:
+                            in_host = True
+        if yaml_port is not None:
+            if not yaml_port.isdecimal() or not 1 <= int(yaml_port) <= 65535:
+                raise ValueError('Unsafe retained application port')
+            port = str(int(yaml_port))
+        if parsed_hosts:
+            candidates = []
+            for raw_entry in parsed_hosts:
+                entry = raw_entry.strip().strip('\'"')
+                entry_host = entry
+                entry_port = None
+                if entry.startswith('['):
+                    m_v6 = re.fullmatch(r'(\[[^\]]+\])(?::([0-9]+))?', entry)
+                    if not m_v6:
+                        raise ValueError('Unsafe retained application listener')
+                    entry_host = m_v6.group(1)
+                    entry_port = m_v6.group(2)
+                elif ':' in entry:
+                    h_part, p_part = entry.rsplit(':', 1)
+                    if not p_part.isdecimal():
+                        raise ValueError('Unsafe retained application port')
+                    entry_host = h_part
+                    entry_port = p_part
+                if entry_port is not None:
+                    if not entry_port.isdecimal() or not 1 <= int(entry_port) <= 65535:
+                        raise ValueError('Unsafe retained application port')
+                    entry_port = str(int(entry_port))
+                norm_host = {'': '127.0.0.1', '*': '127.0.0.1', '0.0.0.0': '127.0.0.1', '::': '[::1]', '[::]': '[::1]'}.get(entry_host, entry_host)
+                candidates.append((norm_host, entry_port))
+            chosen = next((c for c in candidates if c[0] in ('127.0.0.1', 'localhost', '[::1]')), candidates[0])
+            host = chosen[0]
+            if chosen[1] is not None:
+                port = chosen[1]
 elif app == 'overseerr':
     endpoint = '/api/v1/status'
 base = (base or '').strip()
@@ -7243,7 +7372,7 @@ wait_for_service_ready() {
         readiness_path="$(resolve_app_readiness_path "$app_name" "${3:-}")"
     fi
     case "$app_name:$readiness_path" in
-        sonarr:/ping|radarr:/ping|lidarr:/ping|readarr:/ping|prowlarr:/ping)
+        sonarr:/ping|radarr:/ping|lidarr:/ping|readarr:/ping|prowlarr:/ping|autoscan:/health)
             readiness_path="$(application_readiness_url "$app_name" "$port")" || return 1 ;;
     esac
     case "$app_name" in
