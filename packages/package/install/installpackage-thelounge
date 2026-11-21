@@ -125,14 +125,6 @@ if [[ ! "$TL_VER" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
     exit 1
 fi
 TL_VER="$(af_strip_version_prefix "$TL_VER")"
-if [[ -e /opt/thelounge/node_modules/thelounge/package.json || -L /opt/thelounge/node_modules/thelounge/package.json ]]; then
-    TL_PKG_VER="$(af_read_npm_package_version /opt/thelounge/node_modules/thelounge/package.json || true)"
-    TL_PKG_VER="$(af_strip_version_prefix "$TL_PKG_VER")"
-    if [[ -z "$TL_PKG_VER" || "$TL_PKG_VER" != "$TL_VER" ]]; then
-        log_error "Installed The Lounge package metadata (${TL_PKG_VER:-unknown}) does not match runtime version (${TL_VER})."
-        exit 1
-    fi
-fi
 if [[ -n "$TL_TARGET_VER" && "$TL_VER" != "$TL_TARGET_VER" ]]; then
     log_error "Installed The Lounge version (${TL_VER}) does not match requested target version (${TL_TARGET_VER})."
     exit 1

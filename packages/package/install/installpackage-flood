@@ -1,5 +1,8 @@
 #!/bin/bash
-# AetherFlow Package Installer: Flood (@jesec/flood)
+# AetherFlow Package Installer: Flood (npm: flood; GitHub feed: jesec/flood)
+# Discovery uses github:jesec/flood stable releases, which map 1:1 to unscoped npm `flood`.
+# Legacy `@jesec/flood` only publishes `0.0.0-master.<sha>` builds and is selected solely
+# for exact legacy recovery targets matching `0.0.0-master.<hex>`, without silent fallback.
 # Port: 3001
 
 set -euo pipefail
@@ -35,18 +38,27 @@ fi
 
 require_root
 FLOOD_TARGET_VER=""
-FLOOD_PACKAGE="@jesec/flood"
+FLOOD_PACKAGE_NAME="flood"
+FLOOD_PACKAGE="flood"
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     FLOOD_TARGET_VER="$(af_normalize_exact_registry_version npm "${AF_TARGET_VERSION}")" || exit 1
-    FLOOD_PACKAGE="@jesec/flood@${FLOOD_TARGET_VER}"
+    if [[ "$FLOOD_TARGET_VER" =~ ^0\.0\.0-master\.[0-9a-f]{6,40}$ ]]; then
+        FLOOD_PACKAGE_NAME="@jesec/flood"
+    fi
+    FLOOD_PACKAGE="${FLOOD_PACKAGE_NAME}@${FLOOD_TARGET_VER}"
 fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
-report_progress 15 "Installing Node.js 20 LTS for Flood..."
+report_progress 15 "Installing Node.js 22 LTS for Flood..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-certificates
 
-ensure_node 20
+ensure_node 22
+NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
+if [[ ! "$NODE_MAJOR" =~ ^[0-9]+$ ]] || (( NODE_MAJOR < 22 )); then
+    print_error "Flood requires Node.js >= 22; current runtime is Node ${NODE_MAJOR:-unknown}."
+    exit 1
+fi
 
 if ! id -u flood >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/flood --shell /usr/sbin/nologin flood
@@ -121,14 +133,6 @@ FLOOD_VER="$(af_strip_version_prefix "$FLOOD_VER")"
 if [[ -z "$FLOOD_VER" ]]; then
     print_error "Failed to determine installed Flood version"
     exit 1
-fi
-if [[ -e /opt/flood/node_modules/@jesec/flood/package.json || -L /opt/flood/node_modules/@jesec/flood/package.json ]]; then
-    FLOOD_PKG_VER="$(af_read_npm_package_version /opt/flood/node_modules/@jesec/flood/package.json || true)"
-    FLOOD_PKG_VER="$(af_strip_version_prefix "$FLOOD_PKG_VER")"
-    if [[ -z "$FLOOD_PKG_VER" || "$FLOOD_PKG_VER" != "$FLOOD_VER" ]]; then
-        print_error "Installed Flood package metadata (${FLOOD_PKG_VER:-unknown}) does not match runtime version (${FLOOD_VER})"
-        exit 1
-    fi
 fi
 if [[ -n "$FLOOD_TARGET_VER" && "$FLOOD_VER" != "$FLOOD_TARGET_VER" ]]; then
     print_error "Installed Flood version (${FLOOD_VER}) does not match requested target version (${FLOOD_TARGET_VER})"

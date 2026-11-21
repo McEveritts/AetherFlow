@@ -253,7 +253,8 @@ EOF
         echo "$*" >> "${root}/npm_installed.log"
         if [[ "$*" == *--prefix* && "$*" == *n8n* ]]; then
             while [[ "$1" != --prefix ]]; do shift; done
-            mkdir -p "$2/node_modules/.bin"
+            mkdir -p "$2/node_modules/.bin" "$2/node_modules/n8n"
+            printf '{"name":"n8n","version":"2.1.0"}\n' > "$2/node_modules/n8n/package.json"
             printf '#!/bin/bash\necho 2.1.0\n' > "$2/node_modules/.bin/n8n"
             chmod +x "$2/node_modules/.bin/n8n"
         fi

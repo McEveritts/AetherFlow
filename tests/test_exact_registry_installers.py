@@ -283,11 +283,18 @@ install_npm_app "$2" "$3" "$4"
 
     def test_install_npm_app_pins_exact_version_and_rejects_unavailable_or_tampered_package(self):
         packages = {
+            "flood": {
+                "4.16.3": (make_npm_tarball("flood", "4.16.3", "flood"), "", "flood"),
+                "4.16.4": (make_npm_tarball("flood", "4.16.4", "flood"), "latest", "flood"),
+                # Advertised as 4.16.2 in registry metadata, but tarball carries 4.16.4 in package.json.
+                "4.16.2": (make_npm_tarball("flood", "4.16.4", "flood"), "", "flood"),
+            },
             "@jesec/flood": {
-                "4.7.0": (make_npm_tarball("@jesec/flood", "4.7.0", "flood"), "", "flood"),
-                "4.8.0": (make_npm_tarball("@jesec/flood", "4.8.0", "flood"), "latest", "flood"),
-                # Advertised as 4.7.1 in registry metadata, but tarball carries 4.8.0 in package.json.
-                "4.7.1": (make_npm_tarball("@jesec/flood", "4.8.0", "flood"), "", "flood"),
+                "0.0.0-master.01f5a4a": (
+                    make_npm_tarball("@jesec/flood", "0.0.0-master.01f5a4a", "flood"),
+                    "latest",
+                    "flood",
+                ),
             },
             "thelounge": {
                 "4.4.3": (make_npm_tarball("thelounge", "4.4.3", "thelounge"), "", "thelounge"),
@@ -297,33 +304,46 @@ install_npm_app "$2" "$3" "$4"
         with _LocalNpmRegistry(packages) as registry_url:
             flood_dir = self.root / "opt/flood"
             flood_bin = self.root / "usr/local/bin/flood"
-            res = self.run_install_npm(registry_url, "@jesec/flood@4.7.0", flood_dir, flood_bin)
+            res = self.run_install_npm(registry_url, "flood@4.16.3", flood_dir, flood_bin)
             self.assertEqual(res.returncode, 0, res.stderr + (self.log.read_text() if self.log.exists() else ""))
-            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.7.0")
+            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.16.3")
             self.assertEqual(
-                json.loads((flood_dir / "node_modules/@jesec/flood/package.json").read_text())["version"],
-                "4.7.0",
+                json.loads((flood_dir / "node_modules/flood/package.json").read_text())["version"],
+                "4.16.3",
             )
 
-            # Unavailable version fails cleanly and preserves prior 4.7.0 runtime.
-            missing = self.run_install_npm(registry_url, "@jesec/flood@9.9.9", flood_dir, flood_bin)
+            # Unavailable version fails cleanly and preserves prior 4.16.3 runtime.
+            missing = self.run_install_npm(registry_url, "flood@9.9.9", flood_dir, flood_bin)
             self.assertNotEqual(missing.returncode, 0)
-            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.7.0")
+            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.16.3")
             self.assertFalse(list((self.root / "opt").glob("flood.af-build.*")))
             self.assertFalse(list((self.root / "opt").glob("flood.af-backup.*")))
 
-            # Tampered tarball whose package.json mismatches requested 4.7.1 is rejected before swap.
-            tampered = self.run_install_npm(registry_url, "@jesec/flood@4.7.1", flood_dir, flood_bin)
+            # Tampered tarball whose package.json mismatches requested 4.16.2 is rejected before swap.
+            tampered = self.run_install_npm(registry_url, "flood@4.16.2", flood_dir, flood_bin)
             self.assertNotEqual(tampered.returncode, 0)
             self.assertIn("does not match requested version", tampered.stderr)
-            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.7.0")
+            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.16.3")
             self.assertFalse(list((self.root / "opt").glob("flood.af-build.*")))
             self.assertFalse(list((self.root / "opt").glob("flood.af-backup.*")))
 
             # Non-exact semver range is rejected before invoking npm.
-            ranged = self.run_install_npm(registry_url, "@jesec/flood@^4.7.0", flood_dir, flood_bin)
+            ranged = self.run_install_npm(registry_url, "flood@^4.16.3", flood_dir, flood_bin)
             self.assertNotEqual(ranged.returncode, 0)
-            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.7.0")
+            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.16.3")
+
+            # Legacy scoped recovery spec still verifies exact scoped package metadata.
+            scoped_dir = self.root / "opt/flood-legacy"
+            scoped_bin = self.root / "usr/local/bin/flood-legacy"
+            scoped_res = self.run_install_npm(
+                registry_url, "@jesec/flood@0.0.0-master.01f5a4a", scoped_dir, self.root / "usr/local/bin/flood"
+            )
+            self.assertEqual(scoped_res.returncode, 0, scoped_res.stderr)
+            self.assertEqual(
+                json.loads((scoped_dir / "node_modules/@jesec/flood/package.json").read_text())["version"],
+                "0.0.0-master.01f5a4a",
+            )
+            self.assertFalse(scoped_bin.exists())
 
             # Bare package name with AF_TARGET_VERSION automatically pins exact version.
             lounge_dir = self.root / "opt/thelounge"
@@ -335,9 +355,9 @@ install_npm_app "$2" "$3" "$4"
             self.assertEqual(subprocess.check_output([str(lounge_bin)], text=True).strip(), "4.4.3")
 
             # Unpinned install still resolves latest cleanly.
-            unpinned = self.run_install_npm(registry_url, "@jesec/flood", flood_dir, flood_bin)
+            unpinned = self.run_install_npm(registry_url, "flood", flood_dir, flood_bin)
             self.assertEqual(unpinned.returncode, 0, unpinned.stderr)
-            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.8.0")
+            self.assertEqual(subprocess.check_output([str(flood_bin)], text=True).strip(), "4.16.4")
 
 
 MOCK_SANDBOX_BIN = r'''#!/usr/bin/python3
@@ -377,7 +397,7 @@ if cmd == "node":
         bin_path = next(a for a in args if "thelounge" in a)
         os.execv(bin_path, [bin_path, "-v"])
     if "-v" in args or "--version" in args:
-        print("v22.12.0")
+        print(os.environ.get("MOCK_NODE_VER", "v22.12.0"))
         sys.exit(0)
     if "-e" in args and "DatabaseSync" in args[args.index("-e") + 1]:
         sys.exit(0)
@@ -407,14 +427,20 @@ if cmd == "npm":
     else:
         pkg_name, req_ver = spec, ""
 
-    default_ver = os.environ.get("MOCK_DEFAULT_VER", "4.5.0")
+    default_ver = os.environ.get("MOCK_DEFAULT_VER", "4.16.4")
     pkg_ver = os.environ.get("MOCK_PKG_VER") or req_ver or default_ver
     cli_ver = os.environ.get("MOCK_CLI_VER") or pkg_ver
-    bin_name = "flood" if pkg_name == "@jesec/flood" else pkg_name
+    bin_name = "flood" if pkg_name in ("flood", "@jesec/flood") else pkg_name
 
     pkg_dir = prefix / "node_modules" / pkg_name
-    pkg_dir.mkdir(parents=True, exist_ok=True)
-    (pkg_dir / "package.json").write_text(json.dumps({"name": pkg_name, "version": pkg_ver}))
+    if os.environ.get("MOCK_OMIT_PKG_JSON") != "1":
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        if os.environ.get("MOCK_SYMLINK_PKG_JSON") == "1":
+            target = root / "external-pkg.json"
+            target.write_text(json.dumps({"name": pkg_name, "version": pkg_ver}))
+            (pkg_dir / "package.json").symlink_to(target)
+        else:
+            (pkg_dir / "package.json").write_text(json.dumps({"name": pkg_name, "version": pkg_ver}))
     bin_dir = prefix / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     bin_file = bin_dir / bin_name
@@ -537,7 +563,7 @@ log_error() {{ printf '%s\\n' "$*" >&2; }}
 print_error() {{ printf '%s\\n' "$*" >&2; }}
 print_warn() {{ printf '%s\\n' "$*" >&2; }}
 report_progress() {{ :; }}
-ensure_node() {{ :; }}
+ensure_node() {{ printf '["ensure_node", "%s"]\\n' "$1" >> "{root}/commands.jsonl"; }}
 write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
 '''
             + installer_common_functions(
@@ -592,22 +618,36 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
     def test_flood_pinned_unpinned_mismatch_and_clean_rollback(self):
         root, script = self.make_sandbox("flood")
 
-        # 1. No-target install preserves unpinned npm spec.
-        res = self.run_sandbox(root, script, MOCK_DEFAULT_VER="4.6.0")
+        # 1. No-target install uses unscoped stable `flood` with Node 22 and managed service flags.
+        res = self.run_sandbox(root, script, MOCK_DEFAULT_VER="4.16.3")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         cmds = self.read_commands(root)
+        self.assertIn(["ensure_node", "22"], cmds)
         npm_calls = [c for c in cmds if c[0] == "npm"]
         self.assertEqual(len(npm_calls), 1)
-        self.assertEqual(npm_calls[0][-1], "@jesec/flood")
+        self.assertEqual(npm_calls[0][-1], "flood")
         self.assertNotIn("--save-exact", npm_calls[0])
-        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.6.0")
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.3")
         self.assertTrue((root / "active-flood").exists())
+        unit_text = (root / "etc/systemd/system/flood.service").read_text()
+        self.assertIn("--host 127.0.0.1 --port 3001 --rundir", unit_text)
 
-        state = root / "var/lib/flood/users.db"
+        state = root / "var/lib/flood/db/users.db"
+        state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text("retained-flood-state\n")
 
-        # 2. Invalid targets fail before stopping service or calling npm.
-        for bad in ("latest", "^4.7.0", "4.7.x"):
+        # 2. Incompatible Node (<22) fails before stopping service or calling npm.
+        mark = len(self.read_commands(root))
+        old_node = self.run_sandbox(root, script, MOCK_NODE_VER="v20.18.0", AF_TARGET_VERSION="4.16.4")
+        self.assertNotEqual(old_node.returncode, 0)
+        self.assertIn("Node.js >= 22", old_node.stderr)
+        delta = self.read_commands(root, mark)
+        self.assertFalse(any(c[0] in ("npm", "systemctl") for c in delta), delta)
+        self.assertTrue((root / "active-flood").exists())
+        self.assertEqual(state.read_text(), "retained-flood-state\n")
+
+        # 3. Invalid targets fail before stopping service or calling npm.
+        for bad in ("latest", "^4.16.4", "4.16.x", "@jesec/flood@4.16.4"):
             mark = len(self.read_commands(root))
             bad_res = self.run_sandbox(root, script, AF_TARGET_VERSION=bad)
             self.assertNotEqual(bad_res.returncode, 0)
@@ -616,46 +656,144 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
             self.assertTrue((root / "active-flood").exists())
             self.assertEqual(state.read_text(), "retained-flood-state\n")
 
-        # 3. Pinned update with tag prefix passes exact npm spec and commits normalized version.
+        # 4. Pinned update with tag prefix passes exact `flood@4.16.4` and commits normalized version.
         mark = len(self.read_commands(root))
-        pinned = self.run_sandbox(root, script, AF_TARGET_VERSION="v4.7.0")
+        pinned = self.run_sandbox(root, script, AF_TARGET_VERSION="v4.16.4")
         self.assertEqual(pinned.returncode, 0, pinned.stdout + pinned.stderr)
         delta = self.read_commands(root, mark)
         npm_pinned = [c for c in delta if c[0] == "npm"]
         self.assertEqual(len(npm_pinned), 1)
         self.assertIn("--save-exact", npm_pinned[0])
-        self.assertEqual(npm_pinned[0][-1], "@jesec/flood@4.7.0")
-        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.7.0")
+        self.assertEqual(npm_pinned[0][-1], "flood@4.16.4")
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.4")
         self.assertEqual(state.read_text(), "retained-flood-state\n")
 
-        # 4. Unavailable version fails and cleanly rolls back runtime, state, receipt, and active service.
+        # 5. Missing or symlinked package.json on a pinned install fails BEFORE activation and rolls back.
+        for label, extra in (
+            ("missing-pkg-json", {"AF_TARGET_VERSION": "4.16.5", "MOCK_OMIT_PKG_JSON": "1"}),
+            ("symlink-pkg-json", {"AF_TARGET_VERSION": "4.16.5", "MOCK_SYMLINK_PKG_JSON": "1"}),
+        ):
+            with self.subTest(case=label):
+                mark = len(self.read_commands(root))
+                bad_meta = self.run_sandbox(root, script, **extra)
+                self.assertNotEqual(bad_meta.returncode, 0, bad_meta.stdout + bad_meta.stderr)
+                self.assertIn("missing valid package.json metadata", bad_meta.stderr)
+                delta = self.read_commands(root, mark)
+                self.assertFalse(any(c[:2] == ["systemctl", "enable"] for c in delta), delta)
+                self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.4")
+                self.assertEqual(state.read_text(), "retained-flood-state\n")
+                self.assertTrue((root / "active-flood").exists())
+                self.assertEqual(
+                    subprocess.check_output([str(root / "usr/local/bin/flood"), "--version"], text=True).strip(),
+                    "4.16.4",
+                )
+
+        # 6. Unavailable version fails without silent fallback and rolls back cleanly.
         lock_mtime = (root / "install/.flood.lock").stat().st_mtime_ns
+        mark = len(self.read_commands(root))
         unavail = self.run_sandbox(root, script, AF_TARGET_VERSION="9.9.9", MOCK_NPM_FAIL="1")
         self.assertNotEqual(unavail.returncode, 0)
-        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.7.0")
+        npm_unavail = [c for c in self.read_commands(root, mark) if c[0] == "npm"]
+        self.assertEqual(len(npm_unavail), 1)
+        self.assertEqual(npm_unavail[0][-1], "flood@9.9.9")
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.4")
         self.assertEqual(state.read_text(), "retained-flood-state\n")
         self.assertEqual((root / "install/.flood.lock").stat().st_mtime_ns, lock_mtime)
         self.assertTrue((root / "active-flood").exists())
         self.assertEqual(
             subprocess.check_output([str(root / "usr/local/bin/flood"), "--version"], text=True).strip(),
-            "4.7.0",
+            "4.16.4",
         )
 
-        # 5. CLI version mismatch fails BEFORE service activation and rolls back cleanly.
+        # 7. CLI version mismatch fails BEFORE service activation and rolls back cleanly.
         mark = len(self.read_commands(root))
         mismatch = self.run_sandbox(
-            root, script, AF_TARGET_VERSION="4.8.0", MOCK_PKG_VER="4.8.0", MOCK_CLI_VER="4.9.0"
+            root, script, AF_TARGET_VERSION="4.16.5", MOCK_PKG_VER="4.16.5", MOCK_CLI_VER="4.17.0"
         )
         self.assertNotEqual(mismatch.returncode, 0)
         delta = self.read_commands(root, mark)
         self.assertFalse(any(c[:2] == ["systemctl", "enable"] for c in delta), delta)
-        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.7.0")
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.4")
         self.assertEqual(state.read_text(), "retained-flood-state\n")
         self.assertTrue((root / "active-flood").exists())
         self.assertEqual(
             subprocess.check_output([str(root / "usr/local/bin/flood"), "--version"], text=True).strip(),
-            "4.7.0",
+            "4.16.4",
         )
+
+    def test_flood_legacy_scoped_migration_rollback_and_exact_recovery(self):
+        root, script = self.make_sandbox("flood")
+
+        # 1. Seed a retained legacy `@jesec/flood` install (`0.0.0-master.01f5a4a`) with custom host & db state.
+        legacy_res = self.run_sandbox(root, script, AF_TARGET_VERSION="0.0.0-master.01f5a4a")
+        self.assertEqual(legacy_res.returncode, 0, legacy_res.stdout + legacy_res.stderr)
+        npm_legacy = [c for c in self.read_commands(root) if c[0] == "npm"]
+        self.assertEqual(len(npm_legacy), 1)
+        self.assertIn("--save-exact", npm_legacy[0])
+        self.assertEqual(npm_legacy[0][-1], "@jesec/flood@0.0.0-master.01f5a4a")
+        self.assertTrue((root / "opt/flood/node_modules/@jesec/flood/package.json").exists())
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "0.0.0-master.01f5a4a")
+
+        unit_file = root / "etc/systemd/system/flood.service"
+        unit_file.write_text(unit_file.read_text().replace("--host 127.0.0.1", "--host 10.0.0.5"))
+        users_db = root / "var/lib/flood/db/users.db"
+        users_db.parent.mkdir(parents=True, exist_ok=True)
+        users_db.write_text('{"username":"operator"}\n')
+
+        # 2. Unavailable legacy recovery target fails closed without falling back to unscoped `flood`.
+        mark = len(self.read_commands(root))
+        legacy_fail = self.run_sandbox(root, script, AF_TARGET_VERSION="0.0.0-master.deadbee", MOCK_NPM_FAIL="1")
+        self.assertNotEqual(legacy_fail.returncode, 0)
+        npm_legacy_fail = [c for c in self.read_commands(root, mark) if c[0] == "npm"]
+        self.assertEqual(len(npm_legacy_fail), 1)
+        self.assertEqual(npm_legacy_fail[0][-1], "@jesec/flood@0.0.0-master.deadbee")
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "0.0.0-master.01f5a4a")
+        self.assertTrue((root / "opt/flood/node_modules/@jesec/flood/package.json").exists())
+        self.assertEqual(users_db.read_text(), '{"username":"operator"}\n')
+        self.assertTrue((root / "active-flood").exists())
+
+        # 3. Failed migration from legacy `@jesec/flood` to stable `flood@4.16.4` rolls back cleanly.
+        mark = len(self.read_commands(root))
+        mig_fail = self.run_sandbox(root, script, AF_TARGET_VERSION="4.16.4", MOCK_NPM_FAIL="1")
+        self.assertNotEqual(mig_fail.returncode, 0)
+        npm_mig_fail = [c for c in self.read_commands(root, mark) if c[0] == "npm"]
+        self.assertEqual(len(npm_mig_fail), 1)
+        self.assertEqual(npm_mig_fail[0][-1], "flood@4.16.4")
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "0.0.0-master.01f5a4a")
+        self.assertTrue((root / "opt/flood/node_modules/@jesec/flood/package.json").exists())
+        self.assertIn("--host 10.0.0.5", unit_file.read_text())
+        self.assertEqual(users_db.read_text(), '{"username":"operator"}\n')
+        self.assertTrue((root / "active-flood").exists())
+
+        # 4. Successful migration from legacy `@jesec/flood` to stable `flood@4.16.4` preserves state, host, and port.
+        mark = len(self.read_commands(root))
+        migrated = self.run_sandbox(root, script, AF_TARGET_VERSION="v4.16.4", AF_APP_PORT="3015")
+        self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+        npm_mig = [c for c in self.read_commands(root, mark) if c[0] == "npm"]
+        self.assertEqual(len(npm_mig), 1)
+        self.assertIn("--save-exact", npm_mig[0])
+        self.assertEqual(npm_mig[0][-1], "flood@4.16.4")
+        self.assertTrue((root / "opt/flood/node_modules/flood/package.json").exists())
+        self.assertFalse((root / "opt/flood/node_modules/@jesec/flood").exists())
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.4")
+        self.assertEqual(users_db.read_text(), '{"username":"operator"}\n')
+        self.assertIn("--host 10.0.0.5 --port 3015 --rundir", unit_file.read_text())
+        self.assertTrue((root / "active-flood").exists())
+
+        # 5. Downgrading from stable 4.16.4 back to legacy 0.0.0-master.01f5a4a is refused without AF_ALLOW_DOWNGRADE=1,
+        #    and succeeds when AF_ALLOW_DOWNGRADE=1 is explicitly set for recovery.
+        refused = self.run_sandbox(root, script, AF_TARGET_VERSION="0.0.0-master.01f5a4a")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "4.16.4")
+        self.assertTrue((root / "opt/flood/node_modules/flood/package.json").exists())
+
+        recovered = self.run_sandbox(
+            root, script, AF_TARGET_VERSION="0.0.0-master.01f5a4a", AF_ALLOW_DOWNGRADE="1"
+        )
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertEqual((root / "var/lib/flood/.af-version").read_text().strip(), "0.0.0-master.01f5a4a")
+        self.assertTrue((root / "opt/flood/node_modules/@jesec/flood/package.json").exists())
+        self.assertEqual(users_db.read_text(), '{"username":"operator"}\n')
 
     def test_thelounge_pinned_unpinned_mismatch_and_clean_rollback(self):
         root, script = self.make_sandbox("thelounge")
@@ -689,7 +827,18 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
         self.assertEqual((root / "var/lib/thelounge/.af-version").read_text().strip(), "4.5.2")
         self.assertEqual(user_state.read_text(), '{"password":"retained-hash"}\n')
 
-        # 4. Version mismatch rejects before activation and rolls back runtime + retained state.
+        # 4. Missing package.json on a pinned install fails BEFORE activation and rolls back cleanly.
+        mark = len(self.read_commands(root))
+        missing_meta = self.run_sandbox(root, script, AF_TARGET_VERSION="4.6.0", MOCK_OMIT_PKG_JSON="1")
+        self.assertNotEqual(missing_meta.returncode, 0)
+        self.assertIn("missing valid package.json metadata", missing_meta.stderr)
+        delta = self.read_commands(root, mark)
+        self.assertFalse(any(c[:2] == ["systemctl", "enable"] for c in delta), delta)
+        self.assertEqual((root / "var/lib/thelounge/.af-version").read_text().strip(), "4.5.2")
+        self.assertEqual(user_state.read_text(), '{"password":"retained-hash"}\n')
+        self.assertTrue((root / "active-thelounge").exists())
+
+        # 5. Version mismatch rejects before activation and rolls back runtime + retained state.
         mark = len(self.read_commands(root))
         mismatch = self.run_sandbox(
             root, script, AF_TARGET_VERSION="4.6.0", MOCK_PKG_VER="4.6.0", MOCK_CLI_VER="v4.9.9"
@@ -773,7 +922,10 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
         self.assertEqual(automation["unmanic"]["update_source"], "pypi")
         self.assertEqual(automation["unmanic"]["update_package"], "unmanic")
         self.assertNotIn("update_repo", automation["unmanic"])
+        self.assertEqual(automation["flood"]["update_source"], "github")
         self.assertEqual(automation["flood"]["update_repo"], "jesec/flood")
+        self.assertNotIn("update_package", automation["flood"])
+        self.assertEqual(automation["thelounge"]["update_source"], "github")
         self.assertEqual(automation["thelounge"]["update_repo"], "thelounge/thelounge")
 
 

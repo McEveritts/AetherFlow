@@ -588,13 +588,15 @@ install_npm_app() (
     fi
     if [[ -n "$requested_ver" && -n "$pkg_name" ]]; then
         pkg_manifest="$staged/node_modules/${pkg_name}/package.json"
-        if [[ -e "$pkg_manifest" || -L "$pkg_manifest" ]]; then
-            installed_ver="$(af_read_npm_package_version "$pkg_manifest" || true)"
-            installed_ver="$(af_strip_version_prefix "$installed_ver")"
-            if [[ -z "$installed_ver" || "$installed_ver" != "$requested_ver" ]]; then
-                print_error "Installed npm package ${pkg_name} version (${installed_ver:-unknown}) does not match requested version (${requested_ver})"
-                return 1
-            fi
+        if [[ ! -d "$staged/node_modules/${pkg_name}" || -L "$staged/node_modules/${pkg_name}" || ! -f "$pkg_manifest" || -L "$pkg_manifest" ]]; then
+            print_error "Installed npm package ${pkg_name} is missing valid package.json metadata for requested version (${requested_ver})"
+            return 1
+        fi
+        installed_ver="$(af_read_npm_package_version "$pkg_manifest" || true)"
+        installed_ver="$(af_strip_version_prefix "$installed_ver")"
+        if [[ -z "$installed_ver" || "$installed_ver" != "$requested_ver" ]]; then
+            print_error "Installed npm package ${pkg_name} version (${installed_ver:-unknown}) does not match requested version (${requested_ver})"
+            return 1
         fi
     fi
     replace_app_tree "$staged" "$destination" || return $?
