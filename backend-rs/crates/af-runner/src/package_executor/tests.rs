@@ -4323,9 +4323,18 @@ async fn test_rclone_authenticated_wait_for_http_ready_rcd_and_gui() {
         let root = create_isolated_test_dir("rclone-auth-rcd-live");
         let env_cfg = PackageExecutionEnv::isolated(&root);
         for (logical, content) in [
-            ("etc/aetherflow/rclone.env", "RCLONE_USER=admin\nRCLONE_PASS=mysecret\n"),
-            ("etc/rclone/rclone.env", "RCLONE_RC_USER=other\nRCLONE_RC_PASS=other\n"),
-            ("etc/systemd/system/rclone.service", "[Service]\nEnvironmentFile=-/etc/aetherflow/rclone.env\n"),
+            (
+                "etc/aetherflow/rclone.env",
+                "RCLONE_USER=admin\nRCLONE_PASS=mysecret\n",
+            ),
+            (
+                "etc/rclone/rclone.env",
+                "RCLONE_RC_USER=other\nRCLONE_RC_PASS=other\n",
+            ),
+            (
+                "etc/systemd/system/rclone.service",
+                "[Service]\nEnvironmentFile=-/etc/aetherflow/rclone.env\n",
+            ),
         ] {
             let path = root.join(logical);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -4931,7 +4940,9 @@ async fn test_rclone_install_succeeds_with_valid_sha256_and_version() {
     );
 
     assert!(root.join(RCLONE_BIN.trim_start_matches('/')).is_file());
-    assert!(root.join(RCLONE_BIN_OWNER.trim_start_matches('/')).is_file());
+    assert!(root
+        .join(RCLONE_BIN_OWNER.trim_start_matches('/'))
+        .is_file());
     assert!(!root.join("usr/bin/rclone").exists());
     assert!(!root.join("usr/local/bin/rclone").exists());
 

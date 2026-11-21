@@ -1544,6 +1544,8 @@ fi
         self.assertFalse(backup_dir.exists(), "$backup_dir must be removed after component certification passes")
 
     def prepare_rclone_fixture(self):
+        # Exercise directory permissions with the real install command on rebased paths.
+        (self.root / "mock-bin/install").unlink()
         with zipfile.ZipFile(self.root / "rclone.zip", "w") as archive:
             archive.writestr("rclone-linux/rclone", """#!/bin/sh
 case "$1" in

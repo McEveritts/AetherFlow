@@ -2448,7 +2448,10 @@ async fn test_rclone_update_probe_ignores_unowned_executables() {
     let pkg = Package {
         name: "rclone".into(),
         update_source: "github_release".into(),
-        version_command: vec!["/opt/AetherFlow/apps/rclone/rclone".into(), "version".into()],
+        version_command: vec![
+            "/opt/AetherFlow/apps/rclone/rclone".into(),
+            "version".into(),
+        ],
         version_regex: r"rclone\s+v?([0-9]+\.[0-9]+\.[0-9]+[^\s]*)".into(),
         ..Default::default()
     };
