@@ -194,7 +194,9 @@ AetherFlow includes a built-in OpenID Connect provider for downstream applicatio
 
 ## Backup & Staged Restore (`af-host`)
 
-Backups use `af-host` to capture WAL-consistent SQLite snapshots (`OnlineBackupApi` or `VACUUM INTO`) verified with `PRAGMA quick_check`, paired with versioned `af-host.backup-manifest.v1` manifests and `.sha256` sidecars.
+Dashboard and scheduled backups cover the AetherFlow SQLite database. The snapshots capture committed WAL data, pass `PRAGMA quick_check`, and carry a versioned manifest and SHA-256 sidecar.
+
+The `af backup create` host archive also includes the existing `/etc/aetherflow` and legacy `/etc/AetherFlow` configuration trees, the default master credentials and OIDC key under `/var/lib/aetherflow`, and the legacy owner's `~/.rtorrent.rc`. Back up McBrowser files, Marketplace data and databases, Apache configuration, and credentials or signing keys stored outside these paths separately.
 
 ```bash
 # Create a verified backup archive + manifest + SHA-256 sidecar

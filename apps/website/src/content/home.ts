@@ -12,8 +12,8 @@ export const directives = {
   body: "We rejected fragile shell panels and heavy container overlays. AetherFlow is built on an uncompromising philosophy: infrastructure software should be compiled, memory-safe, and verifiable.",
   cards: [
     {
-      title: "100% Bare-Metal & systemd",
-      copy: "Manage a 77-app bare-metal catalog of native Linux services under granular systemd cgroups and af-systemd-sandbox profiles with zero Docker daemon overhead or bridge latency."
+      title: "Native Linux Services",
+      copy: "Manage a 77-app catalog with systemd service controls, app-specific setup, and access through the dashboard or a native client."
     },
     {
       title: "Rust Control Plane (backend-rs)",
@@ -28,7 +28,7 @@ export const directives = {
 
 export const architectureData = {
   title: "A Pure-Rust Control Plane & WASM Dashboard Built for Sovereign Hosts",
-  body: "Uncompromising systems engineering designed for bare-metal longevity. Zero production Node.js daemons. Zero Docker runtime dependencies.",
+  body: "The control plane runs as native Rust and the dashboard runs as WebAssembly. Marketplace apps use their own runtimes, including Node.js where required.",
   columns: [
     {
       title: "Rust Control Plane (backend-rs) & Zero-Sudo aetherflow-runner",

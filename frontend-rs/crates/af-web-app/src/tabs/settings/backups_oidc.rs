@@ -285,7 +285,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     disabled=move || busy.get()
                     on:click=move |_| create()
                 >
-                    {move || tt(context, "Create host snapshot")}
+                    {move || tt(context, "Create database snapshot")}
                 </button>
                 <button
                     type="button"
