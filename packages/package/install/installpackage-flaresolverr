@@ -37,6 +37,7 @@ require_root
 
 BUILD_DIR=""
 BACKUP_DIR=""
+TMP_TAR=""
 WAS_RUNNABLE=0
 SERVICE_STOPPED=0
 APP_MOVED=0
@@ -87,6 +88,9 @@ cleanup() {
                 af_logged systemctl start flaresolverr || restore_failed=true
             fi
         fi
+    fi
+    if [[ -n "$TMP_TAR" ]]; then
+        rm -f -- "$TMP_TAR" || true
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
         rm -rf -- "$BUILD_DIR" || restore_failed=true
@@ -153,8 +157,10 @@ mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 if [[ -n "$FS_URL" ]]; then
     TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/flaresolverr-XXXXXX.tar.gz")
     af_logged download_file "$FS_URL" "$TMP_TAR"
-    tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR"
-    rm -f "$TMP_TAR"
+    af_validate_tar_archive "$TMP_TAR"
+    af_logged tar --no-same-owner --no-same-permissions -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
+    rm -f -- "$TMP_TAR"
+    TMP_TAR=""
 else
     FS_REPO="https://github.com/FlareSolverr/FlareSolverr.git"
     FS_TAG="v${FS_VERSION#v}"

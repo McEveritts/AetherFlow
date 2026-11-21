@@ -155,7 +155,8 @@ TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/notifiarr-extract-XXXXXX"
 af_logged download_file "${ASSET_URL}" "${TMP_ARCHIVE}"
 
 if [[ "${ASSET_FORMAT}" == "tar.gz" ]]; then
-    af_logged tar --no-same-owner -xzf "${TMP_ARCHIVE}" -C "${TMP_DIR}"
+    af_validate_tar_archive "${TMP_ARCHIVE}"
+    af_logged tar --no-same-owner --no-same-permissions -xzf "${TMP_ARCHIVE}" -C "${TMP_DIR}"
     EXTRACTED_BIN="$(find "${TMP_DIR}" -type f -name "notifiarr" -print -quit)"
 else
     if ! gzip -dc "${TMP_ARCHIVE}" > "${TMP_DIR}/notifiarr"; then

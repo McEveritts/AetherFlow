@@ -68,7 +68,8 @@ TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/kavita-XXXXXX.tar.gz")
 af_logged download_file "$KAV_URL" "$TMP_TAR"
 BUILD_DIR="$(mktemp -d /opt/.kavita-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"; rm -f "$TMP_TAR"' EXIT
-af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
+af_validate_tar_archive "$TMP_TAR"
+af_logged tar --no-same-owner --no-same-permissions -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
 rm -f "$TMP_TAR"
 [[ -s "$BUILD_DIR/Kavita" ]]
 chmod 755 "$BUILD_DIR/Kavita"

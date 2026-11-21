@@ -3605,6 +3605,136 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
         self.assertEqual((runtime.read_bytes(), fixture.lock.read_bytes()), before)
         self.assertTrue((fixture.root / "active-autobrr.service").exists())
 
+    def test_kavita_validates_archive_members_and_flags_before_activation(self):
+        fixture = self.fixture("kavita")
+        binary = (fixture.root / "host-command").read_bytes()
+        config_payload = b'{"Port": 5000}\n'
+        with tarfile.open(fixture.root / "release.tar.gz", "w:gz") as output:
+            root_dir = tarfile.TarInfo("Kavita")
+            root_dir.type, root_dir.mode = tarfile.DIRTYPE, 0o755
+            output.addfile(root_dir)
+            entry = tarfile.TarInfo("Kavita/Kavita")
+            entry.mode, entry.size = 0o644, len(binary)
+            output.addfile(entry, io.BytesIO(binary))
+            cfg = tarfile.TarInfo("Kavita/appsettings.json")
+            cfg.mode, cfg.size = 0o666, len(config_payload)
+            output.addfile(cfg, io.BytesIO(config_payload))
+
+        self.assert_success(fixture.run())
+        runtime = fixture.root / "opt/Kavita/Kavita"
+        appsettings = fixture.root / "opt/Kavita/appsettings.json"
+        self.assertEqual(runtime.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(appsettings.stat().st_mode & 0o7022, 0)
+        before = runtime.read_bytes(), fixture.lock.read_bytes()
+
+        with tarfile.open(fixture.root / "release.tar.gz", "w:gz") as output:
+            entry = tarfile.TarInfo("Kavita/Kavita")
+            entry.mode, entry.size = 0o644, len(binary)
+            output.addfile(entry, io.BytesIO(binary))
+            alias = tarfile.TarInfo("Kavita/kavita-alias")
+            alias.type = tarfile.SYMTYPE
+            alias.linkname = "Kavita"
+            output.addfile(alias)
+
+        result = fixture.run("update")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disallowed non-regular tar entry: Kavita/kavita-alias", result.stderr)
+        self.assertEqual((runtime.read_bytes(), fixture.lock.read_bytes()), before)
+        self.assertTrue((fixture.root / "active-kavita.service").exists())
+        self.assertEqual(list((fixture.root / "var/tmp").glob("kavita-*.tar.gz")), [])
+
+    def test_flaresolverr_validates_archive_members_and_restores_on_failure(self):
+        fixture = self.fixture("flaresolverr")
+        binary = (fixture.root / "host-command").read_bytes()
+        lib_payload = b"fixture-library\n"
+        with tarfile.open(fixture.root / "release.tar.gz", "w:gz") as output:
+            for dirname in ("flaresolverr", "flaresolverr/_internal"):
+                d = tarfile.TarInfo(dirname)
+                d.type, d.mode = tarfile.DIRTYPE, 0o755
+                output.addfile(d)
+            entry = tarfile.TarInfo("flaresolverr/flaresolverr")
+            entry.mode, entry.size = 0o755, len(binary)
+            output.addfile(entry, io.BytesIO(binary))
+            lib = tarfile.TarInfo("flaresolverr/_internal/base_library.zip")
+            lib.mode, lib.size = 0o666, len(lib_payload)
+            output.addfile(lib, io.BytesIO(lib_payload))
+
+        self.assert_success(fixture.run())
+        runtime = fixture.root / "opt/flaresolverr/flaresolverr"
+        lib_path = fixture.root / "opt/flaresolverr/_internal/base_library.zip"
+        sentinel = fixture.file("var/lib/flaresolverr/operator-data.sentinel", "retain-me\n")
+        self.assertEqual(lib_path.read_bytes(), lib_payload)
+        self.assertEqual(lib_path.stat().st_mode & 0o7022, 0)
+        before = runtime.read_bytes(), fixture.lock.read_bytes()
+
+        with tarfile.open(fixture.root / "release.tar.gz", "w:gz") as output:
+            entry = tarfile.TarInfo("flaresolverr/flaresolverr")
+            entry.mode, entry.size = 0o755, len(binary)
+            output.addfile(entry, io.BytesIO(binary))
+            alias = tarfile.TarInfo("flaresolverr/alias")
+            alias.type = tarfile.SYMTYPE
+            alias.linkname = "flaresolverr"
+            output.addfile(alias)
+
+        result = fixture.run("update")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disallowed non-regular tar entry: flaresolverr/alias", result.stderr)
+        self.assertEqual((runtime.read_bytes(), fixture.lock.read_bytes()), before)
+        self.assertEqual(sentinel.read_text(), "retain-me\n")
+        self.assertTrue((fixture.root / "active-flaresolverr.service").exists())
+        self.assertEqual(list((fixture.root / "var/tmp").glob("flaresolverr-*.tar.gz")), [])
+
+    def test_flaresolverr_arm64_source_path_remains_intact(self):
+        fixture = self.fixture("flaresolverr")
+        shutil.rmtree(fixture.root / "repository/flaresolverr")
+        fixture.file("repository/src/flaresolverr.py", "print('ok')\n")
+        dpkg_stub = (
+            '#!/bin/sh\n'
+            'if [ "$1" = "--print-architecture" ]; then echo arm64; exit 0; fi\n'
+            'exec "$AF_FIXTURE_ROOT/host-command" "$@"\n'
+        )
+        for path in (fixture.commands / "dpkg", fixture.root / "usr/bin/dpkg"):
+            path.write_text(dpkg_stub)
+            path.chmod(0o755)
+        self.assert_success(fixture.run("install"))
+        wrapper = (fixture.root / "opt/flaresolverr/flaresolverr").read_text()
+        self.assertIn("opt/flaresolverr/.venv/bin/python3", wrapper)
+        self.assertTrue((fixture.root / "active-flaresolverr.service").exists())
+
+    def test_notifiarr_validates_tar_archive_members_before_activation(self):
+        for case, bad_name, bad_type, expected_error in (
+            ("symlink", "notifiarr-alias", tarfile.SYMTYPE, "disallowed non-regular tar entry: notifiarr-alias"),
+            ("traversal", "../notifiarr-outside", tarfile.REGTYPE, "disallowed path-traversal tar entry: ../notifiarr-outside"),
+        ):
+            with self.subTest(case=case):
+                fixture = self.fixture("notifiarr")
+                runtime = fixture.file("usr/local/bin/notifiarr", "prior-notifiarr\n")
+                runtime.chmod(0o755)
+                fixture.file("install/.notifiarr.lock", "installed\n")
+                fixture.file("active-notifiarr.service", "active\n")
+                before = runtime.read_bytes(), fixture.lock.read_bytes()
+                binary = (fixture.root / "host-command").read_bytes()
+                with tarfile.open(fixture.root / "release.tar.gz", "w:gz") as output:
+                    member = tarfile.TarInfo("notifiarr")
+                    member.mode, member.size = 0o755, len(binary)
+                    output.addfile(member, io.BytesIO(binary))
+                    bad = tarfile.TarInfo(bad_name)
+                    bad.type = bad_type
+                    if bad_type == tarfile.SYMTYPE:
+                        bad.linkname = "notifiarr"
+                        output.addfile(bad)
+                    else:
+                        payload = b"outside\n"
+                        bad.mode, bad.size = 0o644, len(payload)
+                        output.addfile(bad, io.BytesIO(payload))
+
+                result = fixture.run("update")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+                self.assertEqual((runtime.read_bytes(), fixture.lock.read_bytes()), before)
+                self.assertTrue((fixture.root / "active-notifiarr.service").exists())
+                self.assertEqual(list((fixture.root / "var/tmp").glob("notifiarr-*.tar.gz")), [])
+
     def test_vaultwarden_port_update_preserves_secrets_and_rejects_config_links(self):
         fixture = self.fixture("vaultwarden")
         config = fixture.file("etc/vaultwarden/vaultwarden.env", "ROCKET_PORT=8343\nADMIN_TOKEN=operator-secret\nOTHER_PORT=1234\n")
