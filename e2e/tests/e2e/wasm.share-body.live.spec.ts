@@ -74,17 +74,26 @@ function pngBytes(size?: number): Buffer {
 
 type CloseObservation = { written: number; tailReleased: boolean; finished: boolean };
 
-function heldBody(bytes: Buffer, prefixLength: number, declaredLength?: number) {
+function heldBody(bytes: Buffer, prefixLength: number, declaredLength?: number, overflowFlushBytes = 0) {
   const opened = deferred<void>();
   const closed = deferred<CloseObservation>();
+  const maxWritten = Math.min(bytes.length - 1, prefixLength + overflowFlushBytes);
   let response: ServerResponse | undefined;
+  let flushTimer: ReturnType<typeof setInterval> | undefined;
   let written = 0;
   let prefixFlushed = false;
   let tailReleased = false;
   let close: CloseObservation | undefined;
+  const stopFlush = () => {
+    if (flushTimer !== undefined) {
+      clearInterval(flushTimer);
+      flushTimer = undefined;
+    }
+  };
   return {
     opened,
     closed,
+    stop: stopFlush,
     send(reply: ServerResponse) {
       if (response) {
         reply.writeHead(409).end();
@@ -92,6 +101,7 @@ function heldBody(bytes: Buffer, prefixLength: number, declaredLength?: number) 
       }
       response = reply;
       reply.once('close', () => {
+        stopFlush();
         close = { written, tailReleased, finished: reply.writableFinished };
         closed.resolve(close);
       });
@@ -104,6 +114,37 @@ function heldBody(bytes: Buffer, prefixLength: number, declaredLength?: number) 
       written = prefixLength;
       reply.write(bytes.subarray(0, prefixLength), (error?: Error | null) => {
         prefixFlushed = !error;
+        if (
+          error
+          || overflowFlushBytes <= 0
+          || close
+          || tailReleased
+          || reply.destroyed
+          || reply.writableFinished
+          || reply.socket?.destroyed
+        ) {
+          return;
+        }
+        // Without Content-Length, WPE WebKit can leave the tail of a single
+        // chunked burst buffered in NetworkProcess until another body byte
+        // arrives. Trickle a bounded overflow window while keeping the rest of
+        // the response tail permanently held.
+        flushTimer = setInterval(() => {
+          if (
+            close
+            || tailReleased
+            || reply.destroyed
+            || reply.writableFinished
+            || reply.socket?.destroyed
+            || written >= maxWritten
+          ) {
+            stopFlush();
+            return;
+          }
+          const offset = written;
+          written = offset + 1;
+          reply.write(bytes.subarray(offset, written));
+        }, 100);
       });
     },
     state() {
@@ -119,9 +160,11 @@ function heldBody(bytes: Buffer, prefixLength: number, declaredLength?: number) 
     },
     release() {
       if (!response || response.destroyed || tailReleased) throw new Error('Stream is not open');
+      stopFlush();
       tailReleased = true;
+      const offset = written;
       written = bytes.length;
-      response.end(bytes.subarray(prefixLength));
+      response.end(bytes.subarray(offset));
     },
   };
 }
@@ -191,8 +234,8 @@ async function startShareFixture(baseURL: string) {
   return {
     origin: `http://127.0.0.1:${address.port}`,
     documentRequests: () => documentRequests,
-    hold(path: string, bytes: Buffer, prefixLength: number, declaredLength?: number) {
-      const body = heldBody(bytes, prefixLength, declaredLength);
+    hold(path: string, bytes: Buffer, prefixLength: number, declaredLength?: number, overflowFlushBytes = 0) {
+      const body = heldBody(bytes, prefixLength, declaredLength, overflowFlushBytes);
       bodies.set(path, body);
       return body;
     },
@@ -206,6 +249,7 @@ async function startShareFixture(baseURL: string) {
       };
     },
     async dispose() {
+      for (const body of bodies.values()) body.stop();
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     },
@@ -512,13 +556,27 @@ for (const type of ['media', 'text'] as const) {
 
   test(`chunked ${type} closes on overflow with the response tail still held`, async ({ page, shareFixture }) => {
     const total = limit + 65536;
-    const body = shareFixture.hold(name, media ? pngBytes(total) : Buffer.alloc(total, 0x61), limit + 1);
+    const overflowFlushBytes = 32;
+    const body = shareFixture.hold(
+      name,
+      media ? pngBytes(total) : Buffer.alloc(total, 0x61),
+      limit + 1,
+      undefined,
+      overflowFlushBytes,
+    );
     await openShare(page, shareFixture, [name]);
     await fileRow(page, name).click();
     await observed(body.opened.promise, `the browser stream for ${name}`);
     expect(await page.evaluate(path => (window as ShareWindow).shareBodyProbe.bodies.get(path)?.contentLength, name))
       .toBeNull();
-    expect(await waitClose(body)).toEqual({ written: limit + 1, tailReleased: false, finished: false });
+    const closed = await waitClose(body);
+    expect(closed.tailReleased).toBe(false);
+    expect(closed.finished).toBe(false);
+    expect(closed.written).toBeGreaterThanOrEqual(limit + 1);
+    expect(closed.written).toBeLessThanOrEqual(limit + 1 + overflowFlushBytes);
+    expect(closed.written).toBeLessThan(total);
+    expect(await page.evaluate(path => (window as ShareWindow).shareBodyProbe.signals.get(path)?.aborted, name))
+      .toBe(true);
     await expect(page.getByRole('alert')).toHaveText(alert);
     await expectUnlocked(page, name);
     await expectNoPreview(page);
