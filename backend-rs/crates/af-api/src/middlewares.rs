@@ -285,7 +285,7 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
         {
             return false;
         }
-        let mut recovered_from_failure = false;
+        let mut requires_install_receipt = false;
         for job in jobs
             .outcomes
             .values()
@@ -294,8 +294,10 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
             if job.status == "completed" {
                 continue;
             }
-            if outcome_allows_recovered_admission(job) {
-                recovered_from_failure = true;
+            let legacy_failed_update =
+                job.action == "update" && job.status == "failed" && job.recovery_state.is_none();
+            if outcome_allows_recovered_admission(job) || legacy_failed_update {
+                requires_install_receipt = true;
             } else {
                 return false;
             }
@@ -321,7 +323,7 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
         } else {
             false
         };
-        if recovered_from_failure {
+        if requires_install_receipt {
             installed
                 && (active_ingress
                     || matches!(af_db::has_retained_app_ingress_config(app), Ok(false)))

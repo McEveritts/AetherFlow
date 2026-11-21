@@ -778,7 +778,11 @@ fn gateway_reopens_verified_failed_reinstall_across_restart_and_blocks_incomplet
         )
         .unwrap();
         assert_eq!(failed.status, "failed");
-        assert!(failed.recovery_state.is_none());
+        assert_eq!(
+            failed.recovery_state.as_deref(),
+            (*action == "update")
+                .then_some(af_runner::af_release::lifecycle::RECOVERY_STATE_UNVERIFIED)
+        );
         for host in [
             "saved.review.test",
             "syncthing.aether.local",
@@ -790,6 +794,18 @@ fn gateway_reopens_verified_failed_reinstall_across_restart_and_blocks_incomplet
             );
         }
     }
+
+    af_db::get_conn().unwrap().execute(
+        "INSERT OR REPLACE INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id) VALUES('syncthing','legacy-update','update','failed','now','owner')",
+        [],
+    ).unwrap();
+    assert_eq!(
+        resolve_app_target_for_host("saved.review.test"),
+        Some(("syncthing".into(), 18384))
+    );
+    fs::remove_file(&lock).unwrap();
+    assert!(resolve_app_target_for_host("saved.review.test").is_none());
+    fs::write(&lock, "installed").unwrap();
 
     // 5. Interrupted and failed remove stay unavailable even if DB recovery_state is tampered.
     for (action, status) in [

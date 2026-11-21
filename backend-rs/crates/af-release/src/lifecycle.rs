@@ -197,11 +197,13 @@ fn retire_finished_owners(conn: &Connection, database: &Path) -> Result<()> {
 }
 
 pub const RECOVERY_STATE_PRIOR_VERIFIED: &str = "prior_state_verified";
+pub const RECOVERY_STATE_UNVERIFIED: &str = "unverified";
 
 /// Enforces the persistence invariant for failed-operation recovery receipts:
 /// only a failed in-place operation (`install`, `reinstall`, `update`) that did
 /// not fail in removal/retention or interruption may persist
-/// [`RECOVERY_STATE_PRIOR_VERIFIED`]. Every other outcome persists `""` (fail-closed).
+/// [`RECOVERY_STATE_PRIOR_VERIFIED`]. Failed updates without that evidence
+/// record `unverified` to distinguish them from rows written before this field.
 pub fn normalize_recovery_state(
     success: bool,
     action: &str,
@@ -214,6 +216,8 @@ pub fn normalize_recovery_state(
         && recovery_state.map(str::trim) == Some(RECOVERY_STATE_PRIOR_VERIFIED)
     {
         RECOVERY_STATE_PRIOR_VERIFIED
+    } else if !success && action == "update" {
+        RECOVERY_STATE_UNVERIFIED
     } else {
         ""
     }
@@ -3745,6 +3749,10 @@ mod tests {
         assert_eq!(
             normalize_recovery_state(false, "reinstall", "installer", Some("partial")),
             ""
+        );
+        assert_eq!(
+            normalize_recovery_state(false, "update", "installer", None),
+            RECOVERY_STATE_UNVERIFIED
         );
 
         let root = std::env::temp_dir().join(format!("af-recovery-inv-{}", uuid::Uuid::new_v4()));
