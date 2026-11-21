@@ -2484,7 +2484,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 Some((&cancel, &recipe.package_id)),
             )?;
             journal.has_existing_installation = pre_existing_ver.is_some()
-                || lock_file_path.is_file()
+                || af_models::inspect_receipt_file(
+                    &lock_file_path,
+                    self.env_cfg.fs_root.as_deref(),
+                )
+                .unwrap_or(false)
                 || (matches!(action, PackageAction::Update | PackageAction::Reinstall)
                     && !journal.dir_snapshots.is_empty());
             journal.pre_existing_version = pre_existing_ver;
@@ -2835,6 +2839,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         // Persist or remove completion receipt BEFORE committing the rollback journal so any
         // receipt write/remove failure triggers compensating rollback of prior config/service mutations.
         if exec_err.is_none() {
+            let legacy_lock_path = af_models::resolve_package_lock_paths(
+                &recipe.package_id,
+                (!recipe.lock_file.trim().is_empty()).then_some(recipe.lock_file.as_str()),
+                self.env_cfg.fs_root.as_deref(),
+            )
+            .legacy_swizzin;
             let finalize_res: Result<(), PackageExecutorError> = (|| {
                 match action {
                     PackageAction::Install | PackageAction::Reinstall | PackageAction::Update => {
@@ -2856,6 +2866,25 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             0o644,
                             self.env_cfg.fs_root.as_deref(),
                         )?;
+                        if let Some(ref legacy_path) = legacy_lock_path {
+                            let legacy_present = af_models::inspect_receipt_file(
+                                legacy_path,
+                                self.env_cfg.fs_root.as_deref(),
+                            )
+                            .map_err(PackageExecutorError::SecurityViolation)?;
+                            if legacy_present {
+                                validate_filesystem_path(
+                                    legacy_path,
+                                    self.env_cfg.fs_root.as_deref(),
+                                )?;
+                                journal.stage_file_mutation(legacy_path)?;
+                                match fs::remove_file(legacy_path) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                        }
                     }
                     PackageAction::Remove => {
                         validate_filesystem_path(&lock_file_path, self.env_cfg.fs_root.as_deref())?;
@@ -2864,6 +2893,25 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             Ok(()) => {}
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                             Err(error) => return Err(error.into()),
+                        }
+                        if let Some(ref legacy_path) = legacy_lock_path {
+                            let legacy_present = af_models::inspect_receipt_file(
+                                legacy_path,
+                                self.env_cfg.fs_root.as_deref(),
+                            )
+                            .map_err(PackageExecutorError::SecurityViolation)?;
+                            if legacy_present {
+                                validate_filesystem_path(
+                                    legacy_path,
+                                    self.env_cfg.fs_root.as_deref(),
+                                )?;
+                                journal.stage_file_mutation(legacy_path)?;
+                                match fs::remove_file(legacy_path) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
                         }
                     }
                 }
@@ -2981,7 +3029,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             engine: PackageEngineMode::DeclarativeRust,
             completed_steps,
             total_steps,
-            lock_present: lock_file_path.exists(),
+            lock_present: af_models::inspect_receipt_file(
+                &lock_file_path,
+                self.env_cfg.fs_root.as_deref(),
+            )
+            .unwrap_or(false),
             lock_file_path,
             resolved_version: vars.get("VERSION").cloned(),
             sandbox_status,

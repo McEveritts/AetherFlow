@@ -87,12 +87,17 @@ function _function() {
     fi
 }
 
+_safe_lock_file() {
+  local lock="$1" dir="${1%/*}"
+  [[ ! -L "$dir" && -d "$dir" && ! -L "$lock" && -f "$lock" ]]
+}
+
 function _install() {
   installa=()
   mapfile -t locks < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | grep -vx 'template' | sort -d)
   for i in "${locks[@]}"; do
     app=${i}
-    if [[ ! -f /install/.$app.lock ]]; then
+    if ! _safe_lock_file "/install/.$app.lock"; then
       installa+=("$i" '""')
     fi
   done
@@ -114,7 +119,7 @@ removea=()
 mapfile -t locks < <(find "$(package_root remove)" -type f -name 'removepackage-*' -printf "%f\n" | sed 's/^removepackage-//' | grep -vx 'template' | sort -d)
 for i in "${locks[@]}"; do
   app=${i}
-  if [[ -f /install/.$app.lock ]]; then
+  if _safe_lock_file "/install/.$app.lock"; then
     removea+=("$i" '""')
   fi
 done
@@ -140,7 +145,7 @@ function _cli() {
       return 1
     fi
     app="$package"
-    if [[ "$action" == update && ! -f /etc/Swizzin/.${app}.lock && ! -f /install/.${app}.lock ]]; then
+    if [[ "$action" == update ]] && ! _safe_lock_file "/etc/Swizzin/.${app}.lock" && ! _safe_lock_file "/install/.${app}.lock"; then
       printf 'Package %s not installed; cannot update\n' "$package" >&2
       return 1
     fi
@@ -151,12 +156,16 @@ function _cli() {
   fi
   for package in "$@"; do
     app="$package"
-    if [[ -f /install/.${app}.lock && "$action" == install ]]; then
+    if [[ "$action" == install ]] && _safe_lock_file "/install/.${app}.lock"; then
       printf 'Package %s already installed\n' "$package"
     else
       script="$(package_script install "$package")" || return 1
       printf 'Installing %s\n' "$package"
-      bash "$script" || return $?
+      if [[ "$action" == install ]] && _safe_lock_file "/etc/Swizzin/.${app}.lock"; then
+        AF_LIFECYCLE_ACTION=reinstall AF_PACKAGE_ACTION=reinstall AF_KEEP_EXISTING_SECRETS=1 bash "$script" || return $?
+      else
+        bash "$script" || return $?
+      fi
     fi
   done
 }
@@ -179,7 +188,7 @@ function _clr() {
   export AF_LIFECYCLE_ACTION=remove AF_PACKAGE_ACTION=remove DELETE_DATA="$purge"
   for package in "$@"; do
     app="$package"
-    if [[ -f /etc/Swizzin/.$app.lock || -f /install/.$app.lock ]]; then
+    if _safe_lock_file "/etc/Swizzin/.$app.lock" || _safe_lock_file "/install/.$app.lock"; then
       script="$(package_script remove "$package")" || return 1
       printf 'Removing %s\n' "$package"
       bash "$script" || return $?
@@ -235,7 +244,7 @@ function _list() {
     sgformat="${bold}%-15s${normal}"
     spacing=$(echo $'\t' | pr -Te15)
     # Check installation status
-    if [[ -f /install/.${app}.lock ]]; then
+    if _safe_lock_file "/install/.${app}.lock"; then
       status="[installed]"
     else
       status="[available]"

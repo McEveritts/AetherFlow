@@ -2,6 +2,15 @@ pub mod app_metadata;
 mod constant_time;
 pub use constant_time::constant_time_eq;
 pub mod md5;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod package_receipts;
+#[cfg(not(target_arch = "wasm32"))]
+pub use package_receipts::{
+    inspect_canonical_package_receipt, inspect_package_receipts, inspect_receipt_file,
+    parse_port_from_receipt_content, read_package_receipt_port, read_receipt_file_bounded,
+    resolve_package_fs_root, resolve_package_lock_name, resolve_package_lock_paths,
+    resolve_path_for_fs_root, PackageLockPaths, PackageReceiptStatus, MAX_PACKAGE_RECEIPT_BYTES,
+};
 pub mod secret_redaction;
 
 use chrono::{DateTime, Utc};

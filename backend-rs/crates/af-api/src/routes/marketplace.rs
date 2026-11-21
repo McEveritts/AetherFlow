@@ -501,7 +501,17 @@ pub(super) async fn install_package(
         }
     };
     let clean_id = id.trim_start_matches("package-");
-    let action = if af_services::is_package_installed(clean_id) {
+    let has_legacy_upgrade = match af_services::package_has_legacy_upgrade_receipt(clean_id) {
+        Ok(present) => present,
+        Err(err) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "UNSAFE_INSTALLATION_LOCK",
+                format!("Unsafe installation lock detected: {err}"),
+            );
+        }
+    };
+    let action = if af_services::is_package_installed(clean_id) || has_legacy_upgrade {
         "reinstall"
     } else {
         "install"
@@ -636,15 +646,15 @@ pub(crate) fn append_package_job_output(job_id: &str, line: &str) {
 }
 
 pub(super) fn is_lock_file_present(lock_file: &str, fs_root_override: Option<&str>) -> bool {
-    let trimmed = lock_file.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let path = match fs_root_override.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(root) => std::path::Path::new(root).join(trimmed.trim_start_matches(['/', '\\'])),
-        None => PathBuf::from(trimmed),
-    };
-    std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+    af_models::inspect_canonical_package_receipt(
+        "",
+        Some(lock_file),
+        fs_root_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(std::path::Path::new),
+    )
+    .unwrap_or(false)
 }
 
 pub(super) fn verified_prior_state_recovery(
@@ -1162,6 +1172,14 @@ where
             if let Ok(Some(ingress)) = load_ingress_config(clean_id) {
                 if (1024..=65535).contains(&ingress.listen_port) {
                     return Ok(ingress.listen_port);
+                }
+            }
+            if let Ok(Some(receipt_port)) = af_services::package_receipt_port(clean_id) {
+                if (1024..=65535).contains(&receipt_port)
+                    && af_db::get_reserved_ports_excluding(clean_id)
+                        .is_ok_and(|reserved| !reserved.contains(&receipt_port))
+                {
+                    return Ok(receipt_port);
                 }
             }
         }
@@ -3140,9 +3158,9 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await
             }
         };
-        let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
-        let fs_root_override =
-            Option::from(fs_root_override_raw.clone()).filter(|s| !s.trim().is_empty());
+        let fs_root_override = af_models::resolve_package_fs_root(None)
+            .map(|root| root.to_string_lossy().into_owned());
+        let fs_root_override_raw = fs_root_override.clone().unwrap_or_default();
         let prior_installed = is_lock_file_present(&pkg_lock_file, fs_root_override.as_deref());
 
         // Re-check under the lifecycle mutex: a system update may have been
@@ -3370,19 +3388,33 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                                 &job_id,
                             );
                             if !pkg_lock_file.is_empty() {
-                                let lock_path = if let Some(ref root) = fs_root_override {
-                                    std::path::Path::new(root.trim())
-                                        .join(pkg_lock_file.trim_start_matches(['/', '\\']))
-                                } else {
-                                    PathBuf::from(&pkg_lock_file)
-                                };
+                                let root_path = fs_root_override.as_deref().map(std::path::Path::new);
+                                let lock_paths = af_models::resolve_package_lock_paths(
+                                    &clean_id,
+                                    Some(&pkg_lock_file),
+                                    root_path,
+                                );
                                 if action == "remove" {
-                                    let _ = fs::remove_file(&lock_path);
+                                    let _ = fs::remove_file(&lock_paths.canonical);
+                                    if let Some(ref legacy_path) = lock_paths.legacy_swizzin {
+                                        if af_models::inspect_receipt_file(legacy_path, root_path)
+                                            .unwrap_or(false)
+                                        {
+                                            let _ = fs::remove_file(legacy_path);
+                                        }
+                                    }
                                 } else if fs_root_override.is_some() {
-                                    if let Some(parent) = lock_path.parent() {
+                                    if let Some(parent) = lock_paths.canonical.parent() {
                                         let _ = fs::create_dir_all(parent);
                                     }
-                                    let _ = fs::write(&lock_path, b"installed\n");
+                                    let _ = fs::write(&lock_paths.canonical, b"installed\n");
+                                    if let Some(ref legacy_path) = lock_paths.legacy_swizzin {
+                                        if af_models::inspect_receipt_file(legacy_path, root_path)
+                                            .unwrap_or(false)
+                                        {
+                                            let _ = fs::remove_file(legacy_path);
+                                        }
+                                    }
                                 }
                             }
                             Ok(())

@@ -3231,12 +3231,7 @@ pub fn is_missing_config_candidate(err: &std::io::Error) -> bool {
 }
 
 fn package_fs_root_override() -> Option<PathBuf> {
-    env::var("AETHERFLOW_FS_ROOT")
-        .or_else(|_| env::var("AETHERFLOW_INSTALL_ROOT"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && value != "/")
-        .map(PathBuf::from)
+    af_models::resolve_package_fs_root(None)
 }
 
 fn installed_config_candidates(root: &Path, filename: &str) -> [PathBuf; 4] {
@@ -3277,10 +3272,11 @@ pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
     candidates
 }
 
-pub(crate) fn try_load_runner_config_or_embedded(
+fn try_load_runner_config_or_embedded_in_root(
     env_var: &str,
     filename: &str,
     embedded: &str,
+    explicit_root: Option<&Path>,
 ) -> anyhow::Result<String> {
     if let Ok(explicit) = env::var(env_var) {
         let trimmed = explicit.trim();
@@ -3290,7 +3286,11 @@ pub(crate) fn try_load_runner_config_or_embedded(
                 .map_err(|e| anyhow::anyhow!("cannot read config {}: {e}", p.display()));
         }
     }
-    for c in canonical_config_candidates(filename) {
+    let candidates: Vec<PathBuf> = match af_models::resolve_package_fs_root(explicit_root) {
+        Some(root) => installed_config_candidates(&root, filename).into(),
+        None => canonical_config_candidates(filename),
+    };
+    for c in candidates {
         match open_and_read_regular_config(&c) {
             Ok(s) => return Ok(s),
             Err(err) if is_missing_config_candidate(&err) => continue,
@@ -3305,17 +3305,30 @@ pub(crate) fn try_load_runner_config_or_embedded(
     Ok(embedded.to_string())
 }
 
-pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
-    let raw_pkgs = try_load_runner_config_or_embedded(
+pub(crate) fn try_load_runner_config_or_embedded(
+    env_var: &str,
+    filename: &str,
+    embedded: &str,
+) -> anyhow::Result<String> {
+    try_load_runner_config_or_embedded_in_root(env_var, filename, embedded, None)
+}
+
+pub fn get_runner_package_definition_in_root(
+    pkg_id: &str,
+    explicit_root: Option<&Path>,
+) -> Option<Package> {
+    let raw_pkgs = try_load_runner_config_or_embedded_in_root(
         "AETHERFLOW_PACKAGES_CONFIG",
         "packages.json",
         EMBEDDED_PACKAGES_JSON,
+        explicit_root,
     )
     .ok()?;
-    let raw_auto = try_load_runner_config_or_embedded(
+    let raw_auto = try_load_runner_config_or_embedded_in_root(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         "package_automation.json",
         EMBEDDED_AUTOMATION_JSON,
+        explicit_root,
     )
     .ok()?;
 
@@ -3328,6 +3341,10 @@ pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
         af_models::merge_package_automation(&mut package, automation);
     }
     Some(package)
+}
+
+pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
+    get_runner_package_definition_in_root(pkg_id, None)
 }
 
 fn normalize_systemd_unit(unit: &str) -> String {

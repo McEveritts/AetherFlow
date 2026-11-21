@@ -4934,9 +4934,48 @@ lock_path() {
     printf '%s/.%s.lock\n' "$LOCK_DIR" "$package_name"
 }
 
-has_lock() {
+legacy_swizzin_lock_path() {
     local package_name="$1"
-    [[ -f "$(lock_path "$package_name")" ]]
+    local fs_root="${AETHERFLOW_FS_ROOT:-${AETHERFLOW_INSTALL_ROOT:-}}"
+    if [[ -n "$fs_root" && "$fs_root" != "/" ]]; then
+        printf '%s/etc/Swizzin/.%s.lock\n' "${fs_root%/}" "$package_name"
+        return 0
+    fi
+    local clean_lock_dir="${LOCK_DIR%/}"
+    if [[ "$clean_lock_dir" == "/install" ]]; then
+        printf '/etc/Swizzin/.%s.lock\n' "$package_name"
+        return 0
+    fi
+    if [[ "$clean_lock_dir" == */install ]]; then
+        printf '%s/etc/Swizzin/.%s.lock\n' "${clean_lock_dir%/install}" "$package_name"
+        return 0
+    fi
+    return 1
+}
+
+remove_legacy_swizzin_lock() {
+    local package_name="$1" legacy_lock="" legacy_dir="" legacy_etc=""
+    legacy_lock="$(legacy_swizzin_lock_path "$package_name")" || return 0
+    legacy_dir="${legacy_lock%/*}"
+    legacy_etc="${legacy_dir%/*}"
+    if [[ -L "$legacy_etc" || -L "$legacy_dir" ]]; then
+        print_error "Refusing symlinked legacy lock directory: $legacy_dir"
+        return 1
+    fi
+    if [[ ! -e "$legacy_lock" && ! -L "$legacy_lock" ]]; then
+        return 0
+    fi
+    if [[ -L "$legacy_lock" || ! -f "$legacy_lock" ]]; then
+        print_error "Refusing unsafe legacy installation lock: $legacy_lock"
+        return 1
+    fi
+    rm -f -- "$legacy_lock"
+}
+
+has_lock() {
+    local package_name="$1" lp=""
+    lp="$(lock_path "$package_name")"
+    [[ ! -L "$LOCK_DIR" && -d "$LOCK_DIR" && ! -L "$lp" && -f "$lp" ]]
 }
 
 launch_detached_helper() (
@@ -4950,7 +4989,7 @@ launch_detached_helper() (
 )
 
 write_lock() {
-    local package_name="$1"
+    local package_name="$1" lp=""
     if [[ -n "${AF_STATE_BACKUP:-}" && -n "${AF_STATE_UNIT:-}" ]]; then
         verify_systemd_service_active "$AF_STATE_UNIT" || return 1
         if [[ "${AF_STATE_PORT:-0}" != 0 ]]; then
@@ -4960,7 +4999,13 @@ write_lock() {
     if [[ -d "${AF_TX_DIR:-}/apt-packages" ]]; then
         clear_apt_reinstall_markers || return 1
     fi
-    touch "$(lock_path "$package_name")" || return 1
+    lp="$(lock_path "$package_name")"
+    if [[ -L "$LOCK_DIR" || -L "$lp" || ( -e "$lp" && ! -f "$lp" ) ]]; then
+        print_error "Refusing unsafe installation lock path: $lp"
+        return 1
+    fi
+    touch "$lp" || return 1
+    remove_legacy_swizzin_lock "$package_name" || return 1
     INSTALL_COMMITTED=true
     if [[ -n "${AF_ARCHIVE_BACKUP:-}" ]]; then
         rm -f -- "$AF_ARCHIVE_BACKUP/.af-archive-pending"
@@ -5079,11 +5124,17 @@ PYEOF
 }
 
 remove_lock() {
-    local package_name="$1"
+    local package_name="$1" lp=""
     if [[ "${DELETE_DATA:-false}" == true ]]; then
         purge_app_backups "$package_name" || return 1
     fi
-    rm -f "$(lock_path "$package_name")"
+    lp="$(lock_path "$package_name")"
+    if [[ -L "$LOCK_DIR" || -L "$lp" || ( -e "$lp" && ! -f "$lp" ) ]]; then
+        print_error "Refusing unsafe installation lock path: $lp"
+        return 1
+    fi
+    rm -f -- "$lp" || return 1
+    remove_legacy_swizzin_lock "$package_name" || return 1
 }
 
 backup_file_once() {

@@ -567,13 +567,9 @@ impl HostsCliCommand {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Resolves the legacy `packages/system/af` lockfile name for a package identifier
-/// (handling the `autodl` -> `autodlirssi` special case in `packages/system/af`).
+/// (handling canonical aliases such as `autodl` -> `autodlirssi` and `transmission-daemon` -> `transmission`).
 pub fn resolve_package_lock_name(pkg_id: &str) -> &str {
-    if pkg_id == "autodl" {
-        "autodlirssi"
-    } else {
-        pkg_id
-    }
+    af_models::resolve_package_lock_name(pkg_id)
 }
 
 /// Validates and builds a [`PackageRunnerRequest`] for `/v1/package` (`install`, `remove`, `update`).
@@ -590,12 +586,8 @@ pub fn build_package_runner_request(
         )));
     }
 
-    // Verify package exists in af-runner's allowlisted package registry (or legacy `autodl` alias)
-    let lookup_id = if clean_pkg == "autodl" {
-        "autodlirssi"
-    } else {
-        clean_pkg
-    };
+    // Verify package exists in af-runner's allowlisted package registry (or canonical alias)
+    let lookup_id = resolve_package_lock_name(clean_pkg);
     if get_runner_package_definition(lookup_id).is_none()
         && get_runner_package_definition(clean_pkg).is_none()
     {

@@ -13,7 +13,7 @@ use rusqlite::OptionalExtension;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -308,17 +308,9 @@ fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
             .map(|package| package.lock_file.as_str())
             .filter(|path| !path.is_empty());
         let installed = if let Some(lock_file) = lock_file {
-            let path = env::var("AETHERFLOW_FS_ROOT")
-                .ok()
-                .filter(|root| !root.trim().is_empty())
-                .map_or_else(
-                    || PathBuf::from(lock_file),
-                    |root| Path::new(root.trim()).join(lock_file.trim_start_matches('/')),
-                );
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.is_file() => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                _ => return false,
+            match af_models::inspect_canonical_package_receipt(app, Some(lock_file), None) {
+                Ok(present) => present,
+                Err(_) => return false,
             }
         } else {
             false

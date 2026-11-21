@@ -832,3 +832,45 @@ fn gateway_reopens_verified_failed_reinstall_across_restart_and_blocks_incomplet
         }
     }
 }
+
+#[test]
+fn security_gateway_never_exposes_stale_legacy_swizzin_receipt_or_symlinked_install_dir() {
+    use std::os::unix::fs::symlink;
+
+    let name = "middlewares::security_regressions::security_gateway_never_exposes_stale_legacy_swizzin_receipt_or_symlinked_install_dir";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+
+    // A stale /etc/Swizzin lock alone must never expose an app in the API gateway.
+    let swizzin = fixture.root.join("etc/Swizzin");
+    fs::create_dir_all(&swizzin).unwrap();
+    fs::write(swizzin.join(".syncthing.lock"), "PORT=18384\n").unwrap();
+    for host in ["syncthing.aether.local", "syncthing.review.test"] {
+        assert!(
+            resolve_app_target_for_host(host).is_none(),
+            "stale legacy receipt exposed {host}"
+        );
+    }
+
+    // A symlinked /install directory pointing to a decoy directory with a lock must fail closed.
+    fs::remove_dir(fixture.root.join("install")).unwrap();
+    let decoy = fixture.root.join("decoy-install");
+    fs::create_dir_all(&decoy).unwrap();
+    fs::write(decoy.join(".syncthing.lock"), "installed\n").unwrap();
+    symlink(&decoy, fixture.root.join("install")).unwrap();
+    assert!(
+        resolve_app_target_for_host("syncthing.aether.local").is_none(),
+        "symlinked /install directory exposed syncthing"
+    );
+
+    // Restoring a real /install directory with a canonical regular lock authorizes internal routing.
+    fs::remove_file(fixture.root.join("install")).unwrap();
+    fs::create_dir_all(fixture.root.join("install")).unwrap();
+    fs::write(fixture.root.join("install/.syncthing.lock"), "installed\n").unwrap();
+    assert_eq!(
+        resolve_app_target_for_host("syncthing.aether.local"),
+        Some(("syncthing".into(), 8384))
+    );
+}

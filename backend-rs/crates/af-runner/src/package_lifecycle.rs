@@ -1730,9 +1730,14 @@ async fn run_direct(
     )
     .await?;
     if request.action == "update" {
+        let installed = af_models::inspect_canonical_package_receipt(
+            &package.name,
+            Some(&package.lock_file),
+            environment.fs_root.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
-            !package.lock_file.is_empty()
-                && environment.resolve_path(&package.lock_file)?.is_file(),
+            installed,
             "Package must be installed before it can be updated"
         );
     }
@@ -2003,11 +2008,13 @@ impl CoordinatedOperation {
             };
             if let Some((other_id, other_label, other_lock)) = conflicting_dns {
                 let env_cfg = crate::PackageExecutionEnv::default();
-                let resolved_lock = match &env_cfg.fs_root {
-                    Some(root) => root.join(other_lock.trim_start_matches(['/', '\\'])),
-                    None => Path::new(other_lock).to_path_buf(),
-                };
-                if std::fs::symlink_metadata(&resolved_lock).is_ok_and(|meta| meta.is_file()) {
+                if af_models::inspect_canonical_package_receipt(
+                    other_id,
+                    Some(other_lock),
+                    env_cfg.fs_root.as_deref(),
+                )
+                .unwrap_or(false)
+                {
                     anyhow::bail!(
                         "Cannot {} {} while {} ({}) is already installed ({}): both bind DNS TCP/UDP :53. Remove {} first before installing {}.",
                         request.action,
@@ -2088,23 +2095,28 @@ impl CoordinatedOperation {
     }
 
     fn is_installed_on_disk_in(&self, fs_root: Option<&Path>) -> bool {
-        let trimmed = self.package.lock_file.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-        let raw_path = Path::new(trimmed);
-        let resolved = match fs_root {
-            Some(root) if !raw_path.starts_with(root) => {
-                root.join(trimmed.trim_start_matches(['/', '\\']))
-            }
-            _ => raw_path.to_path_buf(),
-        };
-        std::fs::symlink_metadata(&resolved).is_ok_and(|meta| meta.is_file())
+        af_models::inspect_canonical_package_receipt(
+            &self.package.name,
+            Some(&self.package.lock_file),
+            fs_root,
+        )
+        .unwrap_or(false)
     }
 
     fn is_installed_on_disk(&self) -> bool {
         let env_cfg = crate::PackageExecutionEnv::default();
         self.is_installed_on_disk_in(env_cfg.fs_root.as_deref())
+    }
+
+    fn has_legacy_upgrade_receipt(&self) -> bool {
+        let env_cfg = crate::PackageExecutionEnv::default();
+        af_models::inspect_package_receipts(
+            &self.package.name,
+            Some(&self.package.lock_file),
+            env_cfg.fs_root.as_deref(),
+        )
+        .map(|status| status.has_legacy_upgrade_receipt())
+        .unwrap_or(false)
     }
 
     fn resolve_port(&self, backend: &impl LifecycleBackend) -> Result<i32> {
@@ -2173,7 +2185,7 @@ impl CoordinatedOperation {
             );
             return Ok(saved);
         }
-        if self.is_installed_on_disk() {
+        if self.is_installed_on_disk() || self.has_legacy_upgrade_receipt() {
             let runtime = backend.runtime_port(&self.request.package_id);
             if runtime > 0 {
                 anyhow::ensure!(
@@ -2182,6 +2194,19 @@ impl CoordinatedOperation {
                 );
                 if !reserved.contains(&runtime) {
                     return Ok(runtime);
+                }
+            }
+            let env_cfg = crate::PackageExecutionEnv::default();
+            if let Ok(Some(receipt_port)) = af_models::read_package_receipt_port(
+                &self.package.name,
+                Some(&self.package.lock_file),
+                env_cfg.fs_root.as_deref(),
+            ) {
+                if (1024..=65535).contains(&receipt_port)
+                    && !reserved.contains(&receipt_port)
+                    && (self.request.action == "reinstall" || backend.available_port(receipt_port))
+                {
+                    return Ok(receipt_port);
                 }
             }
         }

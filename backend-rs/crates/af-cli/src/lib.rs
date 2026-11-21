@@ -71,7 +71,8 @@ pub use af_host::{
 use af_models::SelfUpdateJobStatus;
 use af_release::{ReleaseConfig, ReleaseEngine, ReleaseOutcome};
 use af_runner::{
-    get_runner_package_definition, parse_quota_size_to_1k_blocks, render_systemd_sandbox_dropin,
+    get_runner_package_definition, get_runner_package_definition_in_root,
+    parse_quota_size_to_1k_blocks, render_systemd_sandbox_dropin,
     write_self_update_job_status_atomic,
 };
 use serde::{Deserialize, Serialize};
@@ -85,6 +86,10 @@ pub struct PackageListEntry {
     pub lock_name: String,
     pub lock_path: PathBuf,
     pub installed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_receipt_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_lock_path: Option<PathBuf>,
     pub service_name: String,
     pub sandbox_profile: String,
 }
@@ -445,76 +450,43 @@ fn execute_maintenance_command(
 // Domain 1: Package Management (`/v1/package`, `/v1/package/cancel`, `/install/.<pkg>.lock`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn resolve_cli_package_definition(
+    global: &GlobalOptions,
+    pkg_id: &str,
+) -> Option<af_models::Package> {
+    let lock_name = resolve_package_lock_name(pkg_id);
+    get_runner_package_definition_in_root(lock_name, global.root.as_deref())
+        .or_else(|| get_runner_package_definition_in_root(pkg_id.trim(), global.root.as_deref()))
+}
+
 fn resolve_install_lock_dir(global: &GlobalOptions) -> PathBuf {
-    if let Some(ref r) = global.root {
-        return r.join("install");
-    }
-    if let Ok(env_root) =
-        std::env::var("AETHERFLOW_INSTALL_ROOT").or_else(|_| std::env::var("AETHERFLOW_FS_ROOT"))
-    {
-        let trimmed = env_root.trim();
-        if !trimmed.is_empty() && trimmed != "/" {
-            return PathBuf::from(trimmed).join("install");
-        }
-    }
-    PathBuf::from("/install")
+    let fs_root = af_models::resolve_package_fs_root(global.root.as_deref());
+    af_models::resolve_path_for_fs_root("/install", fs_root.as_deref())
 }
 
 fn resolve_swizzin_lock_dir(global: &GlobalOptions) -> PathBuf {
-    if let Some(ref r) = global.root {
-        return r.join("etc/Swizzin");
-    }
-    if let Ok(env_root) =
-        std::env::var("AETHERFLOW_INSTALL_ROOT").or_else(|_| std::env::var("AETHERFLOW_FS_ROOT"))
-    {
-        let trimmed = env_root.trim();
-        if !trimmed.is_empty() && trimmed != "/" {
-            return PathBuf::from(trimmed).join("etc/Swizzin");
-        }
-    }
-    PathBuf::from("/etc/Swizzin")
+    let fs_root = af_models::resolve_package_fs_root(global.root.as_deref());
+    af_models::resolve_path_for_fs_root("/etc/Swizzin", fs_root.as_deref())
 }
 
-fn resolve_package_lock_paths(global: &GlobalOptions, lock_name: &str) -> (PathBuf, PathBuf) {
-    let filename = format!(".{}.lock", lock_name);
-    (
-        resolve_install_lock_dir(global).join(&filename),
-        resolve_swizzin_lock_dir(global).join(&filename),
-    )
+fn inspect_cli_package_receipts_for_def(
+    global: &GlobalOptions,
+    pkg_id: &str,
+    def: Option<&af_models::Package>,
+) -> CliResult<af_models::PackageReceiptStatus> {
+    let explicit_lock = def
+        .map(|d| d.lock_file.as_str())
+        .filter(|s| !s.trim().is_empty());
+    af_models::inspect_package_receipts(pkg_id, explicit_lock, global.root.as_deref())
+        .map_err(CliError::PreflightOrIntegrity)
 }
 
-fn package_lock_exists(global: &GlobalOptions, lock_name: &str) -> bool {
-    let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lock_name);
-    install_lock.exists() || swizzin_lock.exists()
-}
-
-fn parse_port_from_lockfile_content(raw: &str) -> Option<i32> {
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Ok(p) = trimmed.parse::<i32>() {
-            if (1024..=65535).contains(&p) {
-                return Some(p);
-            }
-        }
-        if let Some((lhs, rhs)) = trimmed.split_once('=') {
-            let key = lhs.trim();
-            if matches!(
-                key,
-                "PORT" | "AF_APP_PORT" | "AETHERFLOW_APP_PORT" | "listen_port" | "port"
-            ) {
-                let clean_rhs = rhs.trim().trim_matches('"').trim_matches('\'').trim();
-                if let Ok(p) = clean_rhs.parse::<i32>() {
-                    if (1024..=65535).contains(&p) {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-    }
-    None
+fn inspect_cli_package_receipts(
+    global: &GlobalOptions,
+    pkg_id: &str,
+) -> CliResult<af_models::PackageReceiptStatus> {
+    let def = resolve_cli_package_definition(global, pkg_id);
+    inspect_cli_package_receipts_for_def(global, pkg_id, def.as_ref())
 }
 
 fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> Option<i32> {
@@ -1089,18 +1061,18 @@ fn resolve_cli_package_port(
         }
     }
 
-    let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lock_name);
-    for lock_path in [install_lock, swizzin_lock] {
-        if let Ok(raw_lock) = std::fs::read_to_string(&lock_path) {
-            if let Some(p) = parse_port_from_lockfile_content(&raw_lock) {
-                return Some(p);
-            }
-        }
+    let def = resolve_cli_package_definition(global, pkg_id);
+    if let Ok(Some(p)) = af_models::read_package_receipt_port(
+        pkg_id,
+        def.as_ref()
+            .map(|d| d.lock_file.as_str())
+            .filter(|s| !s.trim().is_empty()),
+        global.root.as_deref(),
+    ) {
+        return Some(p);
     }
 
-    get_runner_package_definition(lock_name)
-        .or_else(|| get_runner_package_definition(pkg_id))
-        .map(|def| def.default_port)
+    def.map(|def| def.default_port)
         .filter(|p| (1024..=65535).contains(p))
 }
 
@@ -1120,13 +1092,21 @@ fn execute_package_command(
             let mut requests = Vec::new();
 
             for pkg in packages {
-                let lock_name = resolve_package_lock_name(pkg);
-                if package_lock_exists(global, lock_name) {
+                let receipt = inspect_cli_package_receipts(global, pkg)?;
+                if receipt.is_installed() {
                     skipped_installed.push(pkg.clone());
                     continue;
                 }
                 let effective_port = resolve_cli_package_port(global, pkg, *port);
-                let req = build_package_runner_request("install", pkg, effective_port)?;
+                let action = if receipt.has_legacy_upgrade_receipt() {
+                    "reinstall"
+                } else {
+                    "install"
+                };
+                let mut req = build_package_runner_request(action, pkg, effective_port)?;
+                if action == "reinstall" {
+                    req.delete_data = false;
+                }
                 if global.dry_run {
                     requests.push(req);
                 } else {
@@ -1171,6 +1151,7 @@ fn execute_package_command(
             let mut requests = Vec::new();
 
             for pkg in packages {
+                let _receipt = inspect_cli_package_receipts(global, pkg)?;
                 let effective_port = resolve_cli_package_port(global, pkg, *port);
                 let mut req = build_package_runner_request("reinstall", pkg, effective_port)?;
                 req.delete_data = false;
@@ -1212,13 +1193,18 @@ fn execute_package_command(
             let mut requests = Vec::new();
 
             for pkg in packages {
-                let lock_name = resolve_package_lock_name(pkg);
-                // If an isolated root was explicitly supplied or the install lock directory
-                // exists on disk and the lockfile is absent, report `skipped_not_installed`
-                // matching `packages/system/af`'s lock check.
-                if (global.root.is_some() || install_dir.is_dir() || swizzin_dir.is_dir())
-                    && !package_lock_exists(global, lock_name)
-                {
+                let receipt = inspect_cli_package_receipts(global, pkg)?;
+                // If an isolated root was explicitly supplied or a lock directory
+                // exists on disk and neither canonical nor legacy receipt is present,
+                // report `skipped_not_installed`.
+                let has_lock_root = global.root.is_some()
+                    || install_dir.is_dir()
+                    || swizzin_dir.is_dir()
+                    || receipt
+                        .canonical_path
+                        .parent()
+                        .is_some_and(|parent| parent.is_dir());
+                if has_lock_root && !receipt.has_any_receipt() {
                     skipped_not_installed.push(pkg.clone());
                     continue;
                 }
@@ -1368,24 +1354,25 @@ fn execute_package_command(
             let mut entries = Vec::new();
             for &raw_id in KNOWN_CLI_PACKAGE_IDS {
                 let id = raw_id.trim();
-                if let Some(def) = get_runner_package_definition(id) {
+                if let Some(def) = get_runner_package_definition_in_root(id, global.root.as_deref())
+                {
                     let lock_name = resolve_package_lock_name(id).to_string();
-                    let (install_lock, swizzin_lock) =
-                        resolve_package_lock_paths(global, &lock_name);
-                    let installed = install_lock.exists() || swizzin_lock.exists();
-                    let lock_path = if !install_lock.exists() && swizzin_lock.exists() {
-                        swizzin_lock
-                    } else {
-                        install_lock
-                    };
+                    let receipt = inspect_cli_package_receipts_for_def(global, id, Some(&def))?;
+                    let installed = receipt.is_installed();
+                    let legacy_lock_path = receipt
+                        .legacy_receipt_present
+                        .then_some(receipt.legacy_path)
+                        .flatten();
                     if *installed_only && !installed {
                         continue;
                     }
                     entries.push(PackageListEntry {
                         package_id: def.name,
                         lock_name,
-                        lock_path,
+                        lock_path: receipt.canonical_path,
                         installed,
+                        legacy_receipt_present: receipt.legacy_receipt_present,
+                        legacy_lock_path,
                         service_name: def.service_name,
                         sandbox_profile: def.sandbox_profile,
                     });
@@ -1404,10 +1391,17 @@ fn execute_package_command(
                 } else {
                     "[AVAILABLE]"
                 };
-                lines.push(format!(
-                    "  {:<13} {:<20} (service: {})",
-                    badge, item.package_id, item.service_name
-                ));
+                if !item.installed && item.legacy_receipt_present {
+                    lines.push(format!(
+                        "  {:<13} {:<20} (service: {}, legacy receipt pending upgrade)",
+                        badge, item.package_id, item.service_name
+                    ));
+                } else {
+                    lines.push(format!(
+                        "  {:<13} {:<20} (service: {})",
+                        badge, item.package_id, item.service_name
+                    ));
+                }
             }
 
             Ok(CliResponseEnvelope::success(
@@ -1422,29 +1416,35 @@ fn execute_package_command(
             ))
         }
         PackageCommand::Info { package } => {
-            let lookup_id = resolve_package_lock_name(package);
-            let def = get_runner_package_definition(lookup_id)
-                .or_else(|| get_runner_package_definition(package))
+            let def = resolve_cli_package_definition(global, package)
                 .ok_or_else(|| CliError::Validation(format!("unknown package {:?}", package)))?;
-            let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lookup_id);
-            let installed = install_lock.exists() || swizzin_lock.exists();
-            let lock_path = if !install_lock.exists() && swizzin_lock.exists() {
-                swizzin_lock
+            let receipt = inspect_cli_package_receipts_for_def(global, package, Some(&def))?;
+            let installed = receipt.is_installed();
+            let legacy_lock_path = receipt
+                .legacy_receipt_present
+                .then_some(receipt.legacy_path)
+                .flatten();
+            let msg = if !installed && receipt.legacy_receipt_present {
+                format!(
+                    "Package: {} (installed: false, legacy_receipt: true, service: {}, sandbox_profile: {})",
+                    def.name, def.service_name, def.sandbox_profile
+                )
             } else {
-                install_lock
+                format!(
+                    "Package: {} (installed: {}, service: {}, sandbox_profile: {})",
+                    def.name, installed, def.service_name, def.sandbox_profile
+                )
             };
-            let msg = format!(
-                "Package: {} (installed: {}, service: {}, sandbox_profile: {})",
-                def.name, installed, def.service_name, def.sandbox_profile
-            );
             Ok(CliResponseEnvelope::success(
                 "package",
                 "info",
                 msg,
                 Some(json!({
                     "package": def,
-                    "lock_path": lock_path,
+                    "lock_path": receipt.canonical_path,
                     "installed": installed,
+                    "legacy_receipt_present": receipt.legacy_receipt_present,
+                    "legacy_lock_path": legacy_lock_path,
                 })),
             ))
         }

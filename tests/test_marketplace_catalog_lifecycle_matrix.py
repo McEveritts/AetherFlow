@@ -4681,6 +4681,49 @@ if command == 'systemctl':
                     self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
                     self.assertEqual((fixture.root / 'remove-contract').read_text(), f'remove|remove|{str(purge).lower()}\n')
 
+    def test_bash_lock_helpers_cleanup_legacy_swizzin_receipts_and_reject_symlinks(self):
+        with InstallerFixture('threadfin') as fixture:
+            legacy = fixture.file('etc/Swizzin/.threadfin.lock', 'PORT=18989\n')
+            # Legacy `af install` treats /etc/Swizzin receipt as upgrade input (reinstall + keep secrets)
+            fixture.file(
+                'opt/AetherFlow/packages/package/install/installpackage-threadfin',
+                'printf "%s|%s|%s\\n" "$AF_LIFECYCLE_ACTION" "$AF_PACKAGE_ACTION" "$AF_KEEP_EXISTING_SECRETS" > "$AF_FIXTURE_ROOT/install-contract"\n',
+            )
+            upgraded = self.run_legacy_cli(fixture, 'install', 'threadfin')
+            self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+            self.assertEqual((fixture.root / 'install-contract').read_text(), 'reinstall|reinstall|1\n')
+
+            # `write_lock` writes canonical lock and cleans up superseded legacy /etc/Swizzin receipt
+            wrote = self.shell(fixture, 'write_lock threadfin')
+            self.assertEqual(wrote.returncode, 0, wrote.stdout + wrote.stderr)
+            self.assertTrue((fixture.root / 'install/.threadfin.lock').is_file())
+            self.assertFalse(legacy.exists())
+
+            # `remove_lock` removes both canonical and legacy /etc/Swizzin receipts
+            fixture.file('etc/Swizzin/.threadfin.lock', 'PORT=18989\n')
+            removed = self.shell(fixture, 'remove_lock threadfin')
+            self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+            self.assertFalse((fixture.root / 'install/.threadfin.lock').exists())
+            self.assertFalse(legacy.exists())
+
+            # Symlinked legacy and canonical locks are rejected by both shell helpers and legacy CLI
+            outside = fixture.file('srv/outside-lock', 'installed\n')
+            legacy.symlink_to(outside)
+            sym_update = self.run_legacy_cli(fixture, 'update', 'threadfin')
+            self.assertNotEqual(sym_update.returncode, 0, sym_update.stdout + sym_update.stderr)
+            sym_remove = self.shell(fixture, 'remove_lock threadfin')
+            self.assertNotEqual(sym_remove.returncode, 0, sym_remove.stdout + sym_remove.stderr)
+            self.assertTrue(outside.is_file())
+            legacy.unlink()
+
+            canonical = fixture.root / 'install/.threadfin.lock'
+            canonical.symlink_to(outside)
+            has_sym = self.shell(fixture, 'has_lock threadfin')
+            self.assertNotEqual(has_sym.returncode, 0)
+            write_sym = self.shell(fixture, 'write_lock threadfin')
+            self.assertNotEqual(write_sym.returncode, 0)
+            self.assertTrue(outside.is_file())
+
     def test_removers_use_safe_tree_deletion_and_refuse_mounts_and_symlink_parents(self):
         for path in (ROOT / 'packages/package/remove').glob('removepackage-*'):
             self.assertNotRegex(path.read_text(), r'\brm\s+-[rf]*r[rf]*f\b', path.name)

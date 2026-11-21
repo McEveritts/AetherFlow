@@ -1326,7 +1326,15 @@ pub(super) fn should_track_package(pkg: &Package) -> bool {
 }
 
 pub(super) fn package_is_installed(pkg: &Package) -> bool {
-    !pkg.lock_file.is_empty() && resolve_fs_path(&pkg.lock_file).exists()
+    if pkg.lock_file.trim().is_empty() {
+        return false;
+    }
+    let resolved = resolve_fs_path(&pkg.lock_file);
+    let fs_root = af_models::resolve_package_fs_root(None);
+    let bound_root = fs_root
+        .as_deref()
+        .filter(|root| resolved.starts_with(root));
+    af_models::inspect_receipt_file(&resolved, bound_root).unwrap_or(false)
 }
 
 pub fn is_package_installed(pkg: &Package) -> bool {

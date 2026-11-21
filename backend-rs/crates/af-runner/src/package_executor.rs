@@ -4689,12 +4689,7 @@ const EMBEDDED_AUTOMATION_FOR_EXECUTOR: &str =
     include_str!("../../../../config/package_automation.json");
 
 fn resolve_package_lock_name(pkg_id: &str) -> &str {
-    let trimmed = pkg_id.trim();
-    match trimmed {
-        "autodl" => "autodlirssi",
-        "transmission-daemon" => "transmission",
-        _ => trimmed,
-    }
+    af_models::resolve_package_lock_name(pkg_id)
 }
 
 /// Returns whether `config/package_automation.json` configures `require_download_sha256: true`
@@ -4718,35 +4713,6 @@ pub fn package_requires_download_sha256(pkg_id: &str) -> bool {
         .or_else(|| map.get(pkg_id.trim()))
         .map(|a| a.require_download_sha256)
         .unwrap_or(false)
-}
-
-fn parse_port_from_runner_lockfile(raw: &str) -> Option<i32> {
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Ok(p) = trimmed.parse::<i32>() {
-            if (1024..=65535).contains(&p) {
-                return Some(p);
-            }
-        }
-        if let Some((lhs, rhs)) = trimmed.split_once('=') {
-            let key = lhs.trim();
-            if matches!(
-                key,
-                "PORT" | "AF_APP_PORT" | "AETHERFLOW_APP_PORT" | "listen_port" | "port"
-            ) {
-                let clean_rhs = rhs.trim().trim_matches('"').trim_matches('\'').trim();
-                if let Ok(p) = clean_rhs.parse::<i32>() {
-                    if (1024..=65535).contains(&p) {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Resolves the effective listen port for `install` / `reinstall` / `update` when `req.app_port`
@@ -4780,17 +4746,20 @@ pub fn resolve_effective_runner_app_port(action: &str, pkg_id: &str, requested_p
         }
     }
 
-    let lock_logical = format!("/install/.{}.lock", clean_id);
-    if let Ok(lock_path) = env_cfg.resolve_path(&lock_logical) {
-        if let Ok(raw_lock) = fs::read_to_string(&lock_path) {
-            if let Some(p) = parse_port_from_runner_lockfile(&raw_lock) {
-                return p;
-            }
-        }
+    let pkg_def = crate::get_runner_package_definition(clean_id)
+        .or_else(|| crate::get_runner_package_definition(pkg_id.trim()));
+    if let Ok(Some(p)) = af_models::read_package_receipt_port(
+        clean_id,
+        pkg_def
+            .as_ref()
+            .map(|p| p.lock_file.as_str())
+            .filter(|s| !s.trim().is_empty()),
+        env_cfg.fs_root.as_deref(),
+    ) {
+        return p;
     }
 
-    crate::get_runner_package_definition(clean_id)
-        .or_else(|| crate::get_runner_package_definition(pkg_id.trim()))
+    pkg_def
         .map(|p| p.default_port)
         .filter(|p| (1024..=65535).contains(p))
         .unwrap_or(0)

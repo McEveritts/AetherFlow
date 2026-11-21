@@ -520,16 +520,43 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
     assert_eq!(pkg_calls[0].script_name, "installpackage-sonarr");
     drop(pkg_calls);
 
-    // 1b. Reinstall `radarr` and `sonarr` even when `/install/.radarr.lock` and `/etc/Swizzin/.sonarr.lock` exist
+    // 1b. Legacy `/etc/Swizzin/.sonarr.lock` is upgrade input, not a canonical install receipt.
     let swizzin_dir = tmp.path().join("etc/Swizzin");
     fs::create_dir_all(&swizzin_dir).unwrap();
     fs::write(swizzin_dir.join(".sonarr.lock"), b"PORT=18989\n").unwrap();
 
-    // Verify `af install sonarr` skips when `/etc/Swizzin/.sonarr.lock` exists
-    let skip_inv = parse_cli_args(["--json", "--root", &root_str, "install", "sonarr"]).unwrap();
-    let skip_env = execute_invocation(&skip_inv, &transport);
-    assert_eq!(skip_env.status, "ok");
-    assert_eq!(transport.package_calls.lock().unwrap().len(), 1);
+    // `af info sonarr` and `af list --installed` agree with canonical services/API status (`installed: false`)
+    // while surfacing the legacy receipt as upgrade input.
+    let info_inv = parse_cli_args(["--json", "--root", &root_str, "info", "sonarr"]).unwrap();
+    let info_env = execute_invocation(&info_inv, &transport);
+    assert_eq!(info_env.status, "ok");
+    let info_data = info_env.data.as_ref().unwrap();
+    assert_eq!(info_data["installed"], false);
+    assert_eq!(info_data["legacy_receipt_present"], true);
+    assert_eq!(
+        info_data["lock_path"],
+        install_dir.join(".sonarr.lock").to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        info_data["legacy_lock_path"],
+        swizzin_dir.join(".sonarr.lock").to_string_lossy().as_ref()
+    );
+
+    // `af install radarr` still skips canonical `/install/.radarr.lock`, whereas `af install sonarr`
+    // upgrades the legacy `/etc/Swizzin/.sonarr.lock` in-place via `reinstall` preserving PORT=18989.
+    let upgrade_inv =
+        parse_cli_args(["--json", "--root", &root_str, "install", "radarr", "sonarr"]).unwrap();
+    let upgrade_env = execute_invocation(&upgrade_inv, &transport);
+    assert_eq!(upgrade_env.status, "ok");
+    {
+        let pkg_calls = transport.package_calls.lock().unwrap();
+        assert_eq!(pkg_calls.len(), 2);
+        assert_eq!(pkg_calls[1].package_id, "sonarr");
+        assert_eq!(pkg_calls[1].action, "reinstall");
+        assert_eq!(pkg_calls[1].script_name, "installpackage-sonarr");
+        assert_eq!(pkg_calls[1].app_port, 18989);
+        assert!(!pkg_calls[1].delete_data);
+    }
 
     // Verify `af reinstall radarr sonarr` executes both in-place with action="reinstall" and delete_data=false
     let reinv = parse_cli_args([
@@ -546,16 +573,27 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
     assert_eq!(reenv.exit_code, 0);
     assert_eq!(reenv.action, "reinstall");
     let pkg_calls = transport.package_calls.lock().unwrap();
-    assert_eq!(pkg_calls.len(), 3);
-    assert_eq!(pkg_calls[1].package_id, "radarr");
-    assert_eq!(pkg_calls[1].action, "reinstall");
-    assert_eq!(pkg_calls[1].script_name, "installpackage-radarr");
-    assert!(!pkg_calls[1].delete_data);
-    assert_eq!(pkg_calls[2].package_id, "sonarr");
+    assert_eq!(pkg_calls.len(), 4);
+    assert_eq!(pkg_calls[2].package_id, "radarr");
     assert_eq!(pkg_calls[2].action, "reinstall");
-    assert_eq!(pkg_calls[2].script_name, "installpackage-sonarr");
-    assert_eq!(pkg_calls[2].app_port, 18989);
+    assert_eq!(pkg_calls[2].script_name, "installpackage-radarr");
     assert!(!pkg_calls[2].delete_data);
+    assert_eq!(pkg_calls[3].package_id, "sonarr");
+    assert_eq!(pkg_calls[3].action, "reinstall");
+    assert_eq!(pkg_calls[3].script_name, "installpackage-sonarr");
+    assert_eq!(pkg_calls[3].app_port, 18989);
+    assert!(!pkg_calls[3].delete_data);
+    drop(pkg_calls);
+
+    // Verify `af remove sonarr` still dispatches removal for a legacy-only receipt so cleanup can run.
+    let remove_inv = parse_cli_args(["--json", "--root", &root_str, "remove", "sonarr"]).unwrap();
+    let remove_env = execute_invocation(&remove_inv, &transport);
+    assert_eq!(remove_env.status, "ok");
+    let pkg_calls = transport.package_calls.lock().unwrap();
+    assert_eq!(pkg_calls.len(), 5);
+    assert_eq!(pkg_calls[4].package_id, "sonarr");
+    assert_eq!(pkg_calls[4].action, "remove");
+    assert_eq!(pkg_calls[4].script_name, "removepackage-sonarr");
     drop(pkg_calls);
 
     // 2. Service restart via `/v1/systemctl`
@@ -2220,5 +2258,106 @@ fn provision_boot_removes_stale_api_sandbox_dropin_and_provisions_apache_htpassw
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(&htpasswd_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640, "htpasswd must have 0640 permissions");
+    }
+}
+
+#[test]
+fn legacy_receipt_parity_rejects_unsafe_locks_and_honors_custom_catalog_and_retained_ports() {
+    let tmp = TempTestDir::new("legacy-receipt-parity");
+    let root = tmp.path();
+    let root_str = root.to_string_lossy().to_string();
+    let transport = MockRunnerTransport::default();
+
+    // 1. Retained SQLite ingress port takes precedence over stale legacy /etc/Swizzin lock port
+    let swizzin_dir = root.join("etc/Swizzin");
+    fs::create_dir_all(&swizzin_dir).unwrap();
+    fs::write(swizzin_dir.join(".sonarr.lock"), b"PORT=18989\n").unwrap();
+    let db_dir = root.join("var/lib/aetherflow");
+    fs::create_dir_all(&db_dir).unwrap();
+    let conn = Connection::open(db_dir.join("aetherflow.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE app_ingress_configs (app_name TEXT PRIMARY KEY, listen_port INTEGER);
+         CREATE TABLE retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT);
+         INSERT INTO retained_app_ingress_configs (app_name, config_json)
+         VALUES ('sonarr', '{\"app_name\":\"sonarr\",\"listen_port\":19111}');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let install_inv = parse_cli_args(["--json", "--root", &root_str, "install", "sonarr"]).unwrap();
+    let install_env = execute_invocation(&install_inv, &transport);
+    assert_eq!(install_env.status, "ok", "{}", install_env.message);
+    {
+        let calls = transport.package_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].action, "reinstall");
+        assert_eq!(calls[0].app_port, 19111);
+    }
+
+    // 2. Custom explicit catalog lock_file inside isolated root is honored without synthesizing /etc/Swizzin
+    let cfg_dir = root.join("opt/AetherFlow/config");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(
+        cfg_dir.join("packages.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "name": "sonarr",
+            "label": "Sonarr",
+            "description": "custom lock fixture",
+            "category": "test",
+            "lock_file": "/custom/locks/.sonarr.receipt",
+            "service_type": "systemd",
+            "service_name": "sonarr",
+            "default_port": 8989
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(cfg_dir.join("package_automation.json"), "{}").unwrap();
+    let custom_info = parse_cli_args(["--json", "--root", &root_str, "info", "sonarr"]).unwrap();
+    let custom_env = execute_invocation(&custom_info, &transport);
+    assert_eq!(custom_env.status, "ok", "{}", custom_env.message);
+    let custom_data = custom_env.data.as_ref().unwrap();
+    assert_eq!(custom_data["installed"], false);
+    assert_eq!(custom_data["legacy_receipt_present"], false);
+    assert_eq!(
+        custom_data["lock_path"],
+        root.join("custom/locks/.sonarr.receipt")
+            .to_string_lossy()
+            .as_ref()
+    );
+    fs::create_dir_all(root.join("custom/locks")).unwrap();
+    fs::write(root.join("custom/locks/.sonarr.receipt"), b"installed\n").unwrap();
+    let custom_installed_env = execute_invocation(&custom_info, &transport);
+    assert_eq!(custom_installed_env.status, "ok");
+    assert_eq!(custom_installed_env.data.as_ref().unwrap()["installed"], true);
+
+    // 3. Unsafe lock types (symlink and directory) are rejected fail-closed
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        fs::remove_file(cfg_dir.join("packages.json")).unwrap();
+        let outside = root.join("outside-target");
+        fs::write(&outside, b"PORT=19999\n").unwrap();
+        fs::remove_file(swizzin_dir.join(".sonarr.lock")).unwrap();
+        symlink(&outside, swizzin_dir.join(".sonarr.lock")).unwrap();
+        let sym_info = execute_invocation(&custom_info, &transport);
+        assert_eq!(sym_info.status, "error");
+        assert!(
+            sym_info.message.contains("not a regular file"),
+            "{}",
+            sym_info.message
+        );
+        let sym_install = execute_invocation(&install_inv, &transport);
+        assert_eq!(sym_install.status, "error");
+        fs::remove_file(swizzin_dir.join(".sonarr.lock")).unwrap();
+
+        fs::create_dir_all(root.join("install/.sonarr.lock")).unwrap();
+        let dir_info = execute_invocation(&custom_info, &transport);
+        assert_eq!(dir_info.status, "error");
+        assert!(
+            dir_info.message.contains("not a regular file"),
+            "{}",
+            dir_info.message
+        );
     }
 }

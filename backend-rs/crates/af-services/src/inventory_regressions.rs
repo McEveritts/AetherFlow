@@ -790,3 +790,48 @@ async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fa
     .await
     .is_err());
 }
+
+#[test]
+fn legacy_swizzin_receipt_does_not_mark_package_installed_and_unsafe_locks_fail_closed() {
+    let name = "inventory_regressions::legacy_swizzin_receipt_does_not_mark_package_installed_and_unsafe_locks_fail_closed";
+    if !isolated(name) {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.write_packages(&[Fixture::package("fixture", "systemd", "fixture-main")]);
+
+    // Legacy /etc/Swizzin lock alone is upgrade input, not a canonical installed receipt.
+    let swizzin = fixture.root.join("etc/Swizzin");
+    fs::create_dir_all(&swizzin).unwrap();
+    fs::write(swizzin.join(".fixture.lock"), "PORT=18989\n").unwrap();
+
+    let packages = get_packages().unwrap();
+    assert_eq!(packages.len(), 1);
+    assert_eq!(packages[0].status, "uninstalled");
+    assert!(!super::is_package_installed("fixture"));
+    assert!(super::package_has_legacy_upgrade_receipt("fixture").unwrap());
+    assert_eq!(super::package_receipt_port("fixture").unwrap(), Some(18989));
+
+    // AETHERFLOW_INSTALL_ROOT fallback works identically when AETHERFLOW_FS_ROOT is unset.
+    env::remove_var("AETHERFLOW_FS_ROOT");
+    env::set_var("AETHERFLOW_INSTALL_ROOT", &fixture.root);
+    assert!(!super::is_package_installed("fixture"));
+    assert!(super::package_has_legacy_upgrade_receipt("fixture").unwrap());
+    env::remove_var("AETHERFLOW_INSTALL_ROOT");
+    env::set_var("AETHERFLOW_FS_ROOT", &fixture.root);
+
+    // Symlink canonical lock must fail closed in both get_packages() and is_package_installed().
+    let outside = fixture.root.join("outside-lock");
+    fs::write(&outside, "installed\n").unwrap();
+    let canonical_lock = fixture.root.join("install/.fixture.lock");
+    symlink(&outside, &canonical_lock).unwrap();
+    assert!(!super::is_package_installed("fixture"));
+    assert!(get_packages().is_err());
+    fs::remove_file(&canonical_lock).unwrap();
+
+    // Symlink legacy lock must fail closed for upgrade-input inspection and port lookup.
+    fs::remove_file(swizzin.join(".fixture.lock")).unwrap();
+    symlink(&outside, swizzin.join(".fixture.lock")).unwrap();
+    assert!(super::package_has_legacy_upgrade_receipt("fixture").is_err());
+    assert!(super::package_receipt_port("fixture").is_err());
+}

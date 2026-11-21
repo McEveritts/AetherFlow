@@ -235,17 +235,6 @@ pub fn get_package_catalog() -> anyhow::Result<Vec<Package>> {
     Ok(pkgs)
 }
 
-fn resolve_filesystem_path(path_str: &str) -> PathBuf {
-    if let Ok(root) = env::var("AETHERFLOW_FS_ROOT") {
-        let trimmed = root.trim();
-        if !trimmed.is_empty() {
-            let rel = path_str.trim_start_matches('/');
-            return Path::new(trimmed).join(rel);
-        }
-    }
-    PathBuf::from(path_str)
-}
-
 pub fn get_packages() -> anyhow::Result<Vec<Package>> {
     get_packages_with_jobs(&package_job_snapshot()?)
 }
@@ -258,22 +247,8 @@ pub fn get_packages_with_jobs(jobs: &PackageJobSnapshot) -> anyhow::Result<Vec<P
 }
 
 fn package_lock_installed(package: &Package) -> anyhow::Result<bool> {
-    if package.lock_file.is_empty() {
-        return Ok(false);
-    }
-    let path = resolve_filesystem_path(&package.lock_file);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() => Ok(true),
-        Ok(_) => anyhow::bail!(
-            "installation lock is not a regular file: {}",
-            path.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(anyhow::anyhow!(
-            "cannot inspect installation lock {}: {error}",
-            path.display()
-        )),
-    }
+    af_models::inspect_canonical_package_receipt(&package.name, Some(&package.lock_file), None)
+        .map_err(anyhow::Error::msg)
 }
 
 fn public_app_vhost_enabled(app: &str, domain: &str, tls: bool) -> bool {
@@ -716,16 +691,47 @@ pub fn resolve_app_internal_domain(app_name: &str) -> String {
     format!("{}.aether.local", app_name.trim().to_lowercase())
 }
 
-fn package_is_physically_installed(app: &str) -> bool {
+fn find_catalog_package(app: &str) -> Option<Package> {
     let clean = resolve_canonical_service_id(app);
-    get_package_catalog()
-        .ok()
-        .and_then(|pkgs| pkgs.into_iter().find(|p| p.name == clean || p.name == app))
-        .is_some_and(|p| !p.lock_file.is_empty() && resolve_filesystem_path(&p.lock_file).is_file())
+    let lock_alias = af_models::resolve_package_lock_name(app);
+    get_package_catalog().ok().and_then(|pkgs| {
+        pkgs.into_iter().find(|p| {
+            p.name.eq_ignore_ascii_case(&clean)
+                || p.name.eq_ignore_ascii_case(lock_alias)
+                || p.name.eq_ignore_ascii_case(app.trim())
+        })
+    })
+}
+
+fn package_is_physically_installed(app: &str) -> bool {
+    find_catalog_package(app)
+        .and_then(|p| package_lock_installed(&p).ok())
+        .unwrap_or(false)
 }
 
 pub fn is_package_installed(app: &str) -> bool {
     package_is_physically_installed(app)
+}
+
+/// Returns `Ok(true)` iff the package lacks a canonical receipt and has a safe
+/// regular legacy `/etc/Swizzin` upgrade-input receipt. Rejects unsafe lock types.
+pub fn package_has_legacy_upgrade_receipt(app: &str) -> anyhow::Result<bool> {
+    let Some(pkg) = find_catalog_package(app) else {
+        return Ok(false);
+    };
+    let status = af_models::inspect_package_receipts(&pkg.name, Some(&pkg.lock_file), None)
+        .map_err(anyhow::Error::msg)?;
+    Ok(status.has_legacy_upgrade_receipt())
+}
+
+/// Reads an optional port hint from the package's canonical receipt or legacy
+/// `/etc/Swizzin` upgrade receipt, rejecting unsafe lock types.
+pub fn package_receipt_port(app: &str) -> anyhow::Result<Option<i32>> {
+    let Some(pkg) = find_catalog_package(app) else {
+        return Ok(None);
+    };
+    af_models::read_package_receipt_port(&pkg.name, Some(&pkg.lock_file), None)
+        .map_err(anyhow::Error::msg)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
