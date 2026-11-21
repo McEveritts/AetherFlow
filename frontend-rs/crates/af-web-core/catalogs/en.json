@@ -718,6 +718,8 @@
   "Imported event": "Imported event",
   "Imported history estimates": "Imported history estimates",
   "Inbox": {
+    "approveQueueRestart": "Approve & Queue Restart",
+    "approvedUnconfirmed": "Action was approved without a confirmed execution receipt. Inspect service state and logs instead of replaying this command.",
     "awaitingApprovalCount": "{count} actions awaiting human approval",
     "commandBreakdownHeading": "Command & Blast Radius",
     "coreImpactWarning": "Core Control-Plane Impact: approving this restart recycles {target} via a deferred transient unit.",
@@ -727,6 +729,8 @@
     "managerLabel": "Service Manager",
     "operationLabel": "Operation",
     "parametersHeading": "Action Parameters",
+    "queuedBanner": "Deferred restart queued (receipt: {receipt}). Waiting for durable receipt confirmation and API readiness; do not replay this approval.",
+    "receiptLabel": "Restart Receipt",
     "riskLabel": "Risk Classification",
     "subsystemGate": "Subsystem Proposal",
     "summaryCriticalHigh": "Critical & High",
@@ -735,6 +739,7 @@
     "summaryMedium": "Medium / Warning",
     "summaryRegion": "Approval queue summary",
     "targetLabel": "Target / Resource",
+    "unavailableBanner": "Deferred restart outcome is unavailable. Inspect service state and logs before retrying; do not assume this restart executed.",
     "unresolved": "Awaiting decision"
   },
   "Include policy-excluded evidence": "Include policy-excluded evidence",

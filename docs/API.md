@@ -113,8 +113,9 @@ Interfaces with the multi-provider FlowAI engine (`af-api::intelligence`). See [
 | `POST` | `/api/v1/auth/ai/chat` | Multi-provider chat (Gemini, OpenAI, Anthropic, Ollama, LM Studio) with Assistant action detection. |
 | `POST` | `/api/v1/auth/ai/support` | Grounded diagnostic session injecting live metrics and service logs (`full`, `logs`, `metrics`). |
 | `POST` | `/api/v1/admin/settings/test-ai` | Tests provider connectivity using saved or unsaved API keys. |
-| `GET` | `/api/v1/admin/actions/pending` | Lists pending AI remediation actions in the Approval Inbox. |
-| `POST` | `/api/v1/admin/actions/{id}/approve` | Authorizes and executes a pending action, recording an entry in `admin_audit_log`. |
+| `GET` | `/api/v1/admin/actions/pending` | Lists Approval Inbox actions filtered by `status` (`pending`, `approved`, `queued`, `approved_history`, `rejected`, `executed`, `failed`, `unavailable`, `all`), reconciling queued deferred core-restart receipts before returning results. |
+| `GET` | `/api/v1/admin/actions/{id}` | Returns a single Approval Inbox action record, reconciling any queued deferred core-restart `job_unit` receipt against `af-runner`'s durable status. |
+| `POST` | `/api/v1/admin/actions/{id}/approve` | Authorizes and executes a pending action, recording an entry in `admin_audit_log`. Deferred `aetherflow-api`/`aetherflow-runner` restarts return `202 Accepted` (`status: "queued"`) with the persisted `job_unit` receipt instead of claiming immediate execution, and retries return `409 Conflict` without replaying. |
 
 ### 8. Cluster Master & Worker (`/api/v1/admin/cluster`)
 Multi-node enrollment, telemetry heartbeats, and durable worker command orchestration (`af-services::cluster_daemon`; worker mTLS listener on `:50051` serves `/cluster/v1/register` and `/cluster/v1/heartbeat`).

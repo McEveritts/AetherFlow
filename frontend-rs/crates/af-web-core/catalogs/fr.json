@@ -718,6 +718,8 @@
   "Imported event": "Événement importé",
   "Imported history estimates": "Estimations de l'historique importé",
   "Inbox": {
+    "approveQueueRestart": "Approuver et planifier le redémarrage",
+    "approvedUnconfirmed": "L’action a été approuvée sans reçu d’exécution confirmé. Vérifiez l’état du service et les journaux plutôt que de relancer cette commande.",
     "awaitingApprovalCount": "{count} actions en attente d’approbation humaine",
     "commandBreakdownHeading": "Commande et périmètre d'impact",
     "coreImpactWarning": "Impact sur le plan de contrôle central : approuver ce redémarrage recycle {target} via une unité transitoire différée.",
@@ -727,6 +729,8 @@
     "managerLabel": "Gestionnaire de services",
     "operationLabel": "Opération",
     "parametersHeading": "Paramètres de l'action",
+    "queuedBanner": "Redémarrage différé mis en file d’attente (reçu : {receipt}). En attente de confirmation du reçu durable et de la disponibilité de l’API ; ne rejouez pas cette approbation.",
+    "receiptLabel": "Reçu de redémarrage",
     "riskLabel": "Classification du risque",
     "subsystemGate": "Proposition de sous-système",
     "summaryCriticalHigh": "Critique et élevé",
@@ -735,6 +739,7 @@
     "summaryMedium": "Moyen / Avertissement",
     "summaryRegion": "Résumé de la file d'approbation",
     "targetLabel": "Cible / Ressource",
+    "unavailableBanner": "Le résultat du redémarrage différé est indisponible. Vérifiez l’état du service et les journaux avant de réessayer ; ne supposez pas que le redémarrage a été exécuté.",
     "unresolved": "En attente de décision"
   },
   "Include policy-excluded evidence": "Inclure les preuves exclues par la stratégie",

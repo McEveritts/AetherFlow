@@ -1490,6 +1490,7 @@ pub fn init_db() -> anyhow::Result<()> {
 
     ensure_security_schema_invariants(&conn)?;
     ensure_notification_schema_invariants(&conn)?;
+    ensure_pending_actions_schema_invariants(&conn)?;
 
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
     let _ = conn.execute(
@@ -1659,6 +1660,15 @@ fn ensure_notification_schema_invariants(conn: &Connection) -> anyhow::Result<()
         )?;
         Ok(())
     })
+}
+
+fn ensure_pending_actions_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    ensure_column(conn, "pending_actions", "job_unit", "TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_actions_job_unit ON pending_actions(job_unit)",
+        [],
+    )?;
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2397,6 +2407,47 @@ pub struct PendingAction {
     pub resolved_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub execution_log: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub job_unit: Option<String>,
+}
+
+fn pending_actions_has_job_unit(conn: &Connection) -> bool {
+    conn.prepare("PRAGMA table_info(pending_actions)")
+        .and_then(|mut stmt| {
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                if name.eq_ignore_ascii_case("job_unit") {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .unwrap_or(false)
+}
+
+fn pending_action_select_columns(conn: &Connection) -> &'static str {
+    if pending_actions_has_job_unit(conn) {
+        "id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), CAST(resolved_at AS TEXT), resolved_by, execution_log, NULLIF(TRIM(COALESCE(job_unit, '')), '')"
+    } else {
+        "id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), CAST(resolved_at AS TEXT), resolved_by, execution_log, NULL"
+    }
+}
+
+fn map_pending_action_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingAction> {
+    Ok(PendingAction {
+        id: r.get(0)?,
+        classification: r.get(1)?,
+        source: r.get(2)?,
+        action: r.get(3)?,
+        reason: r.get(4)?,
+        status: r.get(5)?,
+        created_at: r.get(6)?,
+        resolved_at: r.get(7).ok().flatten(),
+        resolved_by: r.get(8).ok().flatten(),
+        execution_log: r.get(9).ok().flatten(),
+        job_unit: r.get(10).ok().flatten(),
+    })
 }
 
 pub fn queue_action(classification: &str, source: &str, action: &str, reason: &str) -> (i64, bool) {
@@ -2435,6 +2486,159 @@ pub fn mark_action_failed(action_id: i64, execution_log: &str) {
     }
 }
 
+pub fn mark_action_queued(
+    action_id: i64,
+    job_unit: &str,
+    execution_log: &str,
+) -> anyhow::Result<PendingAction> {
+    let conn = get_conn()?;
+    mark_action_queued_with_connection(&conn, action_id, job_unit, execution_log)
+}
+
+fn mark_action_queued_with_connection(
+    conn: &Connection,
+    action_id: i64,
+    job_unit: &str,
+    execution_log: &str,
+) -> anyhow::Result<PendingAction> {
+    let unit = job_unit.trim();
+    anyhow::ensure!(!unit.is_empty(), "job_unit is required to queue an action");
+    let changed = conn.execute(
+        "UPDATE pending_actions SET status = 'queued', job_unit = ?1, execution_log = ?2 WHERE id = ?3 AND status = 'approved'",
+        params![unit, execution_log, action_id],
+    )?;
+    if changed == 0 {
+        anyhow::bail!("Action not found or not awaiting deferred queue persistence");
+    }
+    get_pending_action_by_id_with_connection(conn, action_id)?
+        .ok_or_else(|| anyhow::anyhow!("Action disappeared after queueing"))
+}
+
+pub fn mark_action_unavailable(
+    action_id: i64,
+    job_unit: Option<&str>,
+    execution_log: &str,
+) -> anyhow::Result<Option<PendingAction>> {
+    let conn = get_conn()?;
+    mark_action_unavailable_with_connection(&conn, action_id, job_unit, execution_log)
+}
+
+fn mark_action_unavailable_with_connection(
+    conn: &Connection,
+    action_id: i64,
+    job_unit: Option<&str>,
+    execution_log: &str,
+) -> anyhow::Result<Option<PendingAction>> {
+    let now = Utc::now().to_rfc3339();
+    let normalized_unit = job_unit.map(str::trim).filter(|u| !u.is_empty());
+    if let Some(unit) = normalized_unit {
+        conn.execute(
+            "UPDATE pending_actions SET status = 'unavailable', resolved_at = ?1, execution_log = ?2, job_unit = COALESCE(NULLIF(TRIM(COALESCE(job_unit, '')), ''), ?3) \
+             WHERE id = ?4 AND status IN ('approved', 'queued') AND COALESCE(TRIM(job_unit), '') IN ('', ?3)",
+            params![now, execution_log, unit, action_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE pending_actions SET status = 'unavailable', resolved_at = ?1, execution_log = ?2 \
+             WHERE id = ?3 AND status IN ('approved', 'queued')",
+            params![now, execution_log, action_id],
+        )?;
+    }
+    get_pending_action_by_id_with_connection(conn, action_id)
+}
+
+pub fn finalize_queued_action_by_id(
+    action_id: i64,
+    expected_job_unit: &str,
+    final_status: &str,
+    execution_log: &str,
+) -> anyhow::Result<Option<PendingAction>> {
+    let conn = get_conn()?;
+    finalize_queued_action_by_id_with_connection(
+        &conn,
+        action_id,
+        expected_job_unit,
+        final_status,
+        execution_log,
+    )
+}
+
+fn finalize_queued_action_by_id_with_connection(
+    conn: &Connection,
+    action_id: i64,
+    expected_job_unit: &str,
+    final_status: &str,
+    execution_log: &str,
+) -> anyhow::Result<Option<PendingAction>> {
+    anyhow::ensure!(
+        matches!(final_status, "executed" | "failed" | "unavailable"),
+        "Invalid final action status"
+    );
+    let unit = expected_job_unit.trim();
+    anyhow::ensure!(!unit.is_empty(), "expected_job_unit is required");
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE pending_actions SET status = ?1, resolved_at = ?2, execution_log = ?3 \
+         WHERE id = ?4 AND status IN ('approved', 'queued') AND job_unit = ?5",
+        params![final_status, now, execution_log, action_id, unit],
+    )?;
+    get_pending_action_by_id_with_connection(conn, action_id)
+}
+
+pub fn finalize_queued_action_by_job_unit(
+    job_unit: &str,
+    final_status: &str,
+    execution_log: &str,
+) -> anyhow::Result<usize> {
+    let conn = get_conn()?;
+    finalize_queued_action_by_job_unit_with_connection(&conn, job_unit, final_status, execution_log)
+}
+
+fn finalize_queued_action_by_job_unit_with_connection(
+    conn: &Connection,
+    job_unit: &str,
+    final_status: &str,
+    execution_log: &str,
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        matches!(final_status, "executed" | "failed" | "unavailable"),
+        "Invalid final action status"
+    );
+    let unit = job_unit.trim();
+    anyhow::ensure!(!unit.is_empty(), "job_unit is required");
+    if !pending_actions_has_job_unit(conn) {
+        return Ok(0);
+    }
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE pending_actions SET status = ?1, resolved_at = ?2, execution_log = ?3 \
+         WHERE job_unit = ?4 AND status IN ('approved', 'queued')",
+        params![final_status, now, execution_log, unit],
+    )?;
+    Ok(changed)
+}
+
+pub fn list_queued_actions_with_receipts(limit: i64) -> anyhow::Result<Vec<PendingAction>> {
+    let conn = get_read_conn()?;
+    list_queued_actions_with_receipts_with_connection(&conn, limit)
+}
+
+fn list_queued_actions_with_receipts_with_connection(
+    conn: &Connection,
+    limit: i64,
+) -> anyhow::Result<Vec<PendingAction>> {
+    if !pending_actions_has_job_unit(conn) {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, 100);
+    let cols = pending_action_select_columns(conn);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {cols} FROM pending_actions WHERE status = 'queued' AND NULLIF(TRIM(COALESCE(job_unit, '')), '') IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT ?1",
+    ))?;
+    let rows = stmt.query_map(params![limit], map_pending_action_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn list_audit_entries(
     limit: i64,
     offset: i64,
@@ -2451,24 +2655,11 @@ pub fn list_pending_actions(mut limit: i64, offset: i64) -> anyhow::Result<Vec<P
         limit = 500;
     }
     let conn = get_read_conn()?;
-    let mut stmt = conn.prepare(
-        "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
-         FROM pending_actions ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
-    )?;
-    let rows = stmt.query_map(params![limit, offset.max(0)], |r| {
-        Ok(PendingAction {
-            id: r.get(0)?,
-            classification: r.get(1)?,
-            source: r.get(2)?,
-            action: r.get(3)?,
-            reason: r.get(4)?,
-            status: r.get(5)?,
-            created_at: r.get(6)?,
-            resolved_at: r.get(7).ok().flatten(),
-            resolved_by: r.get(8).ok().flatten(),
-            execution_log: r.get(9).ok().flatten(),
-        })
-    })?;
+    let cols = pending_action_select_columns(&conn);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {cols} FROM pending_actions ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+    ))?;
+    let rows = stmt.query_map(params![limit, offset.max(0)], map_pending_action_row)?;
     let mut actions = Vec::new();
     for r in rows {
         actions.push(r?);
@@ -2496,8 +2687,12 @@ fn query_pending_actions_with_connection(
     let predicate = match status_filter {
         "all" | "" => "1 = 1",
         "pending" => "COALESCE(status, 'pending') = 'pending'",
-        "approved_history" => "COALESCE(status, 'pending') IN ('approved', 'executed', 'failed')",
-        "approved" | "rejected" | "executed" | "failed" => "COALESCE(status, 'pending') = ?",
+        "approved_history" => {
+            "COALESCE(status, 'pending') IN ('approved', 'queued', 'executed', 'failed', 'unavailable')"
+        }
+        "approved" | "queued" | "rejected" | "executed" | "failed" | "unavailable" => {
+            "COALESCE(status, 'pending') = ?"
+        }
         _ => anyhow::bail!("Invalid status filter"),
     };
     let mut bindings = Vec::<rusqlite::types::Value>::new();
@@ -2511,24 +2706,14 @@ fn query_pending_actions_with_connection(
     )?;
     bindings.push(limit.into());
     bindings.push(offset.into());
+    let cols = pending_action_select_columns(conn);
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
-         FROM pending_actions WHERE {predicate} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        "SELECT {cols} FROM pending_actions WHERE {predicate} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     ))?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
-        Ok(PendingAction {
-            id: row.get(0)?,
-            classification: row.get(1)?,
-            source: row.get(2)?,
-            action: row.get(3)?,
-            reason: row.get(4)?,
-            status: row.get(5)?,
-            created_at: row.get(6)?,
-            resolved_at: row.get(7)?,
-            resolved_by: row.get(8)?,
-            execution_log: row.get(9)?,
-        })
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(bindings.iter()),
+        map_pending_action_row,
+    )?;
     Ok((rows.collect::<rusqlite::Result<Vec<_>>>()?, total))
 }
 
@@ -2541,24 +2726,11 @@ fn get_pending_action_by_id_with_connection(
     conn: &Connection,
     action_id: i64,
 ) -> anyhow::Result<Option<PendingAction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
-         FROM pending_actions WHERE id = ?1",
-    )?;
-    let res = stmt.query_row(params![action_id], |r| {
-        Ok(PendingAction {
-            id: r.get(0)?,
-            classification: r.get(1)?,
-            source: r.get(2)?,
-            action: r.get(3)?,
-            reason: r.get(4)?,
-            status: r.get(5)?,
-            created_at: r.get(6)?,
-            resolved_at: r.get(7).ok().flatten(),
-            resolved_by: r.get(8).ok().flatten(),
-            execution_log: r.get(9).ok().flatten(),
-        })
-    });
+    let cols = pending_action_select_columns(conn);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {cols} FROM pending_actions WHERE id = ?1",
+    ))?;
+    let res = stmt.query_row(params![action_id], map_pending_action_row);
     match res {
         Ok(action) => Ok(Some(action)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -3741,6 +3913,143 @@ mod pending_action_query_tests {
             query_pending_actions_with_connection(&conn, "pending", 50, 1).unwrap();
         assert_eq!(total, 1);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn deferred_restart_receipt_schema_upgrade_preserves_rows_and_history_filters() {
+        let conn = connection();
+        conn.execute(
+            "INSERT INTO pending_actions (id, classification, source, action, reason, status, created_at) \
+             VALUES (1, 'warn', 'FlowAI', 'restart:sonarr', 'legacy row', 'executed', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        // Legacy table without job_unit still reads cleanly.
+        let legacy = get_pending_action_by_id_with_connection(&conn, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.status, "executed");
+        assert_eq!(legacy.job_unit, None);
+
+        // Invariant upgrade adds job_unit without modifying existing rows.
+        ensure_pending_actions_schema_invariants(&conn).unwrap();
+        ensure_pending_actions_schema_invariants(&conn).unwrap();
+        let preserved = get_pending_action_by_id_with_connection(&conn, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.action, "restart:sonarr");
+        assert_eq!(preserved.status, "executed");
+        assert_eq!(preserved.job_unit, None);
+
+        for (id, status, unit) in [
+            (2, "approved", None),
+            (3, "queued", Some("aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service")),
+            (4, "unavailable", Some("aetherflow-self-update-restart-aetherflow-runner-fedcba9876543210.service")),
+            (5, "rejected", None),
+            (6, "pending", None),
+        ] {
+            conn.execute(
+                "INSERT INTO pending_actions (id, classification, source, action, reason, status, created_at, job_unit) \
+                 VALUES (?1, 'critical', 'FlowAI', 'restart_service:aetherflow-api:systemd', 'test', ?2, '2026-01-02', ?3)",
+                params![id, status, unit],
+            )
+            .unwrap();
+        }
+
+        let (history, total) =
+            query_pending_actions_with_connection(&conn, "approved_history", 50, 0).unwrap();
+        assert_eq!(total, 4);
+        assert_eq!(
+            history.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![4, 3, 2, 1]
+        );
+
+        let (queued, q_total) =
+            query_pending_actions_with_connection(&conn, "queued", 50, 0).unwrap();
+        assert_eq!(q_total, 1);
+        assert_eq!(queued[0].id, 3);
+        assert_eq!(
+            queued[0].job_unit.as_deref(),
+            Some("aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service")
+        );
+
+        let (unavail, u_total) =
+            query_pending_actions_with_connection(&conn, "unavailable", 50, 0).unwrap();
+        assert_eq!(u_total, 1);
+        assert_eq!(unavail[0].id, 4);
+
+        let tracked = list_queued_actions_with_receipts_with_connection(&conn, 50).unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].id, 3);
+    }
+
+    #[test]
+    fn deferred_restart_receipt_transitions_guard_against_mismatches_and_replays() {
+        let conn = connection();
+        ensure_pending_actions_schema_invariants(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO pending_actions (id, classification, source, action, reason, status, created_at) \
+             VALUES (10, 'critical', 'FlowAI', 'restart_service:aetherflow-api:systemd', 'recycle', 'approved', '2026-01-03')",
+            [],
+        )
+        .unwrap();
+
+        let unit = "aetherflow-self-update-restart-aetherflow-api-abcdef0123456789.service";
+        let queued =
+            mark_action_queued_with_connection(&conn, 10, unit, "queued for restart").unwrap();
+        assert_eq!(queued.status, "queued");
+        assert_eq!(queued.job_unit.as_deref(), Some(unit));
+
+        // Second queue attempt on an already-queued row is rejected.
+        assert!(mark_action_queued_with_connection(&conn, 10, unit, "duplicate").is_err());
+
+        // Mismatched receipt cannot finalize the action.
+        let wrong = finalize_queued_action_by_id_with_connection(
+            &conn,
+            10,
+            "aetherflow-self-update-restart-aetherflow-api-ffffffffffffffff.service",
+            "executed",
+            "wrong receipt",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(wrong.status, "queued");
+
+        // Matching receipt finalizes atomically by job_unit.
+        let changed = finalize_queued_action_by_job_unit_with_connection(
+            &conn,
+            unit,
+            "executed",
+            "confirmed via durable receipt",
+        )
+        .unwrap();
+        assert_eq!(changed, 1);
+        let done = get_pending_action_by_id_with_connection(&conn, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.status, "executed");
+        assert_eq!(done.job_unit.as_deref(), Some(unit));
+        assert_eq!(
+            done.execution_log.as_deref(),
+            Some("confirmed via durable receipt")
+        );
+
+        // Terminal row cannot be overwritten back to failed or unavailable.
+        let repeat = finalize_queued_action_by_job_unit_with_connection(
+            &conn,
+            unit,
+            "failed",
+            "stale failure",
+        )
+        .unwrap();
+        assert_eq!(repeat, 0);
+        assert_eq!(
+            get_pending_action_by_id_with_connection(&conn, 10)
+                .unwrap()
+                .unwrap()
+                .status,
+            "executed"
+        );
     }
 
     #[test]

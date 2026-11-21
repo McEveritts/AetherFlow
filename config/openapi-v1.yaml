@@ -107,9 +107,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '202':
+          description: Accepted (deferred core restart queued with durable receipt)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '503':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []

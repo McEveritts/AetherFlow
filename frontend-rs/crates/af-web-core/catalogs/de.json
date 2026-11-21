@@ -718,6 +718,8 @@
   "Imported event": "Importiertes Ereignis",
   "Imported history estimates": "Importierte historische Schätzungen",
   "Inbox": {
+    "approveQueueRestart": "Genehmigen & Neustart einreihen",
+    "approvedUnconfirmed": "Die Aktion wurde ohne bestätigten Ausführungsbeleg genehmigt. Prüfen Sie den Dienststatus und die Protokolle, statt den Befehl erneut auszuführen.",
     "awaitingApprovalCount": "{count} Aktionen warten auf manuelle Genehmigung",
     "commandBreakdownHeading": "Befehl & Wirkungsbereich",
     "coreImpactWarning": "Kern-Steuerungsebenen-Auswirkung: Durch die Genehmigung wird {target} über eine verzögerte transiente Unit neu gestartet.",
@@ -727,6 +729,8 @@
     "managerLabel": "Dienstverwaltung",
     "operationLabel": "Vorgang",
     "parametersHeading": "Aktionsparameter",
+    "queuedBanner": "Verzögerter Neustart eingereiht (Beleg: {receipt}). Warte auf dauerhafte Belegbestätigung und API-Bereitschaft; diese Genehmigung nicht erneut senden.",
+    "receiptLabel": "Neustart-Beleg",
     "riskLabel": "Risikoklassifizierung",
     "subsystemGate": "Subsystem-Vorschlag",
     "summaryCriticalHigh": "Kritisch & Hoch",
@@ -735,6 +739,7 @@
     "summaryMedium": "Mittel / Warnung",
     "summaryRegion": "Zusammenfassung der Genehmigungswarteschlange",
     "targetLabel": "Ziel / Ressource",
+    "unavailableBanner": "Das Ergebnis des verzögerten Neustarts ist nicht verfügbar. Prüfen Sie Dienststatus und Protokolle vor einem neuen Versuch; gehen Sie nicht davon aus, dass der Neustart ausgeführt wurde.",
     "unresolved": "Wartet auf Entscheidung"
   },
   "Include policy-excluded evidence": "Schließen Sie von der Richtlinie ausgeschlossene Beweise ein",

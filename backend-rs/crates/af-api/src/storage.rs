@@ -4040,39 +4040,17 @@ pub async fn run_update(req: Request) -> Response {
     .into_response()
 }
 
-pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) -> Response {
-    let job_unit = q
-        .get("job_unit")
-        .or_else(|| q.get("unit"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+pub(crate) fn render_self_update_status_response(
+    job_unit: &str,
+    result: anyhow::Result<af_models::SelfUpdateJobStatus>,
+) -> Response {
     let action = |unit: &str| {
         unit.strip_prefix("aetherflow-self-update-")
             .and_then(|suffix| suffix.split('-').next())
             .filter(|command| matches!(*command, "deploy" | "rollback" | "restart"))
             .map(str::to_owned)
     };
-    if !job_unit.is_empty() && !af_models::is_valid_self_update_job_unit_name(&job_unit) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "A valid self-update job_unit is required",
-        );
-    }
-    if q.get("action")
-        .is_some_and(|expected| action(&job_unit).as_ref() != Some(expected))
-    {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Update action does not match job identity",
-        );
-    }
-
-    let status_req = af_models::SelfUpdateStatusRequest {
-        job_unit: job_unit.clone(),
-    };
-    match af_runner::dispatch_self_update_status_request(&status_req).await {
+    match result {
         Ok(status) => {
             let idle = job_unit.is_empty()
                 && status.job_unit.is_empty()
@@ -4091,7 +4069,7 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
                 && !recovery
                 && (status.job_unit != status.job_unit.trim()
                     || status
-                        .validate_invariants((!job_unit.is_empty()).then_some(job_unit.as_str()))
+                        .validate_invariants((!job_unit.is_empty()).then_some(job_unit))
                         .is_err())
             {
                 return api_error(
@@ -4152,6 +4130,42 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
             )
         }
     }
+}
+
+pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) -> Response {
+    let job_unit = q
+        .get("job_unit")
+        .or_else(|| q.get("unit"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let action = |unit: &str| {
+        unit.strip_prefix("aetherflow-self-update-")
+            .and_then(|suffix| suffix.split('-').next())
+            .filter(|command| matches!(*command, "deploy" | "rollback" | "restart"))
+            .map(str::to_owned)
+    };
+    if !job_unit.is_empty() && !af_models::is_valid_self_update_job_unit_name(&job_unit) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "A valid self-update job_unit is required",
+        );
+    }
+    if q.get("action")
+        .is_some_and(|expected| action(&job_unit).as_ref() != Some(expected))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Update action does not match job identity",
+        );
+    }
+
+    let status_req = af_models::SelfUpdateStatusRequest {
+        job_unit: job_unit.clone(),
+    };
+    let result = af_runner::dispatch_self_update_status_request(&status_req).await;
+    render_self_update_status_response(&job_unit, result)
 }
 
 #[allow(clippy::result_large_err)]

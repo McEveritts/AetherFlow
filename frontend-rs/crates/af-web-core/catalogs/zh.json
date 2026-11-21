@@ -718,6 +718,8 @@
   "Imported event": "导入事件",
   "Imported history estimates": "导入历史估计",
   "Inbox": {
+    "approveQueueRestart": "批准并排队重启",
+    "approvedUnconfirmed": "该操作已获批准，但缺少已确认的执行回执。请检查服务状态和日志，切勿重复执行此命令。",
     "awaitingApprovalCount": "{count} 项操作等待人工审批",
     "commandBreakdownHeading": "命令与影响范围",
     "coreImpactWarning": "核心控制平面影响：批准此重启将通过延迟瞬态单元回收 {target}。",
@@ -727,6 +729,8 @@
     "managerLabel": "服务管理器",
     "operationLabel": "操作",
     "parametersHeading": "动作参数",
+    "queuedBanner": "延迟重启已入队（回执：{receipt}）。正在等待持久回执确认与 API 就绪；请勿重复提交此审批。",
+    "receiptLabel": "重启回执",
     "riskLabel": "风险分级",
     "subsystemGate": "子系统提议",
     "summaryCriticalHigh": "严重与高危",
@@ -735,6 +739,7 @@
     "summaryMedium": "中风险 / 警告",
     "summaryRegion": "审批队列摘要",
     "targetLabel": "目标 / 资源",
+    "unavailableBanner": "延迟重启结果不可用。重试前请检查服务状态和日志；切勿假定该重启已经执行。",
     "unresolved": "等待决定"
   },
   "Include policy-excluded evidence": "包括政策排除的证据",

@@ -1,6 +1,5 @@
 use crate::auth::{api_error, generate_recovery_codes, store_recovery_codes, AuthUser};
 use crate::ws::{broadcast_ws_message, extract_client_ip};
-use af_db::PendingAction;
 use axum::extract::{Extension, Path};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -212,37 +211,18 @@ pub async fn regenerate_2fa_recovery_codes(
 // 2. Action Approval Gate Lookup (`GET /actions/:id`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn query_pending_action_by_id(id: i64) -> Option<PendingAction> {
-    let conn = af_db::get_conn().ok()?;
-    conn.query_row(
-        "SELECT id, classification, source, action, COALESCE(reason, ''), status, \
-         COALESCE(CAST(created_at AS TEXT), ''), CAST(resolved_at AS TEXT), resolved_by, execution_log \
-         FROM pending_actions WHERE id = ?1",
-        params![id],
-        |r| {
-            Ok(PendingAction {
-                id: r.get(0)?,
-                classification: r.get(1)?,
-                source: r.get(2)?,
-                action: r.get(3)?,
-                reason: r.get(4)?,
-                status: r.get(5)?,
-                created_at: r.get(6)?,
-                resolved_at: r.get(7)?,
-                resolved_by: r.get(8)?,
-                execution_log: r.get(9)?,
-            })
-        },
-    )
-    .optional()
-    .ok()
-    .flatten()
-}
-
 pub async fn get_pending_action(Path(id): Path<i64>) -> Response {
-    match query_pending_action_by_id(id) {
-        Some(action) => Json(action).into_response(),
-        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Action not found"),
+    match af_db::get_pending_action_by_id(id) {
+        Ok(Some(action)) => {
+            let reconciled = crate::routes::reconcile_pending_action(action).await;
+            Json(reconciled).into_response()
+        }
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Action not found"),
+        Err(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DATABASE_ERROR",
+            "Could not load action",
+        ),
     }
 }
 

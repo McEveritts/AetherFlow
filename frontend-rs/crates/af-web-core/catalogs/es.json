@@ -718,6 +718,8 @@
   "Imported event": "Evento importado",
   "Imported history estimates": "Estimaciones de historia importadas",
   "Inbox": {
+    "approveQueueRestart": "Aprobar y encolar reinicio",
+    "approvedUnconfirmed": "La acción se aprobó sin un recibo de ejecución confirmado. Inspeccione el estado del servicio y los registros en lugar de repetir este comando.",
     "awaitingApprovalCount": "{count} acciones pendientes de aprobación humana",
     "commandBreakdownHeading": "Comando y radio de impacto",
     "coreImpactWarning": "Impacto en el plano de control central: aprobar este reinicio recicla {target} mediante una unidad transitoria diferida.",
@@ -727,6 +729,8 @@
     "managerLabel": "Gestor de servicios",
     "operationLabel": "Operación",
     "parametersHeading": "Parámetros de la acción",
+    "queuedBanner": "Reinicio diferido en cola (recibo: {receipt}). Esperando confirmación del recibo duradero y disponibilidad de la API; no repita esta aprobación.",
+    "receiptLabel": "Recibo de reinicio",
     "riskLabel": "Clasificación de riesgo",
     "subsystemGate": "Propuesta de subsistema",
     "summaryCriticalHigh": "Crítico y alto",
@@ -735,6 +739,7 @@
     "summaryMedium": "Medio / Advertencia",
     "summaryRegion": "Resumen de la cola de aprobación",
     "targetLabel": "Destino / Recurso",
+    "unavailableBanner": "El resultado del reinicio diferido no está disponible. Inspeccione el estado del servicio y los registros antes de reintentar; no asuma que el reinicio se ejecutó.",
     "unresolved": "Pendiente de decisión"
   },
   "Include policy-excluded evidence": "Incluir evidencia excluida por políticas",

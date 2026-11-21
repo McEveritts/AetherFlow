@@ -1305,18 +1305,188 @@ async fn control_service_handler(
     }))).into_response()
 }
 
+pub(crate) fn is_valid_core_restart_job_unit(unit: &str) -> bool {
+    let trimmed = unit.trim();
+    !trimmed.is_empty()
+        && trimmed == unit
+        && trimmed.starts_with("aetherflow-self-update-restart-")
+        && af_models::is_valid_self_update_job_unit_name(trimmed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoreRestartReceiptOutcome {
+    Working,
+    Succeeded,
+    Failed,
+    Missing,
+    Corrupt,
+    TransientUnavailable,
+}
+
+fn classify_core_restart_receipt(
+    unit: &str,
+    result: &anyhow::Result<af_models::SelfUpdateJobStatus>,
+) -> CoreRestartReceiptOutcome {
+    match result {
+        Ok(status) => {
+            if status.job_unit != status.job_unit.trim()
+                || status.validate_invariants(Some(unit)).is_err()
+            {
+                return CoreRestartReceiptOutcome::Corrupt;
+            }
+            if status.completed && status.success && status.status == "succeeded" {
+                CoreRestartReceiptOutcome::Succeeded
+            } else if (status.completed && !status.success)
+                || matches!(status.status.as_str(), "failed" | "recovery_required")
+            {
+                CoreRestartReceiptOutcome::Failed
+            } else if !status.completed
+                && matches!(
+                    status.status.as_str(),
+                    "initiated" | "queued" | "launching" | "running"
+                )
+            {
+                CoreRestartReceiptOutcome::Working
+            } else {
+                CoreRestartReceiptOutcome::Corrupt
+            }
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("not found") || msg.contains("Not found") {
+                CoreRestartReceiptOutcome::Missing
+            } else if msg.contains("corrupt self-update status file")
+                || msg.contains("contradictory self-update status")
+                || msg.contains("invalid self-update job_unit")
+            {
+                CoreRestartReceiptOutcome::Corrupt
+            } else {
+                CoreRestartReceiptOutcome::TransientUnavailable
+            }
+        }
+    }
+}
+
+fn core_restart_outcome_log(unit: &str, outcome: &CoreRestartReceiptOutcome) -> Option<String> {
+    match outcome {
+        CoreRestartReceiptOutcome::Succeeded => Some(format!(
+            "Deferred core restart confirmed via durable receipt '{unit}'."
+        )),
+        CoreRestartReceiptOutcome::Failed => Some(format!(
+            "Deferred core restart failed per durable receipt '{unit}'; inspect service logs and readiness."
+        )),
+        CoreRestartReceiptOutcome::Missing => Some(format!(
+            "Deferred core restart receipt '{unit}' was not found; check service state and logs before retrying."
+        )),
+        CoreRestartReceiptOutcome::Corrupt => Some(format!(
+            "Deferred core restart receipt '{unit}' could not be verified; check service state and logs before retrying."
+        )),
+        CoreRestartReceiptOutcome::TransientUnavailable => Some(format!(
+            "Deferred core restart receipt '{unit}' is currently unavailable; check service state and logs before retrying."
+        )),
+        CoreRestartReceiptOutcome::Working => None,
+    }
+}
+
+fn reconcile_core_restart_receipt_by_unit(unit: &str, outcome: &CoreRestartReceiptOutcome) {
+    let final_status = match outcome {
+        CoreRestartReceiptOutcome::Succeeded => Some("executed"),
+        CoreRestartReceiptOutcome::Failed => Some("failed"),
+        CoreRestartReceiptOutcome::Missing | CoreRestartReceiptOutcome::Corrupt => {
+            Some("unavailable")
+        }
+        CoreRestartReceiptOutcome::Working | CoreRestartReceiptOutcome::TransientUnavailable => {
+            None
+        }
+    };
+    if let (Some(status), Some(log)) = (final_status, core_restart_outcome_log(unit, outcome)) {
+        if let Err(err) = af_db::finalize_queued_action_by_job_unit(unit, status, &log) {
+            tracing::warn!(%unit, %status, error = %err, "Failed to reconcile pending action for core restart receipt");
+        }
+    }
+}
+
+pub(crate) async fn reconcile_pending_action(
+    mut action: af_db::PendingAction,
+) -> af_db::PendingAction {
+    if action.status != "queued" {
+        return action;
+    }
+    let unit = action.job_unit.as_deref().map(str::trim).unwrap_or("");
+    if !is_valid_core_restart_job_unit(unit) {
+        let log = "Deferred core restart action is missing a valid receipt identity; check service state and logs before retrying.";
+        if let Ok(Some(updated)) = af_db::mark_action_unavailable(action.id, None, log) {
+            return updated;
+        }
+        action.status = "unavailable".into();
+        action.execution_log = Some(log.into());
+        return action;
+    }
+
+    let status_req = af_models::SelfUpdateStatusRequest {
+        job_unit: unit.to_string(),
+    };
+    let result = af_runner::dispatch_self_update_status_request(&status_req).await;
+    let outcome = classify_core_restart_receipt(unit, &result);
+    match outcome {
+        CoreRestartReceiptOutcome::Working => action,
+        CoreRestartReceiptOutcome::TransientUnavailable => {
+            action.status = "unavailable".into();
+            action.execution_log = core_restart_outcome_log(unit, &outcome);
+            action
+        }
+        CoreRestartReceiptOutcome::Succeeded
+        | CoreRestartReceiptOutcome::Failed
+        | CoreRestartReceiptOutcome::Missing
+        | CoreRestartReceiptOutcome::Corrupt => {
+            let final_status = match outcome {
+                CoreRestartReceiptOutcome::Succeeded => "executed",
+                CoreRestartReceiptOutcome::Failed => "failed",
+                CoreRestartReceiptOutcome::Missing | CoreRestartReceiptOutcome::Corrupt => {
+                    "unavailable"
+                }
+                CoreRestartReceiptOutcome::Working
+                | CoreRestartReceiptOutcome::TransientUnavailable => unreachable!(),
+            };
+            let log = core_restart_outcome_log(unit, &outcome).unwrap_or_default();
+            match af_db::finalize_queued_action_by_id(action.id, unit, final_status, &log) {
+                Ok(Some(updated)) => updated,
+                _ => {
+                    action.status = final_status.into();
+                    action.execution_log = Some(log);
+                    action
+                }
+            }
+        }
+    }
+}
+
 async fn get_core_restart_status(Query(query): Query<HashMap<String, String>>) -> Response {
     let unit = query.get("job_unit").map(String::as_str).unwrap_or("");
-    if !unit.starts_with("aetherflow-self-update-restart-")
-        || !af_models::is_valid_self_update_job_unit_name(unit)
-    {
+    if !is_valid_core_restart_job_unit(unit) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "INVALID_RESTART_RECEIPT",
             "A valid core restart receipt is required",
         );
     }
-    crate::storage::get_system_update_status(Query(query)).await
+    if query
+        .get("action")
+        .is_some_and(|expected| expected != "restart")
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Update action does not match job identity",
+        );
+    }
+    let status_req = af_models::SelfUpdateStatusRequest {
+        job_unit: unit.to_string(),
+    };
+    let result = af_runner::dispatch_self_update_status_request(&status_req).await;
+    let outcome = classify_core_restart_receipt(unit, &result);
+    reconcile_core_restart_receipt_by_unit(unit, &outcome);
+    crate::storage::render_self_update_status_response(unit, result)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3473,6 +3643,25 @@ async fn get_notification_channels() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "channels": channels }))
 }
 
+async fn reconcile_queued_actions_for_list() -> HashMap<i64, (String, Option<String>)> {
+    let mut transient_overlays = HashMap::new();
+    let Ok(queued) = af_db::list_queued_actions_with_receipts(100) else {
+        return transient_overlays;
+    };
+    for action in queued {
+        let id = action.id;
+        let reconciled = reconcile_pending_action(action).await;
+        if reconciled.status == "unavailable" {
+            if let Ok(Some(persisted)) = af_db::get_pending_action_by_id(id) {
+                if persisted.status == "queued" {
+                    transient_overlays.insert(id, (reconciled.status, reconciled.execution_log));
+                }
+            }
+        }
+    }
+    transient_overlays
+}
+
 async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Response {
     let status_filter = q
         .get("status")
@@ -3482,12 +3671,20 @@ async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Respo
 
     if !matches!(
         status_filter,
-        "pending" | "approved" | "approved_history" | "rejected" | "executed" | "failed" | "all"
+        "pending"
+            | "approved"
+            | "queued"
+            | "approved_history"
+            | "rejected"
+            | "executed"
+            | "failed"
+            | "unavailable"
+            | "all"
     ) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Invalid status filter. Use: pending, approved, approved_history, rejected, executed, failed, all",
+            "Invalid status filter. Use: pending, approved, queued, approved_history, rejected, executed, failed, unavailable, all",
         );
     }
 
@@ -3503,7 +3700,13 @@ async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Respo
         .unwrap_or(0)
         .min(i64::MAX as usize);
 
-    let (actions, total) =
+    let transient_overlays = if !matches!(status_filter, "pending" | "rejected") {
+        reconcile_queued_actions_for_list().await
+    } else {
+        HashMap::new()
+    };
+
+    let (mut actions, total) =
         match af_db::query_pending_actions(status_filter, limit as i64, offset as i64) {
             Ok(result) => result,
             Err(_) => {
@@ -3514,6 +3717,16 @@ async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Respo
                 )
             }
         };
+    if !transient_overlays.is_empty() {
+        for action in &mut actions {
+            if let Some((status, log)) = transient_overlays.get(&action.id) {
+                action.status = status.clone();
+                if log.is_some() {
+                    action.execution_log = log.clone();
+                }
+            }
+        }
+    }
     let count = actions.len();
     Json(serde_json::json!({
         "actions": actions,
@@ -3578,22 +3791,68 @@ fn parse_action_gate_service_command(raw_action: &str) -> Result<(String, String
     ))
 }
 
+fn is_ambiguous_core_restart_dispatch_error(error: &anyhow::Error) -> bool {
+    if af_runner::is_lifecycle_busy(error) {
+        return false;
+    }
+    for cause in error.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::PermissionDenied
+            ) {
+                return false;
+            }
+        }
+    }
+    let msg = error.to_string();
+    if msg.contains("Core restart already failed")
+        || msg.contains("Could not schedule core restart: Ok(")
+        || msg.contains("runner core restart error: Invalid")
+        || msg.contains("disallowed")
+    {
+        return false;
+    }
+    true
+}
+
+async fn already_resolved_conflict_response(existing: af_db::PendingAction) -> Response {
+    let reconciled = reconcile_pending_action(existing).await;
+    let message = match reconciled.status.as_str() {
+        "queued" => match reconciled.job_unit.as_deref() {
+            Some(unit) => format!(
+                "Action already approved; deferred restart is queued (receipt: {unit}). Poll its receipt instead of retrying."
+            ),
+            None => "Action already approved; deferred restart is queued. Check its status instead of retrying.".into(),
+        },
+        "unavailable" => "Action already approved, but its deferred restart outcome is unavailable; inspect service state and logs instead of retrying.".into(),
+        "approved" => "Action already approved without a confirmed execution outcome; inspect service state and logs instead of retrying.".into(),
+        other => format!("Action already resolved: {other}"),
+    };
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "code": "CONFLICT",
+            "message": message,
+            "status": reconciled.status,
+            "job_unit": reconciled.job_unit,
+            "action": reconciled,
+        })),
+    )
+        .into_response()
+}
+
 async fn approve_action(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(message) = system_update_lifecycle_block().await {
-        return message.into_response();
-    }
     let existing = match af_db::get_pending_action_by_id(id) {
         Ok(Some(existing)) => {
             if existing.status != "pending" {
-                return api_error(
-                    StatusCode::CONFLICT,
-                    "CONFLICT",
-                    format!("Action already resolved: {}", existing.status),
-                );
+                return already_resolved_conflict_response(existing).await;
             }
             existing
         }
@@ -3608,6 +3867,10 @@ async fn approve_action(
             );
         }
     };
+
+    if let Some(message) = system_update_lifecycle_block().await {
+        return message.into_response();
+    }
 
     let (svc_name, svc_act, managed_by) = match parse_action_gate_service_command(&existing.action)
     {
@@ -3637,26 +3900,19 @@ async fn approve_action(
         }
     };
 
-    let Ok(mut action) = af_db::resolve_action(id, "approved", &auth_user.username) else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            "Action not found or already resolved",
-        );
-    };
-
-    let manager = managed_by.trim();
-    let deferred = svc_act == "restart"
-        && matches!(
-            target.trim_end_matches(".service"),
-            "aetherflow-api" | "aetherflow-runner"
-        );
-    let exec_res = if deferred {
-        af_runner::dispatch_core_restart(&target).await.map(|_| ())
-    } else if manager.is_empty() {
-        af_services::control_service(&target, &svc_act).await
-    } else {
-        af_services::control_service_with_manager(&target, &svc_act, manager).await
+    let mut action = match af_db::resolve_action(id, "approved", &auth_user.username) {
+        Ok(action) => action,
+        Err(_) => match af_db::get_pending_action_by_id(id) {
+            Ok(Some(current)) => return already_resolved_conflict_response(current).await,
+            Ok(None) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Action not found"),
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to query action",
+                );
+            }
+        },
     };
 
     let ip = extract_client_ip(&headers);
@@ -3664,6 +3920,173 @@ async fn approve_action(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+
+    let manager = managed_by.trim();
+    let deferred = svc_act == "restart"
+        && matches!(
+            target.trim_end_matches(".service"),
+            "aetherflow-api" | "aetherflow-runner"
+        );
+
+    if deferred {
+        match af_runner::dispatch_core_restart(&target).await {
+            Ok(job_unit) if is_valid_core_restart_job_unit(&job_unit) => {
+                let log_msg = format!(
+                    "Deferred restart queued for '{}' by {} (receipt: {}); awaiting durable receipt confirmation.",
+                    target, auth_user.username, job_unit
+                );
+                let queued_action = match af_db::mark_action_queued(id, &job_unit, &log_msg) {
+                    Ok(updated) => updated,
+                    Err(err) => {
+                        tracing::error!(
+                            action_id = id,
+                            %job_unit,
+                            error = %err,
+                            "Deferred core restart was scheduled, but persisting its receipt on pending_actions failed"
+                        );
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(serde_json::json!({
+                                "code": "RESTART_RECEIPT_PERSISTENCE_FAILED",
+                                "message": "Deferred restart was scheduled, but saving its receipt failed; poll the receipt and inspect service logs instead of retrying.",
+                                "job_unit": job_unit,
+                                "action": action,
+                            })),
+                        )
+                            .into_response();
+                    }
+                };
+                af_services::mutators::clear_app_runtime_meta_cache();
+                af_db::record_audit(
+                    auth_user.user_id,
+                    &auth_user.username,
+                    "action_approve",
+                    "action_gate",
+                    &id.to_string(),
+                    &format!("{} (receipt: {})", queued_action.action, job_unit),
+                    &ip,
+                    ua,
+                );
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(serde_json::json!({
+                        "status": "queued",
+                        "message": "Action approved; deferred restart queued. Poll its receipt before checking readiness.",
+                        "job_unit": job_unit,
+                        "action": queued_action,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(invalid_unit) => {
+                let err_msg = format!(
+                    "Deferred restart for '{}' returned an invalid receipt identity ('{}'); check service state and logs before retrying.",
+                    target, invalid_unit
+                );
+                let updated = af_db::mark_action_unavailable(id, None, &err_msg)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(action);
+                af_db::record_audit(
+                    auth_user.user_id,
+                    &auth_user.username,
+                    "action_approve_failed",
+                    "action_gate",
+                    &id.to_string(),
+                    &existing.action,
+                    &ip,
+                    ua,
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "code": "RESTART_RECEIPT_UNAVAILABLE",
+                        "message": "Deferred restart was accepted without a valid receipt identity; check service state and logs before retrying.",
+                        "status": updated.status,
+                        "action": updated,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                if af_runner::is_lifecycle_busy(&e) {
+                    let err_msg = format!(
+                        "Deferred restart for '{}' was not started because another lifecycle operation is active.",
+                        target
+                    );
+                    af_db::mark_action_failed(id, &err_msg);
+                    af_db::record_audit(
+                        auth_user.user_id,
+                        &auth_user.username,
+                        "action_approve_failed",
+                        "action_gate",
+                        &id.to_string(),
+                        &existing.action,
+                        &ip,
+                        ua,
+                    );
+                    return api_error(
+                        StatusCode::CONFLICT,
+                        "LIFECYCLE_BUSY",
+                        af_runner::LifecycleBusy.to_string(),
+                    );
+                }
+                if is_ambiguous_core_restart_dispatch_error(&e) {
+                    let err_msg = format!(
+                        "Deferred restart dispatch for '{}' could not be confirmed with a durable receipt; check service state and logs before retrying.",
+                        target
+                    );
+                    let updated = af_db::mark_action_unavailable(id, None, &err_msg)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(action);
+                    af_db::record_audit(
+                        auth_user.user_id,
+                        &auth_user.username,
+                        "action_approve_failed",
+                        "action_gate",
+                        &id.to_string(),
+                        &existing.action,
+                        &ip,
+                        ua,
+                    );
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "code": "RESTART_RECEIPT_UNAVAILABLE",
+                            "message": "Deferred restart outcome could not be confirmed with a durable receipt; inspect service state and logs instead of retrying.",
+                            "status": updated.status,
+                            "action": updated,
+                        })),
+                    )
+                        .into_response();
+                }
+                let err_msg = format!("Failed to {} service '{}': {}", svc_act, target, e);
+                af_db::mark_action_failed(id, &err_msg);
+                af_db::record_audit(
+                    auth_user.user_id,
+                    &auth_user.username,
+                    "action_approve_failed",
+                    "action_gate",
+                    &id.to_string(),
+                    &existing.action,
+                    &ip,
+                    ua,
+                );
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "ACTION_EXECUTION_FAILED",
+                    "Approved service action failed to execute; check service diagnostics.",
+                );
+            }
+        }
+    }
+
+    let exec_res = if manager.is_empty() {
+        af_services::control_service(&target, &svc_act).await
+    } else {
+        af_services::control_service_with_manager(&target, &svc_act, manager).await
+    };
 
     match exec_res {
         Ok(()) => {
@@ -3781,6 +4204,10 @@ mod http_lifecycle_regressions;
 #[cfg(all(test, unix))]
 #[path = "services_readiness_regressions.rs"]
 mod services_readiness_regressions;
+
+#[cfg(all(test, unix))]
+#[path = "approval_restart_regressions.rs"]
+mod approval_restart_regressions;
 
 #[cfg(all(test, unix))]
 mod update_error_regressions {

@@ -718,6 +718,8 @@
   "Imported event": "Importeret begivenhed",
   "Imported history estimates": "Importerede historieestimater",
   "Inbox": {
+    "approveQueueRestart": "Godkend og sæt genstart i kø",
+    "approvedUnconfirmed": "Handlingen blev godkendt uden en bekræftet udførelseskvittering. Efterse tjenestestatus og logfiler i stedet for at gentage kommandoen.",
     "awaitingApprovalCount": "{count} handlinger afventer menneskelig godkendelse",
     "commandBreakdownHeading": "Kommando og påvirkningsradius",
     "coreImpactWarning": "Påvirkning af kernestyringsplan: godkendelse genstarter {target} via en udskudt midlertidig enhed.",
@@ -727,6 +729,8 @@
     "managerLabel": "Tjenestestyring",
     "operationLabel": "Handling",
     "parametersHeading": "Handlingsparametre",
+    "queuedBanner": "Udskudt genstart sat i kø (kvittering: {receipt}). Afventer holdbar kvitteringsbekræftelse og API-parathed; gentag ikke denne godkendelse.",
+    "receiptLabel": "Genstartskvittering",
     "riskLabel": "Risikoklassificering",
     "subsystemGate": "Undersystemforslag",
     "summaryCriticalHigh": "Kritisk og høj",
@@ -735,6 +739,7 @@
     "summaryMedium": "Mellem / Advarsel",
     "summaryRegion": "Oversigt over godkendelseskø",
     "targetLabel": "Mål / Ressource",
+    "unavailableBanner": "Resultatet af den udskudte genstart er utilgængeligt. Kontroller tjenestestatus og logfiler før nyt forsøg; antag ikke, at genstarten blev udført.",
     "unresolved": "Afventer beslutning"
   },
   "Include policy-excluded evidence": "Inkluder politik-ekskluderede beviser",

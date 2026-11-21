@@ -78,6 +78,7 @@ To prevent destructive autonomous actions, FlowAI is constrained by the **Action
 3. **Queue**: The action is serialized into `pending_actions` and placed in the **Approval Inbox** tab in the UI.
 4. **Human Review**: The administrator reviews the command and its justification.
 5. **Execution**: Only upon clicking **Approve** does `af-api` dispatch the allowlisted request over `/run/aetherflow/runner.sock` and record the resolution in `admin_audit_log`.
+6. **Deferred Core Restarts**: Approving a restart of `aetherflow-api` or `aetherflow-runner` schedules a deferred transient unit via `af-runner`, persists its `job_unit` receipt on `pending_actions`, and returns `202 Accepted` (`status: "queued"`). The action remains `queued` (and retries return `409 Conflict` without replaying host work) until the durable receipt confirms `executed`, `failed`, or `unavailable` via `/api/v1/admin/services/restart/status` and Approval Inbox reads.
 
 > [!WARNING]
 > While FlowAI is designed for safety, never approve an action you do not understand.

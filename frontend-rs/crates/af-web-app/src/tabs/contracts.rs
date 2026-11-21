@@ -343,6 +343,7 @@ pub struct ActionApprovalRequest {
     pub risk_level: String,
     pub classification: String,
     pub created_at: String,
+    pub job_unit: Option<String>,
     pub target: Option<Value>,
     pub resource: Option<Value>,
     pub service: Option<Value>,
