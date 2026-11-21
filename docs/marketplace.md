@@ -93,6 +93,8 @@ System-update receipts distinguish **launching** from **running**. A live launch
 
 Marketplace install, reinstall, update, and uninstall use the [package API](API.md). The API allocates or reuses the port and submits a job to the privileged runner. Installers may create a dedicated service account and register one or more units. Readiness, lifecycle receipts, and ingress configuration determine when the UI reports the app ready. Install and removal logs appear in System Logs.
 
-**Open App** in Marketplace and Services uses the configured app address. On a managed public HTTPS route for Autoscan, FlareSolverr, McVNC, Netdata, Prometheus, Scrutiny, Threadfin, or Unmanic, an administrator's dashboard session authorizes a one-time launch. The browser exchanges the ticket on the app host for a host-scoped session cookie. Signing out or revoking the dashboard session also invalidates that cookie. ruTorrent continues to use its Apache authentication.
+**Open App** in Marketplace and Services uses the configured app address. On a managed public HTTPS route for Autoscan, FlareSolverr, Jackett, McVNC, Netdata, Prometheus, Scrutiny, Threadfin, or Unmanic, an administrator's dashboard session authorizes a one-time launch. The browser exchanges the ticket on the app host for a host-scoped session cookie. Signing out or revoking the dashboard session also invalidates that cookie. ruTorrent continues to use its Apache authentication.
+
+If an app prompts you to create an administrator on first launch, complete that setup through its internal address before enabling external access. A public route can expose the setup screen while the app's own authentication is still unconfigured.
 
 Use the catalog's service name with [runner-mediated CLI controls](rust-admin-cli.md), for example `af service status plexmediaserver`. Packages that share a service, such as Nextcloud and ruTorrent on Apache, also share the effects of restarting that service.
