@@ -74,29 +74,35 @@ function _bashrc() {
 # intro function (1)
 # shellcheck disable=2005,2312
 function _intro() {
-	if [[ -r /etc/os-release ]]; then
-		# shellcheck disable=1091
-		. /etc/os-release
+	local os_release_file=""
+	if [[ -n "${AF_OS_RELEASE_FILE:-}" && -r "${AF_OS_RELEASE_FILE}" ]]; then
+		os_release_file="${AF_OS_RELEASE_FILE}"
+	elif [[ -z "${AF_OS_RELEASE_FILE:-}" && -r /etc/os-release ]]; then
+		os_release_file="/etc/os-release"
+	fi
+	if [[ -n "${os_release_file}" ]]; then
+		# shellcheck disable=1090,1091
+		. "${os_release_file}"
 		OS_ID="${ID:-}"
-		if [[ "${ID}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
-		if [[ "${ID}" == "debian" ]]; then DISTRO="Debian"; fi
+		if [[ "${ID:-}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
+		if [[ "${ID:-}" == "debian" ]]; then DISTRO="Debian"; fi
 		# Kali Linux is Debian-based (ID=kali, ID_LIKE=debian). Treat as Debian.
-		if [[ "${ID}" == "kali" ]]; then
+		if [[ "${ID:-}" == "kali" ]]; then
 			DISTRO="Debian"
-			[[ -z "${VERSION_ID}" ]] && VERSION_ID="12"
+			[[ -z "${VERSION_ID:-}" ]] && VERSION_ID="12"
 		fi
-		CODENAME="${VERSION_CODENAME}"
-		VERSION_ID="${VERSION_ID}"
-		if [[ "${DISTRO}" == "Debian" ]]; then
-			if [[ -z "${CODENAME}" && -n "${VERSION_CODENAME}" ]]; then
+		CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+		VERSION_ID="${VERSION_ID:-}"
+		if [[ "${DISTRO:-}" == "Debian" ]]; then
+			if [[ -z "${CODENAME}" && -n "${VERSION_CODENAME:-}" ]]; then
 				CODENAME="${VERSION_CODENAME}"
 			fi
-			if [[ -z "${VERSION_ID}" && ("${CODENAME}" == "trixie" || "${VERSION_CODENAME}" == "trixie" || "${PRETTY_NAME}" =~ [Tt]rixie) ]]; then
+			if [[ -z "${VERSION_ID}" && ("${CODENAME}" == "trixie" || "${VERSION_CODENAME:-}" == "trixie" || "${PRETTY_NAME:-}" =~ [Tt]rixie) ]]; then
 				VERSION_ID="13"
 				[[ -z "${CODENAME}" ]] && CODENAME="trixie"
 			fi
 		fi
-		SETNAME="${VERSION_ID} ${VERSION_CODENAME}"
+		SETNAME="${VERSION_ID} ${CODENAME}"
 	elif command -v lsb_release >/dev/null 2>&1; then
 		DISTRO=$(lsb_release -is)
 		CODENAME=$(lsb_release -cs)
@@ -185,18 +191,20 @@ function _intro() {
 }
 
 function _ensure_distro_vars() {
-	if [[ -z "${DISTRO:-}" || -z "${CODENAME:-}" ]] && [[ -r /etc/os-release ]]; then
-		# shellcheck disable=1091
-		. /etc/os-release
+	local os_release_file="${AF_OS_RELEASE_FILE:-/etc/os-release}"
+	if [[ -z "${DISTRO:-}" || -z "${CODENAME:-}" ]] && [[ -r "${os_release_file}" ]]; then
+		# shellcheck disable=1090,1091
+		. "${os_release_file}"
 		OS_ID="${OS_ID:-${ID:-}}"
 		if [[ -z "${DISTRO:-}" ]]; then
 			if [[ "${ID:-}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
 			if [[ "${ID:-}" == "debian" || "${ID:-}" == "kali" ]]; then DISTRO="Debian"; fi
 		fi
-		CODENAME="${CODENAME:-${VERSION_CODENAME:-}}"
+		CODENAME="${CODENAME:-${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}}"
 		VERSION_ID="${VERSION_ID:-}"
-		if [[ "${DISTRO:-}" == "Debian" && -z "${VERSION_ID}" && "${CODENAME}" == "trixie" ]]; then
+		if [[ "${DISTRO:-}" == "Debian" && -z "${VERSION_ID}" && ("${CODENAME}" == "trixie" || "${PRETTY_NAME:-}" =~ [Tt]rixie) ]]; then
 			VERSION_ID="13"
+			[[ -z "${CODENAME}" ]] && CODENAME="trixie"
 		fi
 		SETNAME="${SETNAME:-${VERSION_ID} ${CODENAME}}"
 	fi
@@ -273,6 +281,8 @@ function _checkkernel() {
 					apt-get install -q -y linux-image-686 >>"${OUTTO}" 2>&1
 				elif [[ ${arch} == x86_64 ]]; then
 					apt-get install -q -y linux-image-amd64 >>"${OUTTO}" 2>&1
+				elif [[ ${arch} == aarch64 || ${arch} == arm64 ]]; then
+					apt-get install -q -y linux-image-arm64 >>"${OUTTO}" 2>&1
 				fi
 			fi
 			mv /etc/grub.d/06_OVHkernel /etc/grub.d/25_OVHkernel

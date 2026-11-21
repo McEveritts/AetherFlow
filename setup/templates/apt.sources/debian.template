@@ -3,18 +3,14 @@
 #------------------------------------------------------------------------------#
 
 ###### Debian Update Repos
-deb https://deb.debian.org/debian/ RELEASE main contrib non-free non-free-firmware
-deb-src https://deb.debian.org/debian/ RELEASE main contrib non-free non-free-firmware
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian/ RELEASE main contrib non-free non-free-firmware
+deb-src [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian/ RELEASE main contrib non-free non-free-firmware
 
-deb https://deb.debian.org/debian/ RELEASE-updates main contrib non-free non-free-firmware
-deb-src https://deb.debian.org/debian/ RELEASE-updates main contrib non-free non-free-firmware
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian/ RELEASE-updates main contrib non-free non-free-firmware
+deb-src [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian/ RELEASE-updates main contrib non-free non-free-firmware
 
-deb https://deb.debian.org/debian-security/ RELEASE-security main contrib non-free non-free-firmware
-deb-src https://deb.debian.org/debian-security/ RELEASE-security main contrib non-free non-free-firmware
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian-security/ RELEASE-security main contrib non-free non-free-firmware
+deb-src [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian-security/ RELEASE-security main contrib non-free non-free-firmware
 
-deb https://deb.debian.org/debian/ RELEASE-backports main contrib non-free non-free-firmware
-deb-src https://deb.debian.org/debian/ RELEASE-backports main contrib non-free non-free-firmware
-
-
-
-
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian/ RELEASE-backports main contrib non-free non-free-firmware
+deb-src [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian/ RELEASE-backports main contrib non-free non-free-firmware

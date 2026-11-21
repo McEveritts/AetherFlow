@@ -1,0 +1,17 @@
+#------------------------------------------------------------------------------#
+#                    OFFICIAL UBUNTU PORTS REPOS (ARM64)                       #
+#------------------------------------------------------------------------------#
+
+###### Ubuntu Ports Main Repos
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE main restricted universe multiverse
+deb-src [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE main restricted universe multiverse
+
+###### Ubuntu Ports Update & Security Repos
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE-security main restricted universe multiverse
+deb-src [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE-security main restricted universe multiverse
+
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE-updates main restricted universe multiverse
+deb-src [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE-updates main restricted universe multiverse
+
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE-backports main restricted universe multiverse
+deb-src [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ RELEASE-backports main restricted universe multiverse
