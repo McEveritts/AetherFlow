@@ -2294,8 +2294,8 @@ pub fn record_audit(
     ip_address: &str,
     user_agent: &str,
 ) {
-    if let Ok(conn) = get_conn() {
-        let _ = conn.execute(
+    let result = get_conn().and_then(|conn| {
+        conn.execute(
             "INSERT INTO admin_audit_log (user_id, username, action, target_type, target_id, detail, ip_address, user_agent) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -2308,7 +2308,11 @@ pub fn record_audit(
                 ip_address,
                 user_agent
             ],
-        );
+        )
+        .map_err(Into::into)
+    });
+    if let Err(error) = result {
+        tracing::error!(%error, "Could not persist administrator audit entry");
     }
 }
 

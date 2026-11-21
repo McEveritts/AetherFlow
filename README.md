@@ -143,8 +143,8 @@ AetherFlow manages **77 native Linux packages** across 7 infrastructure domains,
 AetherFlow treats AI output as untrusted until verified by an operator:
 
 1. **Multi-Provider Routing** — Native support for **Google Gemini**, **Anthropic Claude**, **OpenAI**, **Ollama**, and **LM Studio** with API credentials encrypted at rest using **AES-256-GCM** (`enc:v1:`).
-2. **Action Approval Gate** — FlowAI can inspect telemetry and service health, but any state-mutating remediation (restarting units, clearing locks, modifying quotas) is serialized into the **Approval Inbox** (`pending_actions`) and requires explicit administrator authorization before execution.
-3. **Immutable Audit Trail** — Every login, 2FA verification, package lifecycle event, McBrowser file mutation, and AI action resolution is recorded in the administrator audit log.
+2. **Action Approval Gate** — FlowAI can inspect telemetry and service health. Supported service start, stop, and restart actions require administrator approval in the **Approval Inbox** (`pending_actions`) before dispatch.
+3. **Administrator Audit Log** — AetherFlow writes authentication, package lifecycle, McBrowser mutation, and approval events to SQLite. Failed audit writes appear in the API service log.
 
 ---
 
