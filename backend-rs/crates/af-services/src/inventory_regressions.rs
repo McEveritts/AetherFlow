@@ -525,7 +525,8 @@ fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
         resolve_controllable_service_units("scrutiny", "stop"),
         vec![
             "scrutiny-collector.timer".to_string(),
-            "scrutiny".to_string()
+            "scrutiny".to_string(),
+            "scrutiny-collector".to_string(),
         ]
     );
     assert_eq!(
