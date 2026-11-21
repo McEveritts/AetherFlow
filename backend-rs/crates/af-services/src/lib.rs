@@ -79,7 +79,11 @@ pub const CORE_SERVICE_IDS: [&str; 4] = [
     "apache2",
 ];
 
-const INVENTORY_CORE_UNITS: [&str; 3] = ["aetherflow-api", "aetherflow-frontend", "apache2"];
+const INVENTORY_CORE_UNITS: [(&str, &str); 3] = [
+    ("aetherflow-api", "AetherFlow API"),
+    ("aetherflow-runner", "AetherFlow Runner"),
+    ("apache2", "Apache2 Web Server"),
+];
 
 /// Validates a Services control request and returns the exact control target.
 ///
@@ -264,57 +268,34 @@ fn package_lock_installed(package: &Package) -> anyhow::Result<bool> {
     }
 }
 
-fn is_tls_cert_ready_for_domain(raw_domain: &str) -> bool {
-    let domain = raw_domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    if domain.is_empty() || domain.contains('/') || domain.contains("..") {
-        return false;
-    }
-
-    let mut candidate_domains = vec![domain.clone()];
-    let base_domain = resolve_base_domain()
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    if !base_domain.is_empty()
-        && base_domain != domain
-        && domain.ends_with(&format!(".{base_domain}"))
-    {
-        candidate_domains.push(base_domain);
-    }
-    if let Some((_, parent)) = domain.split_once('.') {
-        if parent.contains('.') && !candidate_domains.iter().any(|d| d == parent) {
-            candidate_domains.push(parent.to_string());
-        }
-    }
-
-    for cand in &candidate_domains {
-        let le_rel = format!("/etc/letsencrypt/live/{cand}/fullchain.pem");
-        if mutators::resolve_config_path(&le_rel).is_file()
-            || resolve_filesystem_path(&le_rel).is_file()
-        {
-            return true;
-        }
-    }
-
-    for ssl_dir in [
-        mutators::resolve_config_path("/etc/ssl/AetherFlow"),
-        resolve_filesystem_path("/etc/ssl/AetherFlow"),
-    ] {
-        if let Ok(entries) = fs::read_dir(&ssl_dir) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                if candidate_domains
-                    .iter()
-                    .any(|cand| fname.starts_with(cand.as_str()))
-                    && entry.path().is_file()
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
+fn public_app_vhost_enabled(app: &str, domain: &str, tls: bool) -> bool {
+    ["", "-le-ssl"].into_iter().any(|suffix| {
+        let path = mutators::resolve_config_path(&format!(
+            "/etc/apache2/sites-enabled/aetherflow-ext-{app}{suffix}.conf"
+        ));
+        let Ok(config) = fs::read_to_string(path) else {
+            return false;
+        };
+        // The runner renders an HTTP 503 vhost while the certificate is pending.
+        // A certificate file alone also says nothing about what Apache loaded.
+        config.split("</VirtualHost>").any(|vhost| {
+            let has_directive = |directive: &str, value: &str| {
+                vhost.lines().any(|line| {
+                    let mut words = line.split_whitespace();
+                    words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case(directive))
+                        && words
+                            .next()
+                            .is_some_and(|word| word.eq_ignore_ascii_case(value))
+                })
+            };
+            has_directive("ServerName", domain)
+                && has_directive("SSLEngine", "on") == tls
+                && !vhost.contains("TLS certificate provisioning pending")
+                && !vhost.contains("RewriteRule ^ https://")
+        })
+    })
 }
 
 fn launch_target(
@@ -325,7 +306,8 @@ fn launch_target(
     host: &str,
 ) -> (Option<String>, Option<String>) {
     let unavailable = || (None, Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.into()));
-    if !(1..=65535).contains(&port) {
+    let internal = resolve_app_internal_domain(app);
+    if !(1..=65535).contains(&port) || !af_models::valid_ingress_hostname(&internal) {
         return unavailable();
     }
     let path = if web_path != "/" && web_path.starts_with('/') && !web_path.starts_with("//") {
@@ -340,34 +322,16 @@ fn launch_target(
         ing.external_access_enabled
             && af_models::valid_ingress_hostname(&ing.public_domain)
             && (1..=65535).contains(&ing.listen_port)
+            && public_app_vhost_enabled(app, &ing.public_domain, ing.tls_enabled)
     }) {
         let domain = &ingress.public_domain;
-        if !ingress.tls_enabled {
-            return (
-                Some(format!("http://{domain}{path}")),
-                Some("public".to_string()),
-            );
-        }
-        if is_tls_cert_ready_for_domain(domain) {
-            return (
-                Some(format!("https://{domain}{path}")),
-                Some("public".to_string()),
-            );
-        }
-        if enabled_vhost.is_file() {
-            let internal = resolve_app_internal_domain(app);
-            return (
-                Some(format!("http://{internal}{path}")),
-                Some("internal".to_string()),
-            );
-        }
+        let scheme = if ingress.tls_enabled { "https" } else { "http" };
         return (
-            Some(format!("http://{domain}{path}")),
+            Some(format!("{scheme}://{domain}{path}")),
             Some("public".to_string()),
         );
     }
     if enabled_vhost.is_file() {
-        let internal = resolve_app_internal_domain(app);
         return (
             Some(format!("http://{internal}{path}")),
             Some("internal".to_string()),
@@ -931,8 +895,17 @@ pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
         "qbittorrent" => {
             qbittorrent_bind_scope(mutators::qbittorrent_web_bind_address().as_deref())
         }
-        "maintainerr" | "palate" | "kasmvnc" | "mcvnc" | "nextcloud" | "rutorrent" | "organizr"
-        | "seedcross" | "ombi" | "n8n" | "notifiarr" | "invidious" | "piped" => "loopback",
+        // Fresh installs of these web listeners bind to loopback. A managed
+        // vhost can expose them, but the backend port isn't a LAN URL.
+        "adguardhome" | "audiobookshelf" | "autobrr" | "autoscan" | "bazarr" | "dispatcharr"
+        | "filebot" | "filebrowser" | "flaresolverr" | "flood" | "gitea" | "homeassistant"
+        | "invidious" | "kasmvnc" | "kavita" | "librespeed" | "lidarr" | "listenarr"
+        | "maintainerr" | "mcvnc" | "n8n" | "navidrome" | "netdata" | "nextcloud" | "notifiarr"
+        | "novnc" | "nzbget" | "ombi" | "organizr" | "palate" | "paperless-ngx" | "piped"
+        | "prometheus" | "prowlarr" | "pyload" | "qui" | "radarr" | "rclone" | "readarr"
+        | "rutorrent" | "sabnzbd" | "scrutiny" | "seedcross" | "sonarr" | "syncthing"
+        | "tautulli" | "thelounge" | "threadfin" | "transmission" | "unmanic" | "vaultwarden"
+        | "znc" => "loopback",
         _ => "network",
     }
 }
@@ -1652,13 +1625,26 @@ pub fn get_active_services_with_jobs(
                 .get(&package.name)
                 .is_some_and(|outcome| outcome.status != "completed")
     };
-    let mut policies = policies_for_units(
-        INVENTORY_CORE_UNITS
+    let mut core_units = INVENTORY_CORE_UNITS.to_vec();
+    if ["/etc", "/run", "/usr/local/lib", "/usr/lib", "/lib"]
+        .into_iter()
+        .any(|root| {
+            mutators::resolve_config_path(&format!(
+                "{root}/systemd/system/aetherflow-frontend.service"
+            ))
+            .is_file()
+        })
+    {
+        core_units.push(("aetherflow-frontend", "AetherFlow Frontend"));
+    }
+    let core_policies = policies_for_units(
+        core_units
             .iter()
-            .map(|unit| unit.to_string())
+            .map(|(unit, _)| unit.to_string())
             .collect(),
         rclone_vfs_configured,
     );
+    let mut policies = core_policies.clone();
     let mut include_pm2 = false;
     for package in pkgs.iter().filter(|package| included(package)) {
         if package.service_type == "pm2" {
@@ -1677,88 +1663,32 @@ pub fn get_active_services_with_jobs(
         .collect();
     let observations = service_observations::collect(policies, include_pm2, metadata, deadline);
     let mut map = HashMap::new();
-    let core_info = |unit: &str| {
-        let (status, uptime, process, _) = service_info_from_observations(
-            unit,
-            policies_for_units(vec![unit.to_string()], rclone_vfs_configured),
-            |policy| observations.systemd(policy),
-        );
-        (status, uptime, process)
-    };
-
-    // 1. Core Systemd Services (AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
-    let (api_st, api_up, _api_unit) = core_info("aetherflow-api");
-    map.insert(
-        "AetherFlow API".to_string(),
-        ServiceStatusItem {
-            id: "aetherflow-api".to_string(),
-            status: api_st.clone(),
-            uptime: if api_up == "-" && api_st == "running" {
-                "Active".to_string()
-            } else {
-                api_up
+    for ((unit, label), policy) in core_units.into_iter().zip(core_policies) {
+        let (status, uptime, _, components) =
+            service_info_from_observations(unit, vec![policy], |policy| {
+                observations.systemd(policy)
+            });
+        map.insert(
+            label.to_string(),
+            ServiceStatusItem {
+                id: unit.to_string(),
+                status,
+                uptime,
+                version: if unit == "apache2" {
+                    "system".to_string()
+                } else {
+                    af_release::runtime::runtime_identity().version.clone()
+                },
+                managed_by: "systemd".to_string(),
+                process: unit.to_string(),
+                bind_scope: "network".to_string(),
+                control_scope: "service".to_string(),
+                components,
+                units: vec![unit.to_string()],
+                ..Default::default()
             },
-            version: af_release::runtime::runtime_identity().version.clone(),
-            managed_by: "systemd".to_string(),
-            process: "aetherflow-api".to_string(),
-            bind_scope: "network".to_string(),
-            control_scope: "service".to_string(),
-            components: vec![ServiceComponentStatus {
-                unit: "aetherflow-api".to_string(),
-                role: "required".to_string(),
-                status: api_st,
-                configured: true,
-            }],
-            units: vec!["aetherflow-api".to_string()],
-            ..Default::default()
-        },
-    );
-
-    let (fe_st, fe_up, _fe_unit) = core_info("aetherflow-frontend");
-    map.insert(
-        "AetherFlow Frontend".to_string(),
-        ServiceStatusItem {
-            id: "aetherflow-frontend".to_string(),
-            status: fe_st.clone(),
-            uptime: fe_up,
-            version: af_release::runtime::runtime_identity().version.clone(),
-            managed_by: "systemd".to_string(),
-            process: "aetherflow-frontend".to_string(),
-            bind_scope: "network".to_string(),
-            control_scope: "service".to_string(),
-            components: vec![ServiceComponentStatus {
-                unit: "aetherflow-frontend".to_string(),
-                role: "required".to_string(),
-                status: fe_st,
-                configured: true,
-            }],
-            units: vec!["aetherflow-frontend".to_string()],
-            ..Default::default()
-        },
-    );
-
-    let (apache_st, apache_up, _apache_unit) = core_info("apache2");
-    map.insert(
-        "Apache2 Web Server".to_string(),
-        ServiceStatusItem {
-            id: "apache2".to_string(),
-            status: apache_st.clone(),
-            uptime: apache_up,
-            version: "system".to_string(),
-            managed_by: "systemd".to_string(),
-            process: "apache2".to_string(),
-            bind_scope: "network".to_string(),
-            control_scope: "service".to_string(),
-            components: vec![ServiceComponentStatus {
-                unit: "apache2".to_string(),
-                role: "required".to_string(),
-                status: apache_st,
-                configured: true,
-            }],
-            units: vec!["apache2".to_string()],
-            ..Default::default()
-        },
-    );
+        );
+    }
 
     // 2. Installed & Active-Job Packages
     let ingress_map: HashMap<String, af_models::AppIngressConfig> =
@@ -1861,8 +1791,14 @@ pub fn get_active_services_with_jobs(
         let bind_scope = service_bind_scope_for_id(&p.name).to_string();
         let control_scope = service_control_scope_for_id(&p.name).to_string();
 
-        let (launch_url, launch_scope) =
-            launch_target(&p.name, active_port, &p.web_path, ing, &launch_host);
+        let (launch_url, launch_scope) = if p.launch_scope.as_deref() == Some("network")
+            && active_port != p.default_port
+            && ing.is_none_or(|config| config.listen_port <= 0)
+        {
+            launch_target(&p.name, active_port, &p.web_path, ing, &launch_host)
+        } else {
+            (p.launch_url.clone(), p.launch_scope.clone())
+        };
         let display_name = p.label_or_name();
         anyhow::ensure!(
             !map.contains_key(&display_name),
@@ -2773,6 +2709,9 @@ mod tests {
         }
         let fixture = crate::inventory_regressions::Fixture::new();
         env::set_var("AETHERFLOW_CONFIG_ROOT", &fixture.root);
+        let enabled = fixture.root.join("etc/apache2/sites-enabled");
+        fs::create_dir_all(&enabled).unwrap();
+        let public_vhost = enabled.join("aetherflow-ext-qbittorrent.conf");
         assert_eq!(qbittorrent_bind_scope(None), "loopback");
         assert_eq!(qbittorrent_bind_scope(Some("192.168.1.20")), "network");
         assert_eq!(
@@ -2789,12 +2728,20 @@ mod tests {
             listen_port: 8080,
             ..Default::default()
         };
+        let unpublished =
+            launch_target("qbittorrent", 8080, "/", Some(&ingress_http), "192.168.1.9");
+        assert_eq!(unpublished.0, None);
+        fs::write(
+            &public_vhost,
+            "<VirtualHost *:80>\n    ServerName qbit.example.test\n</VirtualHost>\n",
+        )
+        .unwrap();
         let launch_http =
             launch_target("qbittorrent", 8080, "/", Some(&ingress_http), "192.168.1.9");
         assert_eq!(launch_http.0.as_deref(), Some("http://qbit.example.test"));
         assert_eq!(launch_http.1.as_deref(), Some("public"));
 
-        // When tls_enabled=true and no cert exists on disk yet, keep accurate http:// scheme instead of broken https://
+        // The pending HTTP vhost only answers ACME requests.
         let ingress_tls = af_models::AppIngressConfig {
             public_domain: "qbit-unprovisioned.example.test".to_owned(),
             external_access_enabled: true,
@@ -2802,13 +2749,21 @@ mod tests {
             listen_port: 8080,
             ..Default::default()
         };
+        fs::write(
+            &public_vhost,
+            concat!(
+                "<VirtualHost *:80>\n    ServerName qbit-unprovisioned.example.test\n",
+                "    ErrorDocument 503 \"TLS certificate provisioning pending\"\n</VirtualHost>\n"
+            ),
+        )
+        .unwrap();
         let launch_unready =
             launch_target("qbittorrent", 8080, "/", Some(&ingress_tls), "192.168.1.9");
         assert_eq!(
-            launch_unready.0.as_deref(),
-            Some("http://qbit-unprovisioned.example.test")
+            launch_unready.1.as_deref(),
+            Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE)
         );
-        assert_eq!(launch_unready.1.as_deref(), Some("public"));
+        assert_eq!(launch_unready.0, None);
 
         let launch = launch_target("direct-launch-test", 8989, "/app", None, "192.168.1.9");
         assert_eq!(launch.0.as_deref(), Some("http://192.168.1.9:8989/app"));
@@ -3092,6 +3047,11 @@ mod tests {
             "n8n",
             "notifiarr",
             "invidious",
+            "radarr",
+            "adguardhome",
+            "librespeed",
+            "novnc",
+            "prometheus",
         ] {
             assert_eq!(
                 resolve_service_bind_scope(app),
@@ -3100,7 +3060,7 @@ mod tests {
                 app
             );
         }
-        assert_eq!(resolve_service_bind_scope("radarr"), "network");
+        assert_eq!(resolve_service_bind_scope("jellyfin"), "network");
         assert_eq!(resolve_service_web_scheme("kasmvnc", 6081), "https");
         assert_eq!(resolve_service_web_scheme("radarr", 7878), "http");
 
@@ -3549,7 +3509,7 @@ mod tests {
             )
         );
 
-        // 3. Provisioning `fullchain.pem` promotes external launch URL to `https://`
+        // 3. Provisioning a certificate is independent of enabling its HTTPS vhost.
         fs::write(
             root.join("etc/letsencrypt/live/sonarr.example.com/fullchain.pem"),
             "-----BEGIN CERTIFICATE-----\n",
@@ -3563,6 +3523,21 @@ mod tests {
             listen_port: 8989,
             ..Default::default()
         };
+        assert_eq!(
+            launch_target("sonarr", 8989, "/", Some(&ing_ready), "192.168.1.9")
+                .1
+                .as_deref(),
+            Some("internal")
+        );
+        fs::write(
+            root.join("etc/apache2/sites-enabled/aetherflow-ext-sonarr.conf"),
+            concat!(
+                "<VirtualHost *:80>\n    ServerName sonarr.example.com\n",
+                "    RewriteRule ^ https://sonarr.example.com%{REQUEST_URI} [R=308,L]\n</VirtualHost>\n",
+                "<VirtualHost *:443>\n    ServerName sonarr.example.com\n    SSLEngine On\n</VirtualHost>\n"
+            ),
+        )
+        .unwrap();
         let https_launch = launch_target("sonarr", 8989, "/", Some(&ing_ready), "192.168.1.9");
         assert_eq!(
             https_launch,
@@ -3629,8 +3604,17 @@ mod tests {
         );
         clear_service_status_cache();
         let services = get_active_services().unwrap();
-        assert_eq!(services["AetherFlow Frontend"].status, "stopped");
+        assert!(!services.contains_key("AetherFlow Frontend"));
+        assert_eq!(services["AetherFlow Runner"].status, "stopped");
         assert_eq!(services["AetherFlow API"].status, "stopped");
+
+        let unit = fixture
+            .root
+            .join("etc/systemd/system/aetherflow-frontend.service");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(unit, "[Service]\n").unwrap();
+        let legacy_services = get_active_services().unwrap();
+        assert_eq!(legacy_services["AetherFlow Frontend"].status, "stopped");
     }
 
     #[test]

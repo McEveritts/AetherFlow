@@ -319,8 +319,16 @@ pub(crate) fn launch_url_with_host(
         return None;
     }
     let explicit_launch = field(info, &["launch_url"]);
-    if explicit_launch.starts_with("http://") || explicit_launch.starts_with("https://") {
-        return Some(explicit_launch);
+    if !explicit_launch.is_empty() || info["launch_scope"].is_string() {
+        return url::Url::parse(&explicit_launch)
+            .ok()
+            .filter(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+            })
+            .map(|_| explicit_launch);
     }
     let path = field(info, &["web_path"]);
     let path = if path.is_empty() {

@@ -16,7 +16,7 @@ fn snapshots_bound_and_coalesce_slow_observations_without_caching_jobs() {
         })
         .collect();
     fixture.write_packages(&packages);
-    fixture.command("systemctl", "exec /usr/bin/python3 -c 'import os,signal,sys\nwith open(os.environ[\"AF_STATUS_CALLS\"], \"a\") as output: output.write(\" \".join(sys.argv[1:])+\"\\n\")\nassert sys.argv[1] == \"show\"\nif sys.argv[2] in (\"aetherflow-api\", \"aetherflow-frontend\", \"apache2\"):\n print(\"ActiveState=active\\nSubState=running\")\nelse: signal.pause()' \"$@\"\n");
+    fixture.command("systemctl", "exec /usr/bin/python3 -c 'import os,signal,sys\nwith open(os.environ[\"AF_STATUS_CALLS\"], \"a\") as output: output.write(\" \".join(sys.argv[1:])+\"\\n\")\nassert sys.argv[1] == \"show\"\nif sys.argv[2] in (\"aetherflow-api\", \"aetherflow-runner\", \"apache2\"):\n print(\"ActiveState=active\\nSubState=running\")\nelse: signal.pause()' \"$@\"\n");
     clear_service_status_cache();
     let barrier = Arc::new(Barrier::new(8));
     let started = Instant::now();
@@ -42,11 +42,7 @@ fn snapshots_bound_and_coalesce_slow_observations_without_caching_jobs() {
         "aggregate budget exceeded: {elapsed:?}"
     );
     for services in results {
-        for core in [
-            "AetherFlow API",
-            "AetherFlow Frontend",
-            "Apache2 Web Server",
-        ] {
+        for core in ["AetherFlow API", "AetherFlow Runner", "Apache2 Web Server"] {
             assert_eq!(services[core].status, "running");
         }
         for index in 0..6 {
@@ -146,7 +142,7 @@ fn aggregate_budget_leaves_unstarted_units_unknown_and_bounds_pm2() {
     fixture.install("slow-node");
     packages.push(Fixture::package("slow-node", "pm2", "slow-node"));
     fixture.write_packages(&packages);
-    fixture.command("systemctl", "exec /usr/bin/python3 -c 'import os,signal,sys\nwith open(os.environ[\"AF_STATUS_CALLS\"], \"a\") as output: output.write(\" \".join(sys.argv[1:])+\"\\n\")\nassert sys.argv[1] == \"show\"\nif sys.argv[2] in (\"aetherflow-api\", \"aetherflow-frontend\", \"apache2\"):\n print(\"ActiveState=active\\nSubState=running\")\nelse: signal.pause()' \"$@\"\n");
+    fixture.command("systemctl", "exec /usr/bin/python3 -c 'import os,signal,sys\nwith open(os.environ[\"AF_STATUS_CALLS\"], \"a\") as output: output.write(\" \".join(sys.argv[1:])+\"\\n\")\nassert sys.argv[1] == \"show\"\nif sys.argv[2] in (\"aetherflow-api\", \"aetherflow-runner\", \"apache2\"):\n print(\"ActiveState=active\\nSubState=running\")\nelse: signal.pause()' \"$@\"\n");
     fixture.command("pm2", "test \"$1\" = jlist || exit 92\nprintf 'pm2 jlist\\n' >> \"$AF_STATUS_CALLS\"\nexec /usr/bin/python3 -c 'import signal; signal.pause()'\n");
     clear_service_status_cache();
     let started = Instant::now();

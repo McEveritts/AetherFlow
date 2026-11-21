@@ -301,7 +301,7 @@ fn linux_query_failures_remain_unknown_in_both_aggregation_paths() {
         assert_eq!(get_service_info_detailed("fixture").0, "unknown");
         let inventory = get_active_services().unwrap();
         assert_eq!(inventory["fixture"].status, "unknown");
-        assert_eq!(inventory["AetherFlow Frontend"].status, "unknown");
+        assert_eq!(inventory["AetherFlow Runner"].status, "unknown");
         assert_eq!(inventory["Apache2 Web Server"].status, "unknown");
     }
     clear_service_status_cache();

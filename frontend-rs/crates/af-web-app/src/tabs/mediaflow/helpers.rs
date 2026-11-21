@@ -122,6 +122,9 @@ fn valid_domain(value: &str) -> bool {
 }
 
 pub(super) fn safe_launch_url(service: &Value) -> Option<String> {
+    if service["launch_scope"] == af_models::APP_LAUNCH_SCOPE_UNAVAILABLE {
+        return None;
+    }
     for key in ["launch_url", "launchUrl"] {
         if let Some(raw) = service[key]
             .as_str()
@@ -130,6 +133,9 @@ pub(super) fn safe_launch_url(service: &Value) -> Option<String> {
         {
             return is_safe_launch_url(raw).then(|| raw.to_string());
         }
+    }
+    if service["launch_scope"].is_string() {
+        return None;
     }
     for key in ["web_ui_url", "webUiUrl", "public_url", "url"] {
         if let Some(raw) = service[key]
@@ -205,6 +211,13 @@ mod tests {
 
     #[test]
     fn canonical_launch_url_takes_precedence_over_domain_fallbacks() {
+        assert_eq!(
+            safe_launch_url(&json!({
+                "launch_scope": "unavailable",
+                "internal_domain": "sonarr.aether.local"
+            })),
+            None
+        );
         assert_eq!(
             safe_launch_url(&json!({
                 "launch_url": "https://sonarr.example.com/sonarr",
