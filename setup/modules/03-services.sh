@@ -11,10 +11,11 @@
 # NOTE: _dashboard and _fileindexer functions removed — legacy PHP dashboard sunset
 # The Leptos Rust WASM dashboard served by aetherflow-api is the primary UI
 
-# function to make dirs for first user
+# Add application directories to the account already created by useradd.
 function _makedirs() {
-	\cp -rf /etc/skel/. /home/"${username}"
-	chown -R "${username}:${username}" /home/"${username}" >>"${OUTTO}" 2>&1
+	local user_home="/home/${username}"
+	runuser -u "${username}" -- mkdir -p -m 0750 -- \
+		"$user_home"/{.sessions,Media,rwatch,torrents,torrents/{rtorrent,deluge,qbittorrent}}
 }
 
 # NOTE: _ruconf function removed — ruTorrent user config sunset

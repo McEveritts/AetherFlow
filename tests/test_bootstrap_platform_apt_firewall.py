@@ -156,6 +156,51 @@ class BootstrapPlatformAptFirewallTests(unittest.TestCase):
             "Isolated fixture tests must never mutate live host APT or firewall files",
         )
 
+    def test_setup_preserves_system_skeleton_and_existing_user_dotfiles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="af-skeleton-") as tmp:
+            root = Path(tmp)
+            skeleton = root / "etc/skel"
+            user_home = root / "home/operator"
+            skeleton.mkdir(parents=True)
+            user_home.mkdir(parents=True)
+            (skeleton / ".bashrc").write_text("system profile\n")
+            (user_home / ".bashrc").write_text("operator profile\n")
+
+            packages = root / "packages.sh"
+            packages.write_text(PACKAGES_MODULE.read_text().replace("/etc/skel", str(skeleton)))
+            services = root / "services.sh"
+            services.write_text(
+                (ROOT / "setup/modules/03-services.sh").read_text().replace("/home/", f"{root}/home/")
+            )
+            command = """
+            runuser() {
+                [[ "$1 $2 $3" == "-u operator --" ]] || return 1
+                shift 3
+                "$@"
+            }
+            source "$1"
+            source "$2"
+            username=operator
+            _skel
+            _makedirs
+            _skel
+            _makedirs
+            """
+            result = subprocess.run(
+                ["bash", "-ec", command, "af-skeleton-test", str(packages), str(services)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((skeleton / ".bashrc").read_text(), "system profile\n")
+            self.assertEqual((user_home / ".bashrc").read_text(), "operator profile\n")
+            for relative in ("Media", "torrents/rtorrent", "torrents/deluge", "torrents/qbittorrent"):
+                self.assertTrue((skeleton / relative).is_dir(), relative)
+                self.assertTrue((user_home / relative).is_dir(), relative)
+            self.assertTrue((user_home / ".sessions").is_dir())
+            self.assertTrue((user_home / "rwatch").is_dir())
+
     def test_normal_setup_entry_lists_steps_and_detects_all_supported_os_fixtures(self) -> None:
         os_fixtures = (
             ("debian12", 'ID=debian\nVERSION_ID="12"\nVERSION_CODENAME=bookworm\n', "Debian", "bookworm", "12", "8.2"),

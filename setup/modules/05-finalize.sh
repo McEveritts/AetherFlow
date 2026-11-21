@@ -128,11 +128,10 @@ except Exception:
 
 # function to set permissions on first user
 function _perms() {
-	chown -R "${username}:${username}" "/home/${username}/" >>"${OUTTO}" 2>&1
 	sudo -u "${username}" chmod 755 "/home/${username}/" >>"${OUTTO}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	# Tightened from 777 → 770 (owner + group only, no world access)
-	chmod 770 "/home/${username}/.sessions" >/dev/null 2>&1
+	sudo -u "${username}" chmod 770 "/home/${username}/.sessions" >/dev/null 2>&1
 }
 
 ################################################################################

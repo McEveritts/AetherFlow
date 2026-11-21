@@ -397,13 +397,14 @@ EOF
 	ln -sf /usr/local/bin/aetherflow /usr/bin/aetherflow
 }
 
-# install skel template
+# Add the shared directory layout while preserving system account defaults.
 function _skel() {
-	if [[ -d /etc/skel ]]; then rm -r /etc/skel; fi
-	mkdir -p /etc/skel
-	\cp -rf "${local_setup}templates/skel/." /etc/skel
-	_af_apt_install libdigest-sha-perl >>"${OUTTO}" 2>&1 || true
-	cd /root || true
+	local skel="/etc/skel"
+	if [[ -L "$skel" || -L "$skel/torrents" ]]; then
+		printf '%s\n' "Refusing symlinked account skeleton directory" >&2
+		return 1
+	fi
+	mkdir -p -m 0750 -- "$skel"/{Media,torrents,torrents/{rtorrent,deluge,qbittorrent}}
 }
 
 
