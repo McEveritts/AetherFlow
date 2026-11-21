@@ -131,9 +131,9 @@ TL_CLI_ERR_FILE="${RUNTIME_BACKUP}/cli-probe.err"
 if ! TL_VER_OUT="$("${NODE_PATH}" "${NODE_ARGS[@]}" "${TL_BIN}" -v 2>"$TL_CLI_ERR_FILE")"; then
     cat -- "$TL_CLI_ERR_FILE" >>"$LOGFILE" || true
     if grep -q 'Cannot find module.*thelounge/scripts/version' "$TL_CLI_ERR_FILE"; then
-        log_error "Staged ${TL_PACKAGE} is missing scripts/version. Upstream npm 4.5.2 includes the runtime version module."
+        print_error "Staged ${TL_PACKAGE} is missing scripts/version. Upstream npm 4.5.2 includes the runtime version module."
     else
-        log_error "The version check failed for staged ${TL_PACKAGE}. See $LOGFILE."
+        print_error "The version check failed for staged ${TL_PACKAGE}. See $LOGFILE."
     fi
     exit 1
 fi
