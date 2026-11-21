@@ -379,6 +379,9 @@ if cmd in ("apt-get", "chown", "id", "useradd", "usermod", "getent"):
     sys.exit(0)
 
 if cmd == "curl":
+    if os.environ.get("MOCK_CURL_FAIL") == "1":
+        sys.stderr.write("curl: (7) Failed to connect to 127.0.0.1\n")
+        sys.exit(7)
     sys.exit(0)
 
 if cmd == "sudo":
@@ -444,7 +447,11 @@ if cmd == "npm":
     bin_dir = prefix / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     bin_file = bin_dir / bin_name
-    bin_file.write_text(f"#!/bin/sh\nprintf '%s\\n' {json.dumps(cli_ver)}\n")
+    cli_fail_stderr = os.environ.get("MOCK_CLI_FAIL_STDERR", "")
+    if cli_fail_stderr:
+        bin_file.write_text(f"#!/bin/sh\nprintf '%s\\n' {json.dumps(cli_fail_stderr)} >&2\nexit 1\n")
+    else:
+        bin_file.write_text(f"#!/bin/sh\nprintf '%s\\n' {json.dumps(cli_ver)}\n")
     bin_file.chmod(0o755)
     sys.exit(0)
 
@@ -517,6 +524,8 @@ if cmd == "systemctl":
         for u in units:
             (root / f"active-{u}").touch()
         sys.exit(0)
+    if sub == "is-enabled":
+        sys.exit(0 if (root / f"enabled-{units[0]}").exists() else 1)
     if sub == "enable":
         for u in units:
             (root / f"enabled-{u}").touch()
@@ -525,6 +534,10 @@ if cmd == "systemctl":
         sys.exit(0)
     if sub == "disable":
         for u in units:
+            unit_file = root / f"etc/systemd/system/{u}.service"
+            if os.environ.get("MOCK_STRICT_SYSTEMCTL_DISABLE") == "1" and not unit_file.exists():
+                sys.stderr.write(f"Failed to disable unit: Unit file {u}.service does not exist.\n")
+                sys.exit(1)
             (root / f"enabled-{u}").unlink(missing_ok=True)
         sys.exit(0)
     sys.exit(0)
@@ -853,6 +866,133 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
             subprocess.check_output([str(root / "usr/local/bin/thelounge"), "-v"], text=True).strip(),
             "4.5.2",
         )
+
+    def test_thelounge_broken_upstream_release_fresh_and_retained_rollback(self):
+        root, script = self.make_sandbox("thelounge")
+        missing_module_err = (
+            "Error: Cannot find module '/opt/thelounge/node_modules/thelounge/scripts/version'\n"
+            "Require stack:\n"
+            "- /opt/thelounge/node_modules/thelounge/dist/server/helper.js"
+        )
+
+        # 1. Fresh install of broken 4.5.1 fails pre-activation CLI probe with actionable
+        # diagnostic, keeps exact pin (no silent substitution), and leaves host completely clean.
+        fresh_broken = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="4.5.1",
+            MOCK_CLI_FAIL_STDERR=missing_module_err,
+            MOCK_STRICT_SYSTEMCTL_DISABLE="1",
+        )
+        self.assertNotEqual(fresh_broken.returncode, 0)
+        self.assertIn("missing scripts/version", fresh_broken.stderr)
+        self.assertIn("4.5.2", fresh_broken.stderr)
+        npm_calls = [c for c in self.read_commands(root) if c[0] == "npm"]
+        self.assertEqual(len(npm_calls), 1)
+        self.assertIn("--save-exact", npm_calls[0])
+        self.assertEqual(npm_calls[0][-1], "thelounge@4.5.1")
+        cmds = self.read_commands(root)
+        self.assertFalse(any(c[:2] == ["systemctl", "enable"] for c in cmds), cmds)
+        self.assertFalse(any(c[:2] == ["systemctl", "disable"] for c in cmds), cmds)
+        self.assertFalse((root / "opt/thelounge").exists())
+        self.assertFalse((root / "var/lib/thelounge").exists())
+        self.assertFalse((root / "usr/local/bin/thelounge").exists())
+        self.assertFalse((root / "etc/systemd/system/thelounge.service").exists())
+        self.assertFalse((root / "install/.thelounge.lock").exists())
+        self.assertFalse(list((root / "var/backups/aetherflow-recovery").glob("af-runtime-*")))
+        self.assertIn("scripts/version", (root / "var/log/aetherflow/install-thelounge.log").read_text())
+
+        # 2. Fresh install that fails HTTP readiness after systemctl enable disables unit BEFORE
+        # deleting the unit file and cleans up all fresh paths cleanly.
+        mark = len(self.read_commands(root))
+        fresh_readiness_fail = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="4.5.2",
+            MOCK_CURL_FAIL="1",
+            MOCK_STRICT_SYSTEMCTL_DISABLE="1",
+        )
+        self.assertNotEqual(fresh_readiness_fail.returncode, 0)
+        self.assertNotIn("Rollback incomplete", fresh_readiness_fail.stderr)
+        delta = self.read_commands(root, mark)
+        self.assertTrue(any(c[:2] == ["systemctl", "enable"] for c in delta), delta)
+        self.assertTrue(any(c[:2] == ["systemctl", "disable"] for c in delta), delta)
+        self.assertFalse((root / "enabled-thelounge").exists())
+        self.assertFalse((root / "active-thelounge").exists())
+        self.assertFalse((root / "opt/thelounge").exists())
+        self.assertFalse((root / "var/lib/thelounge").exists())
+        self.assertFalse((root / "usr/local/bin/thelounge").exists())
+        self.assertFalse((root / "etc/systemd/system/thelounge.service").exists())
+        self.assertFalse((root / "install/.thelounge.lock").exists())
+        self.assertFalse(list((root / "var/backups/aetherflow-recovery").glob("af-runtime-*")))
+
+        # 3. Reinstall over retained /var/lib/thelounge (after uninstall with DELETE_DATA=false)
+        # preserves retained config + user credentials when 4.5.1 fails, and succeeds cleanly on 4.5.2.
+        retained_cfg = root / "var/lib/thelounge/config.js"
+        retained_user = root / "var/lib/thelounge/users/operator.json"
+        retained_user.parent.mkdir(parents=True, exist_ok=True)
+        retained_cfg.write_text('module.exports = {\n    port: 9000,\n    public: false,\n    custom: "keep-me"\n};\n')
+        retained_user.write_text('{"password":"retained-operator-hash"}\n')
+
+        retained_broken = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="4.5.1",
+            MOCK_CLI_FAIL_STDERR=missing_module_err,
+            MOCK_STRICT_SYSTEMCTL_DISABLE="1",
+        )
+        self.assertNotEqual(retained_broken.returncode, 0)
+        self.assertFalse((root / "opt/thelounge").exists())
+        self.assertFalse((root / "etc/systemd/system/thelounge.service").exists())
+        self.assertFalse((root / "install/.thelounge.lock").exists())
+        self.assertIn("keep-me", retained_cfg.read_text())
+        self.assertEqual(retained_user.read_text(), '{"password":"retained-operator-hash"}\n')
+
+        ok_452 = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="4.5.2",
+            AF_APP_PORT="9123",
+            MOCK_STRICT_SYSTEMCTL_DISABLE="1",
+        )
+        self.assertEqual(ok_452.returncode, 0, ok_452.stdout + ok_452.stderr)
+        self.assertEqual((root / "var/lib/thelounge/.af-version").read_text().strip(), "4.5.2")
+        self.assertIn("port: 9123,", retained_cfg.read_text())
+        self.assertIn("keep-me", retained_cfg.read_text())
+        self.assertEqual(retained_user.read_text(), '{"password":"retained-operator-hash"}\n')
+        self.assertTrue((root / "active-thelounge").exists())
+        self.assertTrue((root / "enabled-thelounge").exists())
+        unit_text = (root / "etc/systemd/system/thelounge.service").read_text()
+        self.assertNotIn("  ", next(l for l in unit_text.splitlines() if l.startswith("ExecStart=")))
+
+        # 4. Updating the active 4.5.2 install to broken 4.5.1 restores the prior service and data.
+        preexisting_backup = root / "opt/thelounge.af-backup.preexisting"
+        preexisting_backup.mkdir(parents=True)
+        (preexisting_backup / "sentinel").write_text("keep-prior-backup\n")
+        mark = len(self.read_commands(root))
+        upgrade_broken = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="4.5.1",
+            AF_ALLOW_DOWNGRADE="1",
+            MOCK_CLI_FAIL_STDERR=missing_module_err,
+            MOCK_STRICT_SYSTEMCTL_DISABLE="1",
+        )
+        self.assertNotEqual(upgrade_broken.returncode, 0)
+        self.assertIn("missing scripts/version", upgrade_broken.stderr)
+        self.assertNotIn("Rollback incomplete", upgrade_broken.stderr)
+        delta = self.read_commands(root, mark)
+        self.assertFalse(any(c[:2] == ["systemctl", "disable"] for c in delta), delta)
+        self.assertEqual((root / "var/lib/thelounge/.af-version").read_text().strip(), "4.5.2")
+        self.assertEqual(retained_user.read_text(), '{"password":"retained-operator-hash"}\n')
+        self.assertTrue((root / "active-thelounge").exists())
+        self.assertTrue((root / "enabled-thelounge").exists())
+        self.assertEqual(
+            subprocess.check_output([str(root / "usr/local/bin/thelounge"), "-v"], text=True).strip(),
+            "4.5.2",
+        )
+        self.assertEqual((preexisting_backup / "sentinel").read_text(), "keep-prior-backup\n")
+        self.assertFalse(list((root / "var/backups/aetherflow-recovery").glob("af-runtime-*")))
 
     def test_unmanic_pinned_unpinned_mismatch_and_clean_rollback(self):
         root, script = self.make_sandbox("unmanic")

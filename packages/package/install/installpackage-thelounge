@@ -34,7 +34,7 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
-validate_config_paths /etc/systemd/system/thelounge.service
+validate_config_paths /etc/systemd/system/thelounge.service /var/lib/thelounge/config.js
 TL_TARGET_VER=""
 TL_PACKAGE="thelounge"
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
@@ -63,10 +63,8 @@ if ! af_logged "${NODE_PATH}" -e "$SQLITE_CHECK"; then
 fi
 
 if ! id -u thelounge >/dev/null 2>&1; then
-    useradd --system --user-group --create-home --home-dir /var/lib/thelounge --shell /usr/sbin/nologin thelounge
+    useradd --system --user-group --no-create-home --home-dir /var/lib/thelounge --shell /usr/sbin/nologin thelounge
 fi
-
-mkdir -p /var/lib/thelounge/users
 
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/thelounge" "/var/lib/thelounge" "/etc/systemd/system/thelounge.service" "/usr/local/bin/thelounge")
@@ -74,14 +72,22 @@ RUNTIME_HAD_PREVIOUS=false
 RUNTIME_WAS_ACTIVE=0
 RUNTIME_QUIESCE_STARTED=0
 RUNTIME_MUTATED=0
-[[ ! -e "/opt/thelounge" ]] || RUNTIME_HAD_PREVIOUS=true
+RUNTIME_ENABLE_ATTEMPTED=0
+RUNTIME_WAS_ENABLED=0
 if systemctl is-active --quiet thelounge 2>/dev/null; then RUNTIME_WAS_ACTIVE=1; fi
+if systemctl is-enabled --quiet thelounge 2>/dev/null; then RUNTIME_WAS_ENABLED=1; fi
+if [[ -e "/opt/thelounge" || -f /etc/systemd/system/thelounge.service || "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+    RUNTIME_HAD_PREVIOUS=true
+fi
 rollback_runtime() {
     local status="$?" runtime_index runtime_path restore_failed=false
     trap - EXIT INT TERM
     set +e
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
         quiesce_services_for_rollback thelounge || { restore_failed=true; exit 1; }
+        if [[ "$RUNTIME_WAS_ENABLED" -eq 0 && "$RUNTIME_ENABLE_ATTEMPTED" -eq 1 ]]; then
+            af_logged systemctl disable thelounge || restore_failed=true
+        fi
         for runtime_index in "${!RUNTIME_PATHS[@]}"; do
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
@@ -89,6 +95,8 @@ rollback_runtime() {
         af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
             af_logged systemctl restart thelounge || restore_failed=true
+        elif [[ "$RUNTIME_HAD_PREVIOUS" != true && "$RUNTIME_ENABLE_ATTEMPTED" -eq 1 ]]; then
+            af_logged systemctl reset-failed thelounge || true
         fi
     elif [[ "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 0 && "$RUNTIME_WAS_ACTIVE" -eq 1 && "$RUNTIME_QUIESCE_STARTED" -eq 1 ]]; then
         af_logged systemctl restart thelounge || restore_failed=true
@@ -105,7 +113,7 @@ rollback_runtime() {
 trap rollback_runtime EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [[ "$RUNTIME_HAD_PREVIOUS" == true || -f /etc/systemd/system/thelounge.service || "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+if [[ "$RUNTIME_HAD_PREVIOUS" == true ]]; then
     RUNTIME_QUIESCE_STARTED=1
     stop_systemd_unit thelounge
 fi
@@ -119,7 +127,17 @@ report_progress 40 "Installing ${TL_PACKAGE} with its complete dependency build 
 RUNTIME_MUTATED=1
 install_npm_app "$TL_PACKAGE" /opt/thelounge /usr/local/bin/thelounge
 
-TL_VER="$("${NODE_PATH}" "${NODE_ARGS[@]}" "${TL_BIN}" -v | head -n1 | tr -d '\r')"
+TL_CLI_ERR_FILE="${RUNTIME_BACKUP}/cli-probe.err"
+if ! TL_VER_OUT="$("${NODE_PATH}" "${NODE_ARGS[@]}" "${TL_BIN}" -v 2>"$TL_CLI_ERR_FILE")"; then
+    cat -- "$TL_CLI_ERR_FILE" >>"$LOGFILE" || true
+    if grep -q 'Cannot find module.*thelounge/scripts/version' "$TL_CLI_ERR_FILE"; then
+        log_error "Staged ${TL_PACKAGE} is missing scripts/version. Upstream npm 4.5.2 includes the runtime version module."
+    else
+        log_error "The version check failed for staged ${TL_PACKAGE}. See $LOGFILE."
+    fi
+    exit 1
+fi
+TL_VER="$(printf '%s\n' "$TL_VER_OUT" | head -n1 | tr -d '\r')"
 if [[ ! "$TL_VER" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
     log_error "The Lounge did not report a valid installed version."
     exit 1
@@ -132,8 +150,9 @@ fi
 queue_app_version /var/lib/thelounge/.af-version "$TL_VER"
 
 report_progress 65 "Configuring The Lounge state and ports..."
-if [[ ! -f /var/lib/thelounge/config.js ]]; then
-    sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /var/lib/thelounge/config.js
+mkdir -p /var/lib/thelounge/users
+if [[ ! -e /var/lib/thelounge/config.js && ! -L /var/lib/thelounge/config.js ]]; then
+    sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' | write_config_file /var/lib/thelounge/config.js 0640
 module.exports = {
     public: false,
     host: "127.0.0.1",
@@ -153,6 +172,10 @@ set_config_value /var/lib/thelounge/config.js js port "$APP_PORT"
 chown -hRP thelounge:thelounge /var/lib/thelounge
 
 if ! compgen -G '/var/lib/thelounge/users/*.json' > /dev/null; then
+    if [[ -z "${MASTER_USER:-}" || -z "${MASTER_PASS:-}" ]]; then
+        log_error "The Lounge requires configured MASTER_USER and MASTER_PASS to create the initial user account."
+        exit 1
+    fi
     printf '%s' "${MASTER_PASS}" | af_logged sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge \
         "${NODE_PATH}" "${NODE_ARGS[@]}" -e '
 const fs = require("fs");
@@ -169,6 +192,11 @@ fi
 chown -hRP thelounge:thelounge /var/lib/thelounge
 
 report_progress 85 "Configuring and starting thelounge.service on port ${APP_PORT}..."
+TL_EXEC_START="${NODE_PATH}"
+if (( ${#NODE_ARGS[@]} > 0 )); then
+    TL_EXEC_START+=" ${NODE_ARGS[*]}"
+fi
+TL_EXEC_START+=" ${TL_BIN} start"
 write_config_file /etc/systemd/system/thelounge.service 0644 <<EOF
 [Unit]
 Description=The Lounge Web IRC Client
@@ -179,7 +207,7 @@ Type=simple
 User=thelounge
 Group=thelounge
 Environment=THELOUNGE_HOME=/var/lib/thelounge
-ExecStart=${NODE_PATH} ${NODE_ARGS[*]} ${TL_BIN} start
+ExecStart=${TL_EXEC_START}
 Restart=on-failure
 RestartSec=5
 
@@ -188,6 +216,7 @@ WantedBy=multi-user.target
 EOF
 
 af_logged systemctl daemon-reload
+RUNTIME_ENABLE_ATTEMPTED=1
 af_logged systemctl enable thelounge
 af_logged systemctl restart thelounge
 
