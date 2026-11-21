@@ -6,9 +6,12 @@
         RequestHeader unset X-Real-IP
         RequestHeader unset X-Forwarded-Host
         RequestHeader unset X-Aetherflow-User
+        RequestHeader unset X-Aetherflow-External-App
         RequestHeader unset Remote-User
         RequestHeader unset X-Forwarded-User
         RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+        RequestHeader set X-Forwarded-Proto "http"
+        RequestHeader set X-Forwarded-Port "80"
         RewriteEngine On
         RewriteCond %{HTTP_HOST} \.aether\.local(:[0-9]+)?$ [NC]
         RewriteCond %{HTTP:Upgrade} websocket [NC]
@@ -40,9 +43,7 @@
         SSLCertificateFile /etc/ssl/certs/ssl-cert-snakeoil.pem
         SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
 
-        Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
         Header always set X-Content-Type-Options "nosniff"
-        Header always set X-Frame-Options "SAMEORIGIN"
         Header always set Referrer-Policy "strict-origin-when-cross-origin"
         Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
 
@@ -62,6 +63,7 @@
         RequestHeader unset X-Real-IP
         RequestHeader unset X-Forwarded-Host
         RequestHeader unset X-Aetherflow-User
+        RequestHeader unset X-Aetherflow-External-App
         RequestHeader unset Remote-User
         RequestHeader unset X-Forwarded-User
         RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
@@ -75,6 +77,7 @@
 
         ProxyPass /.well-known/acme-challenge/ !
         ProxyPass /downloads !
+        ProxyPassMatch "^/[^/]+[.](rtorrent|deluge)[.]downloads(/|$)" !
 
         ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=3600 keepalive=On
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/

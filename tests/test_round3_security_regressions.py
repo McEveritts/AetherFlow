@@ -776,6 +776,10 @@ state_snapshot
             'RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"',
         ):
             self.assertIn(header_dir, ssl_tpl)
+        self.assertEqual(ssl_tpl.count("RequestHeader unset X-Aetherflow-External-App"), 2)
+        self.assertNotIn('Header always set X-Frame-Options "SAMEORIGIN"', ssl_tpl)
+        self.assertNotIn("includeSubDomains; preload", ssl_tpl)
+        self.assertLess(ssl_tpl.index("ProxyPassMatch"), ssl_tpl.index('ProxyPass /api/'))
         self.assertNotIn("USERNAME.rtorrent.downloads", ssl_tpl)
         self.assertNotIn("USERNAME.deluge.downloads", ssl_tpl)
         self.assertNotIn("/etc/htpasswd", ssl_tpl)
