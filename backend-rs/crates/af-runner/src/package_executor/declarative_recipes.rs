@@ -5281,14 +5281,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             let effective_root = self.env_cfg.fs_root.as_deref().unwrap_or(Path::new("/"));
             let unit =
                 fs::read_to_string(rclone_unit_path(vars, effective_root)).unwrap_or_default();
-            let unit_env = unit
-                .lines()
-                .filter_map(|line| {
-                    let value = line.trim().strip_prefix("EnvironmentFile=")?.trim();
-                    let path = value.trim_start_matches('-').trim_matches(['"', '\'']);
-                    path.starts_with('/').then_some(path)
-                })
-                .last();
+            let unit_env = unit.lines().rev().find_map(|line| {
+                let value = line.trim().strip_prefix("EnvironmentFile=")?.trim();
+                let path = value.trim_start_matches('-').trim_matches(['"', '\'']);
+                path.starts_with('/').then_some(path)
+            });
             let explicit_env = vars.get("RCLONE_ENV_FILE").map(String::as_str);
             let candidates: Vec<&str> = explicit_env
                 .or(unit_env)
