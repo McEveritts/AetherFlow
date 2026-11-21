@@ -781,7 +781,6 @@ html[data-theme="light"] .obs-checkbox:checked {
   border-radius: 50%;
   background-color: #10b981;
   box-shadow: 0 0 10px #10b981, 0 0 20px #10b981;
-  animation: obs-pulse-live 2s infinite ease-in-out;
 }
 
 .obs-beacon-reconnecting,
@@ -791,7 +790,6 @@ html[data-theme="light"] .obs-checkbox:checked {
   border-radius: 50%;
   background-color: #f59e0b;
   box-shadow: 0 0 10px #f59e0b;
-  animation: obs-pulse-warn 1s infinite alternate;
 }
 
 .obs-beacon-danger,
@@ -809,26 +807,6 @@ html[data-theme="light"] .obs-checkbox:checked {
   height: 10px;
   border-radius: 50%;
   background-color: #64748b;
-}
-
-@keyframes obs-pulse-live {
-  0%, 100% {
-    transform: scale(1);
-    opacity: 1;
-  }
-  50% {
-    transform: scale(1.25);
-    opacity: 0.75;
-  }
-}
-
-@keyframes obs-pulse-warn {
-  0% {
-    opacity: 0.4;
-  }
-  100% {
-    opacity: 1;
-  }
 }
 
 /**
@@ -964,10 +942,6 @@ html[data-theme="light"] .obs-checkbox:checked {
   }
   .obs-gpu-120hz-rail {
     transition: none !important;
-  }
-  .obs-beacon-live,
-  .obs-beacon-reconnecting {
-    animation: none !important;
   }
   *, *::before, *::after {
     animation: none !important;
