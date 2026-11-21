@@ -1578,8 +1578,10 @@ fn load_delivery_context_in_conn(
 ) -> Result<(StoredChannel, PreparedChannelRequest), ChannelDispatchError> {
     let notif: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT level, title, message FROM notifications WHERE id = ?1",
-            params![claimed.notification_id],
+            "SELECT n.level, n.title, n.message
+             FROM notification_delivery_log d JOIN notifications n ON n.id = d.notification_id
+             WHERE d.id = ?1 AND d.status = 'sending' AND d.claim_token = ?2",
+            params![claimed.id, claimed.claim_token],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
@@ -1588,7 +1590,7 @@ fn load_delivery_context_in_conn(
         })?;
     let Some((level, title, message)) = notif else {
         return Err(ChannelDispatchError::permanent(
-            "Notification record missing before delivery",
+            "Notification record missing or delivery claim superseded",
             false,
         ));
     };
@@ -1706,6 +1708,10 @@ fn broadcast_triggered_notification(notification: &af_services::Notification) {
 
 async fn drain_due_deliveries_once() {
     let now = Utc::now();
+    // All claims in the batch expire together. Reserve one second for the whole-second
+    // SQLite lease so later tasks cannot send beyond their claim.
+    let dispatch_deadline =
+        tokio::time::Instant::now() + Duration::from_secs((DELIVERY_CLAIM_LEASE_SECS - 1) as u64);
     let now_epoch = now.timestamp();
     let now_rfc3339 = now.to_rfc3339();
     let claimed =
@@ -1751,7 +1757,21 @@ async fn drain_due_deliveries_once() {
             });
 
             let send_outcome = match context_res {
-                Ok((_channel, prepared)) => send_prepared_channel_request(&prepared).await,
+                Ok((_channel, prepared)) => match tokio::time::timeout_at(
+                    dispatch_deadline,
+                    send_prepared_channel_request(&prepared),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        tracing::warn!(
+                            delivery_id = item.id,
+                            "Notification claim expired before a delivery receipt"
+                        );
+                        return;
+                    }
+                },
                 Err(err) => Err(err),
             };
 

@@ -1619,7 +1619,51 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: object
+                required: [channels]
+                properties:
+                  channels:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        type:
+                          type: string
+                        config:
+                          description: Channel settings with credentials masked.
+                        enabled:
+                          type: boolean
+                        created_at:
+                          type: string
+                        pending_deliveries:
+                          type: integer
+                          minimum: 0
+                          description: Rule deliveries waiting to send or currently claimed.
+                        last_delivery:
+                          type: [object, 'null']
+                          description: Latest delivery record, including manual channel tests.
+                          properties:
+                            id:
+                              type: integer
+                            notification_id:
+                              type: [integer, 'null']
+                            status:
+                              type: string
+                              description: Pending, sending, delivered, failed, or uncertain.
+                            attempts:
+                              type: integer
+                              minimum: 0
+                            last_error:
+                              type: string
+                              description: Sanitized delivery diagnostic.
+                            created_at:
+                              type: string
+                            completed_at:
+                              type: string
         '401':
           $ref: '#/components/responses/Error'
         '403':
