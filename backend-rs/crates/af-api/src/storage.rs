@@ -21,6 +21,11 @@ use std::time::{Duration as StdDuration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 
+#[path = "storage_backup_staging.rs"]
+mod backup_staging;
+pub(crate) use backup_staging::maintain_backup_upload_staging;
+use backup_staging::{BackupStaging, StagingLimits};
+
 #[cfg(test)]
 #[path = "storage_hillclimb_tests.rs"]
 mod hillclimb_tests;
@@ -470,9 +475,8 @@ static VALID_BACKUP_FILENAME_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.-]+\.sqlite$").unwrap());
 static VALID_UPLOAD_SESSION_ID_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,64}$").unwrap());
-static BACKUP_UPLOAD_MU: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
 const DEFAULT_BACKUP_CHUNK_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const MAX_BACKUP_UPLOAD_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BACKUP_UPLOAD_CHUNKS: usize = 4096;
 const MAX_RETAINED_BACKUPS: usize = 10;
 const RETENTION_DAYS: i64 = 7;
@@ -494,126 +498,6 @@ struct BackupUploadSessionMeta {
     user_id: i64,
     session_jti: String,
     upload_id: String,
-}
-
-fn ensure_private_backup_dir(dir: &StdPath) -> anyhow::Result<()> {
-    use std::path::Component;
-    let mut acc = std::path::PathBuf::new();
-    for comp in dir.components() {
-        match comp {
-            Component::Prefix(p) => acc.push(p.as_os_str()),
-            Component::RootDir => acc.push(comp.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                anyhow::bail!(
-                    "parent traversal rejected in backup directory {}",
-                    dir.display()
-                );
-            }
-            Component::Normal(part) => {
-                acc.push(part);
-                match fs::symlink_metadata(&acc) {
-                    Ok(meta) => {
-                        if meta.file_type().is_symlink() {
-                            anyhow::bail!("symlink rejected in backup directory {}", acc.display());
-                        }
-                        if !meta.is_dir() {
-                            anyhow::bail!(
-                                "non-directory component in backup path {}",
-                                acc.display()
-                            );
-                        }
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::DirBuilderExt;
-                            let mut builder = fs::DirBuilder::new();
-                            builder.mode(0o700);
-                            if let Err(mk_err) = builder.create(&acc) {
-                                if mk_err.kind() != std::io::ErrorKind::AlreadyExists {
-                                    return Err(mk_err.into());
-                                }
-                            }
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            fs::create_dir(&acc)?;
-                        }
-                        let meta = fs::symlink_metadata(&acc)?;
-                        if meta.file_type().is_symlink() || !meta.is_dir() {
-                            anyhow::bail!("invalid backup directory created at {}", acc.display());
-                        }
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            }
-        }
-    }
-    #[cfg(unix)]
-    if !acc.as_os_str().is_empty() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = fs::symlink_metadata(&acc)?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            anyhow::bail!("symlink or non-directory at backup root {}", acc.display());
-        }
-        let euid = unsafe { libc::geteuid() };
-        if (meta.mode() & 0o777) != 0o700 && (euid == 0 || meta.uid() == euid) {
-            fs::set_permissions(&acc, fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    Ok(())
-}
-
-struct CrossProcessUploadLock {
-    file: fs::File,
-}
-
-impl CrossProcessUploadLock {
-    fn acquire(lock_path: &StdPath) -> anyhow::Result<Self> {
-        if let Some(parent) = lock_path.parent() {
-            ensure_private_backup_dir(parent)?;
-        }
-        let mut opts = OpenOptions::new();
-        opts.create(true).read(true).write(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = opts.open(lock_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            use std::os::unix::io::AsRawFd;
-            let meta = file.metadata()?;
-            if !meta.is_file() || meta.nlink() != 1 {
-                anyhow::bail!(
-                    "upload lock {} must be a single-link regular file",
-                    lock_path.display()
-                );
-            }
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(anyhow::anyhow!(
-                    "failed to acquire upload lock {}: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
-        Ok(Self { file })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for CrossProcessUploadLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe {
-            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
 }
 
 pub fn get_active_db_path() -> PathBuf {
@@ -1253,6 +1137,7 @@ pub fn prune_old_backups() {
         MAX_RETAINED_BACKUPS,
         RETENTION_DAYS,
     );
+    maintain_backup_upload_staging();
 }
 
 pub fn perform_system_backup() -> anyhow::Result<BackupFile> {
@@ -1563,6 +1448,56 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
     auth_session: Option<(i64, &str)>,
     bytes: &[u8],
 ) -> Result<serde_json::Value, (StatusCode, &'static str, String)> {
+    process_backup_chunk_upload(
+        backup_dir,
+        filename,
+        chunk_index,
+        total_chunks,
+        expected_checksum,
+        upload_id_param,
+        auth_session,
+        bytes,
+        StagingLimits::DEFAULT,
+    )
+}
+
+type BackupUploadError = (StatusCode, &'static str, String);
+type BackupUploadResult = Result<serde_json::Value, BackupUploadError>;
+
+fn backup_staging_error(error: impl std::fmt::Display) -> BackupUploadError {
+    tracing::warn!(%error, "backup upload staging operation failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+        "Backup upload staging operation failed".to_owned(),
+    )
+}
+
+fn backup_staging_full() -> BackupUploadError {
+    (
+        StatusCode::INSUFFICIENT_STORAGE,
+        "BACKUP_STAGING_FULL",
+        "Backup upload staging is full; retry when another upload completes or expires".to_owned(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_backup_chunk_upload(
+    backup_dir: &StdPath,
+    filename: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+    expected_checksum: Option<&str>,
+    upload_id_param: Option<&str>,
+    auth_session: Option<(i64, &str)>,
+    bytes: &[u8],
+    limits: StagingLimits,
+) -> BackupUploadResult {
+    use backup_staging::{
+        create_directory, open_staged_file, sync_directory, write_staged_file, SESSION_METADATA,
+    };
+    use std::time::SystemTime;
+
     if filename.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1587,11 +1522,11 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
             ),
         ));
     }
-    if bytes.is_empty() {
+    if bytes.is_empty() || bytes.len() > MAX_BACKUP_UPLOAD_CHUNK_BYTES {
         return Err((
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Failed to persist chunk payload".to_string(),
+            "Invalid chunk payload size".to_string(),
         ));
     }
 
@@ -1615,13 +1550,6 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
     };
     let session_key = format!("u{}-{}-{}", user_id, session_jti, upload_id);
 
-    if ensure_private_backup_dir(backup_dir).is_err() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to prepare backup directory".to_string(),
-        ));
-    }
     let Ok(final_path) = safe_backup_path(backup_dir, filename) else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1629,275 +1557,263 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
             "Invalid filename".to_string(),
         ));
     };
-    let clean_base = final_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(filename)
-        .to_string();
-    if !is_valid_backup_filename(&clean_base) {
+    if !is_valid_backup_filename(filename) {
         return Err((
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
             "Backup filename must end with .sqlite and contain only safe characters".to_string(),
         ));
     }
-
-    let lock_path = backup_dir.join(format!(".upload-lock-{}.lock", clean_base));
-    let _file_lock = CrossProcessUploadLock::acquire(&lock_path).map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            err.to_string(),
-        )
-    })?;
-    let _mutex_guard = BACKUP_UPLOAD_MU
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let upload_dir = backup_dir
-        .join(".upload-staging")
-        .join(&clean_base)
-        .join(&session_key);
-    if fs::create_dir_all(&upload_dir).is_err() {
+    let expected_sha256 = expected_checksum
+        .map(str::trim)
+        .filter(|val| !val.is_empty())
+        .map(str::to_ascii_lowercase);
+    if expected_sha256.as_ref().is_some_and(|checksum| {
+        checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
         return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to prepare upload staging directory".to_string(),
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Backup checksum must be a SHA-256 hex digest".to_owned(),
         ));
     }
 
-    let normalized_expected = expected_checksum
-        .map(str::trim)
-        .filter(|val| !val.is_empty())
-        .map(|val| val.to_ascii_lowercase());
-    let meta_path = upload_dir.join("meta.json");
-    if meta_path.exists() {
-        let raw_meta = fs::read_to_string(&meta_path).map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to read upload session metadata".to_string(),
-            )
-        })?;
-        let mut session_meta: BackupUploadSessionMeta =
-            serde_json::from_str(&raw_meta).map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    "Corrupt upload session metadata".to_string(),
-                )
-            })?;
-        if session_meta.total_chunks != total_chunks
-            || session_meta.user_id != user_id
-            || session_meta.session_jti != session_jti
-            || session_meta.upload_id != upload_id
-        {
-            return Err((
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                "Upload session metadata mismatch; start a new upload_id".to_string(),
-            ));
+    let staging = BackupStaging::acquire(backup_dir, true)
+        .map_err(backup_staging_error)?
+        .expect("blocking staging lock acquisition returned without a lock");
+    let upload_dir = staging.session_path(filename, &session_key);
+    let usage = staging
+        .scan(
+            SystemTime::now(),
+            limits.idle_for,
+            Some((&upload_dir, total_chunks)),
+        )
+        .map_err(backup_staging_error)?;
+    if usage.current.is_none() && usage.sessions >= limits.sessions {
+        return Err(backup_staging_full());
+    }
+
+    // The scanner skips non-directory paths. Check the actual path before opening any leaves.
+    if let Some(filename_dir) = upload_dir.parent() {
+        for dir in [filename_dir, upload_dir.as_path()] {
+            match fs::symlink_metadata(dir) {
+                Ok(meta) if meta.is_dir() => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(backup_staging_error(format!(
+                        "invalid staging directory {}",
+                        dir.display()
+                    )))
+                }
+            }
         }
-        if let Some(ref incoming_sha) = normalized_expected {
-            if let Some(ref existing_sha) = session_meta.expected_sha256 {
-                if existing_sha != incoming_sha {
+    }
+
+    let meta_path = upload_dir.join(SESSION_METADATA);
+    let (session_meta, save_metadata) =
+        match open_staged_file(&meta_path).map_err(backup_staging_error)? {
+            Some(file) => {
+                let mut stored: BackupUploadSessionMeta =
+                    serde_json::from_reader(file.take(16 * 1024)).map_err(backup_staging_error)?;
+                if stored.total_chunks != total_chunks
+                    || stored.user_id != user_id
+                    || stored.session_jti != session_jti
+                    || stored.upload_id != upload_id
+                {
                     return Err((
                         StatusCode::CONFLICT,
                         "CONFLICT",
-                        "Upload session expected checksum mismatch".to_string(),
+                        "Upload session metadata mismatch; start a new upload_id".to_owned(),
                     ));
                 }
-            } else {
-                session_meta.expected_sha256 = Some(incoming_sha.clone());
-                let serialized = serde_json::to_string(&session_meta).unwrap_or_default();
-                let _ = fs::write(&meta_path, serialized);
+                let save_metadata = stored.expected_sha256.is_none() && expected_sha256.is_some();
+                if let Some(incoming) = expected_sha256 {
+                    if stored
+                        .expected_sha256
+                        .as_ref()
+                        .is_some_and(|existing| existing != &incoming)
+                    {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            "CONFLICT",
+                            "Upload session expected checksum mismatch".to_owned(),
+                        ));
+                    }
+                    stored.expected_sha256 = Some(incoming);
+                }
+                (stored, save_metadata)
             }
-        }
-    } else {
-        let session_meta = BackupUploadSessionMeta {
-            total_chunks,
-            expected_sha256: normalized_expected.clone(),
-            user_id,
-            session_jti: session_jti.clone(),
-            upload_id: upload_id.clone(),
+            None => {
+                // The writer commits session metadata before any part. A legacy part without
+                // metadata has no declared chunk count or owner to validate on resume.
+                if usage.current.as_ref().is_some_and(|parts| parts.bytes != 0) {
+                    return Err(backup_staging_error(
+                        "staged parts are missing session metadata",
+                    ));
+                }
+                (
+                    BackupUploadSessionMeta {
+                        total_chunks,
+                        expected_sha256,
+                        user_id,
+                        session_jti,
+                        upload_id,
+                    },
+                    true,
+                )
+            }
         };
-        let serialized = serde_json::to_string(&session_meta).map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to serialize upload session metadata".to_string(),
-            )
-        })?;
-        if fs::write(&meta_path, serialized).is_err() {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to persist upload session metadata".to_string(),
-            ));
-        }
-    }
 
-    let chunk_path = upload_dir.join(format!("{:06}.part", chunk_index));
-    let temp_chunk_path = upload_dir.join(format!("{:06}.part.tmp", chunk_index));
-    if fs::write(&temp_chunk_path, bytes).is_err()
-        || fs::rename(&temp_chunk_path, &chunk_path).is_err()
+    let chunk_path = upload_dir.join(format!("{chunk_index:06}.part"));
+    let mut existing = open_staged_file(&chunk_path).map_err(backup_staging_error)?;
+    let old_len = existing
+        .as_ref()
+        .map(|file| file.metadata().map(|meta| meta.len()))
+        .transpose()
+        .map_err(backup_staging_error)?
+        .unwrap_or(0);
+    let incoming = bytes.len() as u64;
+    let next_usage = usage
+        .part_bytes
+        .saturating_sub(old_len)
+        .saturating_add(incoming);
+    let parts = usage.current.unwrap_or_default();
+    let received = parts.received + usize::from(old_len == 0);
+    let complete = received == total_chunks;
+    let assembly_size = parts.bytes.saturating_sub(old_len).saturating_add(incoming);
+    let physical_limit = limits.part_bytes.saturating_mul(2);
+    if (next_usage > limits.part_bytes && next_usage > usage.part_bytes)
+        || (complete && next_usage.saturating_add(assembly_size) > physical_limit)
     {
-        let _ = fs::remove_file(&temp_chunk_path);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to create chunk file".to_string(),
-        ));
+        return Err(backup_staging_full());
     }
 
-    let mut received = 0usize;
-    for entry in fs::read_dir(&upload_dir).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Unable to inspect upload progress".to_owned(),
-        )
-    })? {
-        let entry = entry.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Unable to inspect upload progress".to_owned(),
-            )
-        })?;
-        let filename = entry.file_name();
-        let index = filename
-            .to_str()
-            .and_then(|name| name.strip_suffix(".part"))
-            .and_then(|index| index.parse::<usize>().ok());
-        if index.is_some_and(|index| index < total_chunks)
-            && entry
-                .file_type()
-                .map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "INTERNAL_ERROR",
-                        "Unable to inspect upload progress".to_owned(),
-                    )
-                })?
-                .is_file()
-        {
-            received += 1;
-        }
+    let repeated = if let Some(file) = existing.as_mut().filter(|_| old_len == incoming) {
+        staged_chunk_matches(file, bytes).map_err(backup_staging_error)?
+    } else {
+        false
+    };
+    if !repeated && usage.part_bytes.saturating_add(incoming) > physical_limit {
+        return Err(backup_staging_full());
     }
-    let progress = (received as f64 / total_chunks as f64) * 100.0;
-    if received < total_chunks {
+
+    create_directory(upload_dir.parent().expect("upload session has a parent"))
+        .and_then(|_| create_directory(&upload_dir))
+        .map_err(backup_staging_error)?;
+    if save_metadata {
+        let serialized = serde_json::to_vec(&session_meta).map_err(backup_staging_error)?;
+        write_staged_file(&meta_path, &upload_dir.join("meta.json.tmp"), &serialized)
+            .map_err(backup_staging_error)?;
+    }
+
+    if let Some(file) = existing.filter(|_| repeated) {
+        file.set_modified(SystemTime::now())
+            .and_then(|_| file.sync_all())
+            .and_then(|_| sync_directory(&upload_dir))
+            .map_err(backup_staging_error)?;
+    } else {
+        write_staged_file(
+            &chunk_path,
+            &upload_dir.join(format!("{chunk_index:06}.part.tmp")),
+            bytes,
+        )
+        .map_err(backup_staging_error)?;
+    }
+
+    if !complete {
         return Ok(serde_json::json!({
             "message": "Chunk received",
-            "filename": clean_base,
-            "upload_id": upload_id,
+            "filename": filename,
+            "upload_id": session_meta.upload_id,
             "received": received,
             "total": total_chunks,
-            "progress": progress,
+            "progress": (received as f64 / total_chunks as f64) * 100.0,
             "complete": false,
         }));
     }
 
-    let temp_final = upload_dir.join(format!("{}.uploading", clean_base));
-    let Ok(mut out) = fs::File::create(&temp_final) else {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to build staged backup file".to_string(),
-        ));
-    };
+    let temp_final = upload_dir.join(format!("{filename}.uploading"));
+    let result = assemble_backup_upload(
+        backup_dir,
+        &upload_dir,
+        &temp_final,
+        &final_path,
+        filename,
+        &session_meta,
+    );
+    let _ = fs::remove_file(&temp_final);
+    // Keep the parts for a retry if assembly or publication fails transiently.
+    if result.is_ok() || matches!(&result, Err((StatusCode::BAD_REQUEST, _, _))) {
+        backup_staging::remove_session(&upload_dir);
+    }
+    result
+}
 
-    for index in 0..total_chunks {
-        let part_path = upload_dir.join(format!("{:06}.part", index));
-        let Ok(mut part) = fs::File::open(&part_path) else {
-            let _ = fs::remove_file(&temp_final);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("Missing chunk {}", index),
-            ));
-        };
-        if std::io::copy(&mut part, &mut out).is_err() {
-            let _ = fs::remove_file(&temp_final);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to assemble backup file".to_string(),
-            ));
+fn staged_chunk_matches(file: &mut fs::File, bytes: &[u8]) -> std::io::Result<bool> {
+    let mut buffer = [0; 64 * 1024];
+    for block in bytes.chunks(buffer.len()) {
+        let read = &mut buffer[..block.len()];
+        file.read_exact(read)?;
+        if read != block {
+            return Ok(false);
         }
     }
-    let _ = out.flush();
+    Ok(true)
+}
+
+fn assemble_backup_upload(
+    backup_dir: &StdPath,
+    upload_dir: &StdPath,
+    temp_final: &StdPath,
+    final_path: &StdPath,
+    filename: &str,
+    session: &BackupUploadSessionMeta,
+) -> BackupUploadResult {
+    use backup_staging::{create_staged_file, open_staged_file};
+
+    let mut out = create_staged_file(temp_final).map_err(backup_staging_error)?;
+    for index in 0..session.total_chunks {
+        let mut part = open_staged_file(&upload_dir.join(format!("{index:06}.part")))
+            .map_err(backup_staging_error)?
+            .ok_or_else(|| backup_staging_error(format!("missing staged part {index}")))?;
+        std::io::copy(&mut part, &mut out).map_err(backup_staging_error)?;
+    }
+    out.sync_all().map_err(backup_staging_error)?;
     drop(out);
 
-    let Ok(checksum) = compute_file_sha256(&temp_final) else {
-        let _ = fs::remove_file(&temp_final);
+    let checksum = compute_file_sha256(temp_final).map_err(backup_staging_error)?;
+    if let Some(expected) = session
+        .expected_sha256
+        .as_ref()
+        .filter(|expected| !expected.eq_ignore_ascii_case(&checksum))
+    {
         return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to compute assembled checksum".to_string(),
+            StatusCode::BAD_REQUEST,
+            "CHECKSUM_MISMATCH",
+            format!("Checksum verification failed: expected {expected}, actual {checksum}"),
         ));
-    };
-
-    let session_expected = fs::read_to_string(&meta_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<BackupUploadSessionMeta>(&raw).ok())
-        .and_then(|meta| meta.expected_sha256)
-        .or(normalized_expected);
-    if let Some(expected) = session_expected {
-        if !expected.eq_ignore_ascii_case(&checksum) {
-            let _ = fs::remove_file(&temp_final);
-            let _ = fs::remove_dir_all(&upload_dir);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "CHECKSUM_MISMATCH",
-                format!(
-                    "Checksum verification failed: expected {}, actual {}",
-                    expected, checksum
-                ),
-            ));
-        }
     }
 
-    if let Err(err) = af_runner::af_host::verify_sqlite_snapshot_integrity(&temp_final) {
-        let _ = fs::remove_file(&temp_final);
-        let _ = fs::remove_dir_all(&upload_dir);
+    if let Err(err) = af_runner::af_host::verify_sqlite_snapshot_integrity(temp_final) {
         return Err((
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            format!(
-                "Uploaded backup failed SQLite integrity verification: {}",
-                err
-            ),
+            format!("Uploaded backup failed SQLite integrity verification: {err}"),
         ));
     }
 
-    let size = match finalize_assembled_backup_upload(
-        backup_dir,
-        &clean_base,
-        &temp_final,
-        &final_path,
-        &checksum,
-    ) {
-        Ok(sz) => sz,
-        Err(err) => {
-            let _ = fs::remove_dir_all(&upload_dir);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                format!("Failed to finalize uploaded backup artifacts: {}", err),
-            ));
-        }
-    };
-    let _ = fs::remove_dir_all(&upload_dir);
+    let size =
+        finalize_assembled_backup_upload(backup_dir, filename, temp_final, final_path, &checksum)
+            .map_err(backup_staging_error)?;
 
     Ok(serde_json::json!({
         "message": "Chunked upload completed",
-        "filename": clean_base,
-        "upload_id": upload_id,
+        "filename": filename,
+        "upload_id": session.upload_id,
         "size": size,
         "checksum": checksum,
-        "received": total_chunks,
-        "total": total_chunks,
+        "received": session.total_chunks,
+        "total": session.total_chunks,
         "progress": 100.0,
         "complete": true,
         "timestamp": Utc::now().to_rfc3339(),
@@ -1949,7 +1865,8 @@ pub async fn upload_backup_chunk(
         }
     };
     let auth_user = req.extensions().get::<AuthUser>().cloned();
-    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await else {
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), MAX_BACKUP_UPLOAD_CHUNK_BYTES).await
+    else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
@@ -2062,28 +1979,41 @@ pub(crate) fn finalize_assembled_backup_upload(
     let prev_manifest_sha =
         PathBuf::from(format!("{}.prev-{}", manifest_sha_path.display(), prev_tag));
 
-    let mut preserved_previous = Vec::<(PathBuf, PathBuf)>::new();
-    for (live_path, backup_path) in [
+    let artifact_paths = [
         (final_path.to_path_buf(), prev_final),
         (sha_path, prev_sha),
         (manifest_path.clone(), prev_manifest),
         (manifest_sha_path, prev_manifest_sha),
-    ] {
-        if let Ok(meta) = fs::symlink_metadata(&live_path) {
-            if meta.is_file() {
-                fs::rename(&live_path, &backup_path).map_err(|err| {
-                    for (orig_path, moved_path) in preserved_previous.iter().rev() {
-                        let _ = fs::rename(moved_path, orig_path);
-                    }
-                    anyhow::anyhow!(
-                        "Failed to stage existing backup artifact {} for safe replacement: {}",
-                        live_path.display(),
-                        err
-                    )
-                })?;
-                preserved_previous.push((live_path, backup_path));
+    ];
+    // Validate every destination before moving any existing backup files.
+    let previous_files = artifact_paths
+        .into_iter()
+        .filter_map(
+            |(live_path, backup_path)| match backup_staging::open_staged_file(&live_path) {
+                Ok(Some(_)) => Some(Ok((live_path, backup_path))),
+                Ok(None) => None,
+                Err(error) => Some(Err(error.context(format!(
+                    "Inspecting backup artifact {} before replacement",
+                    live_path.display()
+                )))),
+            },
+        )
+        .collect::<anyhow::Result<Vec<_>>>();
+    let mut preserved_previous = Vec::<(PathBuf, PathBuf)>::new();
+    for (live_path, backup_path) in previous_files.inspect_err(|_| {
+        let _ = fs::remove_file(temp_final);
+    })? {
+        fs::rename(&live_path, &backup_path).map_err(|err| {
+            for (orig_path, moved_path) in preserved_previous.iter().rev() {
+                let _ = fs::rename(moved_path, orig_path);
             }
-        }
+            anyhow::anyhow!(
+                "Failed to stage existing backup artifact {} for safe replacement: {}",
+                live_path.display(),
+                err
+            )
+        })?;
+        preserved_previous.push((live_path, backup_path));
     }
 
     let activate_result = (|| -> anyhow::Result<i64> {

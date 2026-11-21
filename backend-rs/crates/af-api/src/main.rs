@@ -283,6 +283,10 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "failed to migrate legacy secrets");
     }
 
+    if let Err(error) = tokio::task::spawn_blocking(storage::maintain_backup_upload_staging).await {
+        tracing::warn!(%error, "startup backup upload staging cleanup task failed");
+    }
+
     // Background 15-minute expired data pruning loop
     if !disable_workers {
         tokio::spawn(async move {
@@ -290,7 +294,11 @@ async fn async_main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(Duration::from_secs(900));
             loop {
                 interval.tick().await;
-                let _ = tokio::task::spawn_blocking(af_db::prune_expired_data).await;
+                let _ = tokio::task::spawn_blocking(|| {
+                    af_db::prune_expired_data();
+                    storage::maintain_backup_upload_staging();
+                })
+                .await;
             }
         });
     }
