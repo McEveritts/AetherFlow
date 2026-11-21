@@ -25,6 +25,8 @@ APP_USER="unmanic"
 INSTALL_DIR="/opt/unmanic"
 DATA_DIR="/var/lib/unmanic"
 SERVICE_FILE="/etc/systemd/system/unmanic.service"
+SETTINGS_FILE="${DATA_DIR}/.unmanic/config/settings.json"
+validate_config_paths "${INSTALL_DIR}/.af-version" "$SETTINGS_FILE" "$SERVICE_FILE"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8888}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
@@ -133,15 +135,20 @@ done
 report_progress 55 "Creating Python virtualenv and installing Unmanic..."
 RUNTIME_MUTATED=1
 mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/.unmanic/config" "${DATA_DIR}/.unmanic/userdata"
-if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
+# Older installations let the service account write the virtualenv.
+chown root:root "${INSTALL_DIR}"
+chmod 0755 "${INSTALL_DIR}"
+rm -rf -- "${INSTALL_DIR}/.venv"
+(
+    umask 022
     af_logged python3 -m venv "${INSTALL_DIR}/.venv"
-fi
-af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel
-if [[ -n "$UNMANIC_TARGET_VER" ]]; then
-    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "unmanic==${UNMANIC_TARGET_VER}"
-else
-    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir unmanic
-fi
+    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel
+    if [[ -n "$UNMANIC_TARGET_VER" ]]; then
+        af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "unmanic==${UNMANIC_TARGET_VER}"
+    else
+        af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir unmanic
+    fi
+)
 
 validate_unmanic_cli_runtime() {
     local cli_ver="$1" expected_ver="$2" version_file=""
@@ -231,7 +238,6 @@ queue_app_version "${INSTALL_DIR}/.af-version" "${UNMANIC_VER}"
 
 report_progress 75 "Configuring ${APP_NAME} on port ${APP_PORT}..."
 BIND_ADDRESS="${AF_BIND_ADDRESS:-127.0.0.1}"
-SETTINGS_FILE="${DATA_DIR}/.unmanic/config/settings.json"
 if [[ ! -f "${SETTINGS_FILE}" ]]; then
     cat > "${SETTINGS_FILE}" <<EOF
 {
@@ -247,7 +253,7 @@ else
     set_config_value "$SETTINGS_FILE" json ui_address "$BIND_ADDRESS"
 fi
 
-chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF

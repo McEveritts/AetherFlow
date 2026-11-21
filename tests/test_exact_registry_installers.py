@@ -1025,6 +1025,8 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
             self.assertTrue((root / "active-unmanic").exists())
 
         # 4. Pinned update passes exact `unmanic==0.2.7` without `--upgrade`.
+        legacy_venv_file = root / "opt/unmanic/.venv/legacy-file"
+        legacy_venv_file.write_text("old virtual environment")
         mark = len(self.read_commands(root))
         pinned = self.run_sandbox(root, script, AF_TARGET_VERSION="v0.2.7")
         self.assertEqual(pinned.returncode, 0, pinned.stdout + pinned.stderr)
@@ -1032,6 +1034,8 @@ write_lock() {{ touch "{root}/install/.$1.lock"; INSTALL_COMMITTED=true; }}
         self.assertEqual(pip_pinned[0], ["pip", "install", "--no-cache-dir", "unmanic==0.2.7"])
         self.assertEqual((root / "opt/unmanic/.af-version").read_text().strip(), "0.2.7")
         self.assertEqual(retained.read_text(), "retained-unmanic-state\n")
+        self.assertFalse(legacy_venv_file.exists())
+        self.assertIn(["chown", "root:root", str(root / "opt/unmanic")], self.read_commands(root, mark))
 
         # 5. Unavailable version rolls back runtime, state, receipt, and active service.
         unavail = self.run_sandbox(root, script, AF_TARGET_VERSION="0.9.9", MOCK_PIP_FAIL="1")
