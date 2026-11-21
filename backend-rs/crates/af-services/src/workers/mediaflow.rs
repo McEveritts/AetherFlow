@@ -939,33 +939,80 @@ pub fn open_and_pin_mediaflow_source_in_roots(
     }
 }
 
-pub(super) fn is_stale_mediaflow_temp_name(name: &str) -> bool {
-    (name.starts_with(".tmp_mediaflow_") && name.ends_with(".mkv"))
-        || (name.starts_with('.') && name.ends_with(".tmp.mkv"))
-}
-
-pub(super) fn cleanup_stale_mediaflow_temps_in_dir(dir: &Path) {
+fn cleanup_stranded_mediaflow_temps(dir: &Path, job_id: i64) {
     let Ok(dmeta) = fs::symlink_metadata(dir) else {
         return;
     };
-    if dmeta.file_type().is_symlink() || !dmeta.is_dir() {
+    if !dmeta.is_dir() {
         return;
+    }
+
+    #[cfg(unix)]
+    use std::os::unix::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawFd,
     };
+    #[cfg(unix)]
+    let pinned_dir = {
+        let Ok(pinned) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(dir)
+        else {
+            return;
+        };
+        if !pinned
+            .metadata()
+            .is_ok_and(|meta| meta.dev() == dmeta.dev() && meta.ino() == dmeta.ino())
+        {
+            return;
+        }
+        pinned
+    };
+    #[cfg(unix)]
+    let owner = unsafe { libc::geteuid() };
+
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+    let prefix = format!(".tmp_mediaflow_{job_id}");
     for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        let basename = entry.file_name();
+        let Some(name) = basename.to_str() else {
             continue;
         };
-        if !is_stale_mediaflow_temp_name(name) {
+        let Some(suffix) = name
+            .strip_prefix(prefix.as_str())
+            .and_then(|tail| tail.strip_suffix(".mkv"))
+        else {
+            continue;
+        };
+        // Support the ID-only name and the simple UUID suffix used by the current writer.
+        if !suffix.is_empty()
+            && !suffix.strip_prefix('_').is_some_and(|nonce| {
+                nonce.len() == 32
+                    && nonce
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        {
             continue;
         }
-        if let Ok(meta) = fs::symlink_metadata(&path) {
-            if !meta.file_type().is_symlink() && meta.file_type().is_file() {
-                let _ = fs::remove_file(&path);
+
+        #[cfg(unix)]
+        {
+            let dirfd = pinned_dir.as_raw_fd();
+            if fstatat_nofollow(dirfd, name).is_ok_and(|meta| {
+                meta.st_mode & libc::S_IFMT == libc::S_IFREG
+                    && meta.st_uid == owner
+                    && meta.st_nlink == 1
+            }) {
+                unlinkat_entry(dirfd, name);
             }
+        }
+        #[cfg(not(unix))]
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -1061,7 +1108,7 @@ async fn persist_mediaflow_completion_with_retry(
 /// - Otherwise marks stranded `PROCESSING` rows as `FAILED`.
 /// - Marks legacy `PENDING_APPROVAL` / `APPROVED` rows missing persisted source identity as
 ///   `NEEDS_RESCAN` so operators re-scan and re-approve safely.
-/// - Sweeps stale `.tmp_mediaflow_*` temp files and genuinely expired `.mediaflow_trash` entries.
+/// - Removes scratch files for interrupted jobs and genuinely expired `.mediaflow_trash` entries.
 pub fn reconcile_mediaflow_startup() {
     let Ok(conn) = af_db::get_conn() else {
         return;
@@ -1097,11 +1144,17 @@ pub fn reconcile_mediaflow_startup() {
         let Some(parent) = Path::new(&raw_path).parent() else {
             continue;
         };
+        if !parent.is_absolute() {
+            continue;
+        }
         let Ok(canon_dir) = fs::canonicalize(parent) else {
             continue;
         };
         if !is_path_within_allowed_mediaflow_roots(&canon_dir, &roots) {
             continue;
+        }
+        if parent == canon_dir.as_path() {
+            cleanup_stranded_mediaflow_temps(&canon_dir, job_id);
         }
         let trash_dir = canon_dir.join(".mediaflow_trash");
         let intent_path = trash_dir.join(publish_intent_filename(job_id));
@@ -1231,7 +1284,6 @@ pub fn reconcile_mediaflow_startup() {
         if !is_path_within_allowed_mediaflow_roots(&canon_dir, &roots) {
             continue;
         }
-        cleanup_stale_mediaflow_temps_in_dir(&canon_dir);
         prune_mediaflow_trash_dir(&canon_dir.join(".mediaflow_trash"), retention);
     }
 }

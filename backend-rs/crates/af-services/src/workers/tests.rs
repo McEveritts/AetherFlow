@@ -4672,6 +4672,20 @@ fn test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps()
     fs::write(&movie, b"video").unwrap();
     let stale_tmp = media.join(".tmp_mediaflow_77.mkv");
     fs::write(&stale_tmp, b"partial").unwrap();
+    let stale_current = media.join(format!(
+        ".tmp_mediaflow_77_{}.mkv",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::write(&stale_current, b"partial").unwrap();
+    let unrelated = [
+        media.join(".other-encoder.tmp.mkv"),
+        media.join(".tmp_mediaflow_77_notes.mkv"),
+        media.join(".tmp_mediaflow_78.mkv"),
+        media.join(".tmp_mediaflow_770.mkv"),
+    ];
+    for path in &unrelated {
+        fs::write(path, b"keep").unwrap();
+    }
     let expired_trash = trash.join("77_old.mkv");
     fs::write(&expired_trash, b"trashed").unwrap();
     let expired_meta = trash.join("77_old.mkv.meta.json");
@@ -4695,6 +4709,11 @@ fn test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps()
             params![movie.to_string_lossy().to_string()],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO mediaflow_queue (id, file_path, status) VALUES (78, ?1, 'COMPLETED')",
+            params![media.join("previous.mkv").to_string_lossy().as_ref()],
+        )
+        .unwrap();
     }
 
     reconcile_mediaflow_startup();
@@ -4710,6 +4729,10 @@ fn test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps()
     assert_eq!(status, "FAILED");
     assert_eq!(err_log, "Interrupted by service restart");
     assert!(!stale_tmp.exists());
+    assert!(!stale_current.exists());
+    for path in &unrelated {
+        assert_eq!(fs::read(path).unwrap(), b"keep", "{}", path.display());
+    }
     assert!(!expired_trash.exists());
     assert!(!expired_meta.exists());
     assert!(
