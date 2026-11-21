@@ -1323,6 +1323,333 @@ async fn marketplace_inventory_requires_human_admin_for_lifecycle_diagnostics() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_url_base_launch_contract_and_gateway_forwarding() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::ServiceExt;
+
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let allocated_port = listener.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let mut total = 0usize;
+                while total < buf.len() {
+                    let Ok(read) = stream.read(&mut buf[total..]).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    total += read;
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let raw = String::from_utf8_lossy(&buf[..total]);
+                let request_line = raw.lines().next().unwrap_or_default();
+                let body = serde_json::json!({ "requestLine": request_line }).to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+
+    let (root, connection) = lifecycle_status_fixture();
+    let db_path = root.join("backend/data/aetherflow.sqlite");
+    std::env::set_var("AF_DB_PATH", &db_path);
+    std::env::set_var("AETHERFLOW_DB_PATH", &db_path);
+    std::env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
+    std::env::set_var("AETHERFLOW_PLUGINS_DIR", root.join("plugins"));
+    std::env::set_var("ALLOWED_HOSTS", "localhost");
+    std::env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+    std::env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+
+    let bin_dir = root.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake_systemctl = bin_dir.join("systemctl");
+    std::fs::write(
+        &fake_systemctl,
+        "#!/bin/sh\ncase \"$1\" in show) printf 'ActiveState=active\\nSubState=running\\n';; is-active) echo active;; *) exit 0;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+
+    af_db::init_db().unwrap();
+    let conn = af_db::get_conn().unwrap();
+    conn.execute_batch("INSERT INTO users(id, username, role) VALUES (1, 'operator', 'admin');")
+        .unwrap();
+    drop(conn);
+
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    let packages = vec![
+        af_models::Package {
+            name: "sonarr".into(),
+            label: "Sonarr".into(),
+            lock_file: "/install/.sonarr.lock".into(),
+            service_type: "systemd".into(),
+            service_name: "sonarr".into(),
+            default_port: 8989,
+            web_path: "/".into(),
+            ..Default::default()
+        },
+        af_models::Package {
+            name: "bazarr".into(),
+            label: "Bazarr".into(),
+            lock_file: "/install/.bazarr.lock".into(),
+            service_type: "systemd".into(),
+            service_name: "bazarr".into(),
+            default_port: 6767,
+            web_path: "/".into(),
+            ..Default::default()
+        },
+    ];
+    std::fs::write(&catalog, serde_json::to_vec(&packages).unwrap()).unwrap();
+    std::fs::write(&automation, "{}").unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::write(root.join("install/.sonarr.lock"), "installed").unwrap();
+    std::fs::write(root.join("install/.bazarr.lock"), "installed").unwrap();
+
+    let sonarr_xml = root.join("var/lib/sonarr/config.xml");
+    std::fs::create_dir_all(sonarr_xml.parent().unwrap()).unwrap();
+    std::fs::write(
+        &sonarr_xml,
+        format!(
+            "<Config><Port>{allocated_port}</Port><UrlBase> /tv/sonarr/ </UrlBase><ApiKey>fixture-key</ApiKey></Config>"
+        ),
+    )
+    .unwrap();
+
+    let bazarr_yaml = root.join("var/lib/bazarr/config/config.yaml");
+    std::fs::create_dir_all(bazarr_yaml.parent().unwrap()).unwrap();
+    std::fs::write(
+        &bazarr_yaml,
+        "general:\n  ip: 127.0.0.1\n  port: 16767\n  base_url: /bazarr/../admin\n",
+    )
+    .unwrap();
+
+    let vhosts = root.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&vhosts).unwrap();
+    std::fs::write(
+        vhosts.join("aetherflow-ext-sonarr.conf"),
+        "<VirtualHost *:443>\n    ServerName sonarr.example.test\n    SSLEngine On\n</VirtualHost>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vhosts.join("aetherflow-app-sonarr.conf"),
+        "<VirtualHost *:80>\n    ServerName sonarr.aether.local\n</VirtualHost>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vhosts.join("aetherflow-app-bazarr.conf"),
+        "<VirtualHost *:80>\n    ServerName bazarr.aether.local\n</VirtualHost>\n",
+    )
+    .unwrap();
+
+    af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+        app_name: "sonarr".into(),
+        public_domain: "sonarr.example.test".into(),
+        external_access_enabled: true,
+        tls_enabled: true,
+        listen_port: i32::from(allocated_port),
+        ..Default::default()
+    })
+    .unwrap();
+    af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+        app_name: "bazarr".into(),
+        external_access_enabled: false,
+        tls_enabled: false,
+        listen_port: 16767,
+        ..Default::default()
+    })
+    .unwrap();
+
+    af_services::clear_service_status_cache();
+    af_services::mutators::clear_app_runtime_meta_cache();
+    let (admin_token, _) = crate::auth::create_standard_jwt(1, &HeaderMap::new()).unwrap();
+    let app = build_router().layer(axum::middleware::from_fn(
+        crate::middlewares::app_subdomain_proxy_middleware,
+    ));
+
+    let fetch_json = |uri: &'static str, token: Option<&str>| {
+        let app = app.clone();
+        let auth = token.map(|t| format!("Bearer {t}"));
+        async move {
+            let mut req = axum::http::Request::builder()
+                .uri(uri)
+                .header(header::HOST, "localhost");
+            if let Some(auth) = auth {
+                req = req.header(header::AUTHORIZATION, auth);
+            }
+            let resp = app
+                .oneshot(req.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), 262_144)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+
+    // 1. Unauthenticated marketplace stays redacted and never exposes retained url_base.
+    let redacted = fetch_json("/api/v1/public/marketplace", None).await;
+    let redacted_sonarr = redacted
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "sonarr")
+        .unwrap();
+    assert_eq!(redacted_sonarr["web_path"], "/");
+    assert!(redacted_sonarr.get("launch_url").is_none());
+    assert!(redacted_sonarr.get("launch_scope").is_none());
+
+    // 2. Both authenticated inventories expose the allocated port, retained URL base,
+    //    and safe root fallback for malformed input.
+    let authed_market = fetch_json("/api/v1/public/marketplace", Some(&admin_token)).await;
+    let market_row = |id: &str| {
+        authed_market
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(market_row("sonarr")["active_port"], allocated_port);
+    assert_eq!(market_row("sonarr")["web_path"], "/tv/sonarr");
+    assert_eq!(market_row("sonarr")["launch_scope"], "public");
+    assert_eq!(
+        market_row("sonarr")["launch_url"],
+        "https://sonarr.example.test/tv/sonarr"
+    );
+    assert_eq!(market_row("bazarr")["web_path"], "/");
+    assert_eq!(market_row("bazarr")["launch_scope"], "internal");
+    assert_eq!(
+        market_row("bazarr")["launch_url"],
+        "http://bazarr.aether.local"
+    );
+
+    let authed_services = fetch_json("/api/v1/auth/services", Some(&admin_token)).await;
+    assert_eq!(authed_services["Sonarr"]["active_port"], allocated_port);
+    assert_eq!(authed_services["Sonarr"]["web_path"], "/tv/sonarr");
+    assert_eq!(authed_services["Sonarr"]["launch_scope"], "public");
+    assert_eq!(
+        authed_services["Sonarr"]["launch_url"],
+        "https://sonarr.example.test/tv/sonarr"
+    );
+    assert_eq!(authed_services["Bazarr"]["web_path"], "/");
+    assert_eq!(authed_services["Bazarr"]["launch_scope"], "internal");
+    assert_eq!(
+        authed_services["Bazarr"]["launch_url"],
+        "http://bazarr.aether.local"
+    );
+
+    // 3. Launching the resolved URL forwards the retained path to the allocated port.
+    let parsed_launch =
+        url::Url::parse(market_row("sonarr")["launch_url"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed_launch.host_str(), Some("sonarr.example.test"));
+    assert_eq!(parsed_launch.path(), "/tv/sonarr");
+    for gateway_host in ["sonarr.example.test", "sonarr.aether.local"] {
+        let proxied = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(parsed_launch.path())
+                    .header(header::HOST, gateway_host)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(proxied.status(), StatusCode::OK, "{gateway_host}");
+        let bytes = axum::body::to_bytes(proxied.into_body(), 16_384)
+            .await
+            .unwrap();
+        let observed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            observed["requestLine"], "GET /tv/sonarr HTTP/1.1",
+            "{gateway_host}"
+        );
+    }
+
+    // 4. Malformed retained UrlBase falls back safely to root in both inventories and forwarding.
+    std::fs::write(
+        &sonarr_xml,
+        format!(
+            "<Config><Port>{allocated_port}</Port><UrlBase>https://evil.example/hijack</UrlBase></Config>"
+        ),
+    )
+    .unwrap();
+    af_services::clear_service_status_cache();
+    af_services::mutators::clear_app_runtime_meta_cache();
+
+    let fallback_market = fetch_json("/api/v1/public/marketplace", Some(&admin_token)).await;
+    let fallback_sonarr = fallback_market
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "sonarr")
+        .unwrap();
+    assert_eq!(fallback_sonarr["web_path"], "/");
+    assert_eq!(fallback_sonarr["launch_url"], "https://sonarr.example.test");
+
+    let fallback_services = fetch_json("/api/v1/auth/services", Some(&admin_token)).await;
+    assert_eq!(fallback_services["Sonarr"]["web_path"], "/");
+    assert_eq!(
+        fallback_services["Sonarr"]["launch_url"],
+        "https://sonarr.example.test"
+    );
+
+    let fallback_url = url::Url::parse(fallback_sonarr["launch_url"].as_str().unwrap()).unwrap();
+    let proxied_root = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(fallback_url.path())
+                .header(header::HOST, "sonarr.example.test")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(proxied_root.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(proxied_root.into_body(), 16_384)
+        .await
+        .unwrap();
+    let observed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(observed["requestLine"], "GET / HTTP/1.1");
+
+    upstream.abort();
+    drop(connection);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn progress_test_user(role: &str, plugin: Option<&str>) -> AuthUser {
     AuthUser {
         user_id: 1,

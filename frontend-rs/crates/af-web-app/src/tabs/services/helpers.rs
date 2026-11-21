@@ -330,12 +330,8 @@ pub(crate) fn launch_url_with_host(
             })
             .map(|_| explicit_launch);
     }
-    let path = field(info, &["web_path"]);
-    let path = if path.is_empty() {
-        String::new()
-    } else {
-        format!("/{}", path.trim_start_matches('/'))
-    };
+    let path = af_models::app_metadata::validate_app_web_path(&field(info, &["web_path"]))
+        .unwrap_or_default();
     let public = field(info, &["public_domain"]);
     if info["external_access_enabled"] == true && valid_domain(&public) {
         return Some(format!(
@@ -684,6 +680,57 @@ mod tests {
         assert_eq!(
             external_access_target(&json!({ "id": "aetherflow-api", "default_port": 8080 })),
             None
+        );
+
+        // Retained non-root launch URLs and validated fallback web_path handling
+        let retained_public = json!({
+            "id": "sonarr",
+            "active_port": 18989,
+            "public_domain": "sonarr.example.com",
+            "external_access_enabled": true,
+            "tls_enabled": true,
+            "web_path": "/tv/sonarr",
+            "launch_scope": "public",
+            "launch_url": "https://sonarr.example.com/tv/sonarr"
+        });
+        assert_eq!(
+            launch_url_with_host(&retained_public, &json!({}), Some("panel.example.com"))
+                .as_deref(),
+            Some("https://sonarr.example.com/tv/sonarr")
+        );
+        let fallback_root = json!({
+            "id": "sonarr",
+            "active_port": 18989,
+            "internal_domain": "sonarr.aether.local",
+            "external_access_enabled": false,
+            "web_path": "/"
+        });
+        assert_eq!(
+            launch_url_with_host(&fallback_root, &json!({}), Some("panel.example.com")).as_deref(),
+            Some("http://sonarr.aether.local")
+        );
+        let fallback_valid = json!({
+            "id": "bazarr",
+            "active_port": 6767,
+            "internal_domain": "bazarr.aether.local",
+            "external_access_enabled": false,
+            "web_path": "/bazarr/"
+        });
+        assert_eq!(
+            launch_url_with_host(&fallback_valid, &json!({}), Some("panel.example.com")).as_deref(),
+            Some("http://bazarr.aether.local/bazarr")
+        );
+        let fallback_invalid = json!({
+            "id": "bazarr",
+            "active_port": 6767,
+            "internal_domain": "bazarr.aether.local",
+            "external_access_enabled": false,
+            "web_path": "/bazarr/../admin"
+        });
+        assert_eq!(
+            launch_url_with_host(&fallback_invalid, &json!({}), Some("panel.example.com"))
+                .as_deref(),
+            Some("http://bazarr.aether.local")
         );
     }
 }

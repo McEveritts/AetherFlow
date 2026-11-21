@@ -213,9 +213,7 @@ pub(super) fn safe_launch_url(service: &Value) -> Option<String> {
     let path = service["web_path"]
         .as_str()
         .or_else(|| service["webPath"].as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("/{}", s.trim_start_matches('/')))
+        .and_then(|s| af_models::app_metadata::validate_app_web_path(s).ok())
         .unwrap_or_default();
     if service["external_access_enabled"] != false {
         if let Some(public) = service["public_domain"]

@@ -318,11 +318,7 @@ fn launch_target(
     if !(1..=65535).contains(&port) || !af_models::valid_ingress_hostname(&internal) {
         return unavailable();
     }
-    let path = if web_path != "/" && web_path.starts_with('/') && !web_path.starts_with("//") {
-        web_path
-    } else {
-        ""
-    };
+    let path = af_models::app_metadata::validate_app_web_path(web_path).unwrap_or_default();
     let enabled_vhost = mutators::resolve_config_path(&format!(
         "/etc/apache2/sites-enabled/aetherflow-app-{app}.conf"
     ));
@@ -378,17 +374,12 @@ fn launch_target(
     )
 }
 
-fn populate_package_statuses(
+fn populate_package_core_statuses(
     pkgs: &mut [Package],
     jobs: &PackageJobSnapshot,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::collections::HashSet<String>> {
     let update_map = workers::get_package_update_map();
-    let ingress: HashMap<_, _> = af_db::get_all_app_ingress_configs()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|config| (config.app_name.clone(), config))
-        .collect();
-    let host = mutators::detect_lan_ip();
+    let mut installed_packages = std::collections::HashSet::new();
 
     for p in pkgs {
         let installed = package_lock_installed(p)?;
@@ -403,13 +394,7 @@ fn populate_package_statuses(
         }
 
         if installed {
-            let config = ingress.get(&p.name);
-            let port = config
-                .map(|ing| ing.listen_port)
-                .filter(|port| *port > 0)
-                .unwrap_or(p.default_port);
-            (p.launch_url, p.launch_scope) =
-                launch_target(&p.name, port, &p.web_path, config, &host);
+            installed_packages.insert(p.name.clone());
             if let Some(update) = update_map.get(&p.name) {
                 p.installed_version = update.installed_version.clone();
                 p.latest_version = update.latest_version.clone();
@@ -421,6 +406,46 @@ fn populate_package_statuses(
         } else {
             p.launch_url = None;
             p.launch_scope = Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.into());
+        }
+    }
+
+    Ok(installed_packages)
+}
+
+fn populate_package_statuses(
+    pkgs: &mut [Package],
+    jobs: &PackageJobSnapshot,
+) -> anyhow::Result<()> {
+    let installed_packages = populate_package_core_statuses(pkgs, jobs)?;
+    let ingress: HashMap<_, _> = af_db::get_all_app_ingress_configs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|config| (config.app_name.clone(), config))
+        .collect();
+    let host = mutators::detect_lan_ip();
+    let native_url_base_apps: Vec<String> = pkgs
+        .iter()
+        .filter(|p| {
+            installed_packages.contains(&p.name)
+                && af_models::app_metadata::supports_native_url_base(&p.name)
+        })
+        .map(|p| p.name.clone())
+        .collect();
+    let native_meta = mutators::collect_native_url_base_meta(&native_url_base_apps);
+
+    for p in pkgs {
+        if installed_packages.contains(&p.name) {
+            let meta = native_meta.get(&mutators::normalize_app_key_name(&p.name));
+            let url_base = meta.map(|m| m.url_base.as_str()).unwrap_or("");
+            p.web_path = af_models::app_metadata::effective_app_web_path(url_base, &p.web_path);
+            let config = ingress.get(&p.name);
+            let port = config
+                .map(|ing| ing.listen_port)
+                .filter(|port| *port > 0)
+                .or_else(|| meta.map(|m| m.configured_port).filter(|port| *port > 0))
+                .unwrap_or(p.default_port);
+            (p.launch_url, p.launch_scope) =
+                launch_target(&p.name, port, &p.web_path, config, &host);
         }
     }
 
@@ -1664,7 +1689,7 @@ pub fn get_active_services_with_jobs(
     let deadline = Instant::now() + service_observations::OBSERVATION_BUDGET;
     lifecycle_cache::observe(jobs);
     let mut pkgs = get_package_catalog()?;
-    populate_package_statuses(&mut pkgs, jobs)?;
+    let installed_packages = populate_package_core_statuses(&mut pkgs, jobs)?;
     let rclone_vfs_configured = is_rclone_vfs_configured();
     let included = |package: &Package| {
         package.status == "installed"
@@ -1840,13 +1865,16 @@ pub fn get_active_services_with_jobs(
         let bind_scope = service_bind_scope_for_id(&p.name).to_string();
         let control_scope = service_control_scope_for_id(&p.name).to_string();
 
-        let (launch_url, launch_scope) = if p.launch_scope.as_deref() == Some("network")
-            && active_port != p.default_port
-            && ing.is_none_or(|config| config.listen_port <= 0)
-        {
-            launch_target(&p.name, active_port, &p.web_path, ing, &launch_host)
+        let installed = installed_packages.contains(&p.name);
+        let web_path = if installed {
+            af_models::app_metadata::effective_app_web_path(&runtime_meta.url_base, &p.web_path)
         } else {
-            (p.launch_url.clone(), p.launch_scope.clone())
+            p.web_path.clone()
+        };
+        let (launch_url, launch_scope) = if installed {
+            launch_target(&p.name, active_port, &web_path, ing, &launch_host)
+        } else {
+            (None, Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.into()))
         };
         let display_name = p.label_or_name();
         anyhow::ensure!(
@@ -1873,7 +1901,7 @@ pub fn get_active_services_with_jobs(
                 public_domain,
                 external_access_enabled,
                 tls_enabled,
-                web_path: p.web_path.clone(),
+                web_path,
                 launch_url,
                 launch_scope,
                 web_scheme,
@@ -2888,6 +2916,189 @@ mod tests {
         let launch = launch_target("direct-launch-test", 8989, "/app", None, "192.168.1.9");
         assert_eq!(launch.0.as_deref(), Some("http://192.168.1.9:8989/app"));
         assert_eq!(launch.1.as_deref(), Some("network"));
+        for bad in ["/../admin", "//evil.test", "/app?x=1", "/app#frag"] {
+            let fallback = launch_target("direct-launch-test", 8989, bad, None, "192.168.1.9");
+            assert_eq!(
+                fallback.0.as_deref(),
+                Some("http://192.168.1.9:8989"),
+                "{bad}"
+            );
+            assert_eq!(fallback.1.as_deref(), Some("network"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn launch_target_and_inventories_honor_retained_url_bases_safely() {
+        let name = "tests::launch_target_and_inventories_honor_retained_url_bases_safely";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        let fixture = crate::inventory_regressions::Fixture::new();
+        env::set_var("AETHERFLOW_CONFIG_ROOT", &fixture.root);
+        af_db::init_db().unwrap();
+        let enabled = fixture.root.join("etc/apache2/sites-enabled");
+        fs::create_dir_all(&enabled).unwrap();
+
+        let write_rel = |rel: &str, body: &str| {
+            let full = fixture.root.join(rel);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, body).unwrap();
+        };
+
+        let mut sonarr_pkg =
+            crate::inventory_regressions::Fixture::package("sonarr", "systemd", "sonarr");
+        sonarr_pkg["label"] = serde_json::json!("Sonarr");
+        sonarr_pkg["default_port"] = serde_json::json!(8989);
+        sonarr_pkg["web_path"] = serde_json::json!("/");
+
+        let mut bazarr_pkg =
+            crate::inventory_regressions::Fixture::package("bazarr", "systemd", "bazarr");
+        bazarr_pkg["label"] = serde_json::json!("Bazarr");
+        bazarr_pkg["default_port"] = serde_json::json!(6767);
+        bazarr_pkg["web_path"] = serde_json::json!("/web");
+
+        let mut sab_pkg =
+            crate::inventory_regressions::Fixture::package("sabnzbd", "systemd", "sabnzbd");
+        sab_pkg["label"] = serde_json::json!("SABnzbd");
+        sab_pkg["default_port"] = serde_json::json!(8085);
+        sab_pkg["web_path"] = serde_json::json!("/sabnzbd");
+
+        let mut tautulli_pkg =
+            crate::inventory_regressions::Fixture::package("tautulli", "systemd", "tautulli");
+        tautulli_pkg["label"] = serde_json::json!("Tautulli");
+        tautulli_pkg["default_port"] = serde_json::json!(8181);
+        tautulli_pkg["web_path"] = serde_json::json!("/");
+
+        let mut radarr_pkg =
+            crate::inventory_regressions::Fixture::package("radarr", "systemd", "radarr");
+        radarr_pkg["label"] = serde_json::json!("Radarr");
+        radarr_pkg["default_port"] = serde_json::json!(7878);
+        radarr_pkg["web_path"] = serde_json::json!("/");
+
+        fixture.write_packages(&[sonarr_pkg, bazarr_pkg, sab_pkg, tautulli_pkg, radarr_pkg]);
+        for app in ["sonarr", "bazarr", "sabnzbd", "tautulli"] {
+            fixture.install(app);
+        }
+
+        write_rel(
+            "var/lib/sonarr/config.xml",
+            "<Config><Port>18989</Port><UrlBase> /tv/sonarr/ </UrlBase></Config>",
+        );
+        write_rel(
+            "var/lib/bazarr/config/config.yaml",
+            "general:\n  port: 16767\n  base_url: /subs/bazarr/\nsonarr:\n  base_url: /sonarr\n",
+        );
+        write_rel(
+            "var/lib/sabnzbd/sabnzbd.ini",
+            "__version__ = 19\n[misc]\nport = 18085\nurl_base = /sabnzbd/\n",
+        );
+        write_rel(
+            "var/lib/tautulli/config.ini",
+            "[General]\nhttp_port = 18181\nhttp_root = \"/../evil\"\n",
+        );
+        write_rel(
+            "var/lib/radarr/config.xml",
+            "<Config><Port>17878</Port><UrlBase>/movies</UrlBase></Config>",
+        );
+
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "sonarr".into(),
+            public_domain: "sonarr.example.test".into(),
+            external_access_enabled: true,
+            tls_enabled: true,
+            listen_port: 18989,
+            ..Default::default()
+        })
+        .unwrap();
+        fs::write(
+            enabled.join("aetherflow-ext-sonarr.conf"),
+            "<VirtualHost *:443>\n    ServerName sonarr.example.test\n    SSLEngine On\n</VirtualHost>\n",
+        )
+        .unwrap();
+        for app in ["bazarr", "sabnzbd", "tautulli"] {
+            fs::write(
+                enabled.join(format!("aetherflow-app-{app}.conf")),
+                format!("<VirtualHost *:80>\n    ServerName {app}.aether.local\n</VirtualHost>\n"),
+            )
+            .unwrap();
+        }
+
+        clear_service_status_cache();
+        mutators::clear_app_runtime_meta_cache();
+
+        // Direct listener with retained base path
+        assert_eq!(
+            launch_target(
+                "direct-launch-test",
+                18989,
+                "/tv/sonarr",
+                None,
+                "192.168.1.9"
+            ),
+            (
+                Some("http://192.168.1.9:18989/tv/sonarr".into()),
+                Some("network".into())
+            )
+        );
+        // Unexposed loopback app remains unavailable even with a valid base path
+        assert_eq!(
+            launch_target("radarr", 17878, "/movies", None, "192.168.1.9"),
+            (None, Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE.into()))
+        );
+
+        let pkgs = get_packages().unwrap();
+        let pkg = |id: &str| pkgs.iter().find(|p| p.name == id).unwrap();
+        assert_eq!(pkg("sonarr").web_path, "/tv/sonarr");
+        assert_eq!(
+            pkg("sonarr").launch_url.as_deref(),
+            Some("https://sonarr.example.test/tv/sonarr")
+        );
+        assert_eq!(pkg("sonarr").launch_scope.as_deref(), Some("public"));
+        assert_eq!(pkg("bazarr").web_path, "/subs/bazarr/web");
+        assert_eq!(
+            pkg("bazarr").launch_url.as_deref(),
+            Some("http://bazarr.aether.local/subs/bazarr/web")
+        );
+        assert_eq!(pkg("sabnzbd").web_path, "/sabnzbd");
+        assert_eq!(
+            pkg("sabnzbd").launch_url.as_deref(),
+            Some("http://sabnzbd.aether.local/sabnzbd")
+        );
+        assert_eq!(pkg("tautulli").web_path, "/");
+        assert_eq!(
+            pkg("tautulli").launch_url.as_deref(),
+            Some("http://tautulli.aether.local")
+        );
+        assert_eq!(pkg("radarr").web_path, "/");
+        assert_eq!(pkg("radarr").launch_url, None);
+        assert_eq!(
+            pkg("radarr").launch_scope.as_deref(),
+            Some(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE)
+        );
+
+        let services = get_active_services().unwrap();
+        assert_eq!(services["Sonarr"].web_path, "/tv/sonarr");
+        assert_eq!(
+            services["Sonarr"].launch_url.as_deref(),
+            Some("https://sonarr.example.test/tv/sonarr")
+        );
+        assert_eq!(services["Sonarr"].launch_scope.as_deref(), Some("public"));
+        assert_eq!(services["Bazarr"].web_path, "/subs/bazarr/web");
+        assert_eq!(
+            services["Bazarr"].launch_url.as_deref(),
+            Some("http://bazarr.aether.local/subs/bazarr/web")
+        );
+        assert_eq!(services["SABnzbd"].web_path, "/sabnzbd");
+        assert_eq!(
+            services["SABnzbd"].launch_url.as_deref(),
+            Some("http://sabnzbd.aether.local/sabnzbd")
+        );
+        assert_eq!(services["Tautulli"].web_path, "/");
+        assert_eq!(
+            services["Tautulli"].launch_url.as_deref(),
+            Some("http://tautulli.aether.local")
+        );
+        assert!(!services.contains_key("Radarr"));
     }
 
     #[test]

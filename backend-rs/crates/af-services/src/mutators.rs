@@ -1148,15 +1148,65 @@ fn parse_runner_app_meta(json_body: &str) -> Option<AppRuntimeMeta> {
     if success.and_then(Value::as_bool) != Some(true) {
         return None;
     }
-    if let Some(data) = response.get("data") {
-        return serde_json::from_value(data.clone()).ok();
-    }
-    serde_json::from_str(response.get("output")?.as_str()?).ok()
+    let mut meta: AppRuntimeMeta = if let Some(data) = response.get("data") {
+        serde_json::from_value(data.clone()).ok()?
+    } else {
+        serde_json::from_str(response.get("output")?.as_str()?).ok()?
+    };
+    meta.url_base =
+        af_models::app_metadata::validate_app_web_path(&meta.url_base).unwrap_or_default();
+    Some(meta)
 }
 
-/// Discovers runtime API key and configured port from an application's native config files.
+/// Discovers runtime API key, configured port, and validated native URL base from an
+/// application's native config files.
 pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
     get_app_runtime_meta_until(app_name, Instant::now() + APP_META_BUDGET)
+}
+
+pub(super) fn collect_native_url_base_meta(
+    app_names: &[String],
+) -> HashMap<String, AppRuntimeMeta> {
+    let mut targets: Vec<String> = app_names
+        .iter()
+        .map(|name| normalize_app_key_name(name))
+        .filter(|name| af_models::app_metadata::supports_native_url_base(name))
+        .collect();
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return HashMap::new();
+    }
+    let deadline = Instant::now() + APP_META_BUDGET;
+    if targets.len() == 1 {
+        let app = targets.remove(0);
+        let meta = get_app_runtime_meta_until(&app, deadline);
+        return HashMap::from([(app, meta)]);
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = Mutex::new(HashMap::with_capacity(targets.len()));
+    let workers = MAX_APP_META_PROBES.min(targets.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(app) = targets.get(idx) else {
+                    break;
+                };
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let meta = get_app_runtime_meta_until(app, deadline);
+                results
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(app.clone(), meta);
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> AppRuntimeMeta {
@@ -1196,12 +1246,16 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
 
     let mut meta = af_runner::extract_app_runtime_meta_local_until(&canonical, deadline);
 
-    let mut confirmed = !meta.api_key.is_empty() || meta.configured_port > 0;
+    let mut confirmed =
+        !meta.api_key.is_empty() || meta.configured_port > 0 || !meta.url_base.is_empty();
     #[cfg(unix)]
     if meta.configured_port <= 0 {
         if let Some(runner_meta) = query_runner_app_meta_unix(&canonical, deadline) {
             if meta.api_key.is_empty() {
                 meta.api_key = runner_meta.api_key;
+            }
+            if meta.url_base.is_empty() {
+                meta.url_base = runner_meta.url_base;
             }
             meta.configured_port = runner_meta.configured_port;
             confirmed = true;

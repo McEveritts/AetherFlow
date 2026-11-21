@@ -7164,7 +7164,9 @@ pub async fn dispatch_app_meta(app_name: &str) -> anyhow::Result<AppRuntimeMeta>
     if result.output.trim().is_empty() {
         return Ok(AppRuntimeMeta::default());
     }
-    let meta: AppRuntimeMeta = serde_json::from_str(&result.output)?;
+    let mut meta: AppRuntimeMeta = serde_json::from_str(&result.output)?;
+    meta.url_base =
+        af_models::app_metadata::validate_app_web_path(&meta.url_base).unwrap_or_default();
     Ok(meta)
 }
 

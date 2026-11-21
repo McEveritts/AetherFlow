@@ -123,6 +123,12 @@ mod tests {
                 .as_str(),
             "https://metrics.example.com/.well-known/aetherflow/app-launch"
         );
+        assert_eq!(
+            launch_exchange(&service, "https://metrics.example.com/ops/netdata")
+                .unwrap()
+                .as_str(),
+            "https://metrics.example.com/.well-known/aetherflow/app-launch"
+        );
         for url in [
             "http://metrics.example.com/",
             "https://metrics.example.com:8443/",

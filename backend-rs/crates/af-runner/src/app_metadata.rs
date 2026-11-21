@@ -399,6 +399,7 @@ pub fn extract_app_runtime_meta_local_until(
                 format!("/var/lib/{}/config.xml", canonical),
                 format!("/var/lib/{}/config/config.xml", canonical),
             ];
+            let mut url_base_seen = canonical == "listenarr";
             for raw_path in &candidates {
                 let Some(content) = read_runner_config_text(raw_path) else {
                     continue;
@@ -410,13 +411,23 @@ pub fn extract_app_runtime_meta_local_until(
                     meta.configured_port =
                         parse_valid_runner_port(&extract_runner_xml_tag(&content, "Port"));
                 }
-                if !meta.api_key.is_empty() && meta.configured_port > 0 {
+                if !url_base_seen {
+                    if let Some(raw_base) =
+                        af_models::app_metadata::extract_xml_tag_value(&content, "UrlBase")
+                    {
+                        meta.url_base = af_models::app_metadata::validate_app_web_path(&raw_base)
+                            .unwrap_or_default();
+                        url_base_seen = true;
+                    }
+                }
+                if !meta.api_key.is_empty() && meta.configured_port > 0 && url_base_seen {
                     break;
                 }
             }
         }
 
         "bazarr" => {
+            let mut url_base_seen = false;
             let yaml_paths = [
                 "/var/lib/bazarr/config/config.yaml",
                 "/var/lib/bazarr/config.yaml",
@@ -437,6 +448,15 @@ pub fn extract_app_runtime_meta_local_until(
                         &extract_runner_yaml_key_in_section(&content, "general", "port"),
                     );
                 }
+                if !url_base_seen {
+                    if let Some(raw_base) = af_models::app_metadata::extract_yaml_section_value(
+                        &content, "general", "base_url",
+                    ) {
+                        meta.url_base = af_models::app_metadata::validate_app_web_path(&raw_base)
+                            .unwrap_or_default();
+                        url_base_seen = true;
+                    }
+                }
             }
             let ini_paths = [
                 "/var/lib/bazarr/config/config.ini",
@@ -454,10 +474,20 @@ pub fn extract_app_runtime_meta_local_until(
                     meta.configured_port =
                         parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
                 }
+                if !url_base_seen {
+                    if let Some(raw_base) = af_models::app_metadata::extract_ini_section_value(
+                        &content, "general", "base_url",
+                    ) {
+                        meta.url_base = af_models::app_metadata::validate_app_web_path(&raw_base)
+                            .unwrap_or_default();
+                        url_base_seen = true;
+                    }
+                }
             }
         }
 
         "sabnzbd" => {
+            let mut url_base_seen = false;
             let candidates = [
                 "/var/lib/sabnzbd/sabnzbd.ini",
                 "/var/lib/sabnzbd/.sabnzbd/sabnzbd.ini",
@@ -474,10 +504,20 @@ pub fn extract_app_runtime_meta_local_until(
                     meta.configured_port =
                         parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
                 }
+                if !url_base_seen {
+                    if let Some(raw_base) = af_models::app_metadata::extract_ini_section_value(
+                        &content, "misc", "url_base",
+                    ) {
+                        meta.url_base = af_models::app_metadata::validate_app_web_path(&raw_base)
+                            .unwrap_or_default();
+                        url_base_seen = true;
+                    }
+                }
             }
         }
 
         "tautulli" => {
+            let mut url_base_seen = false;
             let candidates = [
                 "/var/lib/tautulli/config.ini",
                 "/opt/Tautulli/config.ini",
@@ -495,6 +535,17 @@ pub fn extract_app_runtime_meta_local_until(
                         &content,
                         &["http_port", "port"],
                     ));
+                }
+                if !url_base_seen {
+                    if let Some(raw_base) = af_models::app_metadata::extract_ini_section_value(
+                        &content,
+                        "General",
+                        "http_root",
+                    ) {
+                        meta.url_base = af_models::app_metadata::validate_app_web_path(&raw_base)
+                            .unwrap_or_default();
+                        url_base_seen = true;
+                    }
                 }
             }
         }
@@ -1857,11 +1908,8 @@ pub(super) async fn handle_app_meta(
         );
     }
     let meta = extract_app_runtime_meta_local(&req.app_name);
-    let output = serde_json::to_string(&json!({
-        "api_key": meta.api_key,
-        "configured_port": meta.configured_port,
-    }))
-    .unwrap_or_else(|_| "{\"api_key\":\"\",\"configured_port\":0}".to_string());
+    let output = serde_json::to_string(&meta)
+        .unwrap_or_else(|_| "{\"api_key\":\"\",\"configured_port\":0}".to_string());
 
     (
         StatusCode::OK,

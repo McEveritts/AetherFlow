@@ -2298,4 +2298,6 @@ pub struct AppRuntimeMeta {
     pub api_key: String,
     #[serde(default)]
     pub configured_port: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url_base: String,
 }

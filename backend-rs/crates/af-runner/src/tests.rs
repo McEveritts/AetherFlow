@@ -498,6 +498,139 @@ async fn test_handle_app_meta_wire_format() {
     assert!(decoded.configured_port >= 0);
 }
 
+#[tokio::test]
+async fn test_handle_app_meta_extracts_retained_url_bases_and_rejects_malformed() {
+    const ISOLATION_ENV: &str = "AF_RUNNER_URL_BASE_TEST_ISOLATED";
+    if env::var_os(ISOLATION_ENV).is_none() {
+        let name = std::thread::current()
+            .name()
+            .expect("named test thread")
+            .to_string();
+        let status = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture"])
+            .env(ISOLATION_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated test failed: {name}");
+        return;
+    }
+
+    let root = env::temp_dir().join(format!("af-runner-url-base-{}", uuid::Uuid::new_v4()));
+    let write_rel = |rel: &str, body: &str| {
+        let full = root.join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(&full, body).unwrap();
+        full
+    };
+
+    write_rel(
+        "var/lib/sonarr/config.xml",
+        "<Config><Port>18989</Port><ApiKey>s-key</ApiKey><UrlBase> /tv/sonarr/ </UrlBase></Config>",
+    );
+    write_rel(
+        "var/lib/radarr/config.xml",
+        "<Config><Port>17878</Port><UrlBase>radarr</UrlBase></Config>",
+    );
+    write_rel(
+        "var/lib/lidarr/config.xml",
+        "<Config><Port>18686</Port><UrlBase>/music/lidarr/</UrlBase></Config>",
+    );
+    write_rel(
+        "var/lib/prowlarr/config.xml",
+        "<Config><Port>19696</Port><UrlBase>/prowlarr/../admin</UrlBase></Config>",
+    );
+    write_rel(
+        "var/lib/prowlarr/config/config.xml",
+        "<Config><Port>19696</Port><UrlBase>/stale-secondary</UrlBase></Config>",
+    );
+    write_rel(
+        "var/lib/bazarr/config/config.yaml",
+        concat!(
+            "auth:\n",
+            "  apikey: bazarr-key\n",
+            "general: # operator config\n",
+            "  proxy:\n",
+            "    exclude:\n",
+            "    - localhost\n",
+            "    base_url: /nested-ignored\n",
+            "  ip: 127.0.0.1\n",
+            "  port: 16767\n",
+            "  base_url: '/subs/bazarr/' # retained\n",
+            "sonarr:\n",
+            "  base_url: /sonarr\n",
+        ),
+    );
+    write_rel(
+        "var/lib/sabnzbd/sabnzbd.ini",
+        concat!(
+            "__version__ = 19\n",
+            "[servers]\n",
+            "[[news.local]]\n",
+            "url_base = /wrong\n",
+            "[misc]\n",
+            "port = 18085\n",
+            "url_base = /sabnzbd/ # retained\n",
+        ),
+    );
+    write_rel(
+        "var/lib/tautulli/config.ini",
+        "[General]\nhttp_port = 18181\nhttp_root = \"/tautulli\"\n",
+    );
+
+    env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
+
+    for (app, expected_port, expected_base) in [
+        ("sonarr", 18989, "/tv/sonarr"),
+        ("radarr", 17878, "/radarr"),
+        ("lidarr", 18686, "/music/lidarr"),
+        ("prowlarr", 19696, ""),
+        ("bazarr", 16767, "/subs/bazarr"),
+        ("sabnzbd", 18085, "/sabnzbd"),
+        ("tautulli", 18181, "/tautulli"),
+    ] {
+        let (code, Json(resp)) = handle_app_meta(Json(AppMetaRunnerRequest {
+            app_name: app.to_string(),
+        }))
+        .await;
+        assert_eq!(code, StatusCode::OK, "{app}");
+        assert!(resp.success, "{app}");
+        let decoded: AppRuntimeMeta = serde_json::from_str(&resp.output).unwrap();
+        assert_eq!(decoded.configured_port, expected_port, "{app}");
+        assert_eq!(decoded.url_base, expected_base, "{app}");
+        if expected_base.is_empty() {
+            assert!(
+                !resp.output.contains("url_base"),
+                "{app} empty url_base should be omitted on wire: {}",
+                resp.output
+            );
+        }
+    }
+
+    // Legacy Bazarr INI fallback when config.yaml is absent.
+    fs::remove_file(root.join("var/lib/bazarr/config/config.yaml")).unwrap();
+    write_rel(
+        "var/lib/bazarr/config/config.ini",
+        "[sonarr]\nbase_url = /sonarr\n[general]\nport = 16768\nbase_url = /bazarr-ini/\n",
+    );
+    let bazarr_ini = extract_app_runtime_meta_local("bazarr");
+    assert_eq!(bazarr_ini.configured_port, 16768);
+    assert_eq!(bazarr_ini.url_base, "/bazarr-ini");
+
+    // Confined reader must refuse symlinked config files.
+    let target = write_rel(
+        "outside-config.xml",
+        "<Config><Port>18787</Port><UrlBase>/readarr</UrlBase></Config>",
+    );
+    let readarr_xml = root.join("var/lib/readarr/config.xml");
+    fs::create_dir_all(readarr_xml.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &readarr_xml).unwrap();
+    let symlinked = extract_app_runtime_meta_local("readarr");
+    assert_eq!(symlinked.configured_port, 0);
+    assert!(symlinked.url_base.is_empty());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn test_dispatcharr_runtime_port_and_package_fallback() {
     assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=19200\n"), 19200);
