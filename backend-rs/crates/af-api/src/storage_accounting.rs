@@ -184,6 +184,76 @@ fn ensure_no_reserved_uploads(conn: &rusqlite::Connection, user_id: i64) -> anyh
     Ok(())
 }
 
+// The caller holds the storage and per-user mutation locks. A receipt means
+// the host may have changed while SQLite still holds the last committed limit.
+async fn restore_committed_quota(user_id: i64) -> anyhow::Result<()> {
+    let rollback = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, i64)>> {
+        let conn = af_db::get_conn()?;
+        let pending: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT r.username, u.username, COALESCE(q.quota_bytes, 0)
+                 FROM quota_rollbacks r JOIN users u ON u.id = r.user_id
+                 LEFT JOIN user_quotas q ON q.user_id = r.user_id
+                 WHERE r.user_id = ?1",
+                [user_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((username, current_username, bytes)) = pending else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            username == current_username,
+            "Pending quota change belongs to a different host account"
+        );
+        Ok(Some((username, bytes.max(0))))
+    })
+    .await??;
+    if let Some((username, bytes)) = rollback {
+        af_runner::dispatch_set_quota(&username, &format!("{bytes}B")).await?;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = af_db::get_conn()?;
+            conn.execute(
+                "DELETE FROM quota_rollbacks WHERE user_id = ?1 AND username = ?2",
+                params![user_id, username],
+            )?;
+            Ok(())
+        })
+        .await??;
+    }
+    Ok(())
+}
+
+pub(crate) async fn recover_quota_rollbacks() {
+    let pending = tokio::task::spawn_blocking(|| -> anyhow::Result<Vec<i64>> {
+        let conn = af_db::get_conn()?;
+        let mut stmt = conn.prepare("SELECT user_id FROM quota_rollbacks ORDER BY user_id")?;
+        let ids = stmt.query_map([], |row| row.get(0))?;
+        Ok(ids.collect::<Result<_, _>>()?)
+    })
+    .await;
+    let ids = match pending {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Could not read pending host quota rollbacks");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Quota rollback lookup failed");
+            return;
+        }
+    };
+    for user_id in ids {
+        let _shared = MUTATIONS.lock().await;
+        let _user = crate::mcbrowser::user_mutation_stripe(user_id)
+            .lock_owned()
+            .await;
+        if let Err(error) = restore_committed_quota(user_id).await {
+            tracing::warn!(%error, user_id, "Host quota rollback remains pending");
+        }
+    }
+}
+
 async fn run_quota_operation(
     user_id: i64,
     requested: Option<i64>,
@@ -192,6 +262,7 @@ async fn run_quota_operation(
     let _user = crate::mcbrowser::user_mutation_stripe(user_id)
         .lock_owned()
         .await;
+    restore_committed_quota(user_id).await?;
     let username = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let conn = af_db::get_conn()?;
         ensure_no_reserved_uploads(&conn, user_id)?;
@@ -208,17 +279,56 @@ async fn run_quota_operation(
     })
     .await?;
     let effective = requested.map(|bytes| ((bytes as u64).div_ceil(1024) * 1024) as i64);
-    if let Some(bytes) = effective {
-        af_runner::dispatch_set_quota(&username, &format!("{bytes}B")).await?;
+    if effective.is_some() {
+        let username = username.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = af_db::get_conn()?;
+            conn.execute(
+                "INSERT INTO quota_rollbacks (user_id, username) VALUES (?1, ?2)",
+                params![user_id, username],
+            )?;
+            Ok(())
+        })
+        .await??;
     }
-    tokio::task::spawn_blocking(move || -> anyhow::Result<UserQuotaRecord> {
-        let conn=af_db::get_conn()?;
-        let used=usage.used_bytes.checked_add(shared_usage(&conn,user_id,&usage.scanned_roots)?).ok_or_else(||anyhow::anyhow!("Storage usage overflow"))?;
-        let used=i64::try_from(used)?;
-        conn.execute("INSERT INTO user_quotas(user_id,username,quota_bytes,used_bytes,status,source,updated_at) VALUES(?1,?2,COALESCE(?3,0),?4,'active','manual',CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,quota_bytes=COALESCE(?3,user_quotas.quota_bytes),used_bytes=?4,updated_at=CURRENT_TIMESTAMP",params![user_id,username,effective,used])?;
-        drop(conn);
-        query_user_quota_record(user_id)
-    }).await?
+
+    let result: anyhow::Result<UserQuotaRecord> = async {
+        if let Some(bytes) = effective {
+            af_runner::dispatch_set_quota(&username, &format!("{bytes}B")).await?;
+        }
+        tokio::task::spawn_blocking(move || {
+            let conn = af_db::get_conn()?;
+            transaction(&conn, || {
+                let used = usage
+                    .used_bytes
+                    .checked_add(shared_usage(&conn, user_id, &usage.scanned_roots)?)
+                    .ok_or_else(|| anyhow::anyhow!("Storage usage overflow"))?;
+                conn.execute(
+                    "INSERT INTO user_quotas(user_id,username,quota_bytes,used_bytes,status,source,updated_at)
+                     VALUES(?1,?2,COALESCE(?3,0),?4,'active','manual',CURRENT_TIMESTAMP)
+                     ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,
+                     quota_bytes=COALESCE(?3,user_quotas.quota_bytes),used_bytes=?4,updated_at=CURRENT_TIMESTAMP",
+                    params![user_id, username, effective, i64::try_from(used)?],
+                )?;
+                if effective.is_some() {
+                    conn.execute("DELETE FROM quota_rollbacks WHERE user_id = ?1", [user_id])?;
+                }
+                crate::storage::query_user_quota_record_conn(&conn, user_id)
+            })
+        })
+        .await?
+    }
+    .await;
+
+    match result {
+        Err(error) if effective.is_some() => match restore_committed_quota(user_id).await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(error.context(format!(
+                "Quota update failed and host quota rollback remains pending: {rollback_error}"
+            ))),
+        },
+        result => result,
+    }
 }
 
 pub(super) async fn quota_operation(user_id: i64, requested: Option<i64>) -> Response {
@@ -237,7 +347,7 @@ pub(super) async fn quota_operation(user_id: i64, requested: Option<i64>) -> Res
         Ok(Ok(record))=>Json(serde_json::json!({"message":if requested.is_some(){"Filesystem quota applied and usage scanned"}else{"Storage usage scanned"},"quota":record})).into_response(),
         Ok(Err(error))=> {
             let status=if matches!(error.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::QueryReturnedNoRows)){StatusCode::NOT_FOUND}else{StatusCode::BAD_GATEWAY};
-            tracing::warn!(%error,user_id,"Quota operation did not complete; host application may require reconciliation");
+            tracing::warn!(%error, user_id, "Quota operation did not complete");
             api_error(status,"QUOTA_OPERATION_FAILED",error.to_string())
         }
         Err(_)=>api_error(StatusCode::INTERNAL_SERVER_ERROR,"INTERNAL_ERROR","Quota worker failed"),

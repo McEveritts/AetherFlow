@@ -31,6 +31,7 @@ mod update_observability_tests;
 
 #[path = "storage_accounting.rs"]
 mod accounting;
+pub(crate) use accounting::recover_quota_rollbacks;
 
 // Each response owns an already-open file. Reads stay bounded, including for
 // full downloads, and never occupy a runtime worker with filesystem I/O.
@@ -2910,6 +2911,13 @@ fn normalize_quota_record(mut rec: UserQuotaRecord) -> UserQuotaRecord {
 
 pub fn query_user_quota_record(user_id: i64) -> anyhow::Result<UserQuotaRecord> {
     let conn = af_db::get_conn()?;
+    query_user_quota_record_conn(&conn, user_id)
+}
+
+fn query_user_quota_record_conn(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+) -> anyhow::Result<UserQuotaRecord> {
     let username: String = conn.query_row(
         "SELECT username FROM users WHERE id = ?1",
         params![user_id],

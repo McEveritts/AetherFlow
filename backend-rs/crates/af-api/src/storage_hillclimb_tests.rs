@@ -847,24 +847,43 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let fail = Arc::new(AtomicBool::new(false));
     let usage = Arc::new(AtomicU64::new(8123));
-    let (captured, failed, measured) = (calls.clone(), fail.clone(), usage.clone());
+    let applied = Arc::new(AtomicU64::new(0));
+    let (captured, failed, measured, host_limit) =
+        (calls.clone(), fail.clone(), usage.clone(), applied.clone());
     let server = tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-            let (captured, failed, measured) = (captured.clone(), failed.clone(), measured.clone());
+            let (captured, failed, measured, host_limit) = (
+                captured.clone(),
+                failed.clone(),
+                measured.clone(),
+                host_limit.clone(),
+            );
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(
                     move |request: hyper::Request<hyper::body::Incoming>| {
-                        let (captured, failed, measured) =
-                            (captured.clone(), failed.clone(), measured.clone());
+                        let (captured, failed, measured, host_limit) = (
+                            captured.clone(),
+                            failed.clone(),
+                            measured.clone(),
+                            host_limit.clone(),
+                        );
                         async move {
                             let path = request.uri().path().to_owned();
                             let body = request.into_body().collect().await.unwrap().to_bytes();
-                            captured.lock().unwrap().push((
-                                path.clone(),
-                                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-                            ));
+                            let payload =
+                                serde_json::from_slice::<serde_json::Value>(&body).unwrap();
                             let success = !(path == "/v1/quota" && failed.load(Ordering::SeqCst));
+                            if path == "/v1/quota" && success {
+                                let bytes = payload["size"]
+                                    .as_str()
+                                    .unwrap()
+                                    .trim_end_matches('B')
+                                    .parse()
+                                    .unwrap();
+                                host_limit.store(bytes, Ordering::SeqCst);
+                            }
+                            captured.lock().unwrap().push((path.clone(), payload));
                             let output = if path == "/v1/quota/usage" {
                                 serde_json::json!({"used_bytes":measured.load(Ordering::SeqCst),"scanned_roots":[]}).to_string()
                             } else {
@@ -897,6 +916,14 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
     assert_eq!((row.quota_bytes, row.used_bytes), (2048, 8123));
     assert_eq!(calls.lock().unwrap()[0].0, "/v1/quota/usage");
     assert_eq!(calls.lock().unwrap()[1].1["size"], "2048B");
+    assert_eq!(applied.load(Ordering::SeqCst), 2048);
+    let pending_rollbacks = || -> i64 {
+        af_db::get_conn()
+            .unwrap()
+            .query_row("SELECT count(*) FROM quota_rollbacks", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(pending_rollbacks(), 0);
     usage.store(12000, Ordering::SeqCst);
     assert_eq!(refresh_user_quota(Path(693)).await.status(), StatusCode::OK);
     assert_eq!(query_user_quota_record(693).unwrap().used_bytes, 12000);
@@ -908,7 +935,13 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
             .is_server_error()
     );
     assert_eq!(query_user_quota_record(693).unwrap().quota_bytes, 2048);
+    assert_eq!(pending_rollbacks(), 1);
+    // Simulate the host having already changed before the runner reply was lost.
+    applied.store(8192, Ordering::SeqCst);
     fail.store(false, Ordering::SeqCst);
+    crate::storage::recover_quota_rollbacks().await;
+    assert_eq!(applied.load(Ordering::SeqCst), 2048);
+    assert_eq!(pending_rollbacks(), 0);
     let conn = af_db::get_conn().unwrap();
     conn.execute_batch("CREATE TRIGGER reject_quota_persist BEFORE UPDATE ON user_quotas BEGIN SELECT RAISE(FAIL,'fixture persistence failure'); END;").unwrap();
     drop(conn);
@@ -919,6 +952,14 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
             .is_server_error()
     );
     assert_eq!(query_user_quota_record(693).unwrap().quota_bytes, 2048);
+    assert_eq!(applied.load(Ordering::SeqCst), 2048);
+    assert_eq!(pending_rollbacks(), 0);
+    {
+        let calls = calls.lock().unwrap();
+        let apply_and_restore = &calls[calls.len() - 2..];
+        assert_eq!(apply_and_restore[0].1["size"], "8192B");
+        assert_eq!(apply_and_restore[1].1["size"], "2048B");
+    }
     server.abort();
     let _ = server.await;
     let _ = fs::remove_file(&socket);

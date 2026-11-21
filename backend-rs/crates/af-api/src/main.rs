@@ -320,6 +320,7 @@ async fn async_main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             plugins::reconcile_managed_plugins_on_startup().await;
         });
+        tokio::spawn(storage::recover_quota_rollbacks());
     } else {
         tracing::info!(
             "Background mutating workers disabled via AETHERFLOW_DISABLE_BACKGROUND_WORKERS / AETHERFLOW_DISABLE_WORKERS / AETHERFLOW_E2E_ISOLATED"

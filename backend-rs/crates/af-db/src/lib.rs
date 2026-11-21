@@ -1054,6 +1054,11 @@ pub fn init_db() -> anyhow::Result<()> {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS quota_rollbacks (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            username TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS fileshare_objects (
             storage_root TEXT NOT NULL,
             directory TEXT NOT NULL,
