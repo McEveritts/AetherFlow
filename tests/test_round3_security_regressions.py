@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -190,29 +191,36 @@ class Round3SecurityRegressionTests(unittest.TestCase):
 
     def test_kasmvnc_display_probe_honors_proc_net_unix_under_private_tmp(self) -> None:
         kasm = (ROOT / "packages/package/install/installpackage-kasmvnc").read_text(encoding="utf-8")
-        snippet = "PROC_NET_UNIX_PATH=" + kasm.split("PROC_NET_UNIX_PATH=", 1)[1].split("\nKASMVNC_DISPLAY=", 1)[0]
+        _, starter = kasm.split("write_config_file /usr/local/bin/af-kasmvnc-start 0755 <<'EOF'\n", 1)
+        snippet, _ = starter.split("\nEOF\n", 1)
+        self.assertIn("ExecStart=/usr/local/bin/af-kasmvnc-start", kasm)
         with tempfile.TemporaryDirectory(prefix="af-r3-x11-") as tmp:
-            proc_unix = Path(tmp) / "proc_net_unix"
+            root = Path(tmp)
+            proc_unix = root / "proc_net_unix"
             proc_unix.write_text(
                 "Num       RefCount Protocol Flags    Type St Inode Path\n"
-                "0000000000000000: 00000002 00000000 00010000 0001 01 12345 @/tmp/.X11-unix/X47\n",
+                "0000000000000000: 00000002 00000000 00010000 0001 01 12345 @/tmp/.X11-unix/X20\n"
+                "0000000000000000: 00000002 00000000 00010000 0001 01 12346 /tmp/.X11-unix/X21\n",
                 encoding="utf-8",
             )
+            (root / ".X22-lock").touch()
+            vncserver = root / "vncserver"
+            vncserver.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+            vncserver.chmod(0o755)
             probe = (
-                snippet
-                + '\nif x11_display_free 47; then echo "BUG_FREE_47"; exit 1; fi\n'
-                + 'x11_display_free 48\n'
-                + 'echo "OK"\n'
+                snippet.replace('"/tmp/.X', '"$AF_TEST_X_ROOT/.X')
+                .replace("/proc/net/unix", shlex.quote(str(proc_unix)))
+                .replace("/usr/bin/vncserver", shlex.quote(str(vncserver)))
             )
             res = subprocess.run(
-                ["bash", "-euc", probe],
-                env={**os.environ, "AF_PROC_NET_UNIX": str(proc_unix)},
+                ["bash", "-euc", probe, "fixture", "-fg"],
+                env={**os.environ, "AF_TEST_X_ROOT": str(root)},
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-            self.assertIn("OK", res.stdout)
+            self.assertEqual(res.stdout.splitlines(), [":23", "-fg"])
 
     def test_strict_nightly_tag_gate_and_modern_stack_export_preservation(self) -> None:
         modern = (ROOT / "setup/modules/modern_stack.sh").read_text(encoding="utf-8")
