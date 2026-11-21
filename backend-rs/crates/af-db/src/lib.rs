@@ -1500,57 +1500,10 @@ pub fn init_db() -> anyhow::Result<()> {
         "Local AI settings migration v23 failed"
     );
 
-    migrate(
-        &conn,
-        24,
-        "Persist MediaFlow source identity and scope uniqueness to active queue rows",
-        &[
-            r#"CREATE TABLE IF NOT EXISTS mediaflow_queue_v2 (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_path TEXT NOT NULL,
-                status TEXT DEFAULT 'PENDING_APPROVAL',
-                original_codec TEXT DEFAULT '',
-                original_size INTEGER DEFAULT 0,
-                new_codec TEXT DEFAULT '',
-                new_size INTEGER DEFAULT 0,
-                error_log TEXT DEFAULT '',
-                source_dev INTEGER,
-                source_ino INTEGER,
-                source_size INTEGER,
-                source_mtime_sec INTEGER,
-                source_mtime_nsec INTEGER,
-                source_fingerprint TEXT NOT NULL DEFAULT '',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );"#,
-            r#"INSERT INTO mediaflow_queue_v2 (
-                id, file_path, status, original_codec, original_size,
-                new_codec, new_size, error_log, created_at, updated_at
-            )
-            SELECT
-                id, file_path, status, original_codec, original_size,
-                new_codec, new_size, error_log, created_at, updated_at
-            FROM mediaflow_queue;"#,
-            "DROP TABLE mediaflow_queue;",
-            "ALTER TABLE mediaflow_queue_v2 RENAME TO mediaflow_queue;",
-            "CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status);",
-            "CREATE INDEX IF NOT EXISTS idx_mediaflow_file_path ON mediaflow_queue(file_path);",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mediaflow_active_file_path ON mediaflow_queue(file_path) WHERE status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING');",
-        ],
-    )?;
-    let mediaflow_identity_migration: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM schema_versions WHERE version = 24",
-        [],
-        |row| row.get(0),
-    )?;
-    anyhow::ensure!(
-        mediaflow_identity_migration == 1,
-        "MediaFlow source identity migration v24 failed"
-    );
-
     ensure_security_schema_invariants(&conn)?;
     ensure_notification_schema_invariants(&conn)?;
     ensure_pending_actions_schema_invariants(&conn)?;
+    // Streaming owns version 24. Reconcile MediaFlow independently of that epoch.
     ensure_mediaflow_schema_invariants(&conn)?;
     ensure_column(
         &conn,

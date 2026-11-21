@@ -50,10 +50,13 @@ class MarketplaceHelperContractsTest(unittest.TestCase):
 
     def test_marketplace_version_probes_use_package_fallback_and_native_scrutiny(self):
         automation = json.loads((ROOT / "config/package_automation.json").read_text())
+        self.assertEqual(
+            automation["mergerfs"]["version_command"],
+            ["dpkg-query", "-W", "-f=${Version}", "mergerfs"],
+        )
         for package, executable, deb in (
             ("tailscale", "tailscale", "tailscale"),
             ("rtorrent", "rtorrent", "rtorrent"),
-            ("mergerfs", "mergerfs", "mergerfs"),
             ("quassel", "quasselcore", "quassel-core"),
             ("x2go", "x2goversion", "x2goserver"),
         ):

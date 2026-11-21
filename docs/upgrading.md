@@ -57,7 +57,13 @@ sudo /opt/AetherFlow/current/deploy/release-manager.sh deploy --channel stable
 sudo af release rollback --local
 ```
 
-If the post-swap `/health/ready` readiness probe fails, `current` automatically reverts to `.previous_release`. If the live database fails `PRAGMA integrity_check`, the verified pre-swap backup is atomically restored after stopping database services. Both release engines keep the live database when its integrity check succeeds. Before a manual rollback across schema migrations, verify that the destination release supports the live database schema. The [staged restore procedure](./RUNBOOK.md#backup--staged-restore-af-host) covers recovery from a compatible backup.
+If the post-swap `/health/ready` probe fails, the release manager restores `current` to the previous release.
+
+### SQLite rollback behavior
+
+Both release managers keep a live database that passes `PRAGMA integrity_check`. This preserves writes made after the pre-swap snapshot. If the database is missing or damaged, the release manager verifies the recovery snapshot and stops database writers before restoring it.
+
+`/health/ready` checks SQLite access, core tables, and the privileged runner when enabled. Before rolling back across schema changes, confirm that the destination release can read the live schema. If the rollback requires an older schema, follow the staged restore procedure with a compatible backup. [Staged restore procedure](./RUNBOOK.md#backup--staged-restore-af-host)
 
 ---
 
