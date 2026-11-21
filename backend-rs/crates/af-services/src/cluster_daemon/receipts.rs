@@ -1371,11 +1371,9 @@ impl WorkerCommandCoordinator {
             return WorkerCommandDispatchPlan::RejectedStorageFailure;
         }
         guard.receipts = next_receipts;
-        if let Err(err) = enqueue_worker_ack_outbox_entry(
-            &self.outbox_path,
-            &mut guard.pending_acks,
-            ack.clone(),
-        ) {
+        if let Err(err) =
+            enqueue_worker_ack_outbox_entry(&self.outbox_path, &mut guard.pending_acks, ack.clone())
+        {
             tracing::error!(
                 command_id = %ack.id,
                 error = %err,
@@ -1421,36 +1419,36 @@ impl WorkerCommandCoordinator {
         };
 
         let mut next_receipts = guard.receipts.clone();
-        let effective_gen = if let Some(rec) = next_receipts.iter_mut().find(|r| r.id == mutation.id)
-        {
-            let gen = match (rec.lease_generation, mutation.lease_generation) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
+        let effective_gen =
+            if let Some(rec) = next_receipts.iter_mut().find(|r| r.id == mutation.id) {
+                let gen = match (rec.lease_generation, mutation.lease_generation) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                rec.phase = phase;
+                rec.lease_generation = gen;
+                rec.result_message = result_message.clone();
+                rec.ack_confirmed = false;
+                rec.updated_at = now_iso;
+                gen
+            } else {
+                let gen = mutation.lease_generation;
+                next_receipts.push(WorkerCommandReceipt {
+                    id: mutation.id.clone(),
+                    node_id: (!guard.node_id.is_empty()).then_some(guard.node_id.clone()),
+                    cmd_type: None,
+                    target: Some(mutation.service.clone()),
+                    action: Some(mutation.action.clone()),
+                    phase,
+                    lease_generation: gen,
+                    result_message: result_message.clone(),
+                    ack_confirmed: false,
+                    updated_at: now_iso,
+                });
+                gen
             };
-            rec.phase = phase;
-            rec.lease_generation = gen;
-            rec.result_message = result_message.clone();
-            rec.ack_confirmed = false;
-            rec.updated_at = now_iso;
-            gen
-        } else {
-            let gen = mutation.lease_generation;
-            next_receipts.push(WorkerCommandReceipt {
-                id: mutation.id.clone(),
-                node_id: (!guard.node_id.is_empty()).then_some(guard.node_id.clone()),
-                cmd_type: None,
-                target: Some(mutation.service.clone()),
-                action: Some(mutation.action.clone()),
-                phase,
-                lease_generation: gen,
-                result_message: result_message.clone(),
-                ack_confirmed: false,
-                updated_at: now_iso,
-            });
-            gen
-        };
         persist_worker_command_receipts_in_place(&self.receipts_path, &mut next_receipts)?;
         guard.receipts = next_receipts;
 
@@ -1486,8 +1484,8 @@ mod tests {
     use crate::cluster_daemon::{
         acknowledge_worker_command, enqueue_cluster_command, ensure_cluster_schema,
         lease_next_worker_command, list_cluster_commands, process_worker_heartbeat,
-        register_worker_node, route_cluster_http_request, PeerTransportAuth,
-        RegisterWorkerRequest, WorkerCommandAckRequest, WorkerHeartbeatRequest,
+        register_worker_node, route_cluster_http_request, PeerTransportAuth, RegisterWorkerRequest,
+        WorkerCommandAckRequest, WorkerHeartbeatRequest,
     };
     use std::collections::HashMap;
 
@@ -1702,7 +1700,9 @@ mod tests {
             }
             other => panic!("expected Execute on first delivery, got {other:?}"),
         };
-        let ack_gen1 = worker.complete_admitted_mutation(&mutation, Ok(())).unwrap();
+        let ack_gen1 = worker
+            .complete_admitted_mutation(&mutation, Ok(()))
+            .unwrap();
         assert_eq!(ack_gen1.status, WORKER_COMMAND_STATUS_EXECUTED);
         assert_eq!(ack_gen1.lease_generation, Some(1));
         assert_eq!(load_worker_ack_outbox_nofollow(&outbox_path).len(), 1);
@@ -1745,12 +1745,13 @@ mod tests {
             &PeerTransportAuth::InsecureLoopback,
         );
         assert_eq!(code, 200);
-        assert_eq!(body["confirmed_command_ids"], serde_json::json!([cmd_rec.id]));
+        assert_eq!(
+            body["confirmed_command_ids"],
+            serde_json::json!([cmd_rec.id])
+        );
         worker.mark_confirmed(&[cmd_rec.id.clone()]);
         assert!(load_worker_ack_outbox_nofollow(&outbox_path).is_empty());
-        assert!(
-            load_worker_command_receipts_strict(&receipts_path).unwrap()[0].ack_confirmed
-        );
+        assert!(load_worker_command_receipts_strict(&receipts_path).unwrap()[0].ack_confirmed);
 
         // 2. Legacy outbox compatibility: restarted worker with ONLY legacy 0600 outbox file
         //    reattaches completed result to freshly observed lease generation without rerunning.
@@ -1953,11 +1954,8 @@ mod tests {
         std::os::unix::fs::symlink(&receipts_path, &sym_receipts).unwrap();
         assert!(load_worker_command_receipts_strict(&sym_receipts).is_err());
         assert!(persist_worker_command_receipts_atomic(&sym_receipts, &[]).is_err());
-        let tampered_worker = WorkerCommandCoordinator::load_and_recover(
-            "node-gamma",
-            &outbox_path,
-            &sym_receipts,
-        );
+        let tampered_worker =
+            WorkerCommandCoordinator::load_and_recover("node-gamma", &outbox_path, &sym_receipts);
         assert_eq!(
             tampered_worker.prepare_command_dispatch(PendingWorkerCommand {
                 id: "cmd-fresh-tampered".to_string(),
@@ -2039,7 +2037,9 @@ mod tests {
                 updated_at: "2026-11-21T00:00:00Z".to_string(),
             })
             .collect();
-        assert!(persist_worker_command_receipts_atomic(&receipts_path, &unconfirmed_overflow).is_err());
+        assert!(
+            persist_worker_command_receipts_atomic(&receipts_path, &unconfirmed_overflow).is_err()
+        );
 
         let intent_overflow: Vec<WorkerCommandReceipt> = (0..=MAX_WORKER_COMMAND_RECEIPTS)
             .map(|i| WorkerCommandReceipt {
@@ -2285,12 +2285,16 @@ mod tests {
             lease_generation: 1,
         }) {
             WorkerCommandDispatchPlan::Execute(m) => m,
-            other => panic!("expected Execute after recycling confirmed heavy receipt, got {other:?}"),
+            other => {
+                panic!("expected Execute after recycling confirmed heavy receipt, got {other:?}")
+            }
         };
         assert_eq!(admitted_heavy.id, "cmd-heavy-new");
         let completed_heavy = byte_worker
             .complete_admitted_mutation(&admitted_heavy, Err("e".repeat(1024)))
-            .expect("reserved byte headroom must allow admitted intent to persist full-size outcome");
+            .expect(
+                "reserved byte headroom must allow admitted intent to persist full-size outcome",
+            );
         assert_eq!(completed_heavy.status, WORKER_COMMAND_STATUS_FAILED);
         assert_eq!(
             load_worker_command_receipts_strict(&byte_receipts)
