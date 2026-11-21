@@ -1413,6 +1413,88 @@ pub struct BlueprintConfigSummary {
     pub warnings: Vec<String>,
 }
 
+/// Applies only an application's native blueprint configuration files under
+/// blueprint mutation admission, leaving durable ingress, Apache publication,
+/// and DNS synchronization to the caller.
+pub async fn apply_blueprint_host_config(
+    app_name: &str,
+    port: u16,
+) -> Result<BlueprintConfigSummary, String> {
+    with_blueprint_mutation(app_name, async {
+        let canonical = normalize_app_key_name(app_name);
+        let bp = crate::get_blueprint(&canonical)
+            .or_else(|| crate::get_blueprint(app_name))
+            .ok_or_else(|| anyhow::anyhow!("blueprint not found for {:?}", app_name))?;
+        let effective_port = if port > 0 {
+            i32::from(port)
+        } else {
+            bp.default_port
+        };
+        let host_mutation = apply_blueprint_host_config_only(&bp.app_name, effective_port)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        clear_app_runtime_meta_cache();
+        let internal_domain = if !bp.internal_domain.trim().is_empty() {
+            bp.internal_domain.trim().to_lowercase()
+        } else {
+            format!("{}.aether.local", bp.app_name.trim().to_lowercase())
+        };
+        let mutated_files = host_mutation.mutated_files;
+        Ok(BlueprintConfigSummary {
+            app_name: bp.app_name,
+            service_name: bp.service_name,
+            listen_port: effective_port,
+            default_port: bp.default_port,
+            port_reassigned: effective_port > 0 && effective_port != bp.default_port,
+            internal_domain,
+            config_applied: !mutated_files.is_empty(),
+            mutated_files,
+            sqlite_routes_injected: host_mutation.sqlite_routes_injected,
+            dns_domains: Vec::new(),
+            dns_synced: false,
+            unprivileged_skips: Vec::new(),
+            warnings: Vec::new(),
+        })
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
+
+async fn apply_blueprint_host_config_only(
+    app_name: &str,
+    effective_port: i32,
+) -> Result<af_models::RunnerBlueprintApplyResponse, String> {
+    let req = af_models::RunnerBlueprintApplyRequest {
+        app_name: app_name.to_string(),
+        listen_port: effective_port,
+        lifecycle_job_id: af_runner::current_package_job_id(),
+    };
+    let config_root = af_runner::blueprint::has_config_root();
+    let result = if unsafe { libc::geteuid() } != 0 && !config_root {
+        af_runner::dispatch_blueprint_apply(&req).await
+    } else {
+        let admission = BLUEPRINT_ADMISSION.try_with(std::sync::Arc::clone).ok();
+        let local_req = req.clone();
+        let direct = tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            af_runner::blueprint::apply_host_config(&local_req)
+        })
+        .await
+        .map_err(|err| format!("blueprint config task failed: {err}"))?;
+        match direct {
+            Err(err)
+                if !config_root
+                    && af_runner::is_runner_available()
+                    && is_host_permission_error(&err.to_string()) =>
+            {
+                af_runner::dispatch_blueprint_apply(&req).await
+            }
+            result => result,
+        }
+    };
+    result.map_err(|err| err.to_string())
+}
+
 /// Applies an application's blueprint configuration and returns a typed summary
 /// (`BlueprintConfigSummary`) including `mutated_files` and `config_applied`.
 pub async fn apply_blueprint_app_config_detailed(
@@ -1517,35 +1599,7 @@ async fn apply_blueprint_app_config_detailed_admitted(
         None
     };
 
-    let req = af_models::RunnerBlueprintApplyRequest {
-        app_name: bp.app_name.clone(),
-        listen_port: effective_port,
-        lifecycle_job_id: af_runner::current_package_job_id(),
-    };
-    let config_root = af_runner::blueprint::has_config_root();
-    let result = if unsafe { libc::geteuid() } != 0 && !config_root {
-        af_runner::dispatch_blueprint_apply(&req).await
-    } else {
-        let admission = BLUEPRINT_ADMISSION.try_with(std::sync::Arc::clone).ok();
-        let local_req = req.clone();
-        let direct = tokio::task::spawn_blocking(move || {
-            let _admission = admission;
-            af_runner::blueprint::apply_host_config(&local_req)
-        })
-        .await
-        .map_err(|err| format!("blueprint config task failed: {err}"))?;
-        match direct {
-            Err(err)
-                if !config_root
-                    && af_runner::is_runner_available()
-                    && is_host_permission_error(&err.to_string()) =>
-            {
-                af_runner::dispatch_blueprint_apply(&req).await
-            }
-            result => result,
-        }
-    };
-    let host_mutation = result.map_err(|err| err.to_string())?;
+    let host_mutation = apply_blueprint_host_config_only(&bp.app_name, effective_port).await?;
     let mutated_files = host_mutation.mutated_files;
     let sqlite_routes_injected = host_mutation.sqlite_routes_injected;
 

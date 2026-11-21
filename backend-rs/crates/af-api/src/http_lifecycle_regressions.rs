@@ -339,10 +339,15 @@ async fn blueprint_http_sync_rejects_removal_without_side_effects_and_reports_ca
     let body = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
-        "BLUEPRINT_SYNC_FAILED"
-    );
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["code"], "BLUEPRINT_SYNC_FAILED");
+    assert_eq!(failure["failed_phase"], "ingress");
+    assert_eq!(failure["partial_commit"], true);
+    assert_eq!(failure["retryable"], true);
+    assert_eq!(failure["result"]["config_applied"], true);
+    assert_eq!(failure["result"]["ingress_synced"], false);
+    assert_eq!(failure["result"]["hosts_synced"], false);
+    assert_eq!(failure["result"]["network_dns_synced"], false);
     std::fs::remove_dir(vhost).unwrap();
     let response =
         sync_app_blueprint(Path("sonarr".into()), Extension(auth()), HeaderMap::new()).await;
@@ -356,6 +361,183 @@ async fn blueprint_http_sync_rejects_removal_without_side_effects_and_reports_ca
     assert_eq!(payload["result"]["hosts_synced"], true);
     assert_eq!(payload["result"]["network_dns_synced"], true);
     drop(conn);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn blueprint_sync_reports_partial_commit_preserves_custom_tls_and_retries_idempotently() {
+    const TEST: &str = "routes::http_lifecycle_regressions::blueprint_sync_reports_partial_commit_preserves_custom_tls_and_retries_idempotently";
+    if env::var("AF_HTTP_LIFECYCLE_CHILD").as_deref() != Ok(TEST) {
+        assert!(std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("AF_HTTP_LIFECYCLE_CHILD", TEST)
+            .status()
+            .unwrap()
+            .success());
+        return;
+    }
+    let root = env::temp_dir().join(format!("af-http-bp-retry-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("var/lib/sonarr")).unwrap();
+    std::fs::create_dir_all(root.join("etc/apache2/sites-available")).unwrap();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    let database = root.join("var/lib/aetherflow/aetherflow.sqlite");
+    for key in [
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_CONFIG_ROOT",
+    ] {
+        env::set_var(key, &root);
+    }
+    for key in ["DB_PATH", "AF_DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &database);
+    }
+    env::remove_var("PRIVILEGED_RUNNER_ENABLED");
+    env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+    env::set_var("AETHERFLOW_BASE_DOMAIN", "other.example.test");
+    env::set_var("AETHERFLOW_RUNNER_SOCK", root.join("absent.sock"));
+    let hosts_path = root.join("hosts");
+    env::set_var("AETHERFLOW_HOSTS_FILE", &hosts_path);
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", root.join("packages.json"));
+    env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        root.join("automation.json"),
+    );
+    std::fs::write(root.join("automation.json"), "{}").unwrap();
+    std::fs::write(
+        root.join("packages.json"),
+        r#"[{"name":"sonarr","label":"Sonarr","description":"fixture","category":"test","lock_file":"/install/.sonarr.lock","service_type":"systemd","service_name":"sonarr","default_port":8989}]"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("install/.sonarr.lock"), "fixture").unwrap();
+    std::fs::write(
+        root.join("var/lib/sonarr/config.xml"),
+        "<Config><Port>18989</Port></Config>\n",
+    )
+    .unwrap();
+    af_db::init_db().unwrap();
+    af_services::initialize_package_jobs(rusqlite::Connection::open(&database).unwrap()).unwrap();
+    let approved = AppIngressConfig {
+        app_name: "sonarr".into(),
+        public_domain: "series.custom.example".into(),
+        external_access_enabled: true,
+        listen_port: 18989,
+        tls_enabled: true,
+        ..Default::default()
+    };
+    af_db::set_app_ingress_config(&approved).unwrap();
+    let auth = || AuthUser {
+        user_id: 1,
+        username: "fixture".into(),
+        role: "admin".into(),
+        jti: "fixture".into(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+
+    // 1. Managed Apache failure rolls back DB ingress and reports config-only partial commit.
+    let ext_vhost = root.join("etc/apache2/sites-available/aetherflow-ext-sonarr.conf");
+    std::fs::create_dir(&ext_vhost).unwrap();
+    let response =
+        sync_app_blueprint(Path("sonarr".into()), Extension(auth()), HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["code"], "BLUEPRINT_SYNC_FAILED");
+    assert_eq!(payload["failed_phase"], "ingress");
+    assert_eq!(payload["partial_commit"], true);
+    assert_eq!(payload["retryable"], true);
+    assert_eq!(payload["result"]["config_applied"], true);
+    assert_eq!(payload["result"]["ingress_synced"], false);
+    assert_eq!(payload["result"]["hosts_synced"], false);
+    assert_eq!(payload["result"]["network_dns_synced"], false);
+    let retained = af_db::get_app_ingress_config("sonarr").unwrap().unwrap();
+    assert_eq!(retained.public_domain, "series.custom.example");
+    assert!(retained.external_access_enabled);
+    assert!(retained.tls_enabled);
+    assert_eq!(retained.listen_port, 18989);
+    std::fs::remove_dir(&ext_vhost).unwrap();
+
+    // 2. Managed Apache publication succeeds, then local hosts fails -> truthful partial status.
+    std::fs::create_dir(&hosts_path).unwrap();
+    let response =
+        sync_app_blueprint(Path("sonarr".into()), Extension(auth()), HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["code"], "BLUEPRINT_SYNC_FAILED");
+    assert_eq!(payload["failed_phase"], "hosts");
+    assert_eq!(payload["partial_commit"], true);
+    assert_eq!(payload["retryable"], true);
+    assert_eq!(payload["result"]["ingress_synced"], true);
+    assert_eq!(payload["result"]["hosts_synced"], false);
+    assert_eq!(payload["result"]["network_dns_synced"], false);
+    let rendered_int = std::fs::read_to_string(
+        root.join("etc/apache2/sites-available/aetherflow-app-sonarr.conf"),
+    )
+    .unwrap();
+    assert!(rendered_int.contains("ServerName sonarr.aether.local"));
+    assert!(rendered_int.contains("127.0.0.1:18989"));
+    let rendered_ext = std::fs::read_to_string(&ext_vhost).unwrap();
+    assert!(rendered_ext.contains("ServerName series.custom.example"));
+    assert!(rendered_ext.contains("TLS certificate provisioning pending"));
+    assert!(root
+        .join("etc/apache2/sites-enabled/aetherflow-ext-sonarr.conf")
+        .exists());
+
+    // 3. After clearing the hosts blocker, retries converge idempotently and retain custom TLS/host.
+    std::fs::remove_dir(&hosts_path).unwrap();
+    std::fs::write(&hosts_path, "127.0.0.1 localhost\n").unwrap();
+    let mut previous_hosts = String::new();
+    for attempt in 0..2 {
+        let response =
+            sync_app_blueprint(Path("sonarr".into()), Extension(auth()), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK, "attempt {attempt}");
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["result"]["allocated_port"], 18989);
+        assert_eq!(payload["result"]["public_domain"], "series.custom.example");
+        assert_eq!(payload["result"]["external_access_enabled"], true);
+        assert_eq!(payload["result"]["ingress_synced"], true);
+        assert_eq!(payload["result"]["hosts_synced"], true);
+        assert_eq!(payload["result"]["network_dns_synced"], true);
+        let hosts_now = std::fs::read_to_string(&hosts_path).unwrap();
+        assert!(hosts_now.contains("sonarr.aether.local"));
+        if attempt == 0 {
+            previous_hosts = hosts_now;
+        } else {
+            assert_eq!(hosts_now, previous_hosts);
+        }
+        let persisted = af_db::get_app_ingress_config("sonarr").unwrap().unwrap();
+        assert_eq!(persisted.public_domain, "series.custom.example");
+        assert!(persisted.external_access_enabled);
+        assert!(persisted.tls_enabled);
+        assert_eq!(persisted.listen_port, 18989);
+    }
+
+    // 4. Unmanaged/unavailable Apache must not falsely report ingress_synced=true from DB write alone.
+    std::fs::remove_dir_all(root.join("etc/apache2")).unwrap();
+    std::fs::write(root.join("etc/apache2"), "unmanaged apache placeholder").unwrap();
+    let response =
+        sync_app_blueprint(Path("sonarr".into()), Extension(auth()), HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["result"]["ingress_synced"], false);
+    assert_eq!(payload["result"]["hosts_synced"], true);
+    assert_eq!(payload["result"]["network_dns_synced"], true);
+    assert!(payload["result"]["warnings"]
+        .as_array()
+        .is_some_and(|warnings| !warnings.is_empty()));
+
     std::fs::remove_dir_all(root).unwrap();
 }
 

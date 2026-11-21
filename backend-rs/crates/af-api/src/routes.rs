@@ -2808,14 +2808,20 @@ async fn sync_app_blueprint(
     if af_services::get_blueprint(&app_name).is_none() {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found");
     }
-    let guarded_app = app_name.clone();
-    match af_services::mutators::with_blueprint_mutation(&guarded_app, async move {
-        Ok(sync_app_blueprint_admitted(Path(app_name), Extension(auth_user), headers).await)
+    // Keep the app mutation guard until host synchronization or rollback finishes,
+    // including when the HTTP client disconnects.
+    let sync = tokio::spawn(async move {
+        let guarded_app = app_name.clone();
+        af_services::mutators::with_blueprint_mutation(&guarded_app, async move {
+            Ok(sync_app_blueprint_admitted(Path(app_name), Extension(auth_user), headers).await)
+        })
+        .await
     })
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => blueprint_sync_failure_response(&error),
+    .await;
+    match sync {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => blueprint_sync_failure_response(&error),
+        Err(error) => blueprint_sync_failure_response(&anyhow::Error::new(error)),
     }
 }
 
@@ -2830,6 +2836,53 @@ fn blueprint_sync_failure_response(error: &anyhow::Error) -> Response {
     (
         status,
         Json(serde_json::json!({"code":code,"message":message,"error_id":error_id})),
+    )
+        .into_response()
+}
+
+fn blueprint_sync_partial_failure_response(
+    error: &anyhow::Error,
+    failed_phase: &'static str,
+    result: af_services::BlueprintSetupResult,
+) -> Response {
+    let error_id = uuid::Uuid::new_v4().to_string();
+    tracing::error!(
+        %error_id,
+        failed_phase,
+        app = %result.app_name,
+        config_applied = result.config_applied,
+        ingress_synced = result.ingress_synced,
+        hosts_synced = result.hosts_synced,
+        network_dns_synced = result.network_dns_synced,
+        detail = %format!("{error:#}"),
+        "blueprint synchronization failed"
+    );
+    let partial_commit = result.config_applied
+        || result.ingress_synced
+        || result.hosts_synced
+        || result.network_dns_synced;
+    let message = match (failed_phase, partial_commit) {
+        ("config", _) => "Blueprint application configuration failed before ingress or DNS changes were committed; inspect authorized diagnostics before retrying",
+        ("ingress", true) => "Blueprint ingress synchronization failed after applying application configuration; durable ingress was restored where possible and retrying is safe after resolving diagnostics",
+        ("ingress", false) => "Blueprint ingress synchronization failed; inspect authorized diagnostics before retrying",
+        ("hosts", true) => "Blueprint local hosts synchronization failed after prior phases committed; retrying is safe once host DNS writes succeed",
+        ("hosts", false) => "Blueprint local hosts synchronization failed; inspect authorized diagnostics before retrying",
+        ("network_dns", true) => "Blueprint network DNS synchronization failed after prior phases committed; retrying is safe once DNS providers are available",
+        ("network_dns", false) => "Blueprint network DNS synchronization failed; inspect authorized diagnostics before retrying",
+        (_, true) => "Blueprint synchronization failed after committing prior phases; inspect authorized diagnostics before retrying",
+        (_, false) => "Blueprint synchronization could not be completed; inspect authorized diagnostics before retrying",
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "code": "BLUEPRINT_SYNC_FAILED",
+            "message": message,
+            "error_id": error_id,
+            "failed_phase": failed_phase,
+            "partial_commit": partial_commit,
+            "retryable": true,
+            "result": result,
+        })),
     )
         .into_response()
 }
@@ -2852,17 +2905,27 @@ async fn sync_app_blueprint_admitted(
         &auth_user.username,
         "blueprint_sync",
         "blueprint",
-        &app_name,
+        &bp.app_name,
         "",
         &ip,
         ua,
     );
 
-    let existing_ing = match load_authoritative_app_ingress_config(&app_name) {
-        Ok(existing) => existing,
-        Err(error) => return blueprint_sync_failure_response(&error),
-    };
-    let configured_port = af_services::mutators::get_app_runtime_meta(&app_name).configured_port;
+    let lookup_app = bp.app_name.clone();
+    let (existing_ing, previous_active) =
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let existing = load_authoritative_app_ingress_config(&lookup_app)?;
+            let active = af_db::get_app_ingress_config(&lookup_app)?;
+            Ok((existing, active))
+        })
+        .await
+        {
+            Ok(Ok(loaded)) => loaded,
+            Ok(Err(error)) => return blueprint_sync_failure_response(&error),
+            Err(error) => return blueprint_sync_failure_response(&anyhow::Error::new(error)),
+        };
+
+    let configured_port = af_services::mutators::get_app_runtime_meta(&bp.app_name).configured_port;
     let allocated_port = existing_ing
         .as_ref()
         .map(|c| c.listen_port)
@@ -2875,13 +2938,13 @@ async fn sync_app_blueprint_admitted(
     let base_domain = af_services::resolve_base_domain();
     let public_domain = existing_ing
         .as_ref()
-        .map(|c| c.public_domain.clone())
+        .map(|c| c.public_domain.trim().to_string())
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| {
             if base_domain.is_empty() || allocated_port <= 0 {
                 String::new()
             } else {
-                af_services::format_app_public_domain(&app_name, &base_domain)
+                af_services::format_app_public_domain(&bp.app_name, &base_domain)
             }
         });
     let external_access_enabled = existing_ing
@@ -2892,110 +2955,193 @@ async fn sync_app_blueprint_admitted(
         .as_ref()
         .map(|c| c.tls_enabled)
         .unwrap_or(!public_domain.is_empty());
+    let internal_domain = if !bp.internal_domain.trim().is_empty() {
+        bp.internal_domain.trim().to_ascii_lowercase()
+    } else {
+        format!("{}.aether.local", bp.app_name.trim().to_ascii_lowercase())
+    };
 
-    let config_summary = match af_services::mutators::apply_blueprint_app_config_detailed(
-        &app_name,
+    let mut result = af_services::BlueprintSetupResult {
+        app_name: bp.app_name.clone(),
+        service_name: bp.service_name.clone(),
+        allocated_port,
+        default_port: bp.default_port,
+        port_reassigned: allocated_port != bp.default_port && allocated_port > 0,
+        internal_domain: internal_domain.clone(),
+        public_domain: public_domain.clone(),
+        external_access_enabled,
+        config_applied: false,
+        mutated_files: Vec::new(),
+        unprivileged_skips: Vec::new(),
+        warnings: Vec::new(),
+        ingress_synced: false,
+        hosts_synced: false,
+        network_dns_synced: false,
+    };
+
+    let config_summary = match af_services::mutators::apply_blueprint_host_config(
+        &bp.app_name,
         u16::try_from(allocated_port).unwrap_or(0),
     )
     .await
     {
         Ok(summary) => summary,
-        Err(error) => return blueprint_sync_failure_response(&anyhow::Error::msg(error)),
-    };
-    let mut unprivileged_skips = config_summary.unprivileged_skips;
-    let mut warnings = config_summary.warnings;
-    let config_applied = config_summary.config_applied;
-
-    let now = Utc::now();
-    let ingress_cfg = AppIngressConfig {
-        app_name: bp.app_name.clone(),
-        public_domain: public_domain.clone(),
-        external_access_enabled,
-        listen_port: allocated_port,
-        tls_enabled,
-        created_at: existing_ing.as_ref().map(|c| c.created_at).unwrap_or(now),
-        updated_at: now,
-    };
-    let ingress_synced = if allocated_port > 0 {
-        if let Err(error) = af_db::set_app_ingress_config(&ingress_cfg) {
-            return blueprint_sync_failure_response(&error);
+        Err(error) => {
+            return blueprint_sync_partial_failure_response(
+                &anyhow::Error::msg(error),
+                "config",
+                result,
+            );
         }
-        af_db::invalidate_ingress_cache();
-        true
-    } else {
-        false
     };
+    result.config_applied = config_summary.config_applied;
+    result.mutated_files = config_summary.mutated_files;
+    result.unprivileged_skips = config_summary.unprivileged_skips;
+    result.warnings = config_summary.warnings;
+
+    if allocated_port > 0 {
+        let now = Utc::now();
+        let ingress_cfg = AppIngressConfig {
+            app_name: bp.app_name.clone(),
+            public_domain: public_domain.clone(),
+            external_access_enabled,
+            listen_port: allocated_port,
+            tls_enabled,
+            created_at: existing_ing.as_ref().map(|c| c.created_at).unwrap_or(now),
+            updated_at: now,
+        };
+        let persisted_cfg = ingress_cfg.clone();
+        let db_write = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            af_db::set_app_ingress_config(&persisted_cfg)?;
+            af_db::invalidate_ingress_cache();
+            Ok(())
+        })
+        .await
+        .map_err(anyhow::Error::new)
+        .and_then(|res| res);
+        if let Err(error) = db_write {
+            return blueprint_sync_partial_failure_response(&error, "ingress", result);
+        }
+
+        let publish_cfg = ingress_cfg.clone();
+        let publish_internal = internal_domain.clone();
+        let publish = tokio::task::spawn_blocking(move || {
+            apply_ingress_vhost_policy(&publish_cfg, &publish_internal)
+        })
+        .await
+        .map_err(anyhow::Error::new)
+        .and_then(|res| res);
+        match publish {
+            Ok(true) => {
+                if ingress_cfg.tls_enabled {
+                    af_services::mutators::trigger_apache_cert_sync().await;
+                }
+                result.ingress_synced = true;
+            }
+            Ok(false) => {
+                result.warnings.push(
+                    "Apache ingress publication skipped because managed Apache is unavailable; durable ingress settings were saved"
+                        .to_string(),
+                );
+            }
+            Err(error) => {
+                let rollback_app = bp.app_name.clone();
+                let rollback_prev = previous_active.clone();
+                let rollback_internal = internal_domain.clone();
+                let rollback = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    restore_ingress_config(&rollback_app, rollback_prev.as_ref())?;
+                    if let Some(previous) = rollback_prev {
+                        if let Err(vhost_err) = sync_ingress_vhost(&previous, &rollback_internal) {
+                            tracing::error!(
+                                app = %rollback_app,
+                                %vhost_err,
+                                "Could not reapply previous Apache vhost during blueprint sync rollback"
+                            );
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+                if !matches!(rollback, Ok(Ok(()))) {
+                    tracing::error!(?rollback, "Blueprint ingress database rollback failed");
+                    result.warnings.push(
+                        "Durable ingress rollback failed after Apache publication error"
+                            .to_string(),
+                    );
+                }
+                return blueprint_sync_partial_failure_response(&error, "ingress", result);
+            }
+        }
+    }
 
     let mut dns_domains = Vec::new();
-    if !bp.internal_domain.trim().is_empty() {
-        dns_domains.push(bp.internal_domain.clone());
+    if !internal_domain.is_empty() {
+        dns_domains.push(internal_domain.clone());
     }
     if !public_domain.is_empty() && !dns_domains.contains(&public_domain) {
         dns_domains.push(public_domain.clone());
     }
-    let hosts_synced = if dns_domains.is_empty() {
+    result.hosts_synced = if dns_domains.is_empty() {
         true
     } else {
         match af_services::mutators::sync_local_dns_domains(&dns_domains).await {
             Ok(()) => true,
             Err(error) if af_services::mutators::is_unprivileged_host_write_error(&error) => {
-                if !unprivileged_skips.contains(&error) {
-                    unprivileged_skips.push(error.clone());
+                if !result.unprivileged_skips.contains(&error) {
+                    result.unprivileged_skips.push(error.clone());
                 }
-                warnings.push(format!(
+                result.warnings.push(format!(
                     "Local DNS hosts sync skipped in unprivileged API process: {}",
                     error
                 ));
                 false
             }
-            Err(error) => return blueprint_sync_failure_response(&anyhow::Error::msg(error)),
+            Err(error) => {
+                return blueprint_sync_partial_failure_response(
+                    &anyhow::Error::msg(error),
+                    "hosts",
+                    result,
+                );
+            }
         }
     };
     if let Err(error) = af_services::mutators::sync_network_dns_providers().await {
-        return blueprint_sync_failure_response(&anyhow::Error::msg(error));
+        return blueprint_sync_partial_failure_response(
+            &anyhow::Error::msg(error),
+            "network_dns",
+            result,
+        );
     }
-    let network_dns_synced = true;
+    result.network_dns_synced = true;
 
-    if !unprivileged_skips.is_empty() && !ingress_synced && !config_applied {
+    if !result.unprivileged_skips.is_empty() && !result.ingress_synced && !result.config_applied {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
                 "code": "BLUEPRINT_HOST_WRITE_SKIPPED",
                 "message": "Blueprint host configuration writes were skipped due to unprivileged filesystem restrictions and no database/ingress sync occurred",
-                "unprivileged_skips": unprivileged_skips,
-                "warnings": warnings,
+                "failed_phase": "hosts",
+                "partial_commit": false,
+                "retryable": true,
+                "unprivileged_skips": result.unprivileged_skips,
+                "warnings": result.warnings,
+                "result": result,
             })),
         )
             .into_response();
     }
 
-    let message = if unprivileged_skips.is_empty() && warnings.is_empty() {
+    let message = if result.unprivileged_skips.is_empty() && result.warnings.is_empty() {
         "Blueprint synchronized successfully"
-    } else {
+    } else if !result.unprivileged_skips.is_empty() {
         "Blueprint synchronized with warnings (some host writes were skipped in unprivileged mode)"
-    };
-
-    let res = af_services::BlueprintSetupResult {
-        app_name: bp.app_name,
-        service_name: bp.service_name,
-        allocated_port,
-        default_port: bp.default_port,
-        port_reassigned: allocated_port != bp.default_port && allocated_port > 0,
-        internal_domain: bp.internal_domain,
-        public_domain,
-        external_access_enabled,
-        config_applied,
-        mutated_files: config_summary.mutated_files,
-        unprivileged_skips,
-        warnings,
-        ingress_synced,
-        hosts_synced,
-        network_dns_synced,
+    } else {
+        "Blueprint synchronized with warnings"
     };
 
     Json(serde_json::json!({
         "message": message,
-        "result": res,
+        "result": result,
     }))
     .into_response()
 }
@@ -3473,19 +3619,7 @@ async fn upsert_app_ingress_config(
                 .map_err(anyhow::Error::msg)?;
         }
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let apache_managed = apache_ingress_is_managed();
-            let apache = sync_ingress_vhost(&sync_cfg, &sync_internal);
-            match apache {
-                Ok(true) => {}
-                Ok(false) if !apache_managed => {}
-                Err(error) if !apache_managed => {
-                    tracing::warn!(%error, "Apache unavailable during unmanaged ingress update");
-                }
-                Ok(false) => anyhow::bail!("Managed Apache did not apply ingress configuration"),
-                Err(error) => {
-                    anyhow::bail!("Managed Apache failed to apply ingress configuration: {error}")
-                }
-            }
+            apply_ingress_vhost_policy(&sync_cfg, &sync_internal)?;
             let mut domains = vec![sync_internal];
             if !sync_cfg.public_domain.is_empty() && !domains.contains(&sync_cfg.public_domain) {
                 domains.push(sync_cfg.public_domain);
@@ -3555,6 +3689,29 @@ fn sync_ingress_vhost(cfg: &AppIngressConfig, internal: &str) -> Result<bool, St
         &cfg.public_domain,
         cfg.external_access_enabled,
     )
+}
+
+fn apply_ingress_vhost_policy(
+    cfg: &AppIngressConfig,
+    internal: &str,
+) -> Result<bool, anyhow::Error> {
+    let apache_managed = apache_ingress_is_managed();
+    match sync_ingress_vhost(cfg, internal) {
+        Ok(true) => Ok(true),
+        Ok(false) if !apache_managed => Ok(false),
+        Err(error) if !apache_managed => {
+            tracing::warn!(
+                app = %cfg.app_name,
+                %error,
+                "Apache unavailable during unmanaged ingress update"
+            );
+            Ok(false)
+        }
+        Ok(false) => anyhow::bail!("Managed Apache did not apply ingress configuration"),
+        Err(error) => {
+            anyhow::bail!("Managed Apache failed to apply ingress configuration: {error}")
+        }
+    }
 }
 
 fn restore_ingress_config(app: &str, previous: Option<&AppIngressConfig>) -> anyhow::Result<()> {

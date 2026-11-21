@@ -31,32 +31,69 @@ pub fn MediaflowTab() -> impl IntoView {
         }
         syncing.set(Some(id.clone()));
         spawn_local(async move {
-            let result = ApiClient
-                .post(
+            let response = ApiClient
+                .fetch(
                     &format!(
                         "/api/v1/admin/blueprints/{}/sync",
                         js_sys::encode_uri_component(&id)
                             .as_string()
                             .unwrap_or_default()
                     ),
+                    "POST",
                     None,
                 )
                 .await;
             if syncing.try_get_untracked().is_none() {
                 return;
             }
-            match result {
-                Ok(data) => {
-                    stream_requested.set(true);
-                    sync_results.update(|results| {
-                        results.insert(id, data["result"].clone());
-                    });
-                    context.toast(
-                        tt(context, "Application configuration synchronized."),
-                        false,
-                    );
-                    resource.refresh();
-                    blueprints.refresh();
+            match response {
+                Ok(raw) => {
+                    let ok = raw.ok();
+                    match raw.text().await {
+                        Ok(body) => {
+                            if syncing.try_get_untracked().is_none() {
+                                return;
+                            }
+                            let data: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                            if data["result"].is_object() {
+                                sync_results.update(|results| {
+                                    results.insert(id, data["result"].clone());
+                                });
+                            }
+                            if ok {
+                                stream_requested.set(true);
+                                let has_warnings = data["result"]["warnings"]
+                                    .as_array()
+                                    .is_some_and(|warnings| !warnings.is_empty());
+                                let message = if has_warnings {
+                                    data["message"]
+                                        .as_str()
+                                        .unwrap_or("Application configuration synchronized.")
+                                } else {
+                                    "Application configuration synchronized."
+                                };
+                                context.toast(tt(context, message), false);
+                                resource.refresh();
+                                blueprints.refresh();
+                            } else {
+                                if data["partial_commit"].as_bool() == Some(true) {
+                                    resource.refresh();
+                                    blueprints.refresh();
+                                }
+                                let message = data["message"]
+                                    .as_str()
+                                    .or_else(|| data["error"].as_str())
+                                    .unwrap_or("Request failed");
+                                context.toast(tt(context, message), true);
+                            }
+                        }
+                        Err(e) => {
+                            if syncing.try_get_untracked().is_none() {
+                                return;
+                            }
+                            context.toast(tt(context, &e.message), true);
+                        }
+                    }
                 }
                 Err(e) => context.toast(tt(context, &e.message), true),
             }
