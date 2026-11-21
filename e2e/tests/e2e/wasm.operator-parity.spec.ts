@@ -20,8 +20,9 @@ const FAIL_RESTART_UNIT =
 const TIMEOUT_RESTART_UNIT =
   'aetherflow-self-update-restart-aetherflow-api-fedcba9876543210fedcba9876543210.service';
 
-const mockServiceActions = (page: Page) =>
-  page.route('**/api/v1/auth/services', route =>
+const mockOperatorServices = async (page: Page) => {
+  await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+  await page.route('**/api/v1/auth/services', route =>
     json(route, {
       sonarr: {
         id: 'sonarr',
@@ -57,6 +58,19 @@ const mockServiceActions = (page: Page) =>
       },
     }),
   );
+};
+
+const captureServiceControls = async (page: Page) => {
+  const calls: Array<{ service: string; action: string }> = [];
+  await page.route('**/api/v1/admin/services/*/control', async route => {
+    const url = new URL(route.request().url());
+    const service = url.pathname.split('/').slice(-2)[0];
+    const body = route.request().postDataJSON() as { action: string };
+    calls.push({ service, action: body.action });
+    await json(route, { message: 'ok' });
+  });
+  return calls;
+};
 
 test.describe('WASM operator parity workflows', () => {
   test('persists core restart receipts across reload and confirms job and readiness before completion', async ({ page }) => {
@@ -645,10 +659,8 @@ test.describe('WASM operator parity workflows', () => {
     await expect(page.locator('article').filter({ hasText: 'Sonarr' }).getByRole('link', { name: 'Open App' })).toHaveAttribute('href', 'https://sonarr.apps.example.com');
   });
 
-  test('supports Services update checks, confirmed stop, and the failed-install guard', async ({ page }) => {
-    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
-    await mockServiceActions(page);
-    const controlCalls: Array<{ service: string; action: string }> = [];
+  test('checks for service updates and requests the displayed target version', async ({ page }) => {
+    await mockOperatorServices(page);
     const updatePayloads: unknown[] = [];
 
     await page.route('**/api/v1/admin/packages/updates/check', route =>
@@ -658,16 +670,8 @@ test.describe('WASM operator parity workflows', () => {
       updatePayloads.push(route.request().postDataJSON());
       await json(route, { status: 'accepted', job_id: 'job-upd-1' }, 202);
     });
-    await page.route('**/api/v1/admin/services/*/control', async route => {
-      const url = new URL(route.request().url());
-      const service = url.pathname.split('/').slice(-2)[0];
-      const body = route.request().postDataJSON() as { action: string };
-      controlCalls.push({ service, action: body.action });
-      await json(route, { message: 'ok' });
-    });
     await page.goto('/?tab=services');
     await expect(page.getByText('def :8989')).toBeVisible();
-    await expect(page.getByText('Dependency checksum mismatch')).toBeVisible();
     await expect(page.getByRole('link', { name: 'Update v4.0.2' })).toHaveAttribute(
       'href',
       'https://github.com/Sonarr/Sonarr/releases/tag/v4.0.2',
@@ -678,8 +682,13 @@ test.describe('WASM operator parity workflows', () => {
 
     await page.getByRole('button', { name: 'Update Sonarr', exact: true }).click();
     await expect.poll(() => updatePayloads).toEqual([{ expected_target_version: '4.0.2' }]);
+  });
 
-    // Stop requires confirmation; failed-install Start requires confirmation.
+  test('requires confirmation before stopping a service', async ({ page }) => {
+    await mockOperatorServices(page);
+    const controlCalls = await captureServiceControls(page);
+    await page.goto('/?tab=services');
+
     const sonarrStop = page.locator('article', { hasText: 'Sonarr' }).getByRole('button', { name: 'Stop', exact: true });
     await sonarrStop.click();
     const stopDialog = page.getByRole('dialog', { name: 'Stop Sonarr?' });
@@ -690,6 +699,13 @@ test.describe('WASM operator parity workflows', () => {
     await sonarrStop.click();
     await page.getByRole('dialog', { name: 'Stop Sonarr?' }).getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect.poll(() => controlCalls).toContainEqual({ service: 'sonarr', action: 'stop' });
+  });
+
+  test('requires confirmation to start a service after a failed install', async ({ page }) => {
+    await mockOperatorServices(page);
+    const controlCalls = await captureServiceControls(page);
+    await page.goto('/?tab=services');
+    await expect(page.getByText('Dependency checksum mismatch')).toBeVisible();
 
     await page.locator('article', { hasText: 'Bazarr' }).getByRole('button', { name: 'Start', exact: true }).click();
     const startGuard = page.getByRole('dialog', { name: 'Start Bazarr after failed install?' });
@@ -699,8 +715,7 @@ test.describe('WASM operator parity workflows', () => {
   });
 
   test('opens component logs and reviews a FlowAI Auto-Debug proposal', async ({ page }) => {
-    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
-    await mockServiceActions(page);
+    await mockOperatorServices(page);
     const aiSupportBodies: unknown[] = [];
 
     await page.route('**/api/v1/admin/logs?*', route =>
