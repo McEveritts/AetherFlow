@@ -431,6 +431,15 @@ fn compute_pinned_file_fingerprint(file: &fs::File, size: u64) -> Result<String,
     let mut hasher = Sha256::new();
     hasher.update(b"af-mediaflow-source-v1\0");
     hasher.update(size.to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file
+            .metadata()
+            .map_err(|err| format!("Failed to stat source file for fingerprint: {err}"))?;
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
+    }
 
     let sample = MEDIAFLOW_FINGERPRINT_SAMPLE_BYTES as u64;
     if size <= sample * 3 {
@@ -469,6 +478,8 @@ pub struct PinnedMediaflowSource {
     pub identity: MediaflowSourceIdentity,
     #[cfg(unix)]
     pub(super) src_mode: u32,
+    #[cfg(unix)]
+    change_time: (i64, i64),
 }
 
 impl PinnedMediaflowSource {
@@ -488,6 +499,7 @@ impl PinnedMediaflowSource {
             && (st.st_size as u64) == self.identity.size
             && (st.st_mtime as i64) == self.identity.mtime_sec
             && (st.st_mtime_nsec as i64) == self.identity.mtime_nsec
+            && (st.st_ctime as i64, st.st_ctime_nsec as i64) == self.change_time
     }
 
     /// Re-verifies that the pinned source file descriptor, its live directory entry,
@@ -509,18 +521,15 @@ impl PinnedMediaflowSource {
                 || fmeta.len() != self.identity.size
                 || fmeta.mtime() != self.identity.mtime_sec
                 || fmeta.mtime_nsec() != self.identity.mtime_nsec
+                || (fmeta.ctime(), fmeta.ctime_nsec()) != self.change_time
             {
                 return Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string());
             }
 
+            let live_fp = compute_pinned_file_fingerprint(&self.source_file, self.identity.size)?;
             let live_st = fstatat_nofollow(self.parent_dir.as_raw_fd(), &self.source_fname)
                 .map_err(|_| MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string())?;
-            if !self.matches_live_stat(&live_st) {
-                return Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string());
-            }
-
-            let live_fp = compute_pinned_file_fingerprint(&self.source_file, self.identity.size)?;
-            if live_fp != self.identity.fingerprint {
+            if live_fp != self.identity.fingerprint || !self.matches_live_stat(&live_st) {
                 return Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string());
             }
             Ok(())
@@ -704,7 +713,7 @@ fn read_regular_json_bounded<T: serde::de::DeserializeOwned>(path: &Path) -> Opt
         let fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -861,6 +870,8 @@ pub fn open_and_pin_mediaflow_source_in_roots(
             || fmeta_after.len() != fmeta.len()
             || fmeta_after.mtime() != fmeta.mtime()
             || fmeta_after.mtime_nsec() != fmeta.mtime_nsec()
+            || fmeta_after.ctime() != fmeta.ctime()
+            || fmeta_after.ctime_nsec() != fmeta.ctime_nsec()
         {
             return Err("Source file changed concurrently during fingerprinting".to_string());
         }
@@ -881,6 +892,7 @@ pub fn open_and_pin_mediaflow_source_in_roots(
             source_fname: fname_str.to_string(),
             identity,
             src_mode: fmeta.mode(),
+            change_time: (fmeta.ctime(), fmeta.ctime_nsec()),
         };
         let live_st = fstatat_nofollow(pinned.parent_dir.as_raw_fd(), &pinned.source_fname)
             .map_err(|_| "Source directory entry vanished during pinning".to_string())?;

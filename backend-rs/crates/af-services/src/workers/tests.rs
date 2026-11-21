@@ -5300,18 +5300,31 @@ async fn test_mediaflow_worker_blocks_source_change_and_legacy_rows_before_execu
     assert_eq!(status1, "NEEDS_RESCAN");
     assert_eq!(err1, MEDIAFLOW_SOURCE_CHANGED_BEFORE_EXEC_MSG);
 
-    // 2. Same-inode, same-size in-place edit between approval and worker claim -> NEEDS_RESCAN, ffmpeg never spawned.
+    // A write outside the sampled windows changes the inode change time even with mtime restored.
     let edited_src = root.join("media/edited_in_place.mp4");
-    fs::write(&edited_src, b"AAAA-1111-fixture-bytes!").unwrap();
+    let mut edited_contents = vec![b'A'; 1024 * 1024];
+    fs::write(&edited_src, &edited_contents).unwrap();
+    let mtime = fs::metadata(&edited_src).unwrap().modified().unwrap();
     {
         let conn = af_db::get_conn().unwrap();
         insert_pinned_mediaflow_approved(&conn, Some(102), &edited_src);
     }
-    fs::write(&edited_src, b"BBBB-2222-fixture-bytes!").unwrap();
+    {
+        use std::os::unix::fs::FileExt;
+
+        let offset = 80 * 1024;
+        edited_contents[offset] = b'B';
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&edited_src)
+            .unwrap();
+        file.write_all_at(b"B", offset as u64).unwrap();
+        file.set_modified(mtime).unwrap();
+    }
 
     assert!(process_next_mediaflow_job().await);
     assert!(!ffmpeg_called.exists());
-    assert_eq!(fs::read(&edited_src).unwrap(), b"BBBB-2222-fixture-bytes!");
+    assert_eq!(fs::read(&edited_src).unwrap(), edited_contents);
     let status2: String = af_db::get_conn()
         .unwrap()
         .query_row(
