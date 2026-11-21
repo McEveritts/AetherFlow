@@ -5819,14 +5819,13 @@ mod updater_tests {
     }
 
     fn ensure_test_admin_user_for_stream() {
-        let _ = crate::plugins::tests::ensure_shared_test_db();
-        if let Ok(conn) = af_db::get_conn() {
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO users (id, username, role) VALUES (1, 'admin', 'admin')",
-                [],
-            );
-            let _ = conn.execute("UPDATE users SET role = 'admin' WHERE id = 1", []);
-        }
+        crate::plugins::tests::ensure_shared_test_db();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (1, 'admin', 'admin')",
+            [],
+        )
+        .expect("insert the isolated stream test administrator");
     }
 
     #[tokio::test]

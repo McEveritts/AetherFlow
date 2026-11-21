@@ -3063,8 +3063,10 @@ pub(crate) mod tests {
                 std::env::temp_dir().join(format!("af-plugin-shared-db-{}", Uuid::new_v4()));
             fs::create_dir_all(&db_dir).unwrap();
             let db_path = db_dir.join("test.sqlite");
-            std::env::set_var("DB_PATH", &db_path);
-            let _ = af_db::init_db();
+            for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+                std::env::set_var(key, &db_path);
+            }
+            af_db::init_db().expect("initialize the isolated plugin test database");
             db_path
         })
     }
