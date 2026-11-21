@@ -1828,6 +1828,14 @@ fn canonical_config_candidates_prioritize_repo_config_and_isolate_legacy_fallbac
     assert!(opt_canonical_idx < opt_root_idx);
     assert!(opt_root_idx < legacy_curr_idx);
     assert!(legacy_curr_idx < legacy_root_idx);
+    let root = Path::new("/disposable-aetherflow");
+    assert_eq!(
+        installed_config_candidates(root, "packages.json").to_vec(),
+        strings[opt_canonical_idx..]
+            .iter()
+            .map(|path| root.join(path.trim_start_matches('/')))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

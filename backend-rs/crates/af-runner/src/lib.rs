@@ -3212,7 +3212,31 @@ pub fn is_missing_config_candidate(err: &std::io::Error) -> bool {
     }
 }
 
+fn package_fs_root_override() -> Option<PathBuf> {
+    env::var("AETHERFLOW_FS_ROOT")
+        .or_else(|_| env::var("AETHERFLOW_INSTALL_ROOT"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != "/")
+        .map(PathBuf::from)
+}
+
+fn installed_config_candidates(root: &Path, filename: &str) -> [PathBuf; 4] {
+    [
+        "opt/AetherFlow/current/config",
+        "opt/AetherFlow/config",
+        // Legacy v3 host upgrade fallback.
+        "opt/AetherFlow/current/backend/config",
+        "opt/AetherFlow/backend/config",
+    ]
+    .map(|directory| root.join(directory).join(filename))
+}
+
 pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
+    if let Some(root) = package_fs_root_override() {
+        return installed_config_candidates(&root, filename).into();
+    }
+
     #[cfg(unix)]
     let running_as_root = unsafe { libc::geteuid() == 0 };
     #[cfg(not(unix))]
@@ -3231,13 +3255,7 @@ pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
             candidates.push(exe_dir.join("config").join(filename));
         }
     }
-    candidates.extend([
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
-        // Legacy v3 host upgrade fallback only
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
-    ]);
+    candidates.extend(installed_config_candidates(Path::new("/"), filename));
     candidates
 }
 

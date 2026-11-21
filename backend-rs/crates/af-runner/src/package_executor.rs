@@ -1127,12 +1127,7 @@ pub struct PackageExecutionEnv {
 
 impl Default for PackageExecutionEnv {
     fn default() -> Self {
-        let fs_root = env::var("AETHERFLOW_FS_ROOT")
-            .or_else(|_| env::var("AETHERFLOW_INSTALL_ROOT"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && s != "/")
-            .map(PathBuf::from);
+        let fs_root = crate::package_fs_root_override();
         let lock_dir = env::var("LOCK_DIR")
             .ok()
             .filter(|s| !s.trim().is_empty())
