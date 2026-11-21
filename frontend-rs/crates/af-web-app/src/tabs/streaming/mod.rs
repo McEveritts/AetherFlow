@@ -43,7 +43,10 @@ pub fn StreamingTab() -> impl IntoView {
             let visible = web_sys::window()
                 .and_then(|w| w.document())
                 .is_none_or(|d| !d.hidden());
-            if visible && !dashboard.loading.get_untracked() {
+            if visible
+                && active.with_untracked(|tab| tab == "live")
+                && !dashboard.loading.get_untracked()
+            {
                 dashboard.refresh();
             }
         },
@@ -113,7 +116,12 @@ pub fn StreamingTab() -> impl IntoView {
                         }
                     })
             }}
-            <Show when=move || dashboard.loading.get() && dashboard.data.with(Value::is_null)>
+            <Show when=move || {
+                active.with(|tab| tab == "live")
+                    && dashboard.loading.get()
+                    && dashboard.data.with(Value::is_null)
+                    && dashboard.error.with(Option::is_none)
+            }>
                 <SkeletonBox class="h-32" />
             </Show>
             <TabsBar

@@ -214,6 +214,17 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     await json(route, []);
   });
 
+  // StreamingTab mounts a live dashboard resource and 5s poll immediately.
+  // Keep it inside the mocked session instead of falling through to the
+  // isolated live server, whose unrelated cookies correctly return 401.
+  await page.route(/\/api\/v1\/auth\/streaming\/dashboard(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, { servers: [], activeSessions: [], liveSummary: {}, analytics: {} });
+  });
+
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/(check|status)/, async (route: Route) => {
     if (new URL(route.request().url()).pathname.endsWith('/status')) {
       await json(route, { state: 'idle', phase: '', operationId: '', error: '' });

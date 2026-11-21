@@ -131,7 +131,8 @@ test.describe('WASM restored workflows', () => {
     expect(writes).toHaveLength(2);
   });
 
-  test('keeps cohort reports on the history snapshot and applies stable scoped identities', async ({ page }) => {
+  test('keeps cohort reports on the history snapshot and applies stable scoped identities', async ({ page, browserName }) => {
+    if (browserName === 'webkit') test.setTimeout(90_000);
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
     const historyQueries: URLSearchParams[] = [];
     const analyticsQueries: Array<{ path: string; params: URLSearchParams }> = [];

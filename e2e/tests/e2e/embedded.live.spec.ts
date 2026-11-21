@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Page, type Response, type Route } from '@playwright/test';
 
 const ADMIN_USER = process.env.E2E_ADMIN_USER || 'admin';
 const ADMIN_PASS = process.env.E2E_ADMIN_PASS || 'AetherFlowE2E!2026';
@@ -19,7 +19,7 @@ function completedTelemetryHistory(page: Page, window?: string) {
 }
 
 async function mutationHeaders(page: Page): Promise<Record<string, string>> {
-  const response = await page.request.get('/api/v1/public/csrf-token');
+  const response = await page.request.get('/api/v1/public/csrf-token', { timeout: 10_000 });
   expect(response.ok()).toBeTruthy();
   const { csrf_token: token } = await response.json();
   expect(typeof token).toBe('string');
@@ -214,7 +214,8 @@ async function signInLive(page: Page, username = ADMIN_USER): Promise<void> {
 
 async function recheckLiveSession(page: Page): Promise<void> {
   const rechecked = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === '/api/v1/auth/session' && response.ok()
+    new URL(response.url()).pathname === '/api/v1/auth/session' && response.ok(),
+    { timeout: 15_000 }
   );
   // Exercise the recent-login recheck and real session API. An explicit
   // cross-tab login signal must invalidate the old shell immediately.
@@ -451,8 +452,9 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     page,
     request,
     browser,
+    browserName,
   }) => {
-    test.setTimeout(240_000);
+    test.setTimeout(browserName === 'webkit' ? 420_000 : 240_000);
     page.setDefaultTimeout(15_000);
     await page.addInitScript(() => {
       const sockets: WebSocket[] = [];
@@ -1519,20 +1521,48 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
 
   test('same-account session rechecks preserve pending editor loads and saves', async ({ page }) => {
     test.setTimeout(90_000);
+    let lastSessionCheckAt = 0;
+    const trackSessionCheck = (response: Response) => {
+      if (new URL(response.url()).pathname === '/api/v1/auth/session' && response.ok()) {
+        lastSessionCheckAt = Date.now();
+      }
+    };
+    page.on('response', trackSessionCheck);
     await signInLive(page);
     const filename = `live-editor-session-${Date.now()}.txt`;
     const original = 'Editor load remains authorized across a same-account recheck.\n';
+    let primaryError: unknown;
     try {
       const headers = await mutationHeaders(page);
       expect((await page.request.post('/api/v1/auth/mcbrowser/file', {
         headers, data: { path: filename, content: original },
       })).ok()).toBeTruthy();
       await page.goto('/?tab=mcbrowser');
+      const fileRow = page.getByRole('button', { name: `File ${filename}`, exact: true });
+      await fileRow.click({ trial: true, timeout: 30_000 });
+      // Initial cold McBrowser rendering on software WebKit can approach or
+      // exceed the 10-second recent-login grace window before the file is
+      // opened. Refresh authenticated_at while the listing is already ready so
+      // the in-flight editor recheck exercises the recent-login path reliably.
+      if (Date.now() - lastSessionCheckAt >= 7_000) {
+        const synced = page.waitForResponse((response) =>
+          new URL(response.url()).pathname === '/api/v1/auth/session' && response.ok(),
+          { timeout: 15_000 }
+        );
+        await page.evaluate(() => {
+          window.dispatchEvent(new StorageEvent('storage', { key: 'af_login_sync' }));
+        });
+        await synced;
+        await fileRow.click({ trial: true, timeout: 30_000 });
+      }
+      if (Date.now() - lastSessionCheckAt >= 1_000 && Date.now() - lastSessionCheckAt < 7_000) {
+        await recheckLiveSession(page);
+      }
       const load = await delayEditorRequest(page, 'GET');
       const dialog = page.getByRole('dialog', { name: 'Code editor', exact: true });
       const editor = dialog.getByRole('textbox', { name: 'Editor text', exact: true });
       try {
-        await page.getByRole('button', { name: `File ${filename}`, exact: true }).click();
+        await fileRow.click();
         await load.started;
         await expect(dialog).toBeVisible();
         const retained = await dialog.elementHandle();
@@ -1545,6 +1575,9 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
 
       const draft = `${original}Saved after a session recheck.\n`;
       await editor.fill(draft);
+      if (Date.now() - lastSessionCheckAt >= 1_500 && Date.now() - lastSessionCheckAt < 8_000) {
+        await recheckLiveSession(page);
+      }
       const save = await delayEditorRequest(page, 'PUT');
       try {
         await dialog.getByRole('button', { name: 'Save', exact: true }).last().click();
@@ -1562,17 +1595,30 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
       await editor.fill(finalDraft);
       const savedAgain = page.waitForResponse((response) =>
         /\/api\/v1\/auth\/mcbrowser\/(?:content|file)$/.test(new URL(response.url()).pathname)
-          && response.request().method() === 'PUT'
+          && response.request().method() === 'PUT',
+        { timeout: 15_000 }
       );
       await dialog.getByRole('button', { name: 'Save', exact: true }).last().click();
       expect((await savedAgain).ok()).toBeTruthy();
       await expect(editor).toBeEditable();
       const stored = await page.request.get(`/api/v1/auth/mcbrowser/content?path=${encodeURIComponent(filename)}`);
       expect((await stored.json()).content).toBe(finalDraft);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      const headers = await mutationHeaders(page);
-      const deleted = await page.request.post('/api/v1/auth/mcbrowser/delete-recursive', { headers, data: { path: filename } });
-      expect([200, 204, 404]).toContain(deleted.status());
+      page.off('response', trackSessionCheck);
+      try {
+        const headers = await mutationHeaders(page);
+        const deleted = await page.request.post('/api/v1/auth/mcbrowser/delete-recursive', {
+          headers,
+          data: { path: filename },
+          timeout: 10_000,
+        });
+        expect([200, 204, 404]).toContain(deleted.status());
+      } catch (cleanupError) {
+        if (!primaryError) throw cleanupError;
+      }
     }
   });
 
