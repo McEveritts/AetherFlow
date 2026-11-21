@@ -490,7 +490,12 @@ elif command in ('curl', 'wget'):
         if source_url.endswith('.sha256'): source_url = source_url[:-len('.sha256')]
         elif source_url.endswith('.sha256sum'): source_url = source_url[:-len('.sha256sum')]
         if source_url == 'https://raw.githubusercontent.com/pi-hole/pi-hole/f7c0220e63e753c664a1ec08d42d6b647b86005d/automated%20install/basic-install.sh': return (root / 'pihole-bootstrap.sh').read_bytes()
-        if source_url.startswith('https://deb.nodesource.com/setup_'): return (root / 'nodesource-bootstrap.sh').read_bytes()
+        if source_url.startswith('https://deb.nodesource.com/setup_') or source_url in (
+            'https://raw.githubusercontent.com/nodesource/distributions/42da07fa46a3e9649f47416743a5563f9f19028f/scripts/deb/setup_20.x',
+            'https://raw.githubusercontent.com/nodesource/distributions/42da07fa46a3e9649f47416743a5563f9f19028f/scripts/deb/setup_22.x',
+            'https://raw.githubusercontent.com/nodesource/distributions/42da07fa46a3e9649f47416743a5563f9f19028f/scripts/deb/setup_24.x',
+        ):
+            return (root / 'nodesource-bootstrap.sh').read_bytes()
         if source_url == 'https://get.netdata.cloud/kickstart.sh': return (root / 'netdata-bootstrap.sh').read_bytes()
         if 'SHASUMS256.txt' in source_url:
             node_version = '26.12.1' if 'latest-v26' in source_url else '22.14.0'
@@ -1945,53 +1950,63 @@ curl() {
                 self.assertFalse(list((fixture.root / "tmp").glob("aetherflow-install-*.sh")))
 
     def test_bootstrap_pins_match_vendor_digests_and_nodesource_verifies_them(self):
-        for path, variable, expected_vendor_digest, payload in (
-            (
-                "packages/package/install/installpackage-pihole",
-                "AF_PIHOLE_BOOTSTRAP_SHA256",
-                "4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8",
-                PIHOLE_BOOTSTRAP_SCRIPT,
-            ),
-            (
-                "packages/common.sh",
-                "AF_NODESOURCE_BOOTSTRAP_SHA256",
-                "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be",
-                NODESOURCE_BOOTSTRAP_SCRIPT,
-            ),
-        ):
-            with self.subTest(variable=variable):
-                source = (ROOT / path).read_text()
-                pinned = re.search(re.escape(variable) + r":-([0-9a-fA-F]{64})", source)
-                self.assertIsNotNone(pinned)
-                self.assertEqual(pinned.group(1), expected_vendor_digest)
-                self.assertNotEqual(pinned.group(1), hashlib.sha256(payload.encode()).hexdigest())
+        pihole_source = (ROOT / "packages/package/install/installpackage-pihole").read_text()
+        pihole_pinned = re.search(r"AF_PIHOLE_BOOTSTRAP_SHA256:-([0-9a-fA-F]{64})", pihole_source)
+        self.assertIsNotNone(pihole_pinned)
+        self.assertEqual(pihole_pinned.group(1), "4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8")
+        self.assertNotEqual(pihole_pinned.group(1), hashlib.sha256(PIHOLE_BOOTSTRAP_SCRIPT.encode()).hexdigest())
+
+        fixture_nodesource_digest = hashlib.sha256(NODESOURCE_BOOTSTRAP_SCRIPT.encode()).hexdigest()
+
         pihole_fixture = InstallerFixture("pihole")
         self.addCleanup(pihole_fixture.close)
         unpinned_res = pihole_fixture.run("install", AF_PIHOLE_BOOTSTRAP_SHA256=None)
         self.assertNotEqual(unpinned_res.returncode, 0)
         self.assertFalse(pihole_fixture.lock.exists())
+
         fixture = InstallerFixture("pihole")
         self.addCleanup(fixture.close)
         helper = fixture.rewrite(common_functions("ensure_node"))
-        program = 'source "$AF_FIXTURE_ROOT/packages/common.sh"\n' + helper + '''
-command_exists() { [[ "$1" != node ]]; }
-ensure_node 20
+        commands_path = fixture.root / "commands.jsonl"
+        log_path = fixture.root / "bootstrap.log"
+
+        def run_ensure_node(major, extra_env):
+            commands_path.write_text("")
+            log_path.write_text("")
+            program = 'source "$AF_FIXTURE_ROOT/packages/common.sh"\n' + helper + f'''
+command_exists() {{ [[ "$1" != node ]]; }}
+ensure_node {major}
 '''
-        for checksum in ("0" * 64, hashlib.sha256(NODESOURCE_BOOTSTRAP_SCRIPT.encode()).hexdigest().upper()):
-            with self.subTest(checksum=checksum):
-                result = subprocess.run(["/bin/bash", "-euc", program], env={
-                    **os.environ, "PATH": str(fixture.commands) + ":/usr/bin:/bin",
-                    "AF_FIXTURE_ROOT": str(fixture.root), "AF_FIXTURE_APP": "pihole",
-                    "AF_NODESOURCE_BOOTSTRAP_SHA256": checksum, "LOGFILE": str(fixture.root / "bootstrap.log"),
-                }, text=True, capture_output=True, timeout=15)
-                self.assertEqual(result.returncode == 0, checksum != "0" * 64, result.stdout + result.stderr)
-                commands = [json.loads(line) for line in (fixture.root / "commands.jsonl").read_text().splitlines()]
-                if checksum == "0" * 64:
-                    self.assertFalse(any("nodejs" in command for command in commands))
-                    self.assertNotIn("nodesource bootstrap", (fixture.root / "bootstrap.log").read_text())
-                else:
-                    self.assertTrue(any("nodejs" in command for command in commands))
-                    self.assertIn("[BOOTSTRAP-PROVENANCE] url=https://deb.nodesource.com/setup_20.x", (fixture.root / "bootstrap.log").read_text())
+            env = {
+                **os.environ,
+                "PATH": str(fixture.commands) + ":/usr/bin:/bin",
+                "AF_FIXTURE_ROOT": str(fixture.root),
+                "AF_FIXTURE_APP": "pihole",
+                "LOGFILE": str(log_path),
+            }
+            env.pop("AF_NODESOURCE_BOOTSTRAP_SHA256", None)
+            env.update({k: v for k, v in extra_env.items() if v is not None})
+            result = subprocess.run(["/bin/bash", "-euc", program], env=env, text=True, capture_output=True, timeout=15)
+            commands = [json.loads(line) for line in commands_path.read_text().splitlines() if line.strip()]
+            return result, commands, log_path.read_text()
+
+        for major in ("20", "22", "24"):
+            expected_url = f"https://deb.nodesource.com/setup_{major}.x"
+            for label, checksum, expect_ok in (
+                ("default-pin-rejects-fixture-bytes", None, False),
+                ("mismatch-checksum", "0" * 64, False),
+                ("skip-checksum", "SKIP", False),
+                ("matching-override-upper", fixture_nodesource_digest.upper(), True),
+            ):
+                with self.subTest(major=major, case=label):
+                    result, commands, log_text = run_ensure_node(major, {"AF_NODESOURCE_BOOTSTRAP_SHA256": checksum})
+                    self.assertEqual(result.returncode == 0, expect_ok, result.stdout + result.stderr)
+                    if not expect_ok:
+                        self.assertFalse(any("nodejs" in command for command in commands))
+                        self.assertNotIn("nodesource bootstrap", log_text)
+                    else:
+                        self.assertTrue(any("nodejs" in command for command in commands))
+                        self.assertIn(f"[BOOTSTRAP-PROVENANCE] url={expected_url} sha256={fixture_nodesource_digest}", log_text)
 
     def test_all_77_remove_scripts_purge_canonical_state_sentinels(self):
         self.assertEqual(len(CATALOG_APPS), 77)

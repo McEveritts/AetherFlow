@@ -153,11 +153,19 @@ test "$NODE_ENV" = production
 
 
 class NodeInstallerContracts(unittest.TestCase):
+    NODESOURCE_REV = "42da07fa46a3e9649f47416743a5563f9f19028f"
+    NODESOURCE_PINS = {
+        "20": "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be",
+        "22": "575583bbac2fccc0b5edd0dbc03e222d9f9dc8d724da996d22754d6411104fd1",
+        "24": "6e3d580f5bd7ccf2aa1e8df8d35c60d78e873c3ff8beb282c9bebd914904ad72",
+    }
+
     def test_existing_node_runtime_still_provisions_native_build_prerequisites(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             helpers = common_functions("command_exists", "ensure_node")
             result = subprocess.run(["bash", "-euc", helpers + '''
+print_error() { printf '%s\\n' "$*" >&2; }
 node() { printf v26.0.0; }
 apt-get() { printf '%s\\n' "$*" > "$TEST_ROOT/prerequisites"; }
 sync_node_global_bins() { :; }
@@ -169,6 +177,94 @@ ensure_node 20
             installed = (root / "prerequisites").read_text().split()
             for dependency in ("git", "build-essential", "python3", "python3-setuptools", "pkg-config"):
                 self.assertIn(dependency, installed)
+
+    def test_ensure_node_uses_immutable_per_major_pins_and_preserves_higher_runtime(self):
+        helpers = common_functions("command_exists", "ensure_node")
+        for label, arg, have_node, expected_major in (
+            ("default-major-22", "", "", "22"),
+            ("clean-major-20", "20", "", "20"),
+            ("clean-major-22", "22", "", "22"),
+            ("clean-major-24", "24", "", "24"),
+            ("upgrade-from-20-to-22", "22", "v20.19.0", "22"),
+            ("keep-equal-22", "22", "v22.14.0", None),
+            ("keep-higher-24-for-22", "22", "v24.1.0", None),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                node_stub = (
+                    f'command_exists() {{ [[ "$1" == node ]]; }}\nnode() {{ printf "%s" "{have_node}"; }}\n'
+                    if have_node
+                    else 'command_exists() { [[ "$1" != node ]]; }\n'
+                )
+                script = (
+                    "umask 077\n"
+                    + helpers
+                    + "\nprint_error() { printf '%s\\n' \"$*\" >&2; }\n"
+                    + node_stub
+                    + '''
+apt-get() { printf '%s\\n' "$*" >> "$TEST_ROOT/apt.log"; }
+sync_node_global_bins() { printf 'synced\\n' >> "$TEST_ROOT/sync.log"; }
+fetch_and_run() {
+    printf '%s|%s|%s|%s\\n' "$1" "$2" "$(umask)" "${DEBIAN_FRONTEND:-}" > "$TEST_ROOT/fetch.log"
+}
+'''
+                    + f"ensure_node {arg}\n"
+                    + 'printf "%s\\n" "$(umask)" > "$TEST_ROOT/post-umask.log"\n'
+                )
+                env = {**os.environ, "LOGFILE": str(root / "log"), "TEST_ROOT": str(root)}
+                env.pop("AF_NODESOURCE_BOOTSTRAP_SHA256", None)
+                result = subprocess.run(["bash", "-euc", script], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((root / "post-umask.log").read_text().strip(), "0077")
+                self.assertEqual((root / "sync.log").read_text().strip(), "synced")
+                apt_lines = (root / "apt.log").read_text().splitlines()
+                self.assertTrue(any("build-essential" in line and "pkg-config" in line for line in apt_lines))
+                if expected_major is None:
+                    self.assertFalse((root / "fetch.log").exists())
+                    self.assertFalse(any("nodejs" in line for line in apt_lines))
+                else:
+                    expected_url = (
+                        f"https://raw.githubusercontent.com/nodesource/distributions/"
+                        f"{self.NODESOURCE_REV}/scripts/deb/setup_{expected_major}.x"
+                    )
+                    self.assertEqual(
+                        (root / "fetch.log").read_text().strip(),
+                        f"{expected_url}|{self.NODESOURCE_PINS[expected_major]}|0022|noninteractive",
+                    )
+                    self.assertTrue(any(line.endswith(" nodejs") for line in apt_lines))
+
+    def test_ensure_node_uses_vendor_url_only_with_an_explicit_pin(self):
+        helpers = common_functions("command_exists", "ensure_node")
+        override_hash = "a" * 64
+        for label, arg, extra_env, expect_ok, expected_fetch in (
+            ("unsupported-major-18", "18", {}, False, None),
+            ("unsupported-major-26", "26", {}, False, None),
+            ("non-numeric-major", "22/evil", {}, False, None),
+            ("unpadded-major-required", "08", {}, False, None),
+            ("sha-override-on-supported-major", "22", {"AF_NODESOURCE_BOOTSTRAP_SHA256": override_hash}, True,
+             f"https://deb.nodesource.com/setup_22.x|{override_hash}"),
+            ("sha-override-on-other-numeric-major", "26", {"AF_NODESOURCE_BOOTSTRAP_SHA256": override_hash}, True,
+             f"https://deb.nodesource.com/setup_26.x|{override_hash}"),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                script = helpers + '''
+print_error() { printf '%s\\n' "$*" >&2; }
+command_exists() { [[ "$1" != node ]]; }
+apt-get() { printf '%s\\n' "$*" >> "$TEST_ROOT/apt.log"; }
+sync_node_global_bins() { :; }
+fetch_and_run() { printf '%s|%s\\n' "$1" "$2" > "$TEST_ROOT/fetch.log"; }
+ensure_node "$1"
+'''
+                env = {**os.environ, "LOGFILE": str(root / "log"), "TEST_ROOT": str(root)}
+                env.pop("AF_NODESOURCE_BOOTSTRAP_SHA256", None)
+                env.update(extra_env)
+                result = subprocess.run(["bash", "-euc", script, "test", arg], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, expect_ok, result.stderr)
+                if not expect_ok:
+                    self.assertFalse((root / "fetch.log").exists())
+                else:
+                    self.assertEqual((root / "fetch.log").read_text().strip(), expected_fetch)
 
     def test_catalog_installers_do_not_use_global_npm_or_bare_build_installs(self):
         for script in (ROOT / "packages/package/install").glob("installpackage-*"):

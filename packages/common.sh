@@ -6898,17 +6898,37 @@ sync_node_global_bins() {
 ensure_node() {
     local want_major="${1:-22}"
     local have_major=0
+    if [[ ! "$want_major" =~ ^[1-9][0-9]{0,2}$ ]]; then
+        print_error "Invalid Node.js major version requested: $want_major"
+        return 1
+    fi
     # Native addons and Git prepare scripts need these on already-provisioned
     # Node hosts too, not just when Node itself is first installed.
     DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
-        ca-certificates git build-essential python3 python3-setuptools pkg-config
+        ca-certificates git build-essential python3 python3-setuptools pkg-config || return 1
     if command_exists node; then
         have_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
+        [[ "$have_major" =~ ^[1-9][0-9]{0,2}$ ]] || have_major=0
     fi
     if [[ "${have_major:-0}" -lt "$want_major" ]]; then
-        local nodesource_sha256="${AF_NODESOURCE_BOOTSTRAP_SHA256:-2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be}"
-        fetch_and_run "https://deb.nodesource.com/setup_${want_major}.x" "$nodesource_sha256" || return 1
-        DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq nodejs
+        local nodesource_rev="42da07fa46a3e9649f47416743a5563f9f19028f"
+        local nodesource_url nodesource_sha256="${AF_NODESOURCE_BOOTSTRAP_SHA256:-}"
+        if [[ -n "$nodesource_sha256" ]]; then
+            nodesource_url="https://deb.nodesource.com/setup_${want_major}.x"
+        else
+            case "$want_major" in
+                20) nodesource_sha256="2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be" ;;
+                22) nodesource_sha256="575583bbac2fccc0b5edd0dbc03e222d9f9dc8d724da996d22754d6411104fd1" ;;
+                24) nodesource_sha256="6e3d580f5bd7ccf2aa1e8df8d35c60d78e873c3ff8beb282c9bebd914904ad72" ;;
+                *)
+                    print_error "Unsupported Node.js major version for pinned NodeSource bootstrap: $want_major (supported: 20, 22, 24)"
+                    return 1
+                    ;;
+            esac
+            nodesource_url="https://raw.githubusercontent.com/nodesource/distributions/${nodesource_rev}/scripts/deb/setup_${want_major}.x"
+        fi
+        ( umask 022; DEBIAN_FRONTEND=noninteractive fetch_and_run "$nodesource_url" "$nodesource_sha256" ) || return 1
+        DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq nodejs || return 1
     fi
     sync_node_global_bins
 }
