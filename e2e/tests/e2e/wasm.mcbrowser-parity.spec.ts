@@ -249,7 +249,7 @@ async function expectEditorSurfaceContrast(
   }
 }
 
-test('honors persisted non-dropdown 109.1 editor themes, auto-detects filename syntax modes, and supports >256 KiB Find/Replace with ETag CAS conflict recovery', async ({ page }) => {
+test('honors persisted non-dropdown 109.1 editor themes and auto-detects filename syntax modes', async ({ page }) => {
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false, preserveStorage: true });
 
   const prefPuts: Array<Record<string, unknown>> = [];
@@ -277,55 +277,19 @@ test('honors persisted non-dropdown 109.1 editor themes, auto-detects filename s
 
   await mountMcBrowserBaseRoutes(page, [
     { name: 'Dockerfile', path: 'Dockerfile', kind: 'file', size: 64, modified: '2026-11-19T00:00:00Z' },
-    { name: 'large.log', path: 'large.log', kind: 'file', size: 300 * 1024, modified: '2026-11-19T00:00:00Z' },
   ]);
 
-  const largePayload = `${'A'.repeat(270 * 1024)}\nFINDME one\nFINDME two\n`;
-  const putHeaders: Array<string | undefined> = [];
-  let currentEtag = 'etag-1';
-  let forceConflictOnce = true;
-  let savedLargeContent = '';
-
   await page.route(/\/api\/v1\/auth\/mcbrowser\/content\?/, async (route) => {
-    const url = new URL(route.request().url());
-    const targetPath = url.searchParams.get('path') || '';
-    if (targetPath === 'Dockerfile') {
-      await route.fulfill({
-        status: 200,
-        headers: { 'content-type': 'application/json', etag: 'docker-etag-1' },
-        body: JSON.stringify({ path: 'Dockerfile', content: 'FROM alpine:3.20\n# build\nRUN echo ok\n', etag: 'docker-etag-1' }),
-      });
-      return;
-    }
-    if (route.request().method() === 'PUT') {
-      const ifMatch = route.request().headers()['if-match'];
-      putHeaders.push(ifMatch);
-      if (forceConflictOnce) {
-        forceConflictOnce = false;
-        currentEtag = 'etag-2';
-        await json(route, { error: 'ETag mismatch' }, 412);
-        return;
-      }
-      const body = route.request().postDataJSON() as { content: string };
-      savedLargeContent = body.content;
-      currentEtag = 'etag-3';
-      await route.fulfill({
-        status: 200,
-        headers: { 'content-type': 'application/json', etag: currentEtag },
-        body: JSON.stringify({ success: true, etag: currentEtag, accounting_pending: false }),
-      });
-      return;
-    }
     await route.fulfill({
       status: 200,
-      headers: { 'content-type': 'application/json', etag: currentEtag },
-      body: JSON.stringify({ path: 'large.log', content: largePayload, etag: currentEtag }),
+      headers: { 'content-type': 'application/json', etag: 'docker-etag-1' },
+      body: JSON.stringify({ path: 'Dockerfile', content: 'FROM alpine:3.20\n# build\nRUN echo ok\n', etag: 'docker-etag-1' }),
     });
   });
 
   await page.goto('/?tab=mcbrowser');
 
-  // 1. Open Dockerfile -> preserves persisted non-dropdown 109.1 theme 'nord_dark' and auto-detects 'dockerfile' mode.
+  // Open Dockerfile -> preserves persisted non-dropdown 109.1 theme 'nord_dark' and auto-detects 'dockerfile' mode.
   await page.getByRole('button', { name: /Dockerfile/ }).click();
   const editorDialog = page.getByRole('dialog', { name: 'Code editor' });
   const editorRoot = editorDialog.locator('.af-editor');
@@ -364,9 +328,68 @@ test('honors persisted non-dropdown 109.1 editor themes, auto-detects filename s
   await expect.poll(() => prefPuts.at(-1)?.editor_theme).toBe('dracula');
   expect(prefPuts.at(-1)).toMatchObject({ editor_theme: 'dracula', show_hidden: true, locale: 'de' });
   await editorDialog.getByRole('button', { name: 'Close dialog' }).click();
+});
 
-  // 2. Open >256 KiB large.log -> plain-text mode, word wrap, Find Next + Replace All, ETag 412 conflict & CAS overwrite.
+test('supports >256 KiB plain-text Find/Replace with word wrap and ETag CAS conflict recovery', async ({ page }) => {
+  await installAetherFlowMocks(page, { authenticated: true, setupRequired: false, preserveStorage: true });
+
+  await page.route('**/api/v1/auth/mcbrowser/preferences', async (route) => {
+    await json(route, {
+      view: 'list',
+      sort: 'name',
+      direction: 'asc',
+      show_hidden: true,
+      single_click: false,
+      natural_sort: true,
+      redirect_after_copy_move: false,
+      date_format: false,
+      editor_theme: 'dracula',
+      locale: 'de',
+    });
+  });
+
+  await mountMcBrowserBaseRoutes(page, [
+    { name: 'large.log', path: 'large.log', kind: 'file', size: 300 * 1024, modified: '2026-11-19T00:00:00Z' },
+  ]);
+
+  const largePayload = `${'A'.repeat(270 * 1024)}\nFINDME one\nFINDME two\n`;
+  const putHeaders: Array<string | undefined> = [];
+  let currentEtag = 'etag-1';
+  let forceConflictOnce = true;
+  let savedLargeContent = '';
+
+  await page.route(/\/api\/v1\/auth\/mcbrowser\/content\?/, async (route) => {
+    if (route.request().method() === 'PUT') {
+      const ifMatch = route.request().headers()['if-match'];
+      putHeaders.push(ifMatch);
+      if (forceConflictOnce) {
+        forceConflictOnce = false;
+        currentEtag = 'etag-2';
+        await json(route, { error: 'ETag mismatch' }, 412);
+        return;
+      }
+      const body = route.request().postDataJSON() as { content: string };
+      savedLargeContent = body.content;
+      currentEtag = 'etag-3';
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: currentEtag },
+        body: JSON.stringify({ success: true, etag: currentEtag, accounting_pending: false }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: { 'content-type': 'application/json', etag: currentEtag },
+      body: JSON.stringify({ path: 'large.log', content: largePayload, etag: currentEtag }),
+    });
+  });
+
+  await page.goto('/?tab=mcbrowser');
+
+  // Open >256 KiB large.log -> plain-text mode, word wrap, Find Next + Replace All, ETag 412 conflict & CAS overwrite.
   await page.getByRole('button', { name: /large\.log/ }).click();
+  const editorDialog = page.getByRole('dialog', { name: 'Code editor' });
   await expect(editorDialog.getByText('Plain text · >256 KiB')).toBeVisible();
   const wrapToggle = editorDialog.getByTestId('editor-word-wrap');
   await wrapToggle.click();
