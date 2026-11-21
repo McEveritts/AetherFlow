@@ -5830,12 +5830,13 @@ async fn threadfin_ignores_unpinned_target_and_catalog_matches_native_recipes() 
         serde_json::from_str(crate::EMBEDDED_AUTOMATION_JSON).unwrap();
     assert_eq!(recipes["threadfin"].update_source, "pinned");
     assert!(recipes["threadfin"].require_download_sha256);
-    assert_eq!(recipes["prometheus"].update_source, "apt");
+    assert_eq!(recipes["prometheus"].update_source, "github");
+    assert_eq!(recipes["prometheus"].update_repo, "prometheus/prometheus");
     assert_eq!(recipes["prometheus"].update_package, "prometheus");
-    assert!(recipes["prometheus"]
-        .version_command
-        .join(" ")
-        .contains("/usr/bin/prometheus --version"));
+    assert_eq!(
+        recipes["prometheus"].version_command,
+        ["/usr/local/bin/prometheus", "--version"]
+    );
 }
 
 #[test]

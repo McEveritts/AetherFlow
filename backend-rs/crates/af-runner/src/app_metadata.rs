@@ -438,14 +438,20 @@ pub fn extract_app_runtime_meta_local_until(
                     continue;
                 };
                 if meta.api_key.is_empty() {
-                    meta.api_key = extract_runner_yaml_key_in_section(&content, "auth", "apikey");
+                    meta.api_key = af_models::app_metadata::extract_yaml_section_value(
+                        &content, "auth", "apikey",
+                    )
+                    .unwrap_or_default();
                     if meta.api_key.is_empty() {
                         meta.api_key = extract_runner_yaml_key_in_section(&content, "", "apikey");
                     }
                 }
                 if meta.configured_port <= 0 {
                     meta.configured_port = parse_valid_runner_port(
-                        &extract_runner_yaml_key_in_section(&content, "general", "port"),
+                        &af_models::app_metadata::extract_yaml_section_value(
+                            &content, "general", "port",
+                        )
+                        .unwrap_or_default(),
                     );
                 }
                 if !url_base_seen {
