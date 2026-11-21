@@ -41,7 +41,7 @@ This release completes the **Zero-Go cutover** across AetherFlow's repository la
 
 * Bump `backend/go.mod` from Go `1.26.10` to `1.26.11` and remove unused workspace dependencies (`thiserror` in `af-db`, `anyhow` and `tracing` in `af-host`) from `backend-rs`.
 * Upgrade GitHub Actions across `ci.yml`, `release.yml`, `security.yml`, and `deploy-pages.yml` onto Node-24 compatible majors (`actions/checkout@v7`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `actions/setup-go@v7`, `actions/configure-pages@v6`, `actions/upload-pages-artifact@v5`, `actions/deploy-pages@v5`, `actions/attest-build-provenance@v4`) and bump `GITLEAKS_VERSION` to `8.30.1`.
-* Update `frontend/` dependencies (`next` `16.4.6`, `tailwindcss` `4.3.5`, `@types/react*` `19.3.0`, pinned `@playwright/test` `1.59.1`, and compatible runtime packages) with zero `npm audit` findings, and document changes in `docs/codebase-version-audit-2026-11-13.md`.
+* Update `frontend/` dependencies (`next` `16.4.6`, `tailwindcss` `4.3.5`, `@types/react*` `19.3.0`, pinned `@playwright/test` `1.59.1`, and compatible runtime packages) with zero `npm audit` findings, and document changes in the [version audit for that revision](https://github.com/McEveritts/AetherFlow/blob/e8d7c49bebe4e94c5a9e7ef21b8230d5592157a1/docs/codebase-version-audit-2026-11-13.md).
 
 ### Service Version Probes, Installers & Frontend Polish
 

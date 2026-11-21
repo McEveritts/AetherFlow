@@ -192,5 +192,5 @@ finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Autoscan installed on port ${APP_PORT} (Arr webhooks ready)."
+report_progress 100 "Autoscan installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

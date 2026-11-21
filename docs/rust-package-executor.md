@@ -10,7 +10,7 @@ All privileged Marketplace lifecycle operations (`install`, `update`, `remove`) 
 - **`POST /v1/package`** over `/run/aetherflow/runner.sock` (`handle_package` in `af-runner/src/lib.rs`), or
 - **`af_runner::execute_package_local`** / **`af_runner::execute_package_request_stream`** for direct in-process execution by future CLI and bare-metal provisioner binaries.
 
-To guarantee zero regressions across the 70+ Marketplace applications while eliminating unsafe shell evaluation in migrated recipes, `af-runner` implements a **two-tier hybrid dispatch model** controlled by explicit feature gates:
+The 77-app Marketplace uses two package execution paths in `af-runner`. Feature gates select the declarative recipes as applications migrate from shell installers.
 
 1. **`PackageEngineMode::DeclarativeRust` (Opt-In via `AETHERFLOW_ENABLE_RUST_PACKAGES=1`)**:
    - Disabled by default (`AETHERFLOW_ENABLE_RUST_PACKAGES` defaults to `false`).

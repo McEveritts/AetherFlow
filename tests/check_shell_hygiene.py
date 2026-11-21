@@ -45,7 +45,7 @@ def discover_scripts():
 
 def main():
     print("=" * 80)
-    print("       AETHERFLOW v3.1.7 SHELL SCRIPT HYGIENE VERIFIER")
+    print("       AETHERFLOW SHELL SCRIPT HYGIENE VERIFIER")
     print("=" * 80)
     
     scripts = discover_scripts()

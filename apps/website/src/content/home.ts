@@ -58,7 +58,7 @@ export const aiNativeLoopData = {
 
 export const statusMomentumData = {
   title: "Engineered for Production Resilience",
-  body: "AetherFlow v4.0.0 delivers end-to-end atomic lifecycle management across your entire server.",
+  body: "AetherFlow verifies release archives, snapshots its control-plane database, and checks readiness before accepting an update.",
   bullets: [
     {
       title: "Atomic Self-Updates & Rollbacks",

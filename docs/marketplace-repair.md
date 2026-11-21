@@ -126,7 +126,7 @@ checks reject new bare package-manager builds or global npm app installs. The
 Node installer CI job runs these checks with the npm version that reproduced
 the original failure.
 
-Validation passed:
+The original repair validation passed the following checks.
 
 - `cargo test --workspace --no-fail-fast -- --test-threads=1`.
 - Eleven isolated Marketplace installer/removal regressions and eight existing
