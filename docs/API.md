@@ -15,7 +15,7 @@ All API endpoints under `/api/v1/auth/*` and `/api/v1/admin/*` require an active
 Authentication is driven by the `aetherflow_session` cookie (containing a signed 15-minute HS256 JWT) or an `Authorization: Bearer <token>` header.
 
 ### CSRF Protection
-For any state-mutating cookie-authenticated request (`POST`, `PUT`, `PATCH`, `DELETE`), include the CSRF token and matching origin:
+For state-mutating cookie-authenticated requests (`POST`, `PUT`, `PATCH`, `DELETE`), include the CSRF token. The session refresh routes accept an expired session cookie and require `X-Requested-With: XMLHttpRequest` so the dashboard can renew its session after its CSRF token expires.
 
 | Header | Description |
 | :--- | :--- |
@@ -35,6 +35,7 @@ Handles login, TOTP 2FA verification, OAuth2/OIDC handshakes, and Subdomain Gate
 | `POST` | `/api/v1/public/auth/mfa/verify` | Validates a 6-digit TOTP code or recovery code during login. |
 | `GET` | `/api/v1/public/auth/verify` | Perimeter SSO verification for Apache2 Subdomain Gateway (`X-Aetherflow-User` injection). Enforces active, unrevoked administrator sessions (rejecting revoked, expired, non-admin, or plugin-scoped tokens). |
 | `GET` | `/api/v1/auth/session` | Returns the authenticated user's session profile, role, and 2FA status. |
+| `POST` | `/api/v1/auth/refresh` | Rotates the current session. Cookie clients send `X-Requested-With: XMLHttpRequest`. The public alias is `/api/v1/public/auth/refresh`. |
 | `PUT` | `/api/v1/auth/profile` | Updates the authenticated user's profile details. |
 | `POST` | `/api/v1/auth/logout` | Revokes the active JWT (`revoked_tokens`) and clears `aetherflow_session`. |
 

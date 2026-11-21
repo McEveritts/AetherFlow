@@ -238,6 +238,8 @@ class AetherFlowApiClient:
                 headers: Optional[Dict[str, str]] = None, timeout: float = 5.0) -> Tuple[int, Dict[str, Any], Dict[str, str]]:
         url = f"{self.base_url}{path}"
         req_headers = {"User-Agent": "AetherFlow-E2E-Harness/4.0.0"}
+        if path.endswith("/auth/refresh"):
+            req_headers["X-Requested-With"] = "XMLHttpRequest"
         if headers:
             req_headers.update(headers)
 

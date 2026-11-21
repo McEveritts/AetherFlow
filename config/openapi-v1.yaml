@@ -4688,6 +4688,7 @@ paths:
       tags:
         - Auth
       summary: Execute refresh
+      description: Cookie-authenticated refresh requires the X-Requested-With header with value XMLHttpRequest.
       responses:
         '200':
           description: OK
@@ -4697,10 +4698,12 @@ paths:
                 $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
-        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/SessionRefreshHeader'
   /auth/services:
     get:
       tags:
@@ -5417,6 +5420,9 @@ paths:
       tags:
         - Auth
       summary: Execute auth refresh
+      description: Cookie-authenticated refresh requires the X-Requested-With header with value XMLHttpRequest.
+      parameters:
+        - $ref: '#/components/parameters/SessionRefreshHeader'
       responses:
         '200':
           description: OK
@@ -5424,6 +5430,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /public/auth/setup:
     post:
       tags:
@@ -5763,6 +5773,13 @@ components:
       in: cookie
       name: aetherflow_session
   parameters:
+    SessionRefreshHeader:
+      name: X-Requested-With
+      in: header
+      description: Required when authenticating refresh with a session cookie.
+      schema:
+        type: string
+        const: XMLHttpRequest
     CsrfToken:
       in: header
       name: X-CSRF-Token

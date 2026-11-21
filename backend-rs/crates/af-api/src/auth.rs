@@ -2165,6 +2165,21 @@ pub async fn refresh_session_with_peer(
     crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
     headers: HeaderMap,
 ) -> Response {
+    // A cookie can accompany a form submission from a sibling app. The
+    // dashboard sends this header even when its CSRF token needs renewal.
+    // A cross-origin browser request needs an allowed CORS preflight to set it.
+    if !headers.contains_key(header::AUTHORIZATION)
+        && extract_cookie(&headers, "aetherflow_session").is_some()
+        && !headers
+            .get("x-requested-with")
+            .is_some_and(|value| value == "XMLHttpRequest")
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "REFRESH_HEADER_REQUIRED",
+            "Cookie session refresh requires X-Requested-With: XMLHttpRequest",
+        );
+    }
     blocking_response(move || refresh_session_for_peer_blocking(headers, peer_ip)).await
 }
 
@@ -3981,6 +3996,34 @@ mod tests {
                 .body(axum::body::Body::empty())
                 .unwrap();
             assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn cookie_refresh_requires_the_request_header_on_both_routes() {
+        use axum::{routing::post, Router};
+        use tower::ServiceExt;
+
+        for path in ["/auth/refresh", "/public/auth/refresh"] {
+            let app = Router::new().route(path, post(refresh_session_with_peer));
+            for (request_header, expected) in [
+                (None, StatusCode::FORBIDDEN),
+                (Some("XMLHttpRequest"), StatusCode::UNAUTHORIZED),
+            ] {
+                let mut request = Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(header::COOKIE, "aetherflow_session=invalid-fixture-token");
+                if let Some(value) = request_header {
+                    request = request.header("x-requested-with", value);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{path}");
+            }
         }
     }
 
