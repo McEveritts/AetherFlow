@@ -2381,7 +2381,16 @@ fn cli_enforces_threadfin_pinned_and_pihole_vendor_exact_version_policies() {
     let root_str = root.to_string_lossy().into_owned();
     let transport = MockRunnerTransport::default();
 
-    // 1. Threadfin update without --target-version discovers pinned 1.2.37 from package_automation.json
+    let cached = root.join("var/lib/aetherflow/aetherflow.sqlite");
+    fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    rusqlite::Connection::open(cached)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE app_updates (package_name TEXT, latest_version TEXT);
+             INSERT INTO app_updates VALUES ('threadfin', '1.2.36');",
+        )
+        .unwrap();
+
     let inv_tf_default = parse_cli_args([
         "--json",
         "--root",

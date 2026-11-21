@@ -1050,9 +1050,14 @@ fn resolve_cli_package_target_version(
         }
     }
 
+    let lock_name = resolve_package_lock_name(pkg_id);
+    if lock_name == "threadfin" {
+        return af_runner::validate_threadfin_target_policy(None)
+            .map(|(version, _)| version)
+            .map_err(|error| CliError::Validation(error.to_string()));
+    }
     validate_cli_package_target_policy(global, pkg_id, "update", None)?;
 
-    let lock_name = resolve_package_lock_name(pkg_id);
     for db_path in candidate_cli_sqlite_dbs(global) {
         if let Some(ver) = query_app_update_target_version_from_sqlite(&db_path, lock_name)
             .or_else(|| query_app_update_target_version_from_sqlite(&db_path, pkg_id))
