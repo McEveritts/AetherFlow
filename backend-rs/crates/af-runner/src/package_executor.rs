@@ -5448,17 +5448,8 @@ pub(crate) fn format_exit_failure_diagnostics(
 }
 
 fn parse_apt_cache_candidate_version(apt_policy_stdout: &str) -> Option<String> {
-    for line in apt_policy_stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Candidate:") {
-            let raw_candidate = rest.trim();
-            if raw_candidate.is_empty() || raw_candidate == "(none)" {
-                return None;
-            }
-            return Some(normalize_dpkg_version(raw_candidate, raw_candidate));
-        }
-    }
-    None
+    af_release::lifecycle::parse_apt_policy_candidate(apt_policy_stdout)
+        .map(|candidate| normalize_dpkg_version(candidate, candidate))
 }
 
 fn apt_candidate_satisfies_target(apt_package: &str, target_version: &str) -> bool {
