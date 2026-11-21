@@ -14,9 +14,9 @@ AetherFlow v4.0 replaces the legacy Go (`Gin`) + separate Next.js/PM2 stack with
 
 | Path | Owner / Mode | Purpose |
 | --- | --- | --- |
-| `/opt/AetherFlow/releases/<epoch>` | `root:aetherflow` (`0755`) | Immutable versioned release directories containing `aetherflow-api`, `af` (`bin/af`), `speedtest-backend`, `web/dist/`, `config/`, `packages/`, `deploy/`, `.version`, and `data-snapshot/`. |
+| `/opt/AetherFlow/releases/<epoch>` | `root:aetherflow` (`0755`) | Immutable versioned release directories containing `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `web/dist/`, `config/`, `packages/`, `deploy/`, `plugins/telemetry-inspector/`, `.version`, and `data-snapshot/`. |
 | `/opt/AetherFlow/current` | Symlink | Atomic symlink pointing to the active `/opt/AetherFlow/releases/<epoch>` directory. |
-| `/usr/local/bin/af` | `root:root` (`0755`) | Installed CLI entrypoint delegating to `/opt/AetherFlow/current/af` (with legacy `af-*` fallback compatibility). |
+| `/usr/local/bin/af` | `root:root` (`0755`) | Installed CLI entrypoint delegating to `/opt/AetherFlow/current/bin/af` (with legacy `/opt/AetherFlow/current/af` and `af-*` fallback compatibility). |
 | `/etc/aetherflow/aetherflow.env` | `root:aetherflow` (`0640`) | Protected environment file containing `JWT_SECRET`, `AES_MASTER_KEY`, `DB_PATH`, and `ALLOWED_HOSTS`. Never overwritten by upgrades. |
 | `/var/lib/aetherflow/aetherflow.sqlite` | `aetherflow:aetherflow` (`0660`) | Primary SQLite database in `WAL` mode (including `users`, `settings`, `revoked_tokens`, `audit_log`, and metrics history). |
 | `/run/aetherflow/runner.sock` | `root:aetherflow` (`0660`) | Unix domain socket for the privileged `aetherflow-runner.service` (`aetherflow-api runner`) daemon. |
@@ -147,7 +147,7 @@ Expected `/health/ready` response:
 
 - Prebuilt release archives (`aetherflow-linux-amd64.tar.gz`) must be built against the **Ubuntu 22.04 (`GLIBC 2.35`)** baseline (`.github/workflows/release.yml` and `.github/workflows/ci.yml`) so dynamically linked binaries run across Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13, and Kali Linux.
 - All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend`).
-- Release archives package `aetherflow-api`, `af` (`./af` and `./bin/af`), and `speedtest-backend` (`./speedtest-backend` and `./bin/speedtest-backend`), canonical `config/`, `packages/`, `deploy/`, and `.version`, accompanied by `SHA256SUMS` and GitHub build provenance attestations.
+- Release archives package `aetherflow-api`, `bin/af`, and `bin/speedtest-backend`, external `web/dist/`, canonical `config/`, `packages/`, `deploy/`, `plugins/telemetry-inspector/`, and `.version`, accompanied by `SHA256SUMS` and GitHub build provenance attestations.
 
 ### Fresh Installation (`setup/AetherFlow-Setup`)
 

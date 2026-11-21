@@ -55,9 +55,18 @@ pass() {
 
 check_speedtest_companion() {
     local current="$1" version="$2"
-    [[ -x "${current}/speedtest-backend" && -x "${current}/bin/speedtest-backend" ]] || fail "Missing executable LibreSpeed companion for ${version}"
-    cmp -s "${current}/speedtest-backend" "${current}/bin/speedtest-backend" || fail "LibreSpeed companion copies differ for ${version}"
-    grep -qF "speedtest-backend ${version}" "${current}/speedtest-backend" || fail "Wrong LibreSpeed companion version in current (expected ${version})"
+    [[ -x "${current}/bin/speedtest-backend" ]] || fail "Missing executable LibreSpeed companion for ${version}"
+    [[ ! -e "${current}/speedtest-backend" ]] || fail "Unexpected duplicate root speedtest-backend for ${version}"
+    grep -qF "speedtest-backend ${version}" "${current}/bin/speedtest-backend" || fail "Wrong LibreSpeed companion version in current (expected ${version})"
+}
+
+check_managed_plugin_bundle() {
+    local current="$1"
+    [[ -s "${current}/plugins/telemetry-inspector/plugin.manifest.json" ]] || fail "Missing plugins/telemetry-inspector/plugin.manifest.json in ${current}"
+    [[ -x "${current}/plugins/telemetry-inspector/backend/hooks/start.sh" ]] || fail "Missing executable plugins/telemetry-inspector/backend/hooks/start.sh in ${current}"
+    [[ -s "${current}/plugins/telemetry-inspector/backend/runtime.py" ]] || fail "Missing plugins/telemetry-inspector/backend/runtime.py in ${current}"
+    [[ -s "${current}/plugins/telemetry-inspector/frontend/dist/index.html" ]] || fail "Missing plugins/telemetry-inspector/frontend/dist/index.html in ${current}"
+    [[ ! -e "${current}/plugins/sdk-template-rust" ]] || fail "Unexpected developer SDK template in ${current}/plugins"
 }
 
 build_release_tarball() {
@@ -80,6 +89,10 @@ build_release_tarball() {
     if [[ -d "${ROOT_DIR}/config" ]]; then
         cp -R "${ROOT_DIR}/config/." "${stage}/config/"
     fi
+    if [[ -d "${ROOT_DIR}/plugins/telemetry-inspector" ]]; then
+        mkdir -p "${stage}/plugins/telemetry-inspector"
+        cp -R "${ROOT_DIR}/plugins/telemetry-inspector/." "${stage}/plugins/telemetry-inspector/"
+    fi
 
     cat > "${stage}/aetherflow-api" <<EOF
 #!/bin/bash
@@ -99,19 +112,17 @@ fi
 exit 0
 EOF
 
-    cat > "${stage}/af" <<EOF
+    cat > "${stage}/bin/af" <<EOF
 #!/bin/bash
 echo "af-cli ${version_tag} args:\$*"
 EOF
-    cp -f "${stage}/af" "${stage}/bin/af"
-    cat > "${stage}/speedtest-backend" <<EOF
+    cat > "${stage}/bin/speedtest-backend" <<EOF
 #!/bin/bash
 echo "speedtest-backend ${version_tag}"
 EOF
-    cp -f "${stage}/speedtest-backend" "${stage}/bin/speedtest-backend"
     printf '%s\n' "${version_tag}" > "${stage}/.version"
 
-    chmod 0755 "${stage}/aetherflow-api" "${stage}/af" "${stage}/bin/af" "${stage}/speedtest-backend" "${stage}/bin/speedtest-backend" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py"
+    chmod 0755 "${stage}/aetherflow-api" "${stage}/bin/af" "${stage}/bin/speedtest-backend" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py" "${stage}/plugins/telemetry-inspector/backend/hooks/start.sh"
     find "${stage}" -type d -exec chmod 0755 {} +
 
     local archive="${out_dir}/aetherflow-linux-amd64.tar.gz"
@@ -279,14 +290,15 @@ bash -c '
 
 [[ -L "${FRESH_ROOT}/opt/AetherFlow/current" ]] || fail "Fresh install did not create /opt/AetherFlow/current symlink"
 [[ -x "${FRESH_ROOT}/opt/AetherFlow/current/aetherflow-api" ]] || fail "Fresh install missing executable aetherflow-api"
-[[ -x "${FRESH_ROOT}/opt/AetherFlow/current/af" ]] || fail "Fresh install missing executable af CLI"
 [[ -x "${FRESH_ROOT}/opt/AetherFlow/current/bin/af" ]] || fail "Fresh install missing executable bin/af CLI"
+[[ ! -e "${FRESH_ROOT}/opt/AetherFlow/current/af" ]] || fail "Fresh install should not duplicate root af CLI"
 [[ "$(tr -d '[:space:]' < "${FRESH_ROOT}/opt/AetherFlow/current/.version")" == "v4.0.0" ]] || fail "Unexpected .version in fresh install"
 grep -q 'AetherFlow v4.0.0' "${FRESH_ROOT}/opt/AetherFlow/current/web/dist/index.html" || fail "Fresh install missing matching external UI"
 [[ -s "${FRESH_ROOT}/opt/AetherFlow/current/web/dist/app-01234567.wasm" ]] || fail "Fresh install missing external WASM"
 grep -q "DB_PATH=${FRESH_ROOT}/var/lib/aetherflow/aetherflow.sqlite" "${FRESH_ROOT}/etc/aetherflow/aetherflow.env" || fail "aetherflow.env missing FHS DB_PATH"
 grep -q "ExecStart=/opt/AetherFlow/current/aetherflow-api" "${FRESH_ROOT}/etc/systemd/system/aetherflow-api.service" || fail "aetherflow-api.service not pointing to /opt/AetherFlow/current/aetherflow-api"
 check_speedtest_companion "${FRESH_ROOT}/opt/AetherFlow/current" "v4.0.0"
+check_managed_plugin_bundle "${FRESH_ROOT}/opt/AetherFlow/current"
 pass "Fresh installer staged verified v4.0.0 native binaries and external WASM"
 
 # ==============================================================================
@@ -461,7 +473,9 @@ AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Initial deploy did not activate v4.0.0"
 grep -q 'AetherFlow v4.0.0' "${RM_ROOT}/current/web/dist/index.html" || fail "Initial deploy missing matching external UI"
 check_speedtest_companion "${RM_ROOT}/current" "v4.0.0"
-[[ -x "${RM_ROOT}/current/af" ]] || fail "Initial deploy missing af binary"
+check_managed_plugin_bundle "${RM_ROOT}/current"
+[[ -x "${RM_ROOT}/current/bin/af" ]] || fail "Initial deploy missing bin/af binary"
+[[ ! -e "${RM_ROOT}/current/af" ]] || fail "Initial deploy should not duplicate root af binary"
 pass "Stage 1-3 initial deploy of v4.0.0 succeeded"
 
 # 3b. Atomic upgrade from v4.0.0 -> v4.0.1

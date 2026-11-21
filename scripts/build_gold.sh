@@ -10,6 +10,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_RS_DIR="${BACKEND_RS_DIR:-${ROOT_DIR}/backend-rs}"
 CONFIG_DIR="${CONFIG_DIR:-${ROOT_DIR}/config}"
+PLUGINS_DIR="${PLUGINS_DIR:-${ROOT_DIR}/plugins}"
 FRONTEND_DIST_DIR="${FRONTEND_DIST_DIR:-${EMBED_DIST_DIR:-${ROOT_DIR}/web/dist}}"
 VERSION_FILE="${VERSION_FILE:-${ROOT_DIR}/.version}"
 VERSION="${VERSION:-$(tr -d '\r\n' < "${VERSION_FILE}")}"
@@ -136,10 +137,9 @@ stage_companion_binary() {
     echo "error: expected compiled binary '${compiled_path}' not found" >&2
     exit 1
   fi
-  cp "${compiled_path}" "${target_dir}/${dest_name}"
   mkdir -p "${target_dir}/bin"
   cp "${compiled_path}" "${target_dir}/bin/${dest_name}"
-  chmod 0755 "${target_dir}/${dest_name}" "${target_dir}/bin/${dest_name}"
+  chmod 0755 "${target_dir}/bin/${dest_name}"
 }
 
 build_target() {
@@ -250,6 +250,17 @@ build_target() {
   tar -C "${cfg_src}" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/config" -xpf -
   tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" --exclude='packages/ui' --exclude='packages/plugin' \
     --exclude='packages/README.md' -cf - packages deploy | tar -C "${target_dir}" -xpf -
+  if managed_plugin_assets_present "${PLUGINS_DIR}/telemetry-inspector"; then
+    mkdir -p "${target_dir}/plugins/telemetry-inspector"
+    tar -C "${PLUGINS_DIR}/telemetry-inspector" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/plugins/telemetry-inspector" -xpf -
+    find "${target_dir}/plugins/telemetry-inspector" -type d -exec chmod 0755 {} +
+    find "${target_dir}/plugins/telemetry-inspector" -type f -exec chmod 0644 {} +
+    chmod 0755 "${target_dir}/plugins/telemetry-inspector/backend/hooks/start.sh"
+  fi
+  if [[ "${PACKAGE_RELEASE}" == "1" ]] && ! managed_plugin_assets_present "${target_dir}/plugins/telemetry-inspector"; then
+    echo "error: packaged plugins/telemetry-inspector requires plugin.manifest.json, backend/hooks/start.sh, backend/runtime.py, and frontend/dist/index.html" >&2
+    exit 1
+  fi
   printf '%s\n' "${VERSION}" > "${target_dir}/.version"
   chmod 0755 "${target_dir}" "${target_dir}/deploy/release-manager.sh"
   for runtime_script in verify-provenance.py log-retention.py; do
@@ -261,10 +272,10 @@ build_target() {
   if [[ "${PACKAGE_RELEASE}" == "1" ]]; then
     package_archive "${target_dir}" "${archive}" .
     (cd "${OUTPUT_DIR}" && sha256sum "aetherflow-linux-${arch}.tar.gz" >> SHA256SUMS)
-    if [[ "${PACKAGE_SPEEDTEST_STANDALONE}" == "1" && -n "${compiled_speedtest}" && -f "${target_dir}/${SPEEDTEST_BINARY_NAME}" ]]; then
+    if [[ "${PACKAGE_SPEEDTEST_STANDALONE}" == "1" && -n "${compiled_speedtest}" && -f "${target_dir}/bin/${SPEEDTEST_BINARY_NAME}" ]]; then
       local clean_ver="${VERSION#v}"
       local speedtest_archive_name="speedtest-backend_${clean_ver}_linux_${arch}.tar.gz"
-      package_archive "${target_dir}" "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}"
+      package_archive "${target_dir}/bin" "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}"
       (cd "${OUTPUT_DIR}" && sha256sum "${speedtest_archive_name}" >> SHA256SUMS)
     fi
   fi
@@ -281,6 +292,14 @@ frontend_assets_present() {
   local dir="$1"
   [[ -f "${dir}/index.html" && ! -L "${dir}/index.html" && -s "${dir}/index.html" ]] && \
     [[ -n "$(find "${dir}" -type f -name '*.wasm' -size +0c -print -quit)" ]]
+}
+
+managed_plugin_assets_present() {
+  local dir="$1"
+  [[ -f "${dir}/plugin.manifest.json" && ! -L "${dir}/plugin.manifest.json" && -s "${dir}/plugin.manifest.json" ]] && \
+    [[ -f "${dir}/backend/hooks/start.sh" && ! -L "${dir}/backend/hooks/start.sh" && -s "${dir}/backend/hooks/start.sh" ]] && \
+    [[ -f "${dir}/backend/runtime.py" && ! -L "${dir}/backend/runtime.py" && -s "${dir}/backend/runtime.py" ]] && \
+    [[ -f "${dir}/frontend/dist/index.html" && ! -L "${dir}/frontend/dist/index.html" && -s "${dir}/frontend/dist/index.html" ]]
 }
 
 require_tool cargo
@@ -315,6 +334,11 @@ fi
 
 if [[ "${PACKAGE_RELEASE}" == "1" ]] && ! frontend_assets_present "${FRONTEND_DIST_DIR}"; then
   echo "error: full release requires non-empty index.html and a .wasm file in '${FRONTEND_DIST_DIR}'" >&2
+  exit 1
+fi
+
+if [[ "${PACKAGE_RELEASE}" == "1" ]] && ! managed_plugin_assets_present "${PLUGINS_DIR}/telemetry-inspector"; then
+  echo "error: full release requires plugins/telemetry-inspector in '${PLUGINS_DIR}'" >&2
   exit 1
 fi
 

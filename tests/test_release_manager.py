@@ -220,7 +220,12 @@ os.execvp(inner[0], inner)
                 ("aetherflow-api", binary, 0o755),
                 (".version", version, 0o644),
                 ("web/dist/index.html", index, 0o600),
-                ("speedtest-backend", b"speedtest-fixture", 0o600),
+                ("bin/af", b"cli-fixture", 0o600),
+                ("bin/speedtest-backend", b"speedtest-fixture", 0o600),
+                ("plugins/telemetry-inspector/plugin.manifest.json", b'{"id":"telemetry-inspector"}\n', 0o600),
+                ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n", 0o600),
+                ("plugins/telemetry-inspector/backend/runtime.py", b"print('ok')\n", 0o600),
+                ("plugins/telemetry-inspector/frontend/dist/index.html", b"<!doctype html>\n", 0o600),
                 ("web/dist/app.wasm", wasm, 0o644),
                 ("deploy/systemd/aetherflow-api.service", unit, 0o644),
                 ("deploy/systemd/aetherflow-runner.service", runner, 0o644),
@@ -488,8 +493,11 @@ os.execvp(inner[0], inner)
         self.assertEqual(versions[0].read_text().strip(), "v4.0.0-dryrun")
         self.assertNotIn("curl ", self.commands.read_text())
         self.assertTrue((self.dry / "current").is_symlink())
-        self.assertTrue((self.dry / "current" / "speedtest-backend").is_file())
+        self.assertFalse((self.dry / "current" / "af").exists())
+        self.assertFalse((self.dry / "current" / "speedtest-backend").exists())
+        self.assertTrue((self.dry / "current" / "bin" / "af").is_file())
         self.assertTrue((self.dry / "current" / "bin" / "speedtest-backend").is_file())
+        self.assertTrue((self.dry / "current" / "plugins" / "telemetry-inspector" / "plugin.manifest.json").is_file())
 
     def test_env_file_aetherflow_db_path_when_db_path_missing(self):
         other_db = self.root / "live" / "from-aether.sqlite"
@@ -531,10 +539,20 @@ os.execvp(inner[0], inner)
         self.assertEqual((self.current / "web/dist/index.html").read_bytes(), b"<html>app</html>")
         self.assertEqual((self.current / "web/dist/app.wasm").read_bytes(), b"wasm")
         self.assertEqual((self.current / "web/dist/index.html").stat().st_mode & 0o777, 0o644)
-        for relpath in ("speedtest-backend", "bin/speedtest-backend"):
+        self.assertFalse((self.current / "af").exists())
+        self.assertFalse((self.current / "speedtest-backend").exists())
+        for relpath, expected_bytes in (
+            ("bin/af", b"cli-fixture"),
+            ("bin/speedtest-backend", b"speedtest-fixture"),
+            ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n"),
+        ):
             companion = self.current / relpath
-            self.assertEqual(companion.read_bytes(), b"speedtest-fixture")
+            self.assertEqual(companion.read_bytes(), expected_bytes)
             self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(
+            (self.current / "plugins/telemetry-inspector/plugin.manifest.json").stat().st_mode & 0o777,
+            0o644,
+        )
         self.assertEqual(self.marker(self.snapshot()), "env")
 
         # Standalone Bash fallback defaults to /health/ready when neither env nor config sets HEALTH_ENDPOINT.
@@ -1305,12 +1323,25 @@ class SourceReleaseFrontendTests(unittest.TestCase):
             root = Path(directory)
             repo = root / "repo"
             release = root / "release"
-            for path in (repo / "scripts", repo / "frontend", repo / "backend-rs/crates/af-librespeed", repo / "config", release):
+            for path in (
+                repo / "scripts",
+                repo / "frontend",
+                repo / "backend-rs/crates/af-librespeed",
+                repo / "config",
+                repo / "plugins/telemetry-inspector/backend/hooks",
+                repo / "plugins/telemetry-inspector/frontend/dist",
+                release,
+            ):
                 path.mkdir(parents=True)
             (repo / "frontend/source.ts").write_text("legacy source")
             (repo / "backend-rs/Cargo.lock").write_text("# lock\n")
             (repo / "backend-rs/crates/af-librespeed/Cargo.toml").touch()
             (repo / "config/packages.json").write_text("[]\n")
+            (repo / "plugins/telemetry-inspector/plugin.manifest.json").write_text('{"id":"telemetry-inspector"}\n')
+            (repo / "plugins/telemetry-inspector/backend/hooks/start.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+            (repo / "plugins/telemetry-inspector/backend/hooks/start.sh").chmod(0o644)
+            (repo / "plugins/telemetry-inspector/backend/runtime.py").write_text("print('ok')\n")
+            (repo / "plugins/telemetry-inspector/frontend/dist/index.html").write_text("<html>plugin</html>\n")
             (repo / "scripts/install_wasm_build_tools.sh").write_text("exit 0\n")
             (repo / "scripts/build_wasm_frontend.sh").write_text(
                 'mkdir -p "$FRONTEND_DIST_DIR/locales"\n'
@@ -1344,11 +1375,20 @@ cargo() {
             self.assertEqual((release / "web/dist/app.wasm").read_text(), "wasm")
             self.assertEqual((release / "web/dist/locales/en.json.gz").read_text(), "locale")
             self.assertEqual((release / "bin/af").read_text(), "cli")
+            self.assertFalse((release / "af").exists())
             self.assertEqual((release / "config/packages.json").read_text(), "[]\n")
-            for relpath in ("speedtest-backend", "bin/speedtest-backend"):
-                companion = release / relpath
-                self.assertEqual(companion.read_text(), "speedtest")
-                self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+            companion = release / "bin/speedtest-backend"
+            self.assertEqual(companion.read_text(), "speedtest")
+            self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((release / "speedtest-backend").exists())
+            self.assertEqual(
+                (release / "plugins/telemetry-inspector/plugin.manifest.json").read_text(),
+                '{"id":"telemetry-inspector"}\n',
+            )
+            self.assertEqual(
+                (release / "plugins/telemetry-inspector/backend/hooks/start.sh").stat().st_mode & 0o777,
+                0o755,
+            )
             self.assertFalse((release / "frontend").exists())
             self.assertTrue((repo / "frontend/source.ts").exists())
 

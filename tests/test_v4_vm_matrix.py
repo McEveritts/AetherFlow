@@ -221,9 +221,7 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
     def portable_entries(self) -> dict[str, tuple[bytes, int]]:
         return {
             "aetherflow-api": (b"\x7fELF-api", 0o755),
-            "af": (b"\x7fELF-new-cli", 0o755),
             "bin/af": (b"\x7fELF-new-cli", 0o755),
-            "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
             "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
             ".version": (b"v4.0.0\n", 0o644),
             "web/dist/index.html": (b"<html>app</html>", 0o644),
@@ -233,6 +231,10 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             "config/packages.json": (b"{}\n", 0o644),
             "config/package_automation.json": (b"{}\n", 0o644),
             "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
+            "plugins/telemetry-inspector/plugin.manifest.json": (b'{"id":"telemetry-inspector"}\n', 0o644),
+            "plugins/telemetry-inspector/backend/hooks/start.sh": (b"#!/usr/bin/env bash\nexit 0\n", 0o755),
+            "plugins/telemetry-inspector/backend/runtime.py": (b"print('ok')\n", 0o644),
+            "plugins/telemetry-inspector/frontend/dist/index.html": (b"<!doctype html>\n", 0o644),
         }
 
     def test_cli_glibc_requirement_is_checked_independently_of_api(self) -> None:
@@ -252,19 +254,18 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                 report["details"]["binary_glibc_versions"],
                 {
                     "aetherflow-api": "2.34",
-                    "af": "2.38",
                     "bin/af": "2.38",
-                    "speedtest-backend": "2.34",
                     "bin/speedtest-backend": "2.34",
                 },
             )
-            self.assertTrue(any("af requires GLIBC_2.38" in error for error in report["errors"]))
+            self.assertTrue(any("bin/af requires GLIBC_2.38" in error for error in report["errors"]))
 
     def test_cli_archive_copies_must_match(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / "aetherflow-linux-amd64.tar.gz"
             sums = Path(directory) / "SHA256SUMS"
             entries = self.portable_entries()
+            entries["af"] = (b"\x7fELF-new-cli", 0o755)
             entries["bin/af"] = (b"\x7fELF-different-cli", 0o755)
             digest = self._build_tarball(archive, entries)
             sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
@@ -277,6 +278,7 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             archive = Path(directory) / "aetherflow-linux-amd64.tar.gz"
             sums = Path(directory) / "SHA256SUMS"
             entries = self.portable_entries()
+            entries["speedtest-backend"] = (b"\x7fELF-speedtest", 0o755)
             entries["bin/speedtest-backend"] = (b"\x7fELF-different-speedtest", 0o755)
             digest = self._build_tarball(archive, entries)
             sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
@@ -298,7 +300,7 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             )
             self.assertFalse(glibc_report["valid"])
             self.assertTrue(
-                any("speedtest-backend requires GLIBC_2.38" in e for e in glibc_report["errors"])
+                any("bin/speedtest-backend requires GLIBC_2.38" in e for e in glibc_report["errors"])
             )
 
     def test_remote_contract_rejects_incompatible_cli_and_failed_readelf(self) -> None:
@@ -321,7 +323,7 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                     report = namespace["inspect_artifact_bundle"](archive, sums, vm_matrix.asdict(vm_matrix.DEFAULT_ARTIFACT_CONTRACT))
                 self.assertFalse(report["valid"])
                 self.assertFalse(report["details"]["glibc_compatible_ubuntu_2204"])
-                expected = "GLIBC_2.38" if failure_mode == "cli_glibc" else "readelf inspection failed for af"
+                expected = "GLIBC_2.38" if failure_mode == "cli_glibc" else "readelf inspection failed for bin/af"
                 self.assertTrue(any(expected in error for error in report["errors"]), report["errors"])
 
     def test_verify_release_artifact_contract_passes_valid_bundle(self) -> None:
@@ -332,21 +334,7 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
 
             digest = self._build_tarball(
                 archive,
-                {
-                    "aetherflow-api": (b"\x7fELF-binary-payload", 0o755),
-                    "af": (b"\x7fELF-cli-payload", 0o755),
-                    "bin/af": (b"\x7fELF-cli-payload", 0o755),
-                    "speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
-                    "bin/speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
-                    ".version": (b"v4.0.0\n", 0o644),
-                    "web/dist/index.html": (b"<html>app</html>", 0o644),
-                    "web/dist/app.wasm": (b"wasm", 0o644),
-                    "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
-                    "deploy/release-manager.conf": (b"# conf\n", 0o644),
-                    "config/packages.json": (b"{}\n", 0o644),
-                    "config/package_automation.json": (b"{}\n", 0o644),
-                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
-                },
+                self.portable_entries(),
             )
             sums.write_text(f"{digest}  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
 
@@ -436,7 +424,8 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                 require_manifest=False,
             )
             self.assertFalse(report["valid"])
-            self.assertIn("af", report["details"]["missing_entries"])
+            self.assertIn("bin/af", report["details"]["missing_entries"])
+            self.assertIn("plugins/telemetry-inspector/plugin.manifest.json", report["details"]["missing_entries"])
             self.assertIn("evil-link", report["details"]["symlinks_or_unsafe_entries"])
 
     def test_verify_release_artifact_contract_requires_independent_sha256sums_by_default(self) -> None:
@@ -609,21 +598,7 @@ class CertificationInputAndMandatoryPhaseTests(unittest.TestCase):
             art_helper = ArtifactContractAndGlibcTests()
             art_sha = art_helper._build_tarball(
                 archive,
-                {
-                    "aetherflow-api": (b"\x7fELF-binary", 0o755),
-                    "af": (b"\x7fELF-cli", 0o755),
-                    "bin/af": (b"\x7fELF-cli", 0o755),
-                    "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
-                    "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
-                    ".version": (b"v4.0.0\n", 0o644),
-                    "web/dist/index.html": (b"<html>app</html>", 0o644),
-                    "web/dist/app.wasm": (b"wasm", 0o644),
-                    "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
-                    "deploy/release-manager.conf": (b"# conf\n", 0o644),
-                    "config/packages.json": (b"{}\n", 0o644),
-                    "config/package_automation.json": (b"{}\n", 0o644),
-                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
-                },
+                art_helper.portable_entries(),
             )
             sums.write_text(f"{art_sha}  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
 
@@ -851,9 +826,7 @@ class GuestDrillFixtureExecutionTests(unittest.TestCase):
         archive = bundle_dir / "aetherflow-linux-amd64.tar.gz"
         entries = {
             "aetherflow-api": (api_script, 0o755),
-            "af": (b"#!/bin/bash\nexit 0\n", 0o755),
             "bin/af": (b"#!/bin/bash\nexit 0\n", 0o755),
-            "speedtest-backend": (b"#!/bin/bash\nexit 0\n", 0o755),
             "bin/speedtest-backend": (b"#!/bin/bash\nexit 0\n", 0o755),
             ".version": (f"{version}\n".encode("utf-8"), 0o644),
             "web/dist/index.html": (f"<!doctype html><title>{version}</title>\n".encode("utf-8"), 0o644),
@@ -864,6 +837,10 @@ class GuestDrillFixtureExecutionTests(unittest.TestCase):
             "config/packages.json": (b"{}\n", 0o644),
             "config/package_automation.json": (b"{}\n", 0o644),
             "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
+            "plugins/telemetry-inspector/plugin.manifest.json": (b'{"id":"telemetry-inspector"}\n', 0o644),
+            "plugins/telemetry-inspector/backend/hooks/start.sh": (b"#!/usr/bin/env bash\nexit 0\n", 0o755),
+            "plugins/telemetry-inspector/backend/runtime.py": (b"print('ok')\n", 0o644),
+            "plugins/telemetry-inspector/frontend/dist/index.html": (b"<!doctype html>\n", 0o644),
         }
         helper = ArtifactContractAndGlibcTests()
         digest = helper._build_tarball(archive, entries)

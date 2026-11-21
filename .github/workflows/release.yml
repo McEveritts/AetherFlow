@@ -353,7 +353,7 @@ jobs:
               -C "${stage}" -cf - speedtest-backend | gzip -n -c > "release-dist/${archive}"
             speedtest_archives+=("${archive}")
           }
-          package_speedtest "release-dist/linux-amd64/speedtest-backend" amd64
+          package_speedtest "release-dist/linux-amd64/bin/speedtest-backend" amd64
           package_speedtest "backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend" arm64
           package_speedtest "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" armv7
           if git rev-parse --git-dir >/dev/null 2>&1; then
@@ -384,14 +384,24 @@ jobs:
           trap 'rm -rf "${RELEASE_E2E_DIR}"' EXIT
           (cd release-dist && sha256sum --strict --check SHA256SUMS)
           tar -xzf release-dist/aetherflow-linux-amd64.tar.gz -C "${RELEASE_E2E_DIR}"
-          for binary in aetherflow-api af bin/af speedtest-backend bin/speedtest-backend; do
+          for binary in aetherflow-api bin/af bin/speedtest-backend; do
             test -f "${RELEASE_E2E_DIR}/${binary}"
             test -x "${RELEASE_E2E_DIR}/${binary}"
+          done
+          for duplicate in af speedtest-backend; do
+            test ! -e "${RELEASE_E2E_DIR}/${duplicate}"
           done
           for asset in packages.json package_automation.json openapi-v1.yaml; do
             test -f "${RELEASE_E2E_DIR}/config/${asset}"
             test -s "${RELEASE_E2E_DIR}/config/${asset}"
           done
+          for plugin_asset in plugin.manifest.json backend/hooks/start.sh backend/runtime.py frontend/dist/index.html; do
+            test -f "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/${plugin_asset}"
+            test -s "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/${plugin_asset}"
+          done
+          test -x "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
+          test ! -e "${RELEASE_E2E_DIR}/plugins/sdk-template-rust"
+          test ! -e "${RELEASE_E2E_DIR}/plugins/README.md"
           test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"
           bash scripts/run_embedded_e2e.sh --binary "${RELEASE_E2E_DIR}/aetherflow-api" --static-dir "${RELEASE_E2E_DIR}/web/dist" --port 18080 --playwright
 
@@ -436,6 +446,10 @@ jobs:
           tar -xzf release-dist/aetherflow-linux-arm64.tar.gz -C "${release_root}/bundle"
           tar -xzf "release-dist/speedtest-backend_${VERSION_STAMP#v}_linux_arm64.tar.gz" -C "${release_root}/standalone"
           test "$(cat "${release_root}/bundle/.version")" = "${VERSION_STAMP}"
+          test ! -e "${release_root}/bundle/af"
+          test ! -e "${release_root}/bundle/speedtest-backend"
+          test -s "${release_root}/bundle/plugins/telemetry-inspector/plugin.manifest.json"
+          test -x "${release_root}/bundle/plugins/telemetry-inspector/backend/hooks/start.sh"
           timeout 30s "${release_root}/bundle/bin/af" --version | grep -F '(linux/aarch64)'
           timeout 30s "${release_root}/bundle/bin/speedtest-backend" --version
           timeout 30s "${release_root}/standalone/speedtest-backend" --version

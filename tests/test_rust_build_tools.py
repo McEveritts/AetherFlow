@@ -55,6 +55,17 @@ class RustBuildToolsTests(unittest.TestCase):
         (assets / "node_modules/unused.js").write_text("host-generated")
         (assets / "__pycache__").mkdir()
         (assets / "__pycache__/unused.pyc").write_bytes(b"host-generated")
+        plugin_root = self.root / "plugins/telemetry-inspector"
+        (plugin_root / "backend/hooks").mkdir(parents=True)
+        (plugin_root / "backend/__pycache__").mkdir(parents=True)
+        (plugin_root / "frontend/dist").mkdir(parents=True)
+        (plugin_root / "plugin.manifest.json").write_text('{"id":"telemetry-inspector","version":"1.0.0"}\n')
+        (plugin_root / "backend/hooks/start.sh").write_text("#!/bin/sh\nexit 0\n")
+        (plugin_root / "backend/hooks/start.sh").chmod(0o644)
+        (plugin_root / "backend/runtime.py").write_text("print('ok')\n")
+        (plugin_root / "backend/__pycache__/unused.pyc").write_bytes(b"host-generated")
+        (plugin_root / "frontend/dist/index.html").write_text("<!doctype html><title>Telemetry Inspector</title>\n")
+        (self.root / "plugins/README.md").write_text("# Plugins\n")
         (self.root / ".version").write_text("4.0.0\n")
         for name in ("build_gold.sh", "create-plugin-sdk.sh"):
             shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
@@ -84,7 +95,7 @@ for binary in bins:
 """)
         cargo.chmod(0o755)
         self.environment = os.environ.copy()
-        for name in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "BACKEND_DIR", "BACKEND_RS_DIR", "CARGO_LOCKED", "CARGO_ALLOW_UNLOCKED_DEV", "FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "LEGACY_EMBED_DIST_DIR"):
+        for name in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "BACKEND_DIR", "BACKEND_RS_DIR", "CARGO_LOCKED", "CARGO_ALLOW_UNLOCKED_DEV", "FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "LEGACY_EMBED_DIST_DIR", "PLUGINS_DIR"):
             self.environment.pop(name, None)
         self.environment.update({
             "PATH": str(tools) + os.pathsep + self.environment["PATH"],
@@ -101,6 +112,8 @@ for binary in bins:
                               env=self.environment, capture_output=True, text=True, **kwargs)
 
     def test_packages_only_requested_architecture(self):
+        (self.root / "plugins/sdk-template-rust/backend").mkdir(parents=True)
+        (self.root / "plugins/sdk-template-rust/backend/Cargo.toml").write_text('[package]\nname = "sdk"\n')
         self.environment["CARGO_TARGET_DIR"] = "custom-target"
         result = self.run_build()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -109,17 +122,21 @@ for binary in bins:
         for label, triple in (("amd64", "x86_64-unknown-linux-gnu"),
                               ("arm64", "aarch64-unknown-linux-gnu")):
             artifact = self.root / "output" / ("linux-" + label) / "aetherflow-api"
-            cli_artifact = self.root / "output" / ("linux-" + label) / "af"
-            speedtest_artifact = self.root / "output" / ("linux-" + label) / "speedtest-backend"
+            cli_artifact = self.root / "output" / ("linux-" + label) / "bin" / "af"
+            speedtest_artifact = self.root / "output" / ("linux-" + label) / "bin" / "speedtest-backend"
             self.assertEqual(artifact.read_text(), triple)
             self.assertEqual(cli_artifact.read_text(), triple)
             self.assertEqual(speedtest_artifact.read_text(), triple)
+            self.assertFalse((self.root / "output" / ("linux-" + label) / "af").exists())
+            self.assertFalse((self.root / "output" / ("linux-" + label) / "speedtest-backend").exists())
             archive = self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")
             with tarfile.open(archive) as bundle:
                 self.assertEqual(bundle.extractfile("./web/dist/index.html").read(),
                                  (self.root / "web/dist/index.html").read_bytes())
                 self.assertEqual(bundle.extractfile("./web/dist/app-01234567.wasm").read(),
                                  b"\x00asm\x01\x00\x00\x00")
+                self.assertEqual(bundle.extractfile("./plugins/telemetry-inspector/plugin.manifest.json").read(),
+                                 (self.root / "plugins/telemetry-inspector/plugin.manifest.json").read_bytes())
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
         self.assertEqual((self.root / "build-date.log").read_text(), "2009-02-13T23:31:30Z")
         archives = {label: (self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")).read_bytes()
@@ -137,18 +154,28 @@ for binary in bins:
                 self.assertIn("./config/packages.json", members)
                 for name in ("./packages/package/example/install", "./packages/system/af-tune",
                              "./deploy/verify-provenance.py", "./deploy/log-retention.py",
-                             "./aetherflow-api", "./af", "./bin/af", "./speedtest-backend",
-                             "./bin/speedtest-backend", "./web/dist/index.html"):
+                             "./aetherflow-api", "./bin/af", "./bin/speedtest-backend",
+                             "./plugins/telemetry-inspector/backend/hooks/start.sh",
+                             "./plugins/telemetry-inspector/plugin.manifest.json",
+                             "./plugins/telemetry-inspector/backend/runtime.py",
+                             "./plugins/telemetry-inspector/frontend/dist/index.html",
+                             "./web/dist/index.html"):
                     self.assertIn(name, members)
-                    self.assertEqual(bundle.getmember(name).mode & 0o111, 0o111 if "web/dist" not in name else 0)
+                    expected_exec = 0 if ("web/dist" in name or name.endswith((".json", ".py", ".html"))) and not name.startswith("./deploy/") else 0o111
+                    self.assertEqual(bundle.getmember(name).mode & 0o111, expected_exec, name)
+                self.assertNotIn("./af", members)
+                self.assertNotIn("./speedtest-backend", members)
+                self.assertNotIn("./plugins/README.md", members)
+                self.assertFalse(any(name.startswith("./plugins/sdk-template-rust") for name in members))
                 for member in bundle.getmembers():
                     self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 1234567890))
                 self.assertEqual(bundle.getmember("./packages/system/af-tune").mode, 0o755)
+                self.assertEqual(bundle.getmember("./plugins/telemetry-inspector/backend/hooks/start.sh").mode, 0o755)
                 self.assertEqual(members, sorted(members))
                 self.assertFalse(any(part in name for name in members for part in
                                      ("/ui/", "node_modules", "__pycache__", ".pytest_cache", ".pyc", ".pyo", "tsbuildinfo", "/target/")))
                 self.assertNotIn("./packages/README.md", members)
-                for nested in ("./config/config", "./packages/packages", "./deploy/deploy"):
+                for nested in ("./config/config", "./packages/packages", "./deploy/deploy", "./plugins/plugins"):
                     self.assertFalse(any(name == nested or name.startswith(nested + "/") for name in members))
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
 
@@ -196,6 +223,14 @@ for binary in bins:
         result = self.run_build()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("full release requires", result.stderr)
+        self.assertFalse((self.root / "cargo.log").exists())
+        self.assertFalse(list((self.root / "output").glob("*.tar.gz")))
+
+    def test_full_release_rejects_missing_managed_plugin(self):
+        shutil.rmtree(self.root / "plugins/telemetry-inspector")
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("telemetry-inspector", result.stderr)
         self.assertFalse((self.root / "cargo.log").exists())
         self.assertFalse(list((self.root / "output").glob("*.tar.gz")))
 

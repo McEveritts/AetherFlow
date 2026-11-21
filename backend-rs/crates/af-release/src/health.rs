@@ -285,10 +285,10 @@ pub fn preflight_cli_entrypoints(config: &ReleaseConfig, release_dir: &Path) -> 
 pub fn sync_cli_entrypoints(config: &ReleaseConfig, epoch_id: &str) -> ReleaseResult<()> {
     validate_cli_bin_dir(config)?;
 
-    let candidate_af = if config.current_link.join("af").is_file() {
-        Some(config.current_link.join("af"))
-    } else if config.current_link.join("bin/af").is_file() {
+    let candidate_af = if config.current_link.join("bin/af").is_file() {
         Some(config.current_link.join("bin/af"))
+    } else if config.current_link.join("af").is_file() {
+        Some(config.current_link.join("af"))
     } else {
         None
     };

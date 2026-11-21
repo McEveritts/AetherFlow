@@ -359,7 +359,7 @@ fi
 if [[ $# -eq 0 && -t 0 && -t 1 && -x /usr/local/bin/AetherFlow/system/af ]]; then
 	exec /usr/local/bin/AetherFlow/system/af
 fi
-for candidate in /opt/AetherFlow/current/af /opt/AetherFlow/current/bin/af /opt/AetherFlow/backend-rs/target/release/af; do
+for candidate in /opt/AetherFlow/current/bin/af /opt/AetherFlow/current/af /opt/AetherFlow/backend-rs/target/release/af; do
 	if [[ -x "${candidate}" ]]; then
 		exec "${candidate}" "$@"
 	fi

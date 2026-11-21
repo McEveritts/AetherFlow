@@ -157,34 +157,7 @@ pub fn resolve_systemctl_binary() -> Option<PathBuf> {
 }
 
 fn resolve_plugins_dir() -> PathBuf {
-    if let Ok(custom) = env::var("AETHERFLOW_PLUGINS_DIR") {
-        let trimmed = custom.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    if let Ok(fs_root) = env::var("AETHERFLOW_FS_ROOT") {
-        let trimmed = fs_root.trim();
-        if !trimmed.is_empty() {
-            let candidate = PathBuf::from(trimmed).join("plugins");
-            if candidate.is_dir() {
-                return candidate;
-            }
-        }
-    }
-    for candidate in [
-        "/opt/AetherFlow/current/plugins",
-        "/opt/AetherFlow/plugins",
-        "plugins",
-        "../plugins",
-        "../../plugins",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_dir() {
-            return p;
-        }
-    }
-    PathBuf::from("/opt/AetherFlow/plugins")
+    af_models::resolve_plugins_dir()
 }
 
 fn resolve_plugin_tokens_root() -> Result<PathBuf, PluginRunnerError> {

@@ -265,7 +265,7 @@ _depends
         self.assertNotIn("Legacy Go", sec_job)
         self.assertIn('node-version: "24.22.2"', build_job)
         self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", build_job)
-        self.assertIn("aetherflow-api af bin/af speedtest-backend bin/speedtest-backend", build_job)
+        self.assertIn("aetherflow-api bin/af bin/speedtest-backend", build_job)
         self.assertIn("release-dist/SHA256SUMS", build_job)
 
     def test_ci_workflow_runs_locked_rust_build_and_embedded_e2e_and_smoke_gate(self):

@@ -740,33 +740,7 @@ pub fn validate_plugin_manifest(
 }
 
 pub fn resolve_plugins_dir() -> PathBuf {
-    if let Ok(custom) = env::var("AETHERFLOW_PLUGINS_DIR") {
-        let trimmed = custom.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    if let Ok(fs_root) = env::var("AETHERFLOW_FS_ROOT") {
-        let trimmed = fs_root.trim();
-        if !trimmed.is_empty() {
-            let candidate = PathBuf::from(trimmed).join("plugins");
-            if candidate.is_dir() {
-                return candidate;
-            }
-        }
-    }
-    for candidate in [
-        "plugins",
-        "../plugins",
-        "../../plugins",
-        "/opt/AetherFlow/plugins",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_dir() {
-            return p;
-        }
-    }
-    PathBuf::from("plugins")
+    af_models::resolve_plugins_dir()
 }
 
 pub fn discover_plugins() -> (Vec<ValidatedPluginManifest>, Vec<(String, String)>) {

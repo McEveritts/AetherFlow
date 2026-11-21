@@ -154,9 +154,7 @@ class PendingArtifactContract:
     checksum_filename: str = "SHA256SUMS"
     required_archive_entries: Tuple[str, ...] = (
         "aetherflow-api",
-        "af",
         "bin/af",
-        "speedtest-backend",
         "bin/speedtest-backend",
         ".version",
         "web/dist/index.html",
@@ -165,14 +163,17 @@ class PendingArtifactContract:
         "config/packages.json",
         "config/package_automation.json",
         "config/openapi-v1.yaml",
+        "plugins/telemetry-inspector/plugin.manifest.json",
+        "plugins/telemetry-inspector/backend/hooks/start.sh",
+        "plugins/telemetry-inspector/backend/runtime.py",
+        "plugins/telemetry-inspector/frontend/dist/index.html",
     )
     required_executable_entries: Tuple[str, ...] = (
         "aetherflow-api",
-        "af",
         "bin/af",
-        "speedtest-backend",
         "bin/speedtest-backend",
         "deploy/release-manager.sh",
+        "plugins/telemetry-inspector/backend/hooks/start.sh",
     )
     max_glibc_version: str = "2.35"
     lowest_glibc_target: str = "ubuntu-22.04"
@@ -1288,8 +1289,8 @@ CARGO_LOCKED=1 CARGO_NET_OFFLINE=true CARGO_BUILD_JOBS={jobs} BUILD_FRONTEND=0 R
 
 readelf --version-info \\
     /var/tmp/af-build/out/linux-amd64/aetherflow-api \\
-    /var/tmp/af-build/out/linux-amd64/af \\
-    /var/tmp/af-build/out/linux-amd64/speedtest-backend \\
+    /var/tmp/af-build/out/linux-amd64/bin/af \\
+    /var/tmp/af-build/out/linux-amd64/bin/speedtest-backend \\
     | grep -oE 'GLIBC_[0-9]+\\.[0-9]+(\\.[0-9]+)?' | sort -V | tail -n 1 > /var/tmp/af-build/out/MAX_GLIBC.txt || true
 """
 
@@ -2207,9 +2208,10 @@ curl -fsS --max-time 5 http://127.0.0.1:8080/ -o /tmp/af-ui-index.html
 cmp /opt/AetherFlow/current/web/dist/index.html /tmp/af-ui-index.html
 wasm_file="$(find /opt/AetherFlow/current/web/dist -type f -name '*.wasm' -size +0c -print -quit)"
 test -n "${wasm_file}"
-test -x /opt/AetherFlow/current/speedtest-backend
+test -x /opt/AetherFlow/current/bin/af
 test -x /opt/AetherFlow/current/bin/speedtest-backend
-cmp /opt/AetherFlow/current/speedtest-backend /opt/AetherFlow/current/bin/speedtest-backend
+test -s /opt/AetherFlow/current/plugins/telemetry-inspector/plugin.manifest.json
+test -x /opt/AetherFlow/current/plugins/telemetry-inspector/backend/hooks/start.sh
 curl -fsS --max-time 10 "http://127.0.0.1:8080/${wasm_file#/opt/AetherFlow/current/web/dist/}" -o /tmp/af-ui.wasm
 cmp "${wasm_file}" /tmp/af-ui.wasm
 test "$(tr -d '[:space:]' < /opt/AetherFlow/current/.version)" = "${AETHERFLOW_RELEASE_TAG}"

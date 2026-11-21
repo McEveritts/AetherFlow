@@ -86,6 +86,19 @@ class ModernStackSourceBuildTests(unittest.TestCase):
             (root / "config/packages.json").write_text("[]\n")
             (root / "packages/common.sh").write_text("# runtime helper\n")
             (root / "packages/README.md").write_text("# developer docs\n")
+            for pdir in (
+                "plugins/telemetry-inspector/backend/hooks",
+                "plugins/telemetry-inspector/frontend/dist",
+                "plugins/sdk-template-rust/backend",
+            ):
+                (root / pdir).mkdir(parents=True, exist_ok=True)
+            (root / "plugins/README.md").write_text("# plugin docs\n")
+            (root / "plugins/sdk-template-rust/backend/Cargo.toml").write_text("[package]\n")
+            (root / "plugins/telemetry-inspector/plugin.manifest.json").write_text('{"id":"telemetry-inspector"}\n')
+            (root / "plugins/telemetry-inspector/backend/hooks/start.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+            (root / "plugins/telemetry-inspector/backend/hooks/start.sh").chmod(0o644)
+            (root / "plugins/telemetry-inspector/backend/runtime.py").write_text("print('ok')\n")
+            (root / "plugins/telemetry-inspector/frontend/dist/index.html").write_text("<html>plugin</html>\n")
             (root / "scripts/install_wasm_build_tools.sh").write_text("exit 0\n")
             (root / "scripts/build_wasm_frontend.sh").write_text(
                 'mkdir -p "$FRONTEND_DIST_DIR/locale"\n'
@@ -110,15 +123,21 @@ class ModernStackSourceBuildTests(unittest.TestCase):
             self.assertEqual((root / "current/web/dist/index.html").read_text(), "<html>test</html>")
             self.assertEqual((root / "current/web/dist/app.wasm").read_text(), "wasm")
             self.assertEqual((root / "current/web/dist/locale/en.json.gz").read_text(), "locale")
-            self.assertEqual((root / "current/af").read_text(), "cli")
+            self.assertEqual((root / "current/bin/af").read_text(), "cli")
+            self.assertFalse((root / "current/af").exists())
+            self.assertEqual(os.readlink(root / "backend/af"), str(root / "current/bin/af"))
             self.assertEqual((root / "current/config/packages.json").read_text(), "[]\n")
             self.assertEqual((root / "current/packages/common.sh").read_text(), "# runtime helper\n")
             self.assertFalse((root / "current/packages/README.md").exists())
             self.assertTrue((root / "packages/README.md").exists())
-            for relpath in ("speedtest-backend", "bin/speedtest-backend"):
-                companion = root / "current" / relpath
-                self.assertEqual(companion.read_text(), "speedtest")
-                self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+            self.assertEqual((root / "current/plugins/telemetry-inspector/plugin.manifest.json").read_text(), '{"id":"telemetry-inspector"}\n')
+            self.assertEqual((root / "current/plugins/telemetry-inspector/backend/hooks/start.sh").stat().st_mode & 0o777, 0o755)
+            self.assertFalse((root / "current/plugins/sdk-template-rust").exists())
+            self.assertFalse((root / "current/plugins/README.md").exists())
+            companion = root / "current/bin/speedtest-backend"
+            self.assertEqual(companion.read_text(), "speedtest")
+            self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((root / "current/speedtest-backend").exists())
             self.assertFalse((root / "backend/web/dist").exists())
 
     def test_prebuilt_staging_rejects_missing_ui_and_keeps_valid_assets(self):
@@ -128,9 +147,16 @@ class ModernStackSourceBuildTests(unittest.TestCase):
                 root = Path(directory)
                 archive = root / "release.tar.gz"
                 with tarfile.open(archive, "w:gz") as tar:
-                    for name, data in (("aetherflow-api", b"api"), ("bin/speedtest-backend", b"speedtest"),
-                                       (".version", b"v4.0.0\n"),
-                                       ("web/dist/index.html", index), ("web/dist/app.wasm", wasm)):
+                    for name, data in (
+                        ("aetherflow-api", b"api"),
+                        ("bin/af", b"cli"),
+                        ("bin/speedtest-backend", b"speedtest"),
+                        ("plugins/telemetry-inspector/plugin.manifest.json", b'{"id":"telemetry-inspector"}\n'),
+                        ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n"),
+                        (".version", b"v4.0.0\n"),
+                        ("web/dist/index.html", index),
+                        ("web/dist/app.wasm", wasm),
+                    ):
                         info = tarfile.TarInfo(name)
                         info.size = len(data)
                         info.mode = 0o755 if name == "aetherflow-api" else 0o644
@@ -146,13 +172,53 @@ class ModernStackSourceBuildTests(unittest.TestCase):
                 if valid:
                     self.assertEqual((current / "web/dist/app.wasm").read_bytes(), wasm)
                     self.assertEqual((current / "web/dist/index.html").read_bytes(), index)
-                    for relpath in ("speedtest-backend", "bin/speedtest-backend"):
+                    self.assertFalse((current / "af").exists())
+                    self.assertFalse((current / "speedtest-backend").exists())
+                    for relpath, expected_bytes in (
+                        ("bin/af", b"cli"),
+                        ("bin/speedtest-backend", b"speedtest"),
+                        ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n"),
+                    ):
                         companion = current / relpath
-                        self.assertEqual(companion.read_bytes(), b"speedtest")
+                        self.assertEqual(companion.read_bytes(), expected_bytes)
                         self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual(os.readlink(root / "install/backend/af"), str(current / "bin/af"))
                 else:
                     self.assertIn("missing external frontend assets", result.stderr)
                     self.assertFalse(current.exists())
+
+    def test_prebuilt_staging_preserves_legacy_root_only_archive_compatibility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "legacy-release.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                for name, data in (
+                    ("aetherflow-api", b"api"),
+                    ("af", b"legacy-cli"),
+                    ("speedtest-backend", b"legacy-speedtest"),
+                    (".version", b"v4.0.0\n"),
+                    ("web/dist/index.html", b"<html>legacy</html>"),
+                    ("web/dist/app.wasm", b"wasm"),
+                ):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    info.mode = 0o755 if name == "aetherflow-api" else 0o644
+                    tar.addfile(info, io.BytesIO(data))
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            env = {**os.environ, "AF_INSTALL_ROOT": str(root / "install"),
+                   "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1"}
+            result = subprocess.run(["bash", "-c", 'source "$1"; _stage_prebuilt_release_archive "$2" "" "$3" v4.0.0',
+                                     "bash", str(MODERN_STACK_SH), str(archive), digest],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            current = root / "install/current"
+            self.assertEqual((current / "af").read_bytes(), b"legacy-cli")
+            self.assertEqual((current / "af").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((current / "speedtest-backend").read_bytes(), b"legacy-speedtest")
+            self.assertEqual((current / "speedtest-backend").stat().st_mode & 0o777, 0o755)
+            self.assertFalse((current / "bin/af").exists())
+            self.assertFalse((current / "bin/speedtest-backend").exists())
+            self.assertEqual(os.readlink(root / "install/backend/af"), str(current / "af"))
 
 
 class ModernStackEnvGenerationTests(unittest.TestCase):

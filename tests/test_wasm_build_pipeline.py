@@ -356,12 +356,25 @@ printf 'locale' > dist/locales/en.json.gz
     def test_gold_package_contains_external_assets_and_rejects_incomplete_ui(self):
         (self.root / "scripts").mkdir()
         shutil.copyfile(ROOT / "scripts/build_gold.sh", self.root / "scripts/build_gold.sh")
-        for path in ("backend-rs/crates/af-cli", "config", "packages", "deploy", "web/dist/locales"):
+        for path in (
+            "backend-rs/crates/af-cli", "backend-rs/crates/af-librespeed",
+            "config", "packages", "deploy", "web/dist/locales",
+            "plugins/telemetry-inspector/backend/hooks",
+            "plugins/telemetry-inspector/frontend/dist",
+            "plugins/sdk-template-rust/backend/src",
+        ):
             (self.root / path).mkdir(parents=True)
         for path, content in (("backend-rs/Cargo.toml", "[workspace]\n"),
                               ("backend-rs/Cargo.lock", "# lock\n"),
                               ("backend-rs/crates/af-cli/Cargo.toml", "[package]\n"),
+                              ("backend-rs/crates/af-librespeed/Cargo.toml", "[package]\n"),
                               ("deploy/release-manager.sh", "#!/bin/sh\n"),
+                              ("plugins/README.md", "# dev plugin docs\n"),
+                              ("plugins/sdk-template-rust/backend/src/lib.rs", "// template\n"),
+                              ("plugins/telemetry-inspector/plugin.manifest.json", '{"id":"telemetry-inspector"}\n'),
+                              ("plugins/telemetry-inspector/backend/hooks/start.sh", "#!/usr/bin/env bash\nexit 0\n"),
+                              ("plugins/telemetry-inspector/backend/runtime.py", "print('ok')\n"),
+                              ("plugins/telemetry-inspector/frontend/dist/index.html", "<html>plugin</html>\n"),
                               (".version", "v4.0.0\n")):
             (self.root / path).write_text(content)
         self.write_tool("cargo", '''#!/usr/bin/python3
@@ -376,8 +389,9 @@ directory.mkdir(parents=True, exist_ok=True)
         # Use the real checksum program, not the installer fixture's checksum stub.
         (self.bin / "sha256sum").unlink()
         env = {**self.environment, "BUILD_FRONTEND": "0", "RUN_TESTS": "0", "PACKAGE_RELEASE": "1",
+               "PACKAGE_SPEEDTEST_STANDALONE": "1",
                "CARGO_TARGET_DIR": str(self.root / "cargo-target"), "OUTPUT_DIR": str(self.root / "output")}
-        for var in ("FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "BACKEND_RS_DIR", "BACKEND_DIR", "CONFIG_DIR"):
+        for var in ("FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "BACKEND_RS_DIR", "BACKEND_DIR", "CONFIG_DIR", "PLUGINS_DIR"):
             env.pop(var, None)
         index = self.root / "web/dist/index.html"
         wasm = self.root / "web/dist/app.wasm"
@@ -400,6 +414,8 @@ directory.mkdir(parents=True, exist_ok=True)
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / "binary-only/linux-amd64/aetherflow-api").is_file())
+        self.assertTrue((self.root / "binary-only/linux-amd64/bin/af").is_file())
+        self.assertFalse((self.root / "binary-only/linux-amd64/af").exists())
         self.assertFalse((self.root / "binary-only/linux-amd64/web/dist").exists())
         index.write_bytes(b"<html>app</html>")
         wasm.write_bytes(b"wasm-bytes")
@@ -409,11 +425,25 @@ directory.mkdir(parents=True, exist_ok=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         archive_path = self.root / "output/aetherflow-linux-amd64.tar.gz"
         with tarfile.open(archive_path) as archive:
+            names = set(archive.getnames())
+            self.assertNotIn("./af", names)
+            self.assertNotIn("./speedtest-backend", names)
+            self.assertFalse(any("sdk-template-rust" in name or name == "./plugins/README.md" for name in names))
             for name, expected in (("./web/dist/index.html", b"<html>app</html>"),
                                    ("./web/dist/app.wasm", b"wasm-bytes"),
                                    ("./web/dist/locales/en.json.gz", b"compressed"),
-                                   ("./af", b"binary:af")):
+                                   ("./bin/af", b"binary:af"),
+                                   ("./bin/speedtest-backend", b"binary:speedtest-backend"),
+                                   ("./plugins/telemetry-inspector/plugin.manifest.json", b'{"id":"telemetry-inspector"}\n'),
+                                   ("./plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n"),
+                                   ("./plugins/telemetry-inspector/backend/runtime.py", b"print('ok')\n"),
+                                   ("./plugins/telemetry-inspector/frontend/dist/index.html", b"<html>plugin</html>\n")):
                 self.assertEqual(archive.extractfile(name).read(), expected)
+            self.assertEqual(archive.getmember("./plugins/telemetry-inspector/backend/hooks/start.sh").mode, 0o755)
+        standalone_path = self.root / "output/speedtest-backend_4.0.0_linux_amd64.tar.gz"
+        with tarfile.open(standalone_path) as standalone:
+            self.assertEqual(standalone.getnames(), ["speedtest-backend"])
+            self.assertEqual(standalone.extractfile("speedtest-backend").read(), b"binary:speedtest-backend")
         self.assertFalse((self.root / "backend/web/dist").exists())
 
     def test_trunk_hook_discovers_tailwind_in_tool_directory(self):
@@ -447,17 +477,25 @@ directory.mkdir(parents=True, exist_ok=True)
         for relative in (
             "scripts", "deploy/.pytest_cache", "frontend-rs/target", "backend-rs/target",
             "packages/ui/src", "packages/package", "docs", "tests", "e2e", "apps/website",
-            "setup", "plugins", ".github",
+            "setup", "plugins/sdk-template-rust/backend",
+            "plugins/telemetry-inspector/backend/hooks",
+            "plugins/telemetry-inspector/frontend/dist", ".github",
         ):
             (repo / relative).mkdir(parents=True)
         (release).mkdir()
         for relative in (
             "frontend-rs/target/cache", "backend-rs/target/cache", "packages/ui/src/unused",
             "docs/guide.md", "tests/test_sample.py", "e2e/spec.ts", "apps/website/page.tsx",
-            "setup/AetherFlow-Setup", "plugins/sample.json", ".github/ci.yml",
-            "packages/README.md", "CHANGELOG.md",
+            "setup/AetherFlow-Setup", "plugins/sample.json", "plugins/README.md",
+            "plugins/sdk-template-rust/backend/Cargo.toml",
+            "packages/README.md", "CHANGELOG.md", ".github/ci.yml",
         ):
             (repo / relative).write_text("host-generated")
+        (repo / "plugins/telemetry-inspector/plugin.manifest.json").write_text('{"id":"telemetry-inspector"}\n')
+        (repo / "plugins/telemetry-inspector/backend/hooks/start.sh").write_text("#!/usr/bin/env bash\n")
+        (repo / "plugins/telemetry-inspector/backend/hooks/start.sh").chmod(0o644)
+        (repo / "plugins/telemetry-inspector/backend/runtime.py").write_text("print('ok')\n")
+        (repo / "plugins/telemetry-inspector/frontend/dist/index.html").write_text("<html>plugin</html>\n")
         (repo / "rust-toolchain.toml").write_text((ROOT / "rust-toolchain.toml").read_text())
         (repo / "backend-rs/Cargo.lock").write_text("# lock\n")
         (repo / "packages/package/install").write_text("runtime package script")
@@ -496,12 +534,18 @@ cargo() {
         self.assertEqual((release / "web/dist/locales/en.json.gz").read_text(), "sidecar")
         self.assertEqual((release / "packages/package/install").read_text(), "runtime package script")
         self.assertEqual((release / "bin/af").read_text(), "cli")
+        self.assertFalse((release / "af").exists())
+        self.assertEqual((release / "plugins/telemetry-inspector/plugin.manifest.json").read_text(), '{"id":"telemetry-inspector"}\n')
+        self.assertEqual((release / "plugins/telemetry-inspector/backend/hooks/start.sh").stat().st_mode & 0o777, 0o755)
+        self.assertFalse((release / "plugins/sample.json").exists())
+        self.assertFalse((release / "plugins/README.md").exists())
+        self.assertFalse((release / "plugins/sdk-template-rust").exists())
         self.assertFalse((release / "frontend-rs").exists())
         self.assertFalse((release / "backend-rs").exists())
         self.assertFalse((release / "scripts").exists())
         self.assertFalse((release / "rust-toolchain.toml").exists())
         self.assertFalse((release / "packages/README.md").exists())
-        for excluded in ("docs", "tests", "e2e", "apps", "setup", "plugins", ".github", "CHANGELOG.md"):
+        for excluded in ("docs", "tests", "e2e", "apps", "setup", ".github", "CHANGELOG.md"):
             self.assertFalse((release / excluded).exists(), f"{excluded} must not remain in release slot")
         self.assertFalse((release / "deploy/.pytest_cache").exists())
         for name in ("verify-provenance.py", "log-retention.py"):

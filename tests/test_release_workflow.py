@@ -271,7 +271,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('--static-dir "${RELEASE_E2E_DIR}/web/dist"', gate)
         self.assertIn("--port 18080 --playwright", gate)
         self.assertIn("sha256sum --strict --check SHA256SUMS", gate)
-        self.assertIn("aetherflow-api af bin/af speedtest-backend bin/speedtest-backend", gate)
+        self.assertIn("aetherflow-api bin/af bin/speedtest-backend", gate)
+        self.assertIn("plugins/telemetry-inspector/${plugin_asset}", gate)
         self.assertIn("packages.json package_automation.json openapi-v1.yaml", gate)
         self.assertIn('test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"', gate)
         package = "Package Release Tarball & SHA-256 Manifest"
@@ -305,7 +306,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_release_package_step_archives_the_external_frontend(self):
         for path in ("scripts", "backend-rs/crates/af-cli", "backend-rs/crates/af-librespeed",
-                     "web/dist/locales", "config", "packages", "deploy"):
+                     "web/dist/locales", "config", "packages", "deploy",
+                     "plugins/telemetry-inspector/backend/hooks",
+                     "plugins/telemetry-inspector/frontend/dist",
+                     "plugins/sdk-template-rust/backend/src"):
             (self.root / path).mkdir(parents=True, exist_ok=True)
         shutil.copyfile(WORKFLOW.parents[2] / "scripts/build_gold.sh", self.root / "scripts/build_gold.sh")
         (self.root / "backend-rs/Cargo.toml").write_text("[workspace]\n")
@@ -314,11 +318,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
             (self.root / "backend-rs/crates" / crate / "Cargo.toml").write_text("[package]\n")
         for name in ("release-manager.sh", "verify-provenance.py", "log-retention.py"):
             (self.root / "deploy" / name).write_text("fixture")
+        (self.root / "plugins/README.md").write_text("dev docs\n")
+        (self.root / "plugins/sdk-template-rust/backend/src/lib.rs").write_text("// template\n")
+        plugin_files = {
+            "plugins/telemetry-inspector/plugin.manifest.json": b'{"id":"telemetry-inspector"}\n',
+            "plugins/telemetry-inspector/backend/hooks/start.sh": b"#!/usr/bin/env bash\nexit 0\n",
+            "plugins/telemetry-inspector/backend/runtime.py": b"print('ok')\n",
+            "plugins/telemetry-inspector/frontend/dist/index.html": b"<!doctype html><title>Plugin</title>\n",
+        }
+        for name, contents in plugin_files.items():
+            (self.root / name).write_bytes(contents)
         cargo = self.root / "bin/cargo"
         cargo.write_text("#!/bin/sh\nexit 0\n")
         cargo.chmod(0o755)
         for name in ("deploy/__pycache__/host.pyc", "packages/ui/src/unused.tsx",
                      "packages/tool/tsconfig.tsbuildinfo", "packages/tool/node_modules/cache.js",
+                     "plugins/telemetry-inspector/backend/__pycache__/runtime.cpython-311.pyc",
                      "web/dist/.pytest_cache/state", "web/dist/.mypy_cache/state"):
             artifact = self.root / name
             artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -339,6 +354,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "SOURCE_DATE_EPOCH": "1794706390",
             "CARGO_TARGET_DIR": str(self.root / "backend-rs/target"),
             "CONFIG_DIR": str(self.root / "config"),
+            "PLUGINS_DIR": str(self.root / "plugins"),
             "FRONTEND_DIST_DIR": str(self.root / "web/dist"),
         }
         package = "Package Release Tarball & SHA-256 Manifest"
@@ -357,22 +373,27 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with tarfile.open(archive_path) as archive:
             expected = {
-                **binaries, "bin/af": b"cli", "bin/speedtest-backend": b"speedtest",
+                "aetherflow-api": b"api", "bin/af": b"cli", "bin/speedtest-backend": b"speedtest",
                 ".version": b"v4.0.0-nightly.123.1\n", "config/packages.json": b"{}\n",
                 "web/dist/index.html": b"<html>app</html>", "web/dist/app.wasm": b"wasm",
                 "web/dist/locales/en.json.gz": b"compressed",
+                **plugin_files,
             }
             for name, data in expected.items():
                 self.assertEqual(archive.extractfile("./" + name).read(), data)
             names = archive.getnames()
             self.assertEqual(names, sorted(names))
-            self.assertFalse(any(name.startswith("./packages/ui") or "__pycache__" in name
+            self.assertNotIn("./af", names)
+            self.assertNotIn("./speedtest-backend", names)
+            self.assertFalse(any(name.startswith("./packages/ui") or name.startswith("./plugins/sdk-template-rust")
+                                 or name == "./plugins/README.md" or "__pycache__" in name
                                  or ".pytest_cache" in name or ".mypy_cache" in name
                                  or "node_modules" in name or name.endswith(".tsbuildinfo") for name in names))
             for member in archive.getmembers():
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 1794706390))
-            for name in (*binaries, "bin/af", "bin/speedtest-backend", "deploy/release-manager.sh",
-                         "deploy/verify-provenance.py", "deploy/log-retention.py"):
+            for name in ("aetherflow-api", "bin/af", "bin/speedtest-backend", "deploy/release-manager.sh",
+                         "deploy/verify-provenance.py", "deploy/log-retention.py",
+                         "plugins/telemetry-inspector/backend/hooks/start.sh"):
                 self.assertEqual(archive.getmember("./" + name).mode, 0o755)
         packed = archive_path.read_bytes()
         self.assertEqual(packed[4:8], b"\0" * 4, "gzip must not record the wall clock")
@@ -387,8 +408,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         tag = "v4.0.0-nightly.123.1"
         archives = self.release_archives(tag)
         archives[0].write_bytes(b"main release archive")
-        stage = self.root / "release-dist/linux-amd64"
-        stage.mkdir()
+        stage = self.root / "release-dist/linux-amd64/bin"
+        stage.mkdir(parents=True)
         (stage / "speedtest-backend").write_bytes(b"native amd64")
         (self.root / "backend-rs").mkdir()
         cargo = self.root / "bin/cargo"

@@ -635,6 +635,7 @@ pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
         "deploy/release-manager.sh",
         "deploy/verify-provenance.py",
         "deploy/log-retention.py",
+        "plugins/telemetry-inspector/backend/hooks/start.sh",
     ] {
         let staged_exec = release_dir.join(rel_exec);
         if let Ok(meta) = fs::symlink_metadata(&staged_exec) {
@@ -1038,16 +1039,23 @@ pub fn simulate_offline_artifact(
     config: &ReleaseConfig,
 ) -> ReleaseResult<String> {
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
-    for sub in ["deploy/systemd", "packages", "config", "bin", "web/dist"] {
+    for sub in [
+        "deploy/systemd",
+        "packages",
+        "config",
+        "bin",
+        "web/dist",
+        "plugins/telemetry-inspector/backend/hooks",
+        "plugins/telemetry-inspector/frontend/dist",
+    ] {
         let dir = release_dir.join(sub);
         crate::fs_security::create_dir_all_no_symlinks(&dir, 0o755)?;
     }
     for binary in [
         "aetherflow-api",
-        "af",
         "bin/af",
-        "speedtest-backend",
         "bin/speedtest-backend",
+        "plugins/telemetry-inspector/backend/hooks/start.sh",
     ] {
         let bin_path = release_dir.join(binary);
         crate::fs_security::atomic_write_bytes_with_mode(
@@ -1063,6 +1071,18 @@ pub fn simulate_offline_artifact(
             &b"<!-- Offline dry-run placeholder; not a frontend. -->\n"[..],
         ),
         ("web/dist/dry-run-placeholder.wasm", &b""[..]),
+        (
+            "plugins/telemetry-inspector/plugin.manifest.json",
+            &b"{\"id\":\"telemetry-inspector\",\"name\":\"Telemetry Inspector\",\"version\":\"1.0.0\",\"runtime_status\":\"managed\"}\n"[..],
+        ),
+        (
+            "plugins/telemetry-inspector/backend/runtime.py",
+            &b"# Offline dry-run placeholder; not a plugin runtime.\n"[..],
+        ),
+        (
+            "plugins/telemetry-inspector/frontend/dist/index.html",
+            &b"<!-- Offline dry-run placeholder; not a plugin UI. -->\n"[..],
+        ),
     ] {
         crate::fs_security::atomic_write_bytes_with_mode(
             &release_dir.join(asset),

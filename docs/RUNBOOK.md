@@ -57,7 +57,7 @@
 | `aetherflow-api.service` | `127.0.0.1:8080` | Unprivileged Rust HTTP/WS API serving external `web/dist` WASM UI (`User=aetherflow`) |
 | `aetherflow-runner.service` | `/run/aetherflow/runner.sock` | Privileged root UNIX socket daemon (`0660 root:aetherflow`) |
 | `aetherflow-self-update.service` | Transient systemd unit | Isolated self-updater surviving `aetherflow-runner` and `aetherflow-api` restarts |
-| `af` (`/opt/AetherFlow/current/af`) | CLI binary (`af-cli`) | Unified administrative CLI for packages, services, quotas, backups, and releases |
+| `af` (`/opt/AetherFlow/current/bin/af`) | CLI binary (`af-cli`) | Unified administrative CLI for packages, services, quotas, backups, and releases |
 | SQLite (`af-db`) | `/var/lib/aetherflow/aetherflow.sqlite` | Single-writer WAL database (sessions, JWT revocation, settings, streaming history) |
 | McBrowser (`af-files`) | `/var/lib/aetherflow/mcbrowser` | Capability-scoped per-user storage (`0700`) |
 

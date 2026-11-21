@@ -318,12 +318,13 @@ pub fn resolve_af_cli_binary() -> Option<PathBuf> {
         }
     }
     let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/af"),
         PathBuf::from("/opt/AetherFlow/current/bin/af"),
+        PathBuf::from("/opt/AetherFlow/current/af"),
         PathBuf::from("/usr/local/bin/af"),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("bin/af"));
             candidates.push(exe_dir.join("af"));
         }
     }

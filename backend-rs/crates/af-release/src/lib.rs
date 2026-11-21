@@ -1326,10 +1326,27 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         assert_eq!(report.channel, ReleaseChannel::Nightly);
         assert!(report.release_dir.starts_with(&cfg.dry_run_root));
         assert!(report.current_link.starts_with(&cfg.dry_run_root));
-        for path in ["aetherflow-api", "af", "bin/af"] {
+        for path in [
+            "aetherflow-api",
+            "bin/af",
+            "bin/speedtest-backend",
+            "plugins/telemetry-inspector/backend/hooks/start.sh",
+        ] {
             let contents = fs::read_to_string(report.release_dir.join(path)).unwrap();
             assert!(contents.contains("Offline dry-run placeholder"), "{path}");
         }
+        assert!(
+            !report.release_dir.join("af").exists(),
+            "offline dry-run should not duplicate root af"
+        );
+        assert!(
+            !report.release_dir.join("speedtest-backend").exists(),
+            "offline dry-run should not duplicate root speedtest-backend"
+        );
+        assert!(report
+            .release_dir
+            .join("plugins/telemetry-inspector/plugin.manifest.json")
+            .is_file());
         let index = fs::read_to_string(report.release_dir.join("web/dist/index.html")).unwrap();
         assert!(index.contains("Offline dry-run placeholder"));
         let wasm =
@@ -2568,5 +2585,158 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             .recorded_calls()
             .iter()
             .any(|c| c == "restart_units"));
+    }
+
+    #[test]
+    fn canonical_bin_and_managed_plugin_archive_deploys_alongside_legacy_root_archive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sb = TempSandbox::new("canonical-and-legacy-archives");
+        let mut cfg = ReleaseConfig::for_root(sb.path());
+        cfg.health_retries = 2;
+        cfg.health_interval = Duration::from_millis(1);
+
+        // 1. Canonical archive: bin/af, bin/speedtest-backend, and plugins/telemetry-inspector only (no root duplicates).
+        let canonical_tar = sb.path().join("canonical-v4.0.0.tar.gz");
+        let (_, canonical_manifest) = build_synthetic_release_tarball(
+            &canonical_tar,
+            &cfg.artifact_name,
+            &[
+                ("aetherflow-api", b"api-canonical", EntryType::Regular),
+                ("bin/af", b"cli-canonical", EntryType::Regular),
+                (
+                    "bin/speedtest-backend",
+                    b"speedtest-canonical",
+                    EntryType::Regular,
+                ),
+                (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"<html>canonical</html>",
+                    EntryType::Regular,
+                ),
+                ("web/dist/app.wasm", b"\0asm\x01\0\0\0", EntryType::Regular),
+                (
+                    "plugins/telemetry-inspector/plugin.manifest.json",
+                    b"{\"id\":\"telemetry-inspector\"}\n",
+                    EntryType::Regular,
+                ),
+                (
+                    "plugins/telemetry-inspector/backend/hooks/start.sh",
+                    b"#!/usr/bin/env bash\nexit 0\n",
+                    EntryType::Regular,
+                ),
+                (
+                    "plugins/telemetry-inspector/backend/runtime.py",
+                    b"print('ok')\n",
+                    EntryType::Regular,
+                ),
+                (
+                    "plugins/telemetry-inspector/frontend/dist/index.html",
+                    b"<!doctype html>\n",
+                    EntryType::Regular,
+                ),
+            ],
+        );
+
+        let engine_canonical = ReleaseEngine::new(
+            cfg.clone(),
+            MockArtifactProvider {
+                resolved_tag: Ok("v4.0.0".to_string()),
+                archive_source: canonical_tar,
+                manifest_content: canonical_manifest,
+            },
+            MockLifecycle::default(),
+            MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            })]),
+        );
+
+        let deploy_canonical = match engine_canonical
+            .execute(&ReleaseOptions::default())
+            .unwrap()
+        {
+            ReleaseOutcome::Deploy(r) => r,
+            _ => panic!("expected deploy outcome"),
+        };
+
+        assert!(!deploy_canonical.release_dir.join("af").exists());
+        assert!(!deploy_canonical
+            .release_dir
+            .join("speedtest-backend")
+            .exists());
+        for exec_rel in [
+            "aetherflow-api",
+            "bin/af",
+            "bin/speedtest-backend",
+            "plugins/telemetry-inspector/backend/hooks/start.sh",
+        ] {
+            assert_eq!(
+                fs::symlink_metadata(deploy_canonical.release_dir.join(exec_rel))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "expected 0755 on {exec_rel}"
+            );
+        }
+        assert_eq!(
+            fs::read_link(cfg.cli_bin_dir.join("af")).unwrap(),
+            cfg.current_link.join("bin/af")
+        );
+        assert_eq!(
+            fs::read(cfg.cli_bin_dir.join("af")).unwrap(),
+            b"cli-canonical"
+        );
+
+        // 2. Legacy root-only archive (no bin/, no plugins/) still deploys cleanly.
+        let legacy_tar = sb.path().join("legacy-v4.0.1.tar.gz");
+        let (_, legacy_manifest) = build_synthetic_release_tarball(
+            &legacy_tar,
+            &cfg.artifact_name,
+            &[
+                ("aetherflow-api", b"api-legacy", EntryType::Regular),
+                ("af", b"cli-legacy", EntryType::Regular),
+                ("speedtest-backend", b"speedtest-legacy", EntryType::Regular),
+                (".version", b"v4.0.1\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"<html>legacy</html>",
+                    EntryType::Regular,
+                ),
+                ("web/dist/app.wasm", b"\0asm\x01\0\0\0", EntryType::Regular),
+            ],
+        );
+
+        let engine_legacy = ReleaseEngine::new(
+            cfg.clone(),
+            MockArtifactProvider {
+                resolved_tag: Ok("v4.0.1".to_string()),
+                archive_source: legacy_tar,
+                manifest_content: legacy_manifest,
+            },
+            MockLifecycle::default(),
+            MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            })]),
+        );
+
+        let deploy_legacy = match engine_legacy.execute(&ReleaseOptions::default()).unwrap() {
+            ReleaseOutcome::Deploy(r) => r,
+            _ => panic!("expected legacy deploy outcome"),
+        };
+
+        assert_eq!(
+            fs::read_link(cfg.cli_bin_dir.join("af")).unwrap(),
+            cfg.current_link.join("af")
+        );
+        assert_eq!(fs::read(cfg.cli_bin_dir.join("af")).unwrap(), b"cli-legacy");
+        assert!(deploy_legacy
+            .release_dir
+            .join("speedtest-backend")
+            .is_file());
     }
 }

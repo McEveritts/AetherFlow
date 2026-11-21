@@ -178,20 +178,16 @@ _stage_prebuilt_release_archive() {
     chmod 0755 "${release_dir}/aetherflow-api"
     local companion_bin
     for companion_bin in af speedtest-backend; do
+        if [[ -f "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
+            chmod 0755 "${release_dir}/bin/${companion_bin}"
+        fi
         if [[ -f "${release_dir}/${companion_bin}" && ! -L "${release_dir}/${companion_bin}" ]]; then
-            chmod 0755 "${release_dir}/${companion_bin}"
-            mkdir -p "${release_dir}/bin"
-            if [[ ! -e "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
-                cp -f "${release_dir}/${companion_bin}" "${release_dir}/bin/${companion_bin}"
-            fi
-            chmod 0755 "${release_dir}/bin/${companion_bin}"
-        elif [[ -f "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
-            chmod 0755 "${release_dir}/bin/${companion_bin}"
-            rm -f "${release_dir}/${companion_bin}"
-            cp -f "${release_dir}/bin/${companion_bin}" "${release_dir}/${companion_bin}"
             chmod 0755 "${release_dir}/${companion_bin}"
         fi
     done
+    if [[ -f "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
+        chmod 0755 "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh"
+    fi
 
     if [[ ! -f "${release_dir}/.version" || -L "${release_dir}/.version" || ! -s "${release_dir}/.version" ]]; then
         echo "[ERROR] Extracted release archive is missing a non-empty regular .version stamp." >&2
@@ -243,9 +239,12 @@ _stage_prebuilt_release_archive() {
     chmod 0755 "${release_dir}/aetherflow-api"
     local companion_chmod
     for companion_chmod in af speedtest-backend; do
-        [[ -f "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
-        [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
+        [[ -f "${release_dir}/${companion_chmod}" && ! -L "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
+        [[ -f "${release_dir}/bin/${companion_chmod}" && ! -L "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
     done
+    if [[ -f "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
+        chmod 0755 "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh"
+    fi
 
     if [[ -L "${current_link}" ]]; then
         readlink -f "${current_link}" > "${releases_dir}/.previous_release" 2>/dev/null || true
@@ -265,10 +264,16 @@ _stage_prebuilt_release_archive() {
     # Maintain legacy path compatibility symlink for callers expecting /opt/AetherFlow/backend/aetherflow-api
     mkdir -p "${af_root}/backend"
     ln -sfn "${current_link}/aetherflow-api" "${af_root}/backend/aetherflow-api"
-    if [[ -x "${current_link}/af" ]]; then
-        ln -sfn "${current_link}/af" "${af_root}/backend/af"
+    local current_af=""
+    if [[ -x "${current_link}/bin/af" ]]; then
+        current_af="${current_link}/bin/af"
+    elif [[ -x "${current_link}/af" ]]; then
+        current_af="${current_link}/af"
+    fi
+    if [[ -n "${current_af}" ]]; then
+        ln -sfn "${current_af}" "${af_root}/backend/af"
         if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" && -d /usr/local/bin && ! -f /usr/local/bin/AetherFlow/system/af ]]; then
-            ln -sfn "${current_link}/af" /usr/local/bin/af
+            ln -sfn "${current_af}" /usr/local/bin/af
         fi
     fi
     return 0
@@ -575,7 +580,6 @@ _build_modern_stack_from_source() {
         install -m 0755 "${cargo_target_dir}/release/aetherflow-api" "${release_dir}/aetherflow-api" || exit 1
         mkdir -p "${release_dir}/bin" || exit 1
         for built_bin in "${companion_bins[@]}"; do
-            install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${release_dir}/${built_bin}" || exit 1
             install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${release_dir}/bin/${built_bin}" || exit 1
         done
     ) || {
@@ -593,6 +597,14 @@ _build_modern_stack_from_source() {
                 cp -R "${af_root}/${runtime_dir}" "${release_dir}/${runtime_dir}" || exit 1
             fi
         done
+        if [[ -d "${af_root}/plugins/telemetry-inspector" && ! -L "${af_root}/plugins/telemetry-inspector" ]]; then
+            mkdir -p "${release_dir}/plugins/telemetry-inspector" || exit 1
+            tar -C "${af_root}/plugins/telemetry-inspector" \
+                --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
+                --exclude='.cache' --exclude='.pytest_cache' --exclude='.mypy_cache' \
+                --exclude='.ruff_cache' --exclude='target' --exclude='node_modules' \
+                -cf - . | tar -C "${release_dir}/plugins/telemetry-inspector" -xpf - || exit 1
+        fi
         rm -f "${release_dir}/packages/README.md"
         printf 'source-%s\n' "${epoch}" > "${release_dir}/.version" || exit 1
         find "${release_dir}" -type d -exec chmod 0755 {} + || exit 1
@@ -603,6 +615,9 @@ _build_modern_stack_from_source() {
                 chmod 0755 "${release_dir}/deploy/${runtime_script}" || exit 1
             fi
         done
+        if [[ -f "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
+            chmod 0755 "${release_dir}/plugins/telemetry-inspector/backend/hooks/start.sh" || exit 1
+        fi
     ) || {
         rm -rf "${release_dir}"
         return 1
@@ -626,10 +641,16 @@ _build_modern_stack_from_source() {
 
     mkdir -p "${af_root}/backend"
     ln -sfn "${current_link}/aetherflow-api" "${af_root}/backend/aetherflow-api"
-    if [[ -x "${current_link}/af" ]]; then
-        ln -sfn "${current_link}/af" "${af_root}/backend/af"
+    local current_af=""
+    if [[ -x "${current_link}/bin/af" ]]; then
+        current_af="${current_link}/bin/af"
+    elif [[ -x "${current_link}/af" ]]; then
+        current_af="${current_link}/af"
+    fi
+    if [[ -n "${current_af}" ]]; then
+        ln -sfn "${current_af}" "${af_root}/backend/af"
         if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" && -d /usr/local/bin && ! -f /usr/local/bin/AetherFlow/system/af ]]; then
-            ln -sfn "${current_link}/af" /usr/local/bin/af
+            ln -sfn "${current_af}" /usr/local/bin/af
         fi
     fi
     return 0

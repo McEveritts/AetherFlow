@@ -96,7 +96,7 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("cargo fmt --all -- --check", rel_text)
         self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", rel_text)
         self.assertIn("bash scripts/build_gold.sh", rel_text)
-        self.assertIn("aetherflow-api af bin/af speedtest-backend bin/speedtest-backend", rel_text)
+        self.assertIn("aetherflow-api bin/af bin/speedtest-backend", rel_text)
         self.assertIn("ATTEST_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}", rel_text)
         self.assertIn("aetherflow-linux-amd64.tar.gz.sigstore.json", rel_text)
         for forbidden in (

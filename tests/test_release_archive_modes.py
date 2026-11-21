@@ -22,9 +22,10 @@ class ReleaseArchiveModesTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             executable_names = {
-                "./aetherflow-api", "./af", "./bin/af",
+                "./aetherflow-api", "./bin/af",
                 "./deploy/release-manager.sh", "./deploy/verify-provenance.py",
                 "./deploy/log-retention.py", "./packages/example/install.sh",
+                "./plugins/telemetry-inspector/backend/hooks/start.sh",
             }
             fixture_files = {
                 "scripts/build_gold.sh": (ROOT / "scripts/build_gold.sh").read_bytes(),
@@ -41,6 +42,10 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 "deploy/verify-provenance.py": b"#!/usr/bin/python3\n",
                 "deploy/log-retention.py": b"#!/usr/bin/python3\n",
                 "packages/example/install.sh": b"#!/bin/sh\nexit 0\n",
+                "plugins/telemetry-inspector/plugin.manifest.json": b'{"id":"telemetry-inspector"}\n',
+                "plugins/telemetry-inspector/backend/hooks/start.sh": b"#!/usr/bin/env bash\nexit 0\n",
+                "plugins/telemetry-inspector/backend/runtime.py": b"print('ok')\n",
+                "plugins/telemetry-inspector/frontend/dist/index.html": b"<!doctype html><title>Plugin</title>\n",
                 "backend-rs/target/release/aetherflow-api": b"fixed api fixture\n",
                 "backend-rs/target/release/af": b"fixed cli fixture\n",
                 "backend-rs/target/x86_64-unknown-linux-gnu/release/aetherflow-api": b"fixed api fixture\n",
@@ -61,7 +66,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
             )[1].split("\n      - name:", 1)[0])
             env = {key: value for key, value in os.environ.items() if key not in {
                 "FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "BACKEND_RS_DIR", "BACKEND_DIR",
-                "CONFIG_DIR", "CARGO_BUILD_TARGET", "BUILD_DATE", "BINARY_NAME",
+                "CONFIG_DIR", "PLUGINS_DIR", "CARGO_BUILD_TARGET", "BUILD_DATE", "BINARY_NAME",
                 "CLI_BINARY_NAME", "CARGO_BIN_NAME", "CARGO_CLI_BIN_NAME", "VERSION_FILE",
             }}
             env.update({

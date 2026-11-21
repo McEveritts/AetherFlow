@@ -1483,20 +1483,16 @@ pull_prebuilt_artifact() {
     chmod +x "${RELEASE_DIR}/aetherflow-api"
     local companion_bin
     for companion_bin in af speedtest-backend; do
+        if [[ -f "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
+            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
+        fi
         if [[ -f "${RELEASE_DIR}/${companion_bin}" && ! -L "${RELEASE_DIR}/${companion_bin}" ]]; then
-            chmod +x "${RELEASE_DIR}/${companion_bin}"
-            mkdir -p "${RELEASE_DIR}/bin"
-            if [[ ! -e "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
-                cp -f "${RELEASE_DIR}/${companion_bin}" "${RELEASE_DIR}/bin/${companion_bin}"
-            fi
-            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
-        elif [[ -f "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
-            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
-            rm -f "${RELEASE_DIR}/${companion_bin}"
-            cp -f "${RELEASE_DIR}/bin/${companion_bin}" "${RELEASE_DIR}/${companion_bin}"
             chmod +x "${RELEASE_DIR}/${companion_bin}"
         fi
     done
+    if [[ -f "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
+        chmod 0755 "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
+    fi
     if ! stage_running_release_manager; then
         rm -rf "${tmp_dir}"
         return 1
@@ -1617,9 +1613,21 @@ build_from_source() {
     install -m 0755 "${cargo_target_dir}/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api" || return 1
     mkdir -p "${RELEASE_DIR}/bin" || return 1
     for built_bin in "${companion_bins[@]}"; do
-        install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/${built_bin}" || return 1
         install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}" || return 1
     done
+    if [[ -d "${REPO_DIR}/plugins/telemetry-inspector" && ! -L "${REPO_DIR}/plugins/telemetry-inspector" ]]; then
+        mkdir -p "${RELEASE_DIR}/plugins/telemetry-inspector" || return 1
+        if ! rsync -a --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.pyo' \
+            --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.mypy_cache/' \
+            --exclude='.ruff_cache/' --exclude='target/' --exclude='node_modules/' \
+            "${REPO_DIR}/plugins/telemetry-inspector/" "${RELEASE_DIR}/plugins/telemetry-inspector/" >> "${LOG_FILE}" 2>&1; then
+            log_error "Failed to stage managed plugin plugins/telemetry-inspector into ${RELEASE_DIR}."
+            return 1
+        fi
+        if [[ -f "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
+            chmod 0755 "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" || return 1
+        fi
+    fi
     local runtime_script
     for runtime_script in verify-provenance.py log-retention.py; do
         if [[ -f "${RELEASE_DIR}/deploy/${runtime_script}" ]]; then
@@ -1636,20 +1644,22 @@ build_from_source() {
 
 simulate_offline_artifact() {
     log_info "[DRY-RUN] Offline mode: simulating artifact verification and extraction."
-    mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages" "${RELEASE_DIR}/config" "${RELEASE_DIR}/bin" "${RELEASE_DIR}/web/dist"
+    mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages" "${RELEASE_DIR}/config" "${RELEASE_DIR}/bin" "${RELEASE_DIR}/web/dist" \
+        "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks" "${RELEASE_DIR}/plugins/telemetry-inspector/frontend/dist"
     printf '<!doctype html><title>AetherFlow dry run</title>\n' > "${RELEASE_DIR}/web/dist/index.html"
     printf '\000asm\001\000\000\000' > "${RELEASE_DIR}/web/dist/app.wasm"
     echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
-    echo "#!/bin/bash" > "${RELEASE_DIR}/af"
-    cp -f "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
-    echo "#!/bin/bash" > "${RELEASE_DIR}/speedtest-backend"
-    cp -f "${RELEASE_DIR}/speedtest-backend" "${RELEASE_DIR}/bin/speedtest-backend"
+    echo "#!/bin/bash" > "${RELEASE_DIR}/bin/af"
+    echo "#!/bin/bash" > "${RELEASE_DIR}/bin/speedtest-backend"
+    printf '{"id":"telemetry-inspector","name":"Telemetry Inspector","version":"1.0.0","runtime_status":"managed"}\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/plugin.manifest.json"
+    echo "#!/usr/bin/env bash" > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
+    echo "# Offline dry-run placeholder" > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/runtime.py"
+    printf '<!doctype html><title>Telemetry Inspector dry run</title>\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/frontend/dist/index.html"
     chmod +x \
         "${RELEASE_DIR}/aetherflow-api" \
-        "${RELEASE_DIR}/af" \
         "${RELEASE_DIR}/bin/af" \
-        "${RELEASE_DIR}/speedtest-backend" \
-        "${RELEASE_DIR}/bin/speedtest-backend"
+        "${RELEASE_DIR}/bin/speedtest-backend" \
+        "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
     echo "v4.0.0-dryrun" > "${RELEASE_DIR}/.version"
     stage_running_release_manager
 }
@@ -1753,13 +1763,16 @@ prepare_release_permissions() {
     chmod 0755 "${RELEASE_DIR}/aetherflow-api" || return 1
     local companion_chmod
     for companion_chmod in af speedtest-backend; do
-        if [[ -f "${RELEASE_DIR}/${companion_chmod}" ]]; then
+        if [[ -f "${RELEASE_DIR}/${companion_chmod}" && ! -L "${RELEASE_DIR}/${companion_chmod}" ]]; then
             chmod 0755 "${RELEASE_DIR}/${companion_chmod}" || return 1
         fi
-        if [[ -f "${RELEASE_DIR}/bin/${companion_chmod}" ]]; then
+        if [[ -f "${RELEASE_DIR}/bin/${companion_chmod}" && ! -L "${RELEASE_DIR}/bin/${companion_chmod}" ]]; then
             chmod 0755 "${RELEASE_DIR}/bin/${companion_chmod}" || return 1
         fi
     done
+    if [[ -f "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
+        chmod 0755 "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" || return 1
+    fi
     if [[ "${DRY_RUN}" == false ]]; then
         if [[ "${EUID}" -eq 0 ]] || [[ "${service_user}" != "$(id -un)" ]]; then
             if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api && { test ! -d web/dist || test -r web/dist/index.html; }' sh "${RELEASE_DIR}"; then
@@ -1895,12 +1908,12 @@ sync_cli_entrypoints() {
         return 0
     fi
     mkdir -p "${bin_dir}" 2>/dev/null || return 0
-    if [[ -x "${CURRENT_LINK}/af" || -x "${CURRENT_LINK}/bin/af" ]]; then
+    if [[ -x "${CURRENT_LINK}/bin/af" || -x "${CURRENT_LINK}/af" ]]; then
         if [[ ! -e "${bin_dir}/af" || -L "${bin_dir}/af" ]]; then
-            if [[ -x "${CURRENT_LINK}/af" ]]; then
-                ln -sfn "${CURRENT_LINK}/af" "${bin_dir}/af" 2>/dev/null || true
-            else
+            if [[ -x "${CURRENT_LINK}/bin/af" ]]; then
                 ln -sfn "${CURRENT_LINK}/bin/af" "${bin_dir}/af" 2>/dev/null || true
+            else
+                ln -sfn "${CURRENT_LINK}/af" "${bin_dir}/af" 2>/dev/null || true
             fi
         fi
     fi
