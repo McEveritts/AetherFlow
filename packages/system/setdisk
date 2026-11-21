@@ -78,7 +78,7 @@ prompt_if_needed() {
 }
 
 apply_quota() {
-  local quantity disk_blocks quota_bytes setquota_err=""
+  local quantity unit_bytes max_quantity disk_blocks quota_bytes setquota_err=""
   if [[ ! "${USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     if [[ ${JSON_OUTPUT} -eq 1 ]]; then
       emit_json_error "${USERNAME}" "${SIZE^^}" "Invalid username."
@@ -87,32 +87,24 @@ apply_quota() {
     fi
     return 2
   fi
-  case "${SIZE^^}" in
-    *TB)
-      quantity="${SIZE^^}"
-      quantity="${quantity%TB}"
-      [[ "${quantity}" =~ ^[0-9]+$ ]] || return 1
-      disk_blocks=$((quantity * 1024 * 1024 * 1024))
-      quota_bytes=$((disk_blocks * 1024))
-      ;;
-    *GB)
-      quantity="${SIZE^^}"
-      quantity="${quantity%GB}"
-      [[ "${quantity}" =~ ^[0-9]+$ ]] || return 1
-      disk_blocks=$((quantity * 1024 * 1024))
-      quota_bytes=$((disk_blocks * 1024))
-      ;;
-    *MB)
-      quantity="${SIZE^^}"
-      quantity="${quantity%MB}"
-      [[ "${quantity}" =~ ^[0-9]+$ ]] || return 1
-      disk_blocks=$((quantity * 1024))
-      quota_bytes=$((disk_blocks * 1024))
-      ;;
-    *)
-      return 1
-      ;;
+  [[ "${SIZE^^}" =~ ^([0-9]+)([MGT]B)$ ]] || return 1
+  quantity="${BASH_REMATCH[1]}"
+  case "${BASH_REMATCH[2]}" in
+    MB) unit_bytes=$((1024 * 1024)) ;;
+    GB) unit_bytes=$((1024 * 1024 * 1024)) ;;
+    TB) unit_bytes=$((1024 * 1024 * 1024 * 1024)) ;;
   esac
+
+  # Normalize before comparing lengths so leading zeros cannot trigger octal or overflow.
+  quantity="${quantity#"${quantity%%[!0]*}"}"
+  quantity="${quantity:-0}"
+  max_quantity=$((9223372036854775807 / unit_bytes))
+  if [[ ${#quantity} -gt ${#max_quantity} ||
+        ( ${#quantity} -eq ${#max_quantity} && "$quantity" > "$max_quantity" ) ]]; then
+    return 1
+  fi
+  quota_bytes=$((10#$quantity * unit_bytes))
+  disk_blocks=$((quota_bytes / 1024))
 
   if ! setquota_err="$(setquota -u "${USERNAME}" "${disk_blocks}" "${disk_blocks}" 0 0 -a 2>&1)"; then
     if [[ ${JSON_OUTPUT} -eq 1 ]]; then

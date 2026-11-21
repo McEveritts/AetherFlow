@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
@@ -31,6 +32,34 @@ class MarketplaceSystemToolsTests(unittest.TestCase):
                                 env={**os.environ, "TEST_ROOT": str(self.root), **environment}, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.splitlines()
+
+    def test_setdisk_uses_decimal_quantities_and_rejects_overflow(self):
+        setquota = self.file("bin/setquota", '#!/bin/sh\nprintf "%s\\n" "$@" > "$QUOTA_CALL"\n')
+        setquota.chmod(0o755)
+        call_path = self.root / "quota-call"
+        environment = {
+            **os.environ,
+            "PATH": f"{setquota.parent}:/usr/bin:/bin",
+            "QUOTA_CALL": str(call_path),
+        }
+        for size, expected in (("08GB", 8 << 30), ("0009mb", 9 << 20), ("000TB", 0),
+                               ("8796093022208MB", None), ("999999999999999999999999TB", None)):
+            with self.subTest(size=size):
+                call_path.unlink(missing_ok=True)
+                result = subprocess.run(
+                    ["bash", str(ROOT / "packages/system/setdisk"), "--username", "testuser", "--size", size, "--json"],
+                    env=environment, capture_output=True, text=True, timeout=5,
+                )
+                response = json.loads(result.stdout)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(response["status"], "failed")
+                    self.assertFalse(call_path.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(response["quota_bytes"], expected)
+                    blocks = str(expected // 1024)
+                    self.assertEqual(call_path.read_text().splitlines(), ["-u", "testuser", blocks, blocks, "0", "0", "-a"])
 
     def test_sandbox_sources_local_current_then_legacy_helpers(self):
         source = replace_paths_once(
