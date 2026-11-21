@@ -2163,8 +2163,8 @@ export AETHERFLOW_PREBUILT_SHA256_FILE=/var/tmp/af-drill/artifacts/SHA256SUMS
 export AETHERFLOW_RELEASE_TAG=__BOOTSTRAP_TAG__
 export AETHERFLOW_RELEASE_CHANNEL=__BOOTSTRAP_CHANNEL__
 
-# Verify independent SHA256SUMS matches tarball inside guest before bootstrap
-(cd /var/tmp/af-drill/artifacts && sha256sum -c SHA256SUMS)
+# Verify the uploaded archive; sibling release assets remain on the host.
+(cd /var/tmp/af-drill/artifacts && sha256sum --ignore-missing -c SHA256SUMS)
 
 source /opt/AetherFlow/setup/modules/00-core.sh
 source /opt/AetherFlow/setup/modules/06-state.sh

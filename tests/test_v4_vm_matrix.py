@@ -953,7 +953,11 @@ class GuestDrillFixtureExecutionTests(unittest.TestCase):
                         entries = art_helper.portable_entries()
                         entries[".version"] = (f"{bundle_tag}\n".encode("utf-8"), 0o644)
                         digest = art_helper._build_tarball(archive, entries)
-                        sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+                        sums.write_text(
+                            f"{digest}  {archive.name}\n"
+                            f"{'0' * 64}  aetherflow-linux-arm64.tar.gz\n",
+                            encoding="utf-8",
+                        )
                         SourceTarballLayoutAndExtractionRegressionTests()._build_source_tarball(src_tar, prefix="")
 
                         summary = None
@@ -1003,6 +1007,18 @@ class GuestDrillFixtureExecutionTests(unittest.TestCase):
                         d1 = vm.commands["drill-1-bootstrap-and-cli"]
                         self.assertIn(f"export AETHERFLOW_RELEASE_TAG={bundle_tag}\n", d1)
                         self.assertIn(f"export AETHERFLOW_RELEASE_CHANNEL={exp_channel}\n", d1)
+                        checksum_step = next(
+                            step for step in d1.splitlines()
+                            if step.startswith("(cd /var/tmp/af-drill/artifacts && sha256sum")
+                        )
+                        check_upload = checksum_step.replace(
+                            "/var/tmp/af-drill/artifacts", shlex.quote(str(root))
+                        )
+                        verified = subprocess.run(["bash", "-c", check_upload], capture_output=True, text=True)
+                        self.assertEqual(verified.returncode, 0, verified.stderr)
+                        archive.unlink()
+                        missing = subprocess.run(["bash", "-c", check_upload], capture_output=True, text=True)
+                        self.assertNotEqual(missing.returncode, 0, missing.stdout)
 
                         d2 = vm.commands["drill-2-release-update"]
                         self.assertIn(f"printf '{exp_upd}\\n' > /var/tmp/af-drill/release-v2-src/.version", d2)
