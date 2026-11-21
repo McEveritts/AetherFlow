@@ -436,7 +436,6 @@ pub const CANONICAL_ALL_STEPS: &[&str] = &[
     "harden_perms",
     "perms",
     "bbr",
-    "bcm",
 ];
 
 static SAFE_STEP_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-z][a-z0-9_]{1,31}$").unwrap());

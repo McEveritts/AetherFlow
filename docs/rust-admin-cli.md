@@ -196,7 +196,7 @@ af provision reset --confirm
 1. **Interactive `whiptail` TUI (`af` with no arguments)**:
    Calling `af` without arguments returns `CliExitCode::UnsupportedOperation` (`6`). Interactive dialog menus remain in `packages/system/af` and `setup/AetherFlow-Setup`.
 2. **Interactive Shell Bootstrap (`setup/AetherFlow-Setup`)**:
-   14 of the 36 canonical steps in `af_cli::provision::CANONICAL_ALL_STEPS` (`checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, `perms`) execute natively in Rust; the remaining 22 interactive/APT steps (`repos`, `updates`, `depends`, `apacheconf`, `fix_cert`, `installftpd`, `ffmpeg`, etc.) remain `RetainedShellBootstrap` steps in `setup/modules/*.sh`.
+   Rust implements 14 of the 35 canonical steps in `af_cli::provision::CANONICAL_ALL_STEPS` (`checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, `perms`). Bash implements the 21 retained steps, including `repos`, `updates`, `depends`, `apacheconf`, `fix_cert`, `installftpd`, and `ffmpeg`, in `setup/modules/`.
 3. **Unconfirmed Live Root Restore**:
    `af backup restore` requires explicit `--target-root <dir> --confirm-destructive-restore` (`execute_staged_restore`) and refuses unconfirmed invocations (`DestructiveRestoreUnsupported`, exit code `6`).
 

@@ -45,6 +45,13 @@ def parse_workflow_jobs(workflow_text: str) -> dict[str, str]:
 
 
 class V4ReleaseBootstrapCiTests(unittest.TestCase):
+    def test_cli_provision_steps_match_bootstrap(self) -> None:
+        shell = (ROOT / "setup/modules/06-state.sh").read_text()
+        rust = (ROOT / "backend-rs/crates/af-cli/src/provision.rs").read_text()
+        shell_steps = shell.split("\nALL_STEPS=(\n", 1)[1].split("\n)", 1)[0].split()
+        rust_catalog = rust.split("pub const CANONICAL_ALL_STEPS: &[&str] = &[", 1)[1].split("];", 1)[0]
+        self.assertEqual(re.findall(r'"([a-z0-9_]+)"', rust_catalog), shell_steps)
+
     @unittest.skipUnless(os.name == "posix", "Bash state behavior requires the remote Linux test environment")
     def test_load_config_missing_keys_are_empty_under_strict_shell(self):
         cases = (
