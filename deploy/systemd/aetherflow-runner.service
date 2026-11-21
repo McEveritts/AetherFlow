@@ -18,7 +18,6 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 LogsDirectory=aetherflow
 LogsDirectoryMode=0750
-LogsDirectoryPreserve=yes
 
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock

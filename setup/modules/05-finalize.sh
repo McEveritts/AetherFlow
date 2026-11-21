@@ -447,7 +447,7 @@ EOF
 	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
 		rm -rf "$0" >>"${OUTTO}" 2>&1
 	fi
-	for i in ssh apache2 fail2ban memcached cron; do
+	for i in ssh apache2 fail2ban cron; do
 		systemctl restart "${i}" >>/dev/null 2>&1 || true
 		systemctl enable "${i}" >>/dev/null 2>&1 || true
 	done

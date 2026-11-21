@@ -307,8 +307,8 @@ function _updates() {
 function _depends() {
 	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	if [[ ${DISTRO} == Debian ]]; then
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 certbot python3-certbot-apache php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
-		for opt_pkg in clang mold dool dstat speedtest-cli rar unrar ttf-mscorefonts-installer; do
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip unzip nano bwm-ng htop nethogs iotop git dos2unix automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 certbot python3-certbot-apache php-net-socket php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati iptables iptables-persistent xz-utils || return 1
+		for opt_pkg in clang mold dool dstat rar unrar; do
 			_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
 		done
 	elif [[ ${DISTRO} == Ubuntu ]]; then
@@ -316,14 +316,14 @@ function _depends() {
 		if [[ "${CODENAME}" =~ ("noble") ]] || ! apt-cache show dstat >/dev/null 2>&1; then
 			stat_pkg="dool"
 		fi
-		_af_apt_install build-essential ubuntu-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 certbot python3-certbot-apache php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
+		_af_apt_install build-essential ubuntu-keyring fail2ban bc sudo screen zip unzip nano bwm-ng htop iotop git dos2unix "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 certbot python3-certbot-apache php-net-socket libdbd-mysql-perl libdbi-perl php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati iptables iptables-persistent xz-utils || return 1
 		local avail_opt_pkgs=()
 		if apt-cache show default-jre-headless >/dev/null 2>&1; then
 			avail_opt_pkgs+=("default-jre-headless")
 		elif apt-cache show openjdk-8-jre-headless >/dev/null 2>&1; then
 			avail_opt_pkgs+=("openjdk-8-jre-headless")
 		fi
-		for opt_pkg in clang mold rar unrar ttf-mscorefonts-installer; do
+		for opt_pkg in clang mold rar unrar; do
 			if apt-cache show "${opt_pkg}" >/dev/null 2>&1; then
 				avail_opt_pkgs+=("${opt_pkg}")
 			fi
@@ -345,7 +345,6 @@ function _syscommands() {
 	\cp -rf "${local_packages}/." /usr/local/bin/AetherFlow
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 dos2unix >>"${OUTTO}" 2>&1
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 chmod +x >>"${OUTTO}" 2>&1
-	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
 	rm -f /usr/bin/af-heal /usr/local/bin/AetherFlow/system/af-heal
 	\cp -f /usr/local/bin/AetherFlow/system/af-systemd-sandbox /usr/bin/af-systemd-sandbox
 	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/local/bin/af-certbot-sync

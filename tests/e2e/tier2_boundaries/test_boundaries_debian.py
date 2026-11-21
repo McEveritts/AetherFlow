@@ -144,7 +144,7 @@ class TestB30Time64TransitionPackagesResilient(TestCase):
 
 class TestB30OptionalPackagesDoNotHaltBootstrap(TestCase):
     def __init__(self):
-        super().__init__("T2_B30_05", "F30", 2, "Failure of optional utility (e.g. speedtest-cli) does not abort setup")
+        super().__init__("T2_B30_05", "F30", 2, "Failure of an optional utility does not abort setup")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         self.assert_true(True, "B30: Package error recovery contract verified")
