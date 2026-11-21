@@ -134,6 +134,154 @@ pub fn get_retained_app_ingress_config(app: &str) -> anyhow::Result<Option<AppIn
     read_retained_config(&conn, app)
 }
 
+pub fn get_all_retained_app_ingress_configs() -> anyhow::Result<Vec<(String, AppIngressConfig)>> {
+    let conn = crate::get_read_conn()?;
+    read_all_retained_configs(&conn)
+}
+
+pub fn list_retained_app_ingress_names() -> anyhow::Result<Vec<String>> {
+    let conn = crate::get_read_conn()?;
+    let has_retained: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_app_ingress_configs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_retained {
+        return Ok(Vec::new());
+    }
+    let mut stmt =
+        conn.prepare("SELECT app_name FROM retained_app_ingress_configs ORDER BY app_name ASC")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut names = Vec::new();
+    for row in rows {
+        names.push(row?);
+    }
+    Ok(names)
+}
+
+fn read_all_retained_configs(conn: &Connection) -> anyhow::Result<Vec<(String, AppIngressConfig)>> {
+    let has_retained: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_app_ingress_configs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_retained {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT app_name, config_json FROM retained_app_ingress_configs ORDER BY app_name ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut configs = Vec::new();
+    for row in rows {
+        let (app_name, raw_json) = row?;
+        let parsed: AppIngressConfig = serde_json::from_str(&raw_json)?;
+        configs.push((app_name, parsed));
+    }
+    Ok(configs)
+}
+
+pub fn update_retained_app_ingress_config_in_tx(
+    tx: &Connection,
+    app: &str,
+    config: &AppIngressConfig,
+) -> anyhow::Result<()> {
+    check_reservation(tx, app, None)?;
+    schema(tx)?;
+    let changed = tx.execute(
+        "UPDATE retained_app_ingress_configs SET config_json=?2 WHERE app_name=?1",
+        params![app, serde_json::to_string(config)?],
+    )?;
+    anyhow::ensure!(
+        changed == 1,
+        "Retained ingress configuration for {app} is missing"
+    );
+    Ok(())
+}
+
+pub fn check_app_ingress_reservation(app: &str) -> anyhow::Result<()> {
+    let conn = crate::get_conn()?;
+    check_reservation(&conn, app, None)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingBaseDomainSync {
+    pub previous_base_domain: String,
+    pub target_base_domain: String,
+}
+
+fn base_domain_sync_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS base_domain_sync_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            previous_base_domain TEXT NOT NULL DEFAULT '',
+            target_base_domain TEXT NOT NULL DEFAULT '',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
+    )?;
+    Ok(())
+}
+
+pub fn get_pending_base_domain_sync(
+    conn: &Connection,
+) -> anyhow::Result<Option<PendingBaseDomainSync>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='base_domain_sync_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(previous_base_domain, ''), COALESCE(target_base_domain, '')
+             FROM base_domain_sync_state WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(prev, target)| PendingBaseDomainSync {
+        previous_base_domain: crate::normalize_base_domain(&prev),
+        target_base_domain: crate::normalize_base_domain(&target),
+    }))
+}
+
+pub fn set_pending_base_domain_sync(
+    conn: &Connection,
+    previous_base_domain: &str,
+    target_base_domain: &str,
+) -> anyhow::Result<()> {
+    base_domain_sync_schema(conn)?;
+    let prev = crate::normalize_base_domain(previous_base_domain);
+    let target = crate::normalize_base_domain(target_base_domain);
+    conn.execute(
+        "INSERT INTO base_domain_sync_state (id, previous_base_domain, target_base_domain, updated_at)
+         VALUES (1, ?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(id) DO UPDATE SET
+             previous_base_domain = excluded.previous_base_domain,
+             target_base_domain = excluded.target_base_domain,
+             updated_at = CURRENT_TIMESTAMP",
+        params![prev, target],
+    )?;
+    Ok(())
+}
+
+pub fn clear_pending_base_domain_sync(conn: &Connection) -> anyhow::Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='base_domain_sync_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM base_domain_sync_state WHERE id = 1", [])?;
+    Ok(())
+}
+
 fn read_retained_config(conn: &Connection, app: &str) -> anyhow::Result<Option<AppIngressConfig>> {
     let has_retained: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_app_ingress_configs')",
@@ -678,5 +826,50 @@ mod tests {
             .unwrap()
             .contains(&config.listen_port));
         assert!(set_config(&mut conn, &conflict, None).is_err());
+    }
+
+    #[test]
+    fn base_domain_sync_state_and_retained_updates_handle_legacy_schema_and_reservations() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Legacy DB without base_domain_sync_state or retained_app_ingress_configs
+        assert_eq!(get_pending_base_domain_sync(&conn).unwrap(), None);
+        assert!(read_all_retained_configs(&conn).unwrap().is_empty());
+        clear_pending_base_domain_sync(&conn).unwrap();
+
+        // Pending base-domain sync round-trip + normalization
+        set_pending_base_domain_sync(&conn, "https://Old.Example.Test/", "*.New.Example.Test")
+            .unwrap();
+        assert_eq!(
+            get_pending_base_domain_sync(&conn).unwrap(),
+            Some(PendingBaseDomainSync {
+                previous_base_domain: "old.example.test".into(),
+                target_base_domain: "new.example.test".into(),
+            })
+        );
+        clear_pending_base_domain_sync(&conn).unwrap();
+        assert_eq!(get_pending_base_domain_sync(&conn).unwrap(), None);
+
+        // Retained update honors active lifecycle reservations
+        let mut config = fixture(&conn);
+        archive(&mut conn, "maintainerr", false, None).unwrap();
+        conn.execute(
+            "INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,service_units)
+             VALUES ('maintainerr','job-1','install','installing','[\"af-maintainerr\"]')",
+            [],
+        )
+        .unwrap();
+        config.public_domain = "maintainerr.new.example.test".into();
+        assert!(update_retained_app_ingress_config_in_tx(&conn, "maintainerr", &config).is_err());
+
+        conn.execute(
+            "UPDATE package_lifecycle_jobs SET status='completed' WHERE job_id='job-1'",
+            [],
+        )
+        .unwrap();
+        update_retained_app_ingress_config_in_tx(&conn, "maintainerr", &config).unwrap();
+        let all = read_all_retained_configs(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "maintainerr");
+        assert_eq!(all[0].1.public_domain, "maintainerr.new.example.test");
     }
 }

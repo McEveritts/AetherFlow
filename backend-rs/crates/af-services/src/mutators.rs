@@ -703,21 +703,36 @@ pub async fn sync_network_dns_providers() -> Result<bool, String> {
     let base_domain = crate::resolve_base_domain();
 
     let configs = af_db::get_all_app_ingress_configs().map_err(|error| error.to_string())?;
+    let mut configured_public_apps: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     {
         for cfg in configs {
-            if !cfg.app_name.trim().is_empty() {
+            let app_key = cfg.app_name.trim().to_ascii_lowercase();
+            if !app_key.is_empty() {
                 domain_set.insert(crate::resolve_app_internal_domain(&cfg.app_name));
             }
             if !cfg.public_domain.trim().is_empty() {
+                if !app_key.is_empty() {
+                    configured_public_apps.insert(app_key);
+                }
                 domain_set.insert(cfg.public_domain.trim().to_lowercase());
             } else if !base_domain.is_empty() && cfg.listen_port > 0 {
                 let pub_dom = crate::format_app_public_domain(&cfg.app_name, &base_domain);
                 if !pub_dom.is_empty() {
+                    if !app_key.is_empty() {
+                        configured_public_apps.insert(app_key);
+                    }
                     domain_set.insert(pub_dom);
                 }
             }
         }
     }
+
+    let retained_apps: std::collections::HashSet<String> = af_db::list_retained_app_ingress_names()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|app| app.trim().to_ascii_lowercase())
+        .collect();
 
     let pkgs = crate::get_packages().map_err(|error| error.to_string())?;
     {
@@ -725,13 +740,18 @@ pub async fn sync_network_dns_providers() -> Result<bool, String> {
             if p.status != "installed" {
                 continue;
             }
+            let app_key = p.name.trim().to_ascii_lowercase();
             if let Some(bp) = crate::get_blueprint(&p.name) {
                 if !bp.internal_domain.trim().is_empty() {
                     domain_set.insert(bp.internal_domain.trim().to_lowercase());
                 } else {
                     domain_set.insert(format!("{}.aether.local", p.name.to_lowercase()));
                 }
-                if !base_domain.is_empty() && bp.default_port > 0 {
+                if !base_domain.is_empty()
+                    && bp.default_port > 0
+                    && !configured_public_apps.contains(&app_key)
+                    && !retained_apps.contains(&app_key)
+                {
                     let pub_dom = crate::format_app_public_domain(&p.name, &base_domain);
                     if !pub_dom.is_empty() {
                         domain_set.insert(pub_dom);

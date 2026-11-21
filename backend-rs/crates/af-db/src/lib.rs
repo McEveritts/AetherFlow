@@ -1,8 +1,12 @@
 mod retained_ingress;
 pub use retained_ingress::{
     archive_app_ingress_config, archive_app_ingress_config_for_lifecycle,
+    check_app_ingress_reservation, clear_pending_base_domain_sync,
+    get_all_retained_app_ingress_configs, get_pending_base_domain_sync,
     get_reserved_ports_excluding, get_retained_app_ingress_config, list_reserved_ports_excluding,
-    load_lifecycle_ingress, plan_lifecycle_ingress, synchronize_lifecycle_ingress,
+    list_retained_app_ingress_names, load_lifecycle_ingress, plan_lifecycle_ingress,
+    set_pending_base_domain_sync, synchronize_lifecycle_ingress,
+    update_retained_app_ingress_config_in_tx, PendingBaseDomainSync,
 };
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
@@ -958,6 +962,13 @@ pub fn init_db() -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (
             app_name TEXT PRIMARY KEY,
             config_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS base_domain_sync_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            previous_base_domain TEXT NOT NULL DEFAULT '',
+            target_base_domain TEXT NOT NULL DEFAULT '',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS oidc_auth_codes (

@@ -1068,3 +1068,650 @@ async fn pre_stop_and_restore_order_librespeed_socket_and_novnc_companions_with_
         ]
     );
 }
+
+#[test]
+fn admin_settings_generated_domain_classification_preserves_custom_domains_under_old_suffix() {
+    let sources = vec!["old.example".to_string()];
+    assert!(is_generated_public_domain(
+        "sonarr",
+        "sonarr.old.example",
+        "old.example"
+    ));
+    assert!(is_generated_public_domain(
+        "sonarr",
+        "SONARR.OLD.EXAMPLE.",
+        "old.example"
+    ));
+    assert!(!is_generated_public_domain(
+        "sonarr",
+        "tv.old.example",
+        "old.example"
+    ));
+    assert!(!is_generated_public_domain(
+        "sonarr",
+        "media.sonarr.old.example",
+        "old.example"
+    ));
+    assert!(!is_generated_public_domain(
+        "sonarr",
+        "sonarr-4k.old.example",
+        "old.example"
+    ));
+
+    // Active configs: generated & empty migrate; custom under old or other suffix stays untouched.
+    assert!(should_auto_update_active_domain(
+        "sonarr",
+        "sonarr.old.example",
+        &sources,
+        "new.example"
+    ));
+    assert!(should_auto_update_active_domain(
+        "sonarr",
+        "",
+        &sources,
+        "new.example"
+    ));
+    assert!(!should_auto_update_active_domain(
+        "radarr",
+        "movies.old.example",
+        &sources,
+        "new.example"
+    ));
+    assert!(!should_auto_update_active_domain(
+        "sonarr",
+        "media.sonarr.old.example",
+        &sources,
+        "new.example"
+    ));
+    assert!(!should_auto_update_active_domain(
+        "radarr",
+        "movies.custom.test",
+        &sources,
+        "new.example"
+    ));
+
+    // Retained configs: generated old domain migrates; empty and custom domains stay untouched.
+    assert!(should_auto_update_retained_domain(
+        "lidarr",
+        "lidarr.old.example",
+        &sources,
+        "new.example"
+    ));
+    assert!(!should_auto_update_retained_domain(
+        "lidarr",
+        "",
+        &sources,
+        "new.example"
+    ));
+    assert!(!should_auto_update_retained_domain(
+        "readarr",
+        "books.old.example",
+        &sources,
+        "new.example"
+    ));
+
+    // Multi-source retry/revert: covers both original and partially-applied generated domains,
+    // while still preserving custom domains under the old suffix.
+    let retry_sources = vec!["old.example".to_string(), "new.example".to_string()];
+    assert!(should_auto_update_active_domain(
+        "sabnzbd",
+        "sabnzbd.new.example",
+        &retry_sources,
+        "third.example"
+    ));
+    assert!(should_auto_update_active_domain(
+        "sonarr",
+        "sonarr.old.example",
+        &retry_sources,
+        "third.example"
+    ));
+    assert!(!should_auto_update_active_domain(
+        "radarr",
+        "movies.old.example",
+        &retry_sources,
+        "third.example"
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn admin_settings_base_domain_update_handles_partial_failure_same_value_retry_and_preserves_custom_and_retained_domains(
+) {
+    use tower::ServiceExt;
+
+    const TEST: &str = "routes::http_lifecycle_regressions::admin_settings_base_domain_update_handles_partial_failure_same_value_retry_and_preserves_custom_and_retained_domains";
+    if env::var("AF_HTTP_LIFECYCLE_CHILD").as_deref() != Ok(TEST) {
+        assert!(std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("AF_HTTP_LIFECYCLE_CHILD", TEST)
+            .status()
+            .unwrap()
+            .success());
+        return;
+    }
+
+    let root = env::temp_dir().join(format!("af-http-base-domain-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("var/lib/sabnzbd")).unwrap();
+    std::fs::create_dir_all(root.join("var/lib/sonarr")).unwrap();
+    std::fs::create_dir_all(root.join("etc/apache2/sites-available")).unwrap();
+    std::fs::create_dir_all(root.join("etc/apache2/sites-enabled")).unwrap();
+    std::fs::create_dir_all(root.join("etc/dnsmasq.d")).unwrap();
+    let database = root.join("var/lib/aetherflow/aetherflow.sqlite");
+    let hosts_path = root.join("hosts");
+    std::fs::write(&hosts_path, "127.0.0.1 localhost\n").unwrap();
+    for key in [
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_CONFIG_ROOT",
+    ] {
+        env::set_var(key, &root);
+    }
+    for key in ["DB_PATH", "AF_DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &database);
+    }
+    env::remove_var("PRIVILEGED_RUNNER_ENABLED");
+    env::remove_var("AETHERFLOW_BASE_DOMAIN");
+    env::remove_var("AETHERFLOW_DOMAIN");
+    env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+    env::set_var("AETHERFLOW_RUNNER_SOCK", root.join("absent.sock"));
+    env::set_var("AETHERFLOW_HOSTS_FILE", &hosts_path);
+    env::set_var("AETHERFLOW_DNSMASQ_DIR", root.join("etc/dnsmasq.d"));
+    env::set_var("AETHERFLOW_LAN_IP", "192.0.2.10");
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", root.join("packages.json"));
+    env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        root.join("automation.json"),
+    );
+    std::fs::write(root.join("automation.json"), "{}").unwrap();
+    std::fs::write(
+        root.join("packages.json"),
+        r#"[
+            {"name":"sabnzbd","label":"SABnzbd","description":"fixture","category":"test","lock_file":"/install/.sabnzbd.lock","service_type":"systemd","service_name":"sabnzbd","default_port":8080},
+            {"name":"sonarr","label":"Sonarr","description":"fixture","category":"test","lock_file":"/install/.sonarr.lock","service_type":"systemd","service_name":"sonarr","default_port":8989},
+            {"name":"radarr","label":"Radarr","description":"fixture","category":"test","lock_file":"/install/.radarr.lock","service_type":"systemd","service_name":"radarr","default_port":7878},
+            {"name":"bazarr","label":"Bazarr","description":"fixture","category":"test","lock_file":"/install/.bazarr.lock","service_type":"systemd","service_name":"bazarr","default_port":6767},
+            {"name":"lidarr","label":"Lidarr","description":"fixture","category":"test","lock_file":"/install/.lidarr.lock","service_type":"systemd","service_name":"lidarr","default_port":8686},
+            {"name":"readarr","label":"Readarr","description":"fixture","category":"test","lock_file":"/install/.readarr.lock","service_type":"systemd","service_name":"readarr","default_port":8787}
+        ]"#,
+    )
+    .unwrap();
+    for installed in ["sabnzbd", "sonarr", "radarr", "bazarr"] {
+        std::fs::write(
+            root.join(format!("install/.{installed}.lock")),
+            "installed\n",
+        )
+        .unwrap();
+    }
+    let sab_ini = root.join("var/lib/sabnzbd/sabnzbd.ini");
+    std::fs::write(
+        &sab_ini,
+        "[misc]\nport = 18080\nhost = 127.0.0.1\nhost_whitelist = sabnzbd.old.example, sabnzbd.aether.local, localhost, 127.0.0.1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("var/lib/sonarr/config.xml"),
+        "<Config><Port>18989</Port></Config>\n",
+    )
+    .unwrap();
+
+    af_db::init_db().unwrap();
+    af_services::initialize_package_jobs(rusqlite::Connection::open(&database).unwrap()).unwrap();
+    {
+        let conn = af_db::get_conn().unwrap();
+        let encrypted_openai = af_db::encrypt_key("sk-test-preserve-9876").unwrap();
+        conn.execute(
+            "INSERT INTO users(id, username, role) VALUES(701, 'domain-admin', 'admin')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE settings SET ai_model='gemini-4-argon', system_prompt='keep-system-prompt',
+             base_domain='old.example', openai_api_key=?1, backup_schedule_mode='smart' WHERE id=1",
+            params![encrypted_openai],
+        )
+        .unwrap();
+    }
+    af_db::invalidate_ingress_cache();
+
+    // Active ingress: generated sabnzbd (tls=false), generated sonarr (tls=true),
+    // and operator-owned custom radarr under the OLD suffix (movies.old.example).
+    let sab_cfg = AppIngressConfig {
+        app_name: "sabnzbd".into(),
+        public_domain: "sabnzbd.old.example".into(),
+        external_access_enabled: true,
+        listen_port: 18080,
+        tls_enabled: false,
+        ..Default::default()
+    };
+    let sonarr_cfg = AppIngressConfig {
+        app_name: "sonarr".into(),
+        public_domain: "sonarr.old.example".into(),
+        external_access_enabled: true,
+        listen_port: 18989,
+        tls_enabled: true,
+        ..Default::default()
+    };
+    let radarr_cfg = AppIngressConfig {
+        app_name: "radarr".into(),
+        public_domain: "movies.old.example".into(),
+        external_access_enabled: true,
+        listen_port: 17878,
+        tls_enabled: true,
+        ..Default::default()
+    };
+    af_db::set_app_ingress_config(&sab_cfg).unwrap();
+    af_db::set_app_ingress_config(&sonarr_cfg).unwrap();
+    af_db::set_app_ingress_config(&radarr_cfg).unwrap();
+    // Seed radarr's existing Apache vhost so we can verify it stays untouched.
+    assert!(sync_ingress_vhost(&radarr_cfg, "radarr.aether.local").unwrap());
+
+    // Retained ingress (uninstalled apps): generated lidarr + custom readarr under old suffix.
+    af_db::set_app_ingress_config(&AppIngressConfig {
+        app_name: "lidarr".into(),
+        public_domain: "lidarr.old.example".into(),
+        external_access_enabled: true,
+        listen_port: 18686,
+        tls_enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    af_db::archive_app_ingress_config("lidarr", false).unwrap();
+    af_db::set_app_ingress_config(&AppIngressConfig {
+        app_name: "readarr".into(),
+        public_domain: "books.old.example".into(),
+        external_access_enabled: true,
+        listen_port: 18787,
+        tls_enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    af_db::archive_app_ingress_config("readarr", false).unwrap();
+
+    let (token, _) = crate::auth::create_standard_jwt(701, &HeaderMap::new()).unwrap();
+    let app = build_router();
+    async fn send_admin_settings_put(
+        app: &Router,
+        token: &str,
+        domain: &str,
+        prompt: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let payload = SettingsPayload {
+            ai_model: "gemini-4-argon".into(),
+            system_prompt: prompt.into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+            update_channel: "stable".into(),
+            default_dashboard: "overview".into(),
+            setup_completed: true,
+            base_domain: domain.into(),
+            openai_api_key: "****9876".into(),
+            ..Default::default()
+        };
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri("/api/v1/admin/settings")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&payload).unwrap(),
+            ))
+            .unwrap();
+        let res = Box::pin(app.clone().oneshot(req)).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
+    async fn send_auth_settings_get(app: &Router, token: &str) -> (StatusCode, serde_json::Value) {
+        let req = axum::http::Request::builder()
+            .uri("/api/v1/auth/settings")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = Box::pin(app.clone().oneshot(req)).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
+
+    // 1. Lifecycle serialization: active reservation on an affected app rejects with 409 LIFECYCLE_BUSY
+    //    before mutating settings, active/retained ingress, native configs, Apache, or DNS.
+    let mut job_conn = rusqlite::Connection::open(&database).unwrap();
+    let job_owner = af_runner::af_release::lifecycle::admit_job(
+        &mut job_conn,
+        "sonarr",
+        "busy-job-1",
+        "update",
+        "2026-11-21T01:00:00Z",
+        &["sonarr".into()],
+    )
+    .unwrap();
+    let (busy_status, busy_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "new.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(busy_status, StatusCode::CONFLICT);
+    assert_eq!(busy_body["code"], "LIFECYCLE_BUSY");
+    assert_eq!(af_db::get_base_domain(), "old.example");
+    assert_eq!(
+        af_db::get_app_ingress_config("sabnzbd")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sabnzbd.old.example"
+    );
+    assert!(std::fs::read_to_string(&sab_ini)
+        .unwrap()
+        .contains("sabnzbd.old.example"));
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(af_db::get_pending_base_domain_sync(&conn).unwrap(), None);
+    }
+    af_runner::af_release::lifecycle::finish_job(
+        &job_conn,
+        "sonarr",
+        "busy-job-1",
+        "update",
+        true,
+        "",
+    )
+    .unwrap();
+    drop(job_owner);
+    drop(job_conn);
+
+    // 2. Partial failure during managed Apache: sabnzbd commits, sonarr fails Apache -> sonarr rolls back,
+    //    settings.base_domain restores to old.example, and pending sync state records old->new.
+    let sonarr_ext_vhost = root.join("etc/apache2/sites-available/aetherflow-ext-sonarr.conf");
+    std::fs::create_dir(&sonarr_ext_vhost).unwrap();
+    let (partial_status, partial_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "new.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(partial_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(partial_body["code"], "BLUEPRINT_SYNC_FAILED");
+    assert_eq!(partial_body["failed_phase"], "ingress");
+    assert_eq!(partial_body["partial_commit"], true);
+    assert_eq!(partial_body["retryable"], true);
+    // sabnzbd committed with tls_enabled preserved as false; sonarr rolled back; radarr untouched.
+    let sab_mid = af_db::get_app_ingress_config("sabnzbd").unwrap().unwrap();
+    assert_eq!(sab_mid.public_domain, "sabnzbd.new.example");
+    assert!(!sab_mid.tls_enabled);
+    assert!(std::fs::read_to_string(&sab_ini)
+        .unwrap()
+        .contains("sabnzbd.new.example"));
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.old.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("radarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "movies.old.example"
+    );
+    assert_eq!(af_db::get_base_domain(), "old.example");
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("lidarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "lidarr.old.example"
+    );
+    {
+        let conn = af_db::get_conn().unwrap();
+        assert_eq!(
+            af_db::get_pending_base_domain_sync(&conn).unwrap(),
+            Some(af_db::PendingBaseDomainSync {
+                previous_base_domain: "old.example".into(),
+                target_base_domain: "new.example".into(),
+            })
+        );
+    }
+    std::fs::remove_dir(&sonarr_ext_vhost).unwrap();
+
+    // 3. DNS failure after all active apps commit, followed by same-value retry converging everything.
+    std::fs::remove_file(&hosts_path).unwrap();
+    std::fs::create_dir(&hosts_path).unwrap();
+    let (dns_fail_status, dns_fail_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "new.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(dns_fail_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dns_fail_body["failed_phase"], "network_dns");
+    assert_eq!(dns_fail_body["partial_commit"], true);
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.new.example"
+    );
+    assert_eq!(af_db::get_base_domain(), "old.example");
+    std::fs::remove_dir(&hosts_path).unwrap();
+    std::fs::write(&hosts_path, "127.0.0.1 localhost\n").unwrap();
+
+    // Same-value retry with baseDomain = "new.example" now succeeds and converges all layers.
+    let (retry_status, retry_body) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "new.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(retry_status, StatusCode::OK);
+    assert_eq!(retry_body["data"]["baseDomain"], "new.example");
+    assert_eq!(retry_body["data"]["systemPrompt"], "updated-prompt");
+
+    // Verify persisted settings fields, masked secret preservation, untouched columns, and cleared pending state.
+    let (get_status, get_body) = Box::pin(send_auth_settings_get(&app, &token)).await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert_eq!(get_body["baseDomain"], "new.example");
+    assert_eq!(get_body["systemPrompt"], "updated-prompt");
+    assert_eq!(get_body["openaiApiKey"], "****9876");
+    {
+        let conn = af_db::get_conn().unwrap();
+        let (backup_mode, enc_key): (String, String) = conn
+            .query_row(
+                "SELECT backup_schedule_mode, openai_api_key FROM settings WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(backup_mode, "smart");
+        assert_eq!(
+            af_db::decrypt_key(&enc_key).unwrap(),
+            "sk-test-preserve-9876"
+        );
+        assert_eq!(af_db::get_pending_base_domain_sync(&conn).unwrap(), None);
+    }
+
+    // Verify active ingress, native config, and Apache vhosts.
+    let sab_now = af_db::get_app_ingress_config("sabnzbd").unwrap().unwrap();
+    assert_eq!(sab_now.public_domain, "sabnzbd.new.example");
+    assert!(!sab_now.tls_enabled);
+    assert_eq!(sab_now.listen_port, 18080);
+    let sab_ini_text = std::fs::read_to_string(&sab_ini).unwrap();
+    assert!(sab_ini_text.contains("sabnzbd.new.example"));
+    assert!(!sab_ini_text.contains("sabnzbd.old.example"));
+    assert!(std::fs::read_to_string(
+        root.join("etc/apache2/sites-available/aetherflow-ext-sabnzbd.conf")
+    )
+    .unwrap()
+    .contains("ServerName sabnzbd.new.example"));
+
+    let sonarr_now = af_db::get_app_ingress_config("sonarr").unwrap().unwrap();
+    assert_eq!(sonarr_now.public_domain, "sonarr.new.example");
+    assert!(sonarr_now.tls_enabled);
+    assert_eq!(sonarr_now.listen_port, 18989);
+    assert!(std::fs::read_to_string(&sonarr_ext_vhost)
+        .unwrap()
+        .contains("ServerName sonarr.new.example"));
+
+    let bazarr_now = af_db::get_app_ingress_config("bazarr").unwrap().unwrap();
+    assert_eq!(bazarr_now.public_domain, "bazarr.new.example");
+    assert!(!bazarr_now.external_access_enabled);
+    assert!(bazarr_now.tls_enabled);
+    assert_eq!(bazarr_now.listen_port, 6767);
+
+    // Custom domain under the old suffix must remain untouched in DB and Apache!
+    let radarr_now = af_db::get_app_ingress_config("radarr").unwrap().unwrap();
+    assert_eq!(radarr_now.public_domain, "movies.old.example");
+    assert!(std::fs::read_to_string(
+        root.join("etc/apache2/sites-available/aetherflow-ext-radarr.conf")
+    )
+    .unwrap()
+    .contains("ServerName movies.old.example"));
+
+    // Retained ingress: generated lidarr updated in place (not promoted); custom readarr preserved!
+    assert!(af_db::get_app_ingress_config("lidarr").unwrap().is_none());
+    assert!(af_db::get_app_ingress_config("readarr").unwrap().is_none());
+    let lidarr_ret = af_db::get_retained_app_ingress_config("lidarr")
+        .unwrap()
+        .unwrap();
+    assert_eq!(lidarr_ret.public_domain, "lidarr.new.example");
+    assert_eq!(lidarr_ret.listen_port, 18686);
+    assert!(lidarr_ret.external_access_enabled);
+    let readarr_ret = af_db::get_retained_app_ingress_config("readarr")
+        .unwrap()
+        .unwrap();
+    assert_eq!(readarr_ret.public_domain, "books.old.example");
+    assert!(!root
+        .join("etc/apache2/sites-available/aetherflow-ext-lidarr.conf")
+        .exists());
+
+    // DNS reconciliation: active new domains + custom radarr present; stale old & phantom domains absent.
+    let dnsmasq_conf =
+        std::fs::read_to_string(root.join("etc/dnsmasq.d/05-aetherflow-dns.conf")).unwrap();
+    for expected in [
+        "sabnzbd.new.example",
+        "sonarr.new.example",
+        "bazarr.new.example",
+        "movies.old.example",
+    ] {
+        assert!(
+            dnsmasq_conf.contains(expected),
+            "dnsmasq missing {expected}: {dnsmasq_conf}"
+        );
+    }
+    for absent in [
+        "sabnzbd.old.example",
+        "sonarr.old.example",
+        "radarr.new.example",
+        "lidarr.new.example",
+        "books.old.example",
+    ] {
+        assert!(
+            !dnsmasq_conf.contains(absent),
+            "dnsmasq should not contain {absent}: {dnsmasq_conf}"
+        );
+    }
+
+    // 4. Reverting back to the committed base domain after a partial failure toward a third domain
+    //    must still converge partially-migrated apps back cleanly.
+    std::fs::remove_file(&hosts_path).unwrap();
+    std::fs::create_dir(&hosts_path).unwrap();
+    let (third_fail_status, _) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "third.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(third_fail_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.third.example"
+    );
+    std::fs::remove_dir(&hosts_path).unwrap();
+    std::fs::write(&hosts_path, "127.0.0.1 localhost\n").unwrap();
+    let (revert_status, _) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "new.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(revert_status, StatusCode::OK);
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.new.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("sabnzbd")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sabnzbd.new.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("radarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "movies.old.example"
+    );
+
+    // 5. Unmanaged Apache: base-domain update still succeeds via apply_ingress_vhost_policy.
+    std::fs::remove_dir_all(root.join("etc/apache2")).unwrap();
+    std::fs::write(root.join("etc/apache2"), "unmanaged apache placeholder").unwrap();
+    let (unmanaged_status, _) = Box::pin(send_admin_settings_put(
+        &app,
+        &token,
+        "unmanaged.example",
+        "updated-prompt",
+    ))
+    .await;
+    assert_eq!(unmanaged_status, StatusCode::OK);
+    assert_eq!(af_db::get_base_domain(), "unmanaged.example");
+    assert_eq!(
+        af_db::get_app_ingress_config("sonarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "sonarr.unmanaged.example"
+    );
+    assert_eq!(
+        af_db::get_app_ingress_config("radarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "movies.old.example"
+    );
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("lidarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "lidarr.unmanaged.example"
+    );
+    assert_eq!(
+        af_db::get_retained_app_ingress_config("readarr")
+            .unwrap()
+            .unwrap()
+            .public_domain,
+        "books.old.example"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
