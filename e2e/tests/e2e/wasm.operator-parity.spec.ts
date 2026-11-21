@@ -1,4 +1,4 @@
-import { expect, test, type Route } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { installAetherFlowMocks } from './support/mockAetherFlow';
 
 const json = (route: Route, value: unknown, status = 200) =>
@@ -19,6 +19,44 @@ const FAIL_RESTART_UNIT =
   'aetherflow-self-update-restart-aetherflow-api-abcdef1234567890abcdef1234567890.service';
 const TIMEOUT_RESTART_UNIT =
   'aetherflow-self-update-restart-aetherflow-api-fedcba9876543210fedcba9876543210.service';
+
+const mockServiceActions = (page: Page) =>
+  page.route('**/api/v1/auth/services', route =>
+    json(route, {
+      sonarr: {
+        id: 'sonarr',
+        name: 'Sonarr',
+        slug: 'sonarr',
+        status: 'running',
+        installed_version: '4.0.0',
+        latest_version: '4.0.2',
+        update_available: true,
+        update_url: 'https://github.com/Sonarr/Sonarr/releases/tag/v4.0.2',
+        default_port: 8989,
+        active_port: 18989,
+        managed_by: 'systemd',
+        process: 'sonarr',
+        components: [
+          { unit: 'sonarr.service', status: 'running', role: 'required' },
+          { unit: 'sonarr-worker.service', status: 'running', role: 'worker' },
+        ],
+      },
+      bazarr: {
+        id: 'bazarr',
+        name: 'Bazarr',
+        slug: 'bazarr',
+        status: 'stopped',
+        default_port: 6767,
+        managed_by: 'systemd',
+        process: 'bazarr',
+        last_job: {
+          action: 'install',
+          status: 'failed',
+          sanitized_summary: 'Dependency checksum mismatch',
+        },
+      },
+    }),
+  );
 
 test.describe('WASM operator parity workflows', () => {
   test('persists core restart receipts across reload and confirms job and readiness before completion', async ({ page }) => {
@@ -607,48 +645,11 @@ test.describe('WASM operator parity workflows', () => {
     await expect(page.locator('article').filter({ hasText: 'Sonarr' }).getByRole('link', { name: 'Open App' })).toHaveAttribute('href', 'https://sonarr.apps.example.com');
   });
 
-  test('supports Services update checks, confirmed stop, failed-install guard, component logs, and FlowAI Auto-Debug', async ({ page }) => {
+  test('supports Services update checks, confirmed stop, and the failed-install guard', async ({ page }) => {
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+    await mockServiceActions(page);
     const controlCalls: Array<{ service: string; action: string }> = [];
     const updatePayloads: unknown[] = [];
-    const aiSupportBodies: unknown[] = [];
-
-    await page.route('**/api/v1/auth/services', route =>
-      json(route, {
-        sonarr: {
-          id: 'sonarr',
-          name: 'Sonarr',
-          slug: 'sonarr',
-          status: 'running',
-          installed_version: '4.0.0',
-          latest_version: '4.0.2',
-          update_available: true,
-          update_url: 'https://github.com/Sonarr/Sonarr/releases/tag/v4.0.2',
-          default_port: 8989,
-          active_port: 18989,
-          managed_by: 'systemd',
-          process: 'sonarr',
-          components: [
-            { unit: 'sonarr.service', status: 'running', role: 'required' },
-            { unit: 'sonarr-worker.service', status: 'running', role: 'worker' },
-          ],
-        },
-        bazarr: {
-          id: 'bazarr',
-          name: 'Bazarr',
-          slug: 'bazarr',
-          status: 'stopped',
-          default_port: 6767,
-          managed_by: 'systemd',
-          process: 'bazarr',
-          last_job: {
-            action: 'install',
-            status: 'failed',
-            sanitized_summary: 'Dependency checksum mismatch',
-          },
-        },
-      }),
-    );
 
     await page.route('**/api/v1/admin/packages/updates/check', route =>
       json(route, { updates_available: 1, updates: [{ package_id: 'sonarr', update_available: true }] }),
@@ -664,24 +665,6 @@ test.describe('WASM operator parity workflows', () => {
       controlCalls.push({ service, action: body.action });
       await json(route, { message: 'ok' });
     });
-    await page.route('**/api/v1/admin/logs?*', route =>
-      json(route, {
-        logs: [
-          { timestamp: '2026-11-19T06:00:00Z', level: 'ERROR', message: 'Database locked in sonarr-worker' },
-        ],
-      }),
-    );
-    await page.route('**/api/v1/auth/ai/support', async route => {
-      aiSupportBodies.push(route.request().postDataJSON());
-      await json(route, {
-        reply: 'SQLite WAL lock contention detected.',
-        proposed_action: {
-          title: 'Restart sonarr-worker.service',
-          description: 'Recycle worker unit to clear lock.',
-        },
-      });
-    });
-
     await page.goto('/?tab=services');
     await expect(page.getByText('def :8989')).toBeVisible();
     await expect(page.getByText('Dependency checksum mismatch')).toBeVisible();
@@ -713,8 +696,32 @@ test.describe('WASM operator parity workflows', () => {
     await expect(startGuard).toBeVisible();
     await startGuard.getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect.poll(() => controlCalls).toContainEqual({ service: 'bazarr', action: 'start' });
+  });
 
-    // Open component logs and run FlowAI Auto-Debug.
+  test('opens component logs and reviews a FlowAI Auto-Debug proposal', async ({ page }) => {
+    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+    await mockServiceActions(page);
+    const aiSupportBodies: unknown[] = [];
+
+    await page.route('**/api/v1/admin/logs?*', route =>
+      json(route, {
+        logs: [
+          { timestamp: '2026-11-19T06:00:00Z', level: 'ERROR', message: 'Database locked in sonarr-worker' },
+        ],
+      }),
+    );
+    await page.route('**/api/v1/auth/ai/support', async route => {
+      aiSupportBodies.push(route.request().postDataJSON());
+      await json(route, {
+        reply: 'SQLite WAL lock contention detected.',
+        proposed_action: {
+          title: 'Restart sonarr-worker.service',
+          description: 'Recycle worker unit to clear lock.',
+        },
+      });
+    });
+
+    await page.goto('/?tab=services');
     await page.locator('article', { hasText: 'Sonarr' }).locator('ul').getByRole('button', { name: 'Logs', exact: true }).nth(1).click();
     const logsModal = page.getByRole('dialog', { name: 'Service Logs' });
     await expect(logsModal).toBeVisible();
