@@ -4504,28 +4504,42 @@ async fn get_notification_rules() -> Json<serde_json::Value> {
 async fn get_notification_channels() -> Json<serde_json::Value> {
     let mut channels = Vec::new();
     if let Ok(conn) = af_db::get_read_conn() {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, name, type, COALESCE(config, '{}'), COALESCE(enabled, 1), COALESCE(CAST(created_at AS TEXT), '') \
-             FROM notification_channels ORDER BY created_at DESC",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |r| {
-                let channel_type: String = r.get(2)?;
-                let raw_cfg: String = r.get(3)?;
-                let cfg_val =
-                    af_db::mask_notification_channel_config_str(&channel_type, &raw_cfg);
-                Ok(serde_json::json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "name": r.get::<_, String>(1)?,
-                    "type": channel_type,
-                    "config": cfg_val,
-                    "enabled": r.get::<_, i32>(4)? != 0,
-                    "created_at": r.get::<_, String>(5)?,
-                }))
-            }) {
-                for ch in rows.flatten() {
-                    channels.push(ch);
-                }
-            }
+        let raw_channels: Vec<(i64, String, String, String, bool, String)> = conn
+            .prepare(
+                "SELECT id, name, type, COALESCE(config, '{}'), COALESCE(enabled, 1), COALESCE(CAST(created_at AS TEXT), '') \
+                 FROM notification_channels ORDER BY created_at DESC",
+            )
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i32>(4)? != 0,
+                        r.get::<_, String>(5)?,
+                    ))
+                })
+                .ok()
+                .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
+
+        for (id, name, channel_type, raw_cfg, enabled, created_at) in raw_channels {
+            let cfg_val = af_db::mask_notification_channel_config_str(&channel_type, &raw_cfg);
+            let (pending_deliveries, last_delivery) =
+                crate::notifications_ext::channel_delivery_overview_in_conn(&conn, id);
+            channels.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "type": channel_type,
+                "config": cfg_val,
+                "enabled": enabled,
+                "created_at": created_at,
+                "pending_deliveries": pending_deliveries,
+                "last_delivery": last_delivery,
+            }));
         }
     }
     Json(serde_json::json!({ "channels": channels }))

@@ -1713,7 +1713,7 @@ fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ensure_notification_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+pub fn ensure_notification_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
     run_atomic_migration_tx(conn, |tx_conn| {
         tx_conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS notification_reads (
@@ -1725,6 +1725,58 @@ fn ensure_notification_schema_invariants(conn: &Connection) -> anyhow::Result<()
             CREATE INDEX IF NOT EXISTS idx_notification_reads_user_notification
                 ON notification_reads(user_id, notification_id);",
         )?;
+
+        let has_table = |name: &str| -> rusqlite::Result<bool> {
+            tx_conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                params![name],
+                |r| r.get(0),
+            )
+        };
+
+        if has_table("notification_rules")? {
+            ensure_column(
+                tx_conn,
+                "notification_rules",
+                "last_triggered_at",
+                "INTEGER",
+            )?;
+        }
+
+        if has_table("notification_delivery_log")? {
+            ensure_column(
+                tx_conn,
+                "notification_delivery_log",
+                "next_attempt_at",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            ensure_column(
+                tx_conn,
+                "notification_delivery_log",
+                "claim_token",
+                "TEXT NOT NULL DEFAULT ''",
+            )?;
+            ensure_column(
+                tx_conn,
+                "notification_delivery_log",
+                "lease_until",
+                "INTEGER",
+            )?;
+            ensure_column(
+                tx_conn,
+                "notification_delivery_log",
+                "updated_at",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            tx_conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delivery_log_notification
+                    ON notification_delivery_log(notification_id);
+                 CREATE INDEX IF NOT EXISTS idx_delivery_log_due
+                    ON notification_delivery_log(status, next_attempt_at, lease_until);
+                 CREATE INDEX IF NOT EXISTS idx_delivery_log_channel_id_desc
+                    ON notification_delivery_log(channel_id, id DESC);",
+            )?;
+        }
         Ok(())
     })
 }
@@ -2159,6 +2211,9 @@ pub fn prune_expired_active_sessions(conn: &Connection, now: i64) -> rusqlite::R
     )
 }
 
+pub const PRUNE_NOTIFICATION_DELIVERY_LOG_SQL: &str =
+    "DELETE FROM notification_delivery_log WHERE status IN ('delivered', 'failed', 'uncertain') AND replace(CAST(created_at AS TEXT), 'T', ' ') < datetime('now', '-90 days')";
+
 pub fn prune_expired_data() {
     let Ok(conn) = get_conn() else {
         return;
@@ -2185,6 +2240,7 @@ pub fn prune_expired_data() {
         PRUNE_METRICS_HISTORY_SQL,
         "DELETE FROM login_history WHERE replace(CAST(created_at AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
         "DELETE FROM streaming_bandwidth_samples WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
+        PRUNE_NOTIFICATION_DELIVERY_LOG_SQL,
     ];
     for query_sql in static_queries {
         let _ = conn.execute(query_sql, []);
@@ -4867,5 +4923,67 @@ mod pending_action_query_tests {
             [],
         );
         assert!(dup_active.is_err());
+    }
+
+    #[test]
+    fn test_notification_durable_delivery_schema_invariants_and_pruning() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE notification_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                condition_type TEXT NOT NULL,
+                condition_value TEXT NOT NULL,
+                level TEXT DEFAULT 'warning',
+                enabled BOOLEAN DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE notification_delivery_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                channel_type TEXT NOT NULL,
+                notification_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            );
+            INSERT INTO notification_delivery_log (id, channel_id, channel_type, notification_id, status, attempts, created_at)
+            VALUES
+                (1, 1, 'webhook', 10, 'delivered', 1, datetime('now', '-120 days')),
+                (2, 1, 'webhook', 11, 'failed', 3, datetime('now', '-120 days')),
+                (3, 1, 'webhook', 12, 'uncertain', 3, datetime('now', '-120 days')),
+                (4, 1, 'webhook', 13, 'pending', 0, datetime('now', '-120 days')),
+                (5, 1, 'webhook', 14, 'sending', 1, datetime('now', '-120 days')),
+                (6, 1, 'webhook', 15, 'delivered', 1, datetime('now', '-5 days'));"#,
+        )
+        .unwrap();
+
+        ensure_notification_schema_invariants(&conn).unwrap();
+        // Second call must remain idempotent.
+        ensure_notification_schema_invariants(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO notification_rules (name, condition_type, condition_value, last_triggered_at)
+             VALUES ('Disk', 'disk_usage', '90', 1700000000)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(PRUNE_NOTIFICATION_DELIVERY_LOG_SQL, [])
+            .unwrap();
+        let remaining: Vec<i64> = conn
+            .prepare("SELECT id FROM notification_delivery_log ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec![4, 5, 6],
+            "pruning must only delete terminal rows older than 90 days and preserve active pending/sending rows"
+        );
     }
 }

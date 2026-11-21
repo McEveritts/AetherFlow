@@ -250,7 +250,7 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 
 ## Notification Channels
 
-Supported outbound webhook channels (`discord`, `telegram`, `slack`, `custom`) are dispatched asynchronously with 3-attempt exponential backoff and SSRF protection blocking private/loopback addresses and redirects. Delivery outcomes are recorded in `notification_delivery_log`.
+Rule triggers atomically persist per-rule cooldown (`notification_rules.last_triggered_at`), the local broadcast notification, and credential-free delivery intents for enabled channels in `notification_delivery_log`. Supported outbound webhook channels (`discord`, `telegram`, `slack`, `gotify`, `email`, `webhook`, `custom`) are resumed on startup and periodic ticks using bounded leased claims (`pending` -> `sending` -> `delivered` / `failed` / `uncertain`), 3-attempt exponential backoff, current decrypted channel config, and SSRF protection blocking private/loopback addresses and redirects. Because external webhook receivers do not provide universal idempotency keys, a crash in the narrow window after an upstream receiver accepts a request and before SQLite commits the receipt is bounded by the claim lease and attempt cap (at-least-once retry until attempt 3, then terminal `uncertain` if the final claim expires without receipt). Delivery outcomes are recorded in `notification_delivery_log` (with terminal rows pruned after 90 days) and surfaced without credentials in `GET /api/v1/admin/notifications/channels`.
 
 ---
 
