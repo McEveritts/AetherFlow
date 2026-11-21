@@ -392,7 +392,14 @@ async fn post_json(router: Router, path: &str, token: &str) -> (StatusCode, Valu
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-fn receipt_ok(unit: &str, status: &str, completed: bool, success: bool, exit_code: Option<i32>, error: &str) -> MockStatusResponse {
+fn receipt_ok(
+    unit: &str,
+    status: &str,
+    completed: bool,
+    success: bool,
+    exit_code: Option<i32>,
+    error: &str,
+) -> MockStatusResponse {
     MockStatusResponse::Json(
         StatusCode::OK,
         json!({
@@ -440,7 +447,12 @@ async fn deferred_core_restart_persists_receipt_and_reconciles_working_to_execut
     assert_eq!(fixture.runner.dispatch_count.load(Ordering::SeqCst), 1);
 
     // While receipt is running: detail, queued filter, and approved_history show queued; executed filter does not.
-    let (st, detail) = get_json(router.clone(), &format!("/api/v1/admin/actions/{id}"), &fixture.token).await;
+    let (st, detail) = get_json(
+        router.clone(),
+        &format!("/api/v1/admin/actions/{id}"),
+        &fixture.token,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(detail["status"], "queued");
     assert_eq!(detail["job_unit"], unit);
@@ -481,8 +493,12 @@ async fn deferred_core_restart_persists_receipt_and_reconciles_working_to_execut
     fixture
         .runner
         .set_receipt(unit, MockStatusResponse::DropConnection);
-    let (st, unavail_detail) =
-        get_json(router.clone(), &format!("/api/v1/admin/actions/{id}"), &fixture.token).await;
+    let (st, unavail_detail) = get_json(
+        router.clone(),
+        &format!("/api/v1/admin/actions/{id}"),
+        &fixture.token,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(unavail_detail["status"], "unavailable");
     assert_eq!(unavail_detail["job_unit"], unit);
@@ -506,8 +522,12 @@ async fn deferred_core_restart_persists_receipt_and_reconciles_working_to_execut
     assert_eq!(restart_status["completed"], true);
     assert_eq!(restart_status["success"], true);
 
-    let (st, done_detail) =
-        get_json(router.clone(), &format!("/api/v1/admin/actions/{id}"), &fixture.token).await;
+    let (st, done_detail) = get_json(
+        router.clone(),
+        &format!("/api/v1/admin/actions/{id}"),
+        &fixture.token,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(done_detail["status"], "executed");
     assert_eq!(done_detail["job_unit"], unit);
@@ -639,7 +659,8 @@ async fn deferred_core_restart_receipt_failure_missing_and_corrupt_never_claim_e
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_approvals_interrupted_dispatch_and_active_lifecycle_prevent_duplicate_host_work() {
+async fn concurrent_approvals_interrupted_dispatch_and_active_lifecycle_prevent_duplicate_host_work(
+) {
     if !isolated("routes::approval_restart_regressions::concurrent_approvals_interrupted_dispatch_and_active_lifecycle_prevent_duplicate_host_work") {
         return;
     }
@@ -660,7 +681,9 @@ async fn concurrent_approvals_interrupted_dispatch_and_active_lifecycle_prevent_
     for _ in 0..6 {
         let r = router.clone();
         let tok = fixture.token.clone();
-        set.spawn(async move { post_json(r, &format!("/api/v1/admin/actions/{race_id}/approve"), &tok).await });
+        set.spawn(async move {
+            post_json(r, &format!("/api/v1/admin/actions/{race_id}/approve"), &tok).await
+        });
     }
     let mut accepted = 0usize;
     let mut conflicts = 0usize;
@@ -794,7 +817,9 @@ async fn concurrent_approvals_interrupted_dispatch_and_active_lifecycle_prevent_
     );
 
     // 7. Non-deferred service action preserves synchronous 200 OK `executed` API contract.
-    fixture.runner.set_systemctl(MockSystemctlResponse::OkService);
+    fixture
+        .runner
+        .set_systemctl(MockSystemctlResponse::OkService);
     let sync_id = fixture.queue_action("restart_service:sonarr:systemd", "warn");
     let (st, sync_resp) = post_json(
         router.clone(),

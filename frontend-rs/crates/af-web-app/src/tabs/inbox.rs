@@ -7,7 +7,6 @@ use af_web_core::{api::ApiClient, draft::FormDraft};
 use af_web_ui::SkeletonBox;
 use leptos::prelude::*;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use wasm_bindgen_futures::spawn_local;
 
 const ENVELOPE_KEYS: &[&str] = &[
@@ -28,9 +27,6 @@ const ENVELOPE_KEYS: &[&str] = &[
     "parameters",
     "payload",
 ];
-
-const INBOX_RESTART_POLL_MS: u32 = 1_500;
-const INBOX_RESTART_TIMEOUT_MS: f64 = 180_000.0;
 
 fn text(value: &Value, key: &str) -> String {
     match &value[key] {
@@ -105,82 +101,10 @@ fn action_job_unit(action: &Value, response: Option<&Value>) -> Option<String> {
     from_action.or(from_response).map(str::to_string)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InboxRestartPhase {
-    WaitingForJob,
-    WaitingForReadiness,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrackedInboxRestart {
-    action_id: i64,
-    target: String,
-    job_unit: String,
-    deadline_ms: f64,
-    phase: InboxRestartPhase,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct InboxNotice {
-    message: String,
-    is_error: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum InboxRestartJobOutcome {
-    Working,
-    JobSucceeded,
-    JobFailed(String),
-}
-
-fn evaluate_inbox_restart_status(expected_unit: &str, status: &Value) -> InboxRestartJobOutcome {
-    let observed_unit = status
-        .get("job_unit")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .or_else(|| status.get("operationId").and_then(Value::as_str))
-        .unwrap_or("");
-    if observed_unit != expected_unit {
-        return InboxRestartJobOutcome::Working;
-    }
-    let completed = status
-        .get("completed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let success = status
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let status_text = status.get("status").and_then(Value::as_str).unwrap_or("");
-    let state_text = status.get("state").and_then(Value::as_str).unwrap_or("");
-    if (completed && !success)
-        || status_text == "failed"
-        || matches!(state_text, "failed" | "interrupted")
-    {
-        let detail = status
-            .get("error")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Check service logs.");
-        return InboxRestartJobOutcome::JobFailed(detail.to_string());
-    }
-    if completed && success && (status_text == "succeeded" || state_text == "complete") {
-        return InboxRestartJobOutcome::JobSucceeded;
-    }
-    InboxRestartJobOutcome::Working
-}
-
-fn is_api_database_ready(readiness: &Value) -> bool {
-    readiness.get("service").and_then(Value::as_str) == Some("aetherflow-api")
-        && readiness.get("status").and_then(Value::as_str) == Some("ready")
-        && readiness.get("database").and_then(Value::as_str) == Some("ok")
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ApprovalFeedbackKind {
     Executed,
-    Queued { target: String, job_unit: String },
+    Queued { job_unit: String },
     QueuedMissingReceipt,
     Unavailable,
     ApprovedUnconfirmed,
@@ -208,10 +132,9 @@ fn classify_approval_decision(
         "failed" => ApprovalFeedbackKind::Failed(text(action, "execution_log")),
         "executed" => ApprovalFeedbackKind::Executed,
         "queued" | "accepted" => match action_job_unit(action, Some(response)) {
-            Some(unit) if is_valid_core_restart_unit(&unit) => ApprovalFeedbackKind::Queued {
-                target: target_summary(action),
-                job_unit: unit,
-            },
+            Some(unit) if is_valid_core_restart_unit(&unit) => {
+                ApprovalFeedbackKind::Queued { job_unit: unit }
+            }
             _ => ApprovalFeedbackKind::QueuedMissingReceipt,
         },
         "unavailable" => ApprovalFeedbackKind::Unavailable,
@@ -556,29 +479,10 @@ fn ApprovalInbox() -> impl IntoView {
     let detail_loading = RwSignal::new(false);
     let detail_error = RwSignal::new(None::<String>);
     let generation = RwSignal::new(0u64);
-    let tracked_restarts = RwSignal::new(BTreeMap::<i64, TrackedInboxRestart>::new());
-    let restart_notice = RwSignal::new(None::<InboxNotice>);
-    let restart_poll_busy = RwSignal::new(false);
-    let restart_interval = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
     Effect::new(move |_| {
         if let Some(total) = pending.data.get().reported_total() {
             context.pending.set(total as usize);
         }
-    });
-    let interval = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
-        15_000,
-        move || {
-            if !resource.loading.get_untracked() {
-                resource.refresh();
-            }
-            if !pending.loading.get_untracked() {
-                pending.refresh();
-            }
-        },
-    )));
-    on_cleanup(move || {
-        interval.set_value(None);
-        restart_interval.set_value(None);
     });
     let rows = Memo::new(move |_| {
         let filter = filter.get();
@@ -610,220 +514,32 @@ fn ApprovalInbox() -> impl IntoView {
             }
         });
     });
-    let track_restart = Callback::new(move |(action_id, target, job_unit): (i64, String, String)| {
-        if !is_valid_core_restart_unit(&job_unit) {
-            return;
-        }
-        let now = js_sys::Date::now();
-        tracked_restarts.update(|map| {
-            let replace = map
-                .get(&action_id)
-                .map(|existing| existing.job_unit != job_unit)
-                .unwrap_or(true);
-            if replace {
-                map.insert(
-                    action_id,
-                    TrackedInboxRestart {
-                        action_id,
-                        target,
-                        job_unit,
-                        deadline_ms: now + INBOX_RESTART_TIMEOUT_MS,
-                        phase: InboxRestartPhase::WaitingForJob,
-                    },
-                );
+    let interval = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
+        15_000,
+        move || {
+            if !resource.loading.get_untracked() {
+                resource.refresh();
             }
-        });
-    });
-    // Reconcile tracked restarts from server-returned inbox rows (e.g. after reload or API restart).
-    Effect::new(move |_| {
-        let loaded = super::contracts::grid_rows::<super::contracts::ActionApprovalRequest>(
-            &resource.data.get(),
-        );
-        if loaded.is_empty() {
-            return;
-        }
-        let now = js_sys::Date::now();
-        tracked_restarts.update(|map| {
-            for row in &loaded {
-                let Some(id) = row["id"].as_i64() else {
-                    continue;
-                };
-                let status = row["status"].as_str().unwrap_or("");
-                if status == "queued" {
-                    if let Some(unit) = action_job_unit(row, None)
-                        .filter(|u| is_valid_core_restart_unit(u))
+            if !pending.loading.get_untracked() {
+                pending.refresh();
+            }
+            if open.get_untracked() && !detail_loading.get_untracked() {
+                let receipt_action = selected.with_untracked(|action| {
+                    if matches!(action["status"].as_str(), Some("queued" | "unavailable"))
+                        && action_job_unit(action, None).is_some()
                     {
-                        let needs_insert = map
-                            .get(&id)
-                            .map(|existing| existing.job_unit != unit)
-                            .unwrap_or(true);
-                        if needs_insert {
-                            map.insert(
-                                id,
-                                TrackedInboxRestart {
-                                    action_id: id,
-                                    target: target_summary(row),
-                                    job_unit: unit,
-                                    deadline_ms: now + INBOX_RESTART_TIMEOUT_MS,
-                                    phase: InboxRestartPhase::WaitingForJob,
-                                },
-                            );
-                        }
-                    }
-                } else if matches!(status, "executed" | "failed" | "unavailable" | "rejected") {
-                    map.remove(&id);
-                }
-            }
-        });
-    });
-    // Poll durable core-restart receipts and API readiness while any inbox restart is queued.
-    Effect::new(move |_| {
-        let active = !tracked_restarts.with(BTreeMap::is_empty);
-        if !context.is_admin() || !active {
-            restart_interval.set_value(None);
-            return;
-        }
-        if restart_interval.with_value(Option::is_some) {
-            return;
-        }
-        restart_interval.set_value(Some(gloo_timers::callback::Interval::new(
-            INBOX_RESTART_POLL_MS,
-            move || {
-                if !context.is_admin()
-                    || restart_poll_busy.get_untracked()
-                    || tracked_restarts.with_untracked(BTreeMap::is_empty)
-                {
-                    return;
-                }
-                let snapshot = tracked_restarts.get_untracked();
-                let epoch = context.session_epoch.get_untracked();
-                restart_poll_busy.set(true);
-                let mut busy_guard = crate::tabs::busy::BusyGuard::new(restart_poll_busy);
-                spawn_local(async move {
-                    let now = js_sys::Date::now();
-                    for (action_id, entry) in snapshot {
-                        if tracked_restarts.try_get_untracked().is_none()
-                            || context.session_epoch.try_get_untracked() != Some(epoch)
-                            || !context.is_admin()
-                        {
-                            break;
-                        }
-                        if now >= entry.deadline_ms {
-                            tracked_restarts.update(|map| {
-                                map.remove(&action_id);
-                            });
-                            let msg = tt_with(
-                                context,
-                                "{service}: restart outcome or readiness could not be confirmed. Check service state and logs before retrying.",
-                                &[("service", &entry.target)],
-                            );
-                            restart_notice.set(Some(InboxNotice {
-                                message: msg.clone(),
-                                is_error: true,
-                            }));
-                            context.toast(msg, true);
-                            resource.refresh();
-                            pending.refresh();
-                            refresh_selected.run(action_id);
-                            continue;
-                        }
-                        let mut phase = entry.phase;
-                        if phase == InboxRestartPhase::WaitingForJob {
-                            let encoded = js_sys::encode_uri_component(&entry.job_unit)
-                                .as_string()
-                                .unwrap_or_default();
-                            let path = format!(
-                                "/api/v1/admin/services/restart/status?job_unit={encoded}"
-                            );
-                            match ApiClient.get(&path).await {
-                                Ok(status) => match evaluate_inbox_restart_status(&entry.job_unit, &status) {
-                                    InboxRestartJobOutcome::Working => {}
-                                    InboxRestartJobOutcome::JobFailed(detail) => {
-                                        tracked_restarts.update(|map| {
-                                            map.remove(&action_id);
-                                        });
-                                        let msg = tt_with(
-                                            context,
-                                            "{service}: restart failed. {detail}",
-                                            &[
-                                                ("service", &entry.target),
-                                                ("detail", &tt(context, &detail)),
-                                            ],
-                                        );
-                                        restart_notice.set(Some(InboxNotice {
-                                            message: msg.clone(),
-                                            is_error: true,
-                                        }));
-                                        context.toast(msg, true);
-                                        resource.refresh();
-                                        pending.refresh();
-                                        refresh_selected.run(action_id);
-                                        continue;
-                                    }
-                                    InboxRestartJobOutcome::JobSucceeded => {
-                                        phase = InboxRestartPhase::WaitingForReadiness;
-                                        tracked_restarts.update(|map| {
-                                            if let Some(current) = map.get_mut(&action_id) {
-                                                if current.job_unit == entry.job_unit {
-                                                    current.phase = InboxRestartPhase::WaitingForReadiness;
-                                                }
-                                            }
-                                        });
-                                    }
-                                },
-                                Err(err) => {
-                                    if matches!(err.status, 400 | 404) {
-                                        tracked_restarts.update(|map| {
-                                            map.remove(&action_id);
-                                        });
-                                        let msg = tt_with(
-                                            context,
-                                            "{service}: restart outcome or readiness could not be confirmed. Check service state and logs before retrying.",
-                                            &[("service", &entry.target)],
-                                        );
-                                        restart_notice.set(Some(InboxNotice {
-                                            message: msg.clone(),
-                                            is_error: true,
-                                        }));
-                                        context.toast(msg, true);
-                                        resource.refresh();
-                                        pending.refresh();
-                                        refresh_selected.run(action_id);
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        if phase == InboxRestartPhase::WaitingForReadiness {
-                            if let Ok(readiness) = ApiClient.get("/api/v1/auth/ready").await {
-                                if is_api_database_ready(&readiness) {
-                                    tracked_restarts.update(|map| {
-                                        map.remove(&action_id);
-                                    });
-                                    let msg = tt_with(
-                                        context,
-                                        "{service}: restart completed; service activation and API readiness confirmed.",
-                                        &[("service", &entry.target)],
-                                    );
-                                    restart_notice.set(Some(InboxNotice {
-                                        message: msg.clone(),
-                                        is_error: false,
-                                    }));
-                                    context.toast(msg, false);
-                                    resource.refresh();
-                                    pending.refresh();
-                                    refresh_selected.run(action_id);
-                                }
-                            }
-                        }
-                    }
-                    if restart_poll_busy.try_get_untracked().is_some() {
-                        busy_guard.release();
+                        action["id"].as_i64()
+                    } else {
+                        None
                     }
                 });
-            },
-        )));
-    });
+                if let Some(id) = receipt_action {
+                    refresh_selected.run(id);
+                }
+            }
+        },
+    )));
+    on_cleanup(move || interval.set_value(None));
     let risk_counts = Memo::new(move |_| {
         let mut critical_high = 0usize;
         let mut medium = 0usize;
@@ -873,6 +589,9 @@ fn ApprovalInbox() -> impl IntoView {
         });
     });
     let resolved = Callback::new(move |action: Value| {
+        if action["status"] == "queued" {
+            filter.set("approved".to_string());
+        }
         resource.data.update(|data| {
             if let Some(rows) = data["actions"].as_array_mut() {
                 if let Some(row) = rows.iter_mut().find(|r| r["id"] == action["id"]) {
@@ -913,61 +632,6 @@ fn ApprovalInbox() -> impl IntoView {
             <p role="status" class="text-sm text-amber-300">
                 {move || tt_with(context, "Inbox.awaitingApprovalCount", &[("count", &context.pending.get().to_string())])}
             </p>
-            {move || {
-                let active: Vec<TrackedInboxRestart> = tracked_restarts.get().into_values().collect();
-                (!active.is_empty()).then(|| {
-                    view! {
-                        <div class="space-y-2" role="status">
-                            {active
-                                .into_iter()
-                                .map(|entry| {
-                                    let phase_key = match entry.phase {
-                                        InboxRestartPhase::WaitingForJob => {
-                                            "Waiting for systemd restart job completion"
-                                        }
-                                        InboxRestartPhase::WaitingForReadiness => {
-                                            "Confirming API and database readiness"
-                                        }
-                                    };
-                                    let label = tt_with(
-                                        context,
-                                        "{service} · Receipt: {receipt} · {phase}",
-                                        &[
-                                            ("service", &entry.target),
-                                            ("receipt", &entry.job_unit),
-                                            ("phase", &tt(context, phase_key)),
-                                        ],
-                                    );
-                                    view! {
-                                        <p class="text-xs font-mono text-indigo-200 bg-indigo-500/10 border border-indigo-400/30 rounded-lg px-3 py-2 break-all">
-                                            {label}
-                                        </p>
-                                    }
-                                })
-                                .collect_view()}
-                        </div>
-                    }
-                })
-            }}
-            {move || {
-                restart_notice.get().map(|notice| {
-                    if notice.is_error {
-                        view! {
-                            <p role="alert" class="af-danger-banner text-sm">
-                                {notice.message}
-                            </p>
-                        }
-                        .into_any()
-                    } else {
-                        view! {
-                            <p role="status" class="text-sm text-emerald-300 bg-emerald-500/10 border border-emerald-400/30 rounded-lg px-3 py-2">
-                                {notice.message}
-                            </p>
-                        }
-                        .into_any()
-                    }
-                })
-            }}
             <div
                 role="region"
                 aria-label=move || tt(context, "Inbox.summaryRegion")
@@ -1161,8 +825,6 @@ fn ApprovalInbox() -> impl IntoView {
                 loading=detail_loading
                 error=detail_error
                 on_resolved=resolved
-                tracked_restarts=tracked_restarts
-                on_track_restart=track_restart
                 on_refresh_action=refresh_selected
             />
         </section>
@@ -1170,14 +832,12 @@ fn ApprovalInbox() -> impl IntoView {
 }
 
 #[component]
-pub fn ActionDetailModal(
+fn ActionDetailModal(
     open: RwSignal<bool>,
     action: RwSignal<Value>,
     loading: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     on_resolved: Callback<Value>,
-    tracked_restarts: RwSignal<BTreeMap<i64, TrackedInboxRestart>>,
-    on_track_restart: Callback<(i64, String, String)>,
     on_refresh_action: Callback<i64>,
 ) -> impl IntoView {
     let context = app();
@@ -1254,17 +914,14 @@ pub fn ActionDetailModal(
                             ApprovalFeedbackKind::Executed => {
                                 (tt(context, "Action approved and executed."), false)
                             }
-                            ApprovalFeedbackKind::Queued { target, job_unit } => {
-                                on_track_restart.run((id, target.clone(), job_unit));
-                                (
-                                    tt_with(
-                                        context,
-                                        "{service}: restart scheduled; waiting for its receipt and API readiness.",
-                                        &[("service", &target)],
-                                    ),
-                                    false,
-                                )
-                            }
+                            ApprovalFeedbackKind::Queued { job_unit } => (
+                                tt_with(
+                                    context,
+                                    "Inbox.queuedBanner",
+                                    &[("receipt", &job_unit)],
+                                ),
+                                false,
+                            ),
                             ApprovalFeedbackKind::QueuedMissingReceipt => (
                                 tt(
                                     context,
@@ -1286,7 +943,9 @@ pub fn ActionDetailModal(
                                 false,
                             ),
                         };
-                        if action.with_untracked(|a| a["id"].as_i64() == Some(id)) {
+                        if updated["status"] != "queued"
+                            && action.with_untracked(|a| a["id"].as_i64() == Some(id))
+                        {
                             outcome.set(Some(message.clone()));
                         }
                         context.toast(message, is_error);
@@ -1341,18 +1000,11 @@ pub fn ActionDetailModal(
                     let breakdown = analyze_action(&current);
                     let status_str = text(&current, "status");
                     let action_id = text(&current, "id");
-                    let numeric_id = current["id"].as_i64();
                     let reason_str = text(&current, "reason");
                     let exec_log = text(&current, "execution_log");
                     let job_unit = text(&current, "job_unit");
                     let resolved_by = text(&current, "resolved_by");
                     let resolved_at = text(&current, "resolved_at");
-                    let tracked_phase = numeric_id.and_then(|id| {
-                        tracked_restarts
-                            .get()
-                            .get(&id)
-                            .map(|entry| entry.phase)
-                    });
                     let raw_class = breakdown.raw_classification.clone();
                     let show_raw_class = !raw_class.trim().is_empty()
                         && !raw_class.eq_ignore_ascii_case(breakdown.risk_level);
@@ -1411,34 +1063,10 @@ pub fn ActionDetailModal(
                                 </div>
                             })}
 
-                            {is_queued.then(|| {
-                                let phase_text = tracked_phase.map(|phase| {
-                                    tt(
-                                        context,
-                                        match phase {
-                                            InboxRestartPhase::WaitingForJob => {
-                                                "Waiting for systemd restart job completion"
-                                            }
-                                            InboxRestartPhase::WaitingForReadiness => {
-                                                "Confirming API and database readiness"
-                                            }
-                                        },
-                                    )
-                                });
-                                view! {
-                                    <div role="status" class="bg-indigo-500/10 border border-indigo-400/30 rounded-xl p-3 text-xs text-indigo-200 space-y-1">
-                                        <p class="break-all">
-                                            {tt_with(
-                                                context,
-                                                "Inbox.queuedBanner",
-                                                &[("receipt", &job_unit_for_banner)],
-                                            )}
-                                        </p>
-                                        {phase_text.map(|phase| view! {
-                                            <p class="font-mono text-indigo-300">{phase}</p>
-                                        })}
-                                    </div>
-                                }
+                            {is_queued.then(|| view! {
+                                <p role="status" class="bg-indigo-500/10 border border-indigo-400/30 rounded-xl p-3 text-xs text-indigo-200 break-all">
+                                    {tt_with(context, "Inbox.queuedBanner", &[("receipt", &job_unit_for_banner)])}
+                                </p>
                             })}
 
                             {is_unavailable.then(|| view! {
@@ -1711,11 +1339,8 @@ mod tests {
     }
 
     #[test]
-    fn deferred_restart_decision_classification_and_receipt_evaluation_stay_truthful() {
-        let valid_unit =
-            "aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service";
-        let other_unit =
-            "aetherflow-self-update-restart-aetherflow-runner-fedcba9876543210.service";
+    fn deferred_restart_decisions_report_the_server_state() {
+        let valid_unit = "aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service";
 
         // Queued deferred core restart with valid receipt never claims executed.
         let queued_action = json!({
@@ -1731,7 +1356,6 @@ mod tests {
                 &json!({"status": "queued", "job_unit": valid_unit, "action": queued_action})
             ),
             ApprovalFeedbackKind::Queued {
-                target: "aetherflow-api".into(),
                 job_unit: valid_unit.into(),
             }
         );
@@ -1802,49 +1426,13 @@ mod tests {
             ApprovalFeedbackKind::Failed("unit failed".into())
         );
         assert_eq!(
-            classify_approval_decision("reject", &json!({"id": 45, "status": "rejected"}), &json!({})),
+            classify_approval_decision(
+                "reject",
+                &json!({"id": 45, "status": "rejected"}),
+                &json!({})
+            ),
             ApprovalFeedbackKind::Rejected
         );
-
-        // Receipt polling evaluator verifies unit identity, working, succeeded, failed, and readiness.
-        assert_eq!(
-            evaluate_inbox_restart_status(
-                valid_unit,
-                &json!({"job_unit": other_unit, "completed": true, "success": true, "status": "succeeded", "state": "complete"})
-            ),
-            InboxRestartJobOutcome::Working
-        );
-        assert_eq!(
-            evaluate_inbox_restart_status(
-                valid_unit,
-                &json!({"job_unit": valid_unit, "completed": false, "success": false, "status": "running", "state": "running"})
-            ),
-            InboxRestartJobOutcome::Working
-        );
-        assert_eq!(
-            evaluate_inbox_restart_status(
-                valid_unit,
-                &json!({"job_unit": valid_unit, "completed": true, "success": true, "status": "succeeded", "state": "complete"})
-            ),
-            InboxRestartJobOutcome::JobSucceeded
-        );
-        assert_eq!(
-            evaluate_inbox_restart_status(
-                valid_unit,
-                &json!({"job_unit": valid_unit, "completed": true, "success": false, "status": "failed", "state": "failed", "error": "Restart failed"})
-            ),
-            InboxRestartJobOutcome::JobFailed("Restart failed".into())
-        );
-        assert!(is_api_database_ready(&json!({
-            "service": "aetherflow-api",
-            "status": "ready",
-            "database": "ok"
-        })));
-        assert!(!is_api_database_ready(&json!({
-            "service": "aetherflow-api",
-            "status": "not_ready",
-            "database": "unreachable"
-        })));
 
         // Envelope key `job_unit` is excluded from generic extracted parameters.
         let extracted = extract_action_parameters(&queued_action);

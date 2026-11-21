@@ -2727,9 +2727,7 @@ fn get_pending_action_by_id_with_connection(
     action_id: i64,
 ) -> anyhow::Result<Option<PendingAction>> {
     let cols = pending_action_select_columns(conn);
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {cols} FROM pending_actions WHERE id = ?1",
-    ))?;
+    let mut stmt = conn.prepare(&format!("SELECT {cols} FROM pending_actions WHERE id = ?1",))?;
     let res = stmt.query_row(params![action_id], map_pending_action_row);
     match res {
         Ok(action) => Ok(Some(action)),
@@ -3943,8 +3941,16 @@ mod pending_action_query_tests {
 
         for (id, status, unit) in [
             (2, "approved", None),
-            (3, "queued", Some("aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service")),
-            (4, "unavailable", Some("aetherflow-self-update-restart-aetherflow-runner-fedcba9876543210.service")),
+            (
+                3,
+                "queued",
+                Some("aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service"),
+            ),
+            (
+                4,
+                "unavailable",
+                Some("aetherflow-self-update-restart-aetherflow-runner-fedcba9876543210.service"),
+            ),
             (5, "rejected", None),
             (6, "pending", None),
         ] {
