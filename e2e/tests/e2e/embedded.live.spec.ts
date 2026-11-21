@@ -1340,69 +1340,6 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
       }
     });
 
-    await test.step('a public WAV share loads a blob audio preview under production CSP', async () => {
-      const directory = `live-public-audio-${Date.now()}`;
-      const path = `${directory}/silence.wav`;
-      let shareId: string | undefined;
-      const previewContext = await browser.newContext({ baseURL: new URL(page.url()).origin, serviceWorkers: 'block' });
-      try {
-        const headers = await mutationHeaders(page);
-        const mkdir = await page.request.post('/api/v1/auth/mcbrowser/directory', { headers, data: { path: directory } });
-        expect([200, 201]).toContain(mkdir.status());
-        const upload = await page.request.put(`/api/v1/auth/mcbrowser/upload?path=${encodeURIComponent(path)}`, {
-          headers: { ...headers, 'Content-Type': 'audio/wav' }, data: silentWav(),
-        });
-        expect(upload.status()).toBe(201);
-        expect((await upload.json()).success).toBe(true);
-        const created = await page.request.post('/api/v1/auth/mcbrowser/shares', {
-          headers, data: { path, allow_download: true },
-        });
-        expect(created.status()).toBe(201);
-        const share = (await created.json()).share;
-        shareId = share.id;
-        const url = new URL(share.url, page.url());
-        const token = url.searchParams.get('token');
-        expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-
-        const preview = await previewContext.newPage();
-        await preview.addInitScript(() => {
-          const target = window as Window & { __afCspViolations?: string[] };
-          target.__afCspViolations = [];
-          document.addEventListener('securitypolicyviolation', (event) => {
-            target.__afCspViolations!.push(`${event.violatedDirective}: ${event.blockedURI}`);
-          });
-        });
-        const response = await preview.goto(`/share?token=${token}`);
-        expect(response?.ok()).toBeTruthy();
-        expect(response?.headers()['content-security-policy']).toMatch(/(?:^|;)\s*media-src\s+[^;]*'self'[^;]*blob:/);
-        const downloaded = preview.waitForResponse((response) =>
-          new URL(response.url()).pathname === `/api/v1/public/mcbrowser/shares/${token}/download`
-        );
-        await preview.getByRole('button', { name: 'Preview', exact: true }).click();
-        const attachment = await downloaded;
-        expect(attachment.ok()).toBeTruthy();
-        expect(attachment.headers()['content-type']).toBe('application/octet-stream');
-        expect(attachment.headers()['content-disposition']).toMatch(/^attachment;/);
-        expect(attachment.headers()['x-content-type-options']).toBe('nosniff');
-        const audio = preview.locator('audio');
-        await expect(audio).toBeVisible();
-        await expect(audio).toHaveAttribute('src', /^blob:/);
-        await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.readyState)).toBeGreaterThanOrEqual(1);
-        expect(await audio.evaluate((element: HTMLAudioElement) => element.duration)).toBeGreaterThan(0);
-        expect(await preview.evaluate(() => (window as Window & { __afCspViolations?: string[] }).__afCspViolations)).toEqual([]);
-        expect((await previewContext.cookies()).some((cookie) => cookie.name === 'aetherflow_session')).toBe(false);
-      } finally {
-        await previewContext.close();
-        const headers = await mutationHeaders(page);
-        if (shareId) {
-          const revoked = await page.request.delete(`/api/v1/auth/mcbrowser/shares/${shareId}`, { headers });
-          expect([200, 204, 404]).toContain(revoked.status());
-        }
-        const deleted = await page.request.post('/api/v1/auth/mcbrowser/delete-recursive', { headers, data: { path: directory } });
-        expect([200, 204, 404]).toContain(deleted.status());
-      }
-    });
-
     await test.step('streaming status tokens and French public errors are localized live', async () => {
       const dashboard = page.waitForResponse((response) =>
         new URL(response.url()).pathname === '/api/v1/auth/streaming/dashboard' && response.ok()
@@ -1544,6 +1481,71 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     }
   });
 
+  test('a public WAV share loads a blob audio preview under production CSP', async ({ page, browser }) => {
+    test.setTimeout(65_000);
+    await signInLive(page);
+    const directory = `live-public-audio-${Date.now()}`;
+    const path = `${directory}/silence.wav`;
+    let shareId: string | undefined;
+    const previewContext = await browser.newContext({ baseURL: new URL(page.url()).origin, serviceWorkers: 'block' });
+    try {
+      const headers = await mutationHeaders(page);
+      const mkdir = await page.request.post('/api/v1/auth/mcbrowser/directory', { headers, data: { path: directory } });
+      expect([200, 201]).toContain(mkdir.status());
+      const upload = await page.request.put(`/api/v1/auth/mcbrowser/upload?path=${encodeURIComponent(path)}`, {
+        headers: { ...headers, 'Content-Type': 'audio/wav' }, data: silentWav(),
+      });
+      expect(upload.status()).toBe(201);
+      expect((await upload.json()).success).toBe(true);
+      const created = await page.request.post('/api/v1/auth/mcbrowser/shares', {
+        headers, data: { path, allow_download: true },
+      });
+      expect(created.status()).toBe(201);
+      const share = (await created.json()).share;
+      shareId = share.id;
+      const url = new URL(share.url, page.url());
+      const token = url.searchParams.get('token');
+      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+      const preview = await previewContext.newPage();
+      await preview.addInitScript(() => {
+        const target = window as Window & { __afCspViolations?: string[] };
+        target.__afCspViolations = [];
+        document.addEventListener('securitypolicyviolation', (event) => {
+          target.__afCspViolations!.push(`${event.violatedDirective}: ${event.blockedURI}`);
+        });
+      });
+      const response = await preview.goto(`/share?token=${token}`);
+      expect(response?.ok()).toBeTruthy();
+      expect(response?.headers()['content-security-policy']).toMatch(/(?:^|;)\s*media-src\s+[^;]*'self'[^;]*blob:/);
+      const downloaded = preview.waitForResponse((response) =>
+        new URL(response.url()).pathname === `/api/v1/public/mcbrowser/shares/${token}/download`
+      );
+      await preview.getByRole('button', { name: 'Preview', exact: true }).click();
+      const attachment = await downloaded;
+      expect(attachment.ok()).toBeTruthy();
+      expect(attachment.headers()['content-type']).toBe('application/octet-stream');
+      expect(attachment.headers()['content-disposition']).toMatch(/^attachment;/);
+      expect(attachment.headers()['x-content-type-options']).toBe('nosniff');
+      const audio = preview.locator('audio');
+      await expect(audio).toBeVisible();
+      await expect(audio).toHaveAttribute('src', /^blob:/);
+      await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.readyState)).toBeGreaterThanOrEqual(1);
+      expect(await audio.evaluate((element: HTMLAudioElement) => element.duration)).toBeGreaterThan(0);
+      expect(await preview.evaluate(() => (window as Window & { __afCspViolations?: string[] }).__afCspViolations)).toEqual([]);
+      expect((await previewContext.cookies()).some((cookie) => cookie.name === 'aetherflow_session')).toBe(false);
+    } finally {
+      await previewContext.close();
+      const headers = await mutationHeaders(page);
+      if (shareId) {
+        const revoked = await page.request.delete(`/api/v1/auth/mcbrowser/shares/${shareId}`, { headers });
+        expect([200, 204, 404]).toContain(revoked.status());
+      }
+      const deleted = await page.request.post('/api/v1/auth/mcbrowser/delete-recursive', { headers, data: { path: directory } });
+      expect([200, 204, 404]).toContain(deleted.status());
+    }
+  });
+
   test('same-account session rechecks preserve pending editor loads and saves', async ({ page }) => {
     test.setTimeout(90_000);
     // Keep the browser inside the recent-login window while the server handles
@@ -1597,7 +1599,9 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
           && response.request().method() === 'PUT',
         { timeout: 15_000 }
       );
-      await dialog.getByRole('button', { name: 'Save', exact: true }).last().click();
+      const saveAgain = dialog.getByRole('button', { name: 'Save', exact: true }).last();
+      await expect(saveAgain).toBeEnabled();
+      await saveAgain.press('Enter');
       expect((await savedAgain).ok()).toBeTruthy();
       await expect(editor).toBeEditable();
       const stored = await page.request.get(`/api/v1/auth/mcbrowser/content?path=${encodeURIComponent(filename)}`);
