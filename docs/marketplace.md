@@ -97,6 +97,6 @@ Marketplace install, reinstall, update, and uninstall use the [package API](API.
 
 If an app prompts you to create an administrator on first launch, complete that setup through its internal address before enabling external access. A public route can expose the setup screen while the app's own authentication is still unconfigured.
 
-Autoscan's **Open App** link shows its health endpoint. Configure media targets, mount anchor files and Sonarr or Radarr Connect webhooks before starting automated scans. If a retained `host` entry has its own port, use that port when reinstalling or change the entry before selecting a different port.
+Autoscan's **Open App** link shows its health endpoint. Configure media targets and any webhook senders you use, such as Sonarr or Radarr Connect. Optional mount anchors use regular files. If a retained `host` entry has its own port, use that port when reinstalling or change the entry before selecting a different port.
 
 Use the catalog's service name with [runner-mediated CLI controls](rust-admin-cli.md), for example `af service status plexmediaserver`. Packages that share a service, such as Nextcloud and ruTorrent on Apache, also share the effects of restarting that service.
