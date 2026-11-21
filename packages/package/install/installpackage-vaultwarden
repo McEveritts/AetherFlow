@@ -35,20 +35,11 @@ fi
 
 require_root
 validate_config_paths /etc/vaultwarden/vaultwarden.env /etc/vaultwarden/admin_token.txt
-if [[ -f /etc/vaultwarden/vaultwarden.env ]]; then
-    set_config_file_mode 0600 /etc/vaultwarden/vaultwarden.env
-fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Vaultwarden..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 curl jq tar openssl ca-certificates sqlite3 libsqlite3-0 libpq5 libmariadb3
-
-if ! id -u vaultwarden >/dev/null 2>&1; then
-    useradd --system --user-group --no-create-home --home-dir /var/lib/vaultwarden --shell /usr/sbin/nologin vaultwarden
-fi
-
-mkdir -p /opt/vaultwarden /var/lib/vaultwarden/data /etc/vaultwarden
 
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
@@ -58,53 +49,87 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-report_progress 35 "Fetching latest Vaultwarden release metadata..."
+report_progress 35 "Resolving the Vaultwarden release image..."
 VW_VERSION="$(github_latest_tag "dani-garcia/vaultwarden" "1.32.7")"
-
-report_progress 55 "Extracting prebuilt Vaultwarden binary and Web Vault (${OCI_ARCH})..."
-mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
-TMP_EXTRACT=$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/vw-oci-XXXXXX")
-VW_TAG="${VW_VERSION#v}"
-TOKEN="$(curl -fsSL "https://ghcr.io/token?scope=repository:dani-garcia/vaultwarden:pull" 2>/dev/null | jq -r '.token // empty' || true)"
-
-if [[ -n "$TOKEN" ]]; then
-    ACCEPT_INDEX="application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
-    INDEX="$(printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_TAG}" 2>/dev/null || \
-             printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_VERSION}" 2>/dev/null || \
-             printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/latest" 2>/dev/null || true)"
-
-    if [[ -n "$INDEX" ]]; then
-        MANIFEST_DIGEST="$(printf '%s' "$INDEX" | jq -r --arg arch "$OCI_ARCH" 'if .manifests then (.manifests[] | select(.platform.architecture == $arch and .platform.os == "linux") | .digest) else empty end' | head -n1 || true)"
-        if [[ -n "$MANIFEST_DIGEST" ]]; then
-            MANIFEST="$(printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${MANIFEST_DIGEST}" 2>/dev/null || true)"
-        else
-            MANIFEST="$INDEX"
-        fi
-
-        for LAYER_DIGEST in $(printf '%s' "$MANIFEST" | jq -r '.layers[]?.digest // empty'); do
-            if [[ ! "$LAYER_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
-                print_error "Invalid Vaultwarden OCI layer digest"
-                rm -rf "$TMP_EXTRACT"
-                exit 1
-            fi
-            BLOB_FILE="${TMP_EXTRACT}/layer.tar.gz"
-            if printf 'Authorization: Bearer %s\n' "$TOKEN" | af_logged curl -fsSL -L -H @- "https://ghcr.io/v2/dani-garcia/vaultwarden/blobs/${LAYER_DIGEST}" -o "$BLOB_FILE"; then
-                if ! verify_sha256 "$BLOB_FILE" "${LAYER_DIGEST#sha256:}" "Vaultwarden OCI layer"; then
-                    rm -rf "$TMP_EXTRACT"
-                    exit 1
-                fi
-                tar -xzf "$BLOB_FILE" -C "$TMP_EXTRACT" vaultwarden web-vault 2>/dev/null || tar -xzf "$BLOB_FILE" -C "$TMP_EXTRACT" ./vaultwarden ./web-vault 2>/dev/null || true
-            fi
-            rm -f "$BLOB_FILE"
-        done
-    fi
-fi
-
-if [[ ! -f "${TMP_EXTRACT}/vaultwarden" ]]; then
-    print_error "Failed to extract vaultwarden binary from official OCI package"
-    rm -rf "$TMP_EXTRACT"
+if [[ ! "$VW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+    print_error "Invalid Vaultwarden release version: $VW_VERSION"
     exit 1
 fi
+
+OCI_REGISTRY="https://ghcr.io/v2/dani-garcia/vaultwarden"
+TOKEN="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://ghcr.io/token?scope=repository:dani-garcia/vaultwarden:pull" | jq -er '.token // empty')"
+
+vaultwarden_oci_fetch() {
+    printf 'Authorization: Bearer %s\n' "$TOKEN" |
+        curl --proto '=https' --proto-redir '=https' -fsSL -H @- "$@"
+}
+
+OCI_ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json"
+if ! MANIFEST="$(vaultwarden_oci_fetch -H "Accept: $OCI_ACCEPT" "$OCI_REGISTRY/manifests/$VW_VERSION" 2>/dev/null)" &&
+   ! MANIFEST="$(vaultwarden_oci_fetch -H "Accept: $OCI_ACCEPT" "$OCI_REGISTRY/manifests/v$VW_VERSION" 2>/dev/null)"; then
+    print_error "No official Vaultwarden OCI image for exact release $VW_VERSION"
+    exit 1
+fi
+
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
+TMP_EXTRACT=$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/vw-oci-XXXXXX")
+trap 'rm -rf -- "$TMP_EXTRACT"' EXIT
+
+MANIFEST_DIGEST="$(jq -r --arg arch "$OCI_ARCH" '
+    first(.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $arch
+        and ($arch != "arm" or .platform.variant == "v7"))) | .digest // empty
+' <<< "$MANIFEST")"
+if [[ -n "$MANIFEST_DIGEST" ]]; then
+    if [[ ! "$MANIFEST_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+        print_error "Invalid Vaultwarden OCI manifest digest"
+        exit 1
+    fi
+    manifest_file="$TMP_EXTRACT/manifest.json"
+    vaultwarden_oci_fetch -H "Accept: $OCI_ACCEPT" "$OCI_REGISTRY/manifests/$MANIFEST_DIGEST" -o "$manifest_file"
+    verify_sha256 "$manifest_file" "${MANIFEST_DIGEST#sha256:}" "Vaultwarden OCI manifest"
+    MANIFEST="$(< "$manifest_file")"
+    rm -f -- "$manifest_file"
+fi
+
+CONFIG_DIGEST="$(jq -r '.config.digest // empty' <<< "$MANIFEST")"
+if [[ ! "$CONFIG_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+    print_error "No valid Vaultwarden OCI configuration for linux/$OCI_ARCH at release $VW_VERSION"
+    exit 1
+fi
+image_config="$TMP_EXTRACT/image-config.json"
+vaultwarden_oci_fetch "$OCI_REGISTRY/blobs/$CONFIG_DIGEST" -o "$image_config"
+verify_sha256 "$image_config" "${CONFIG_DIGEST#sha256:}" "Vaultwarden OCI configuration"
+IMAGE_VERSION="$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' < "$image_config")"
+rm -f -- "$image_config"
+if [[ "${IMAGE_VERSION#[vV]}" != "$VW_VERSION" ]]; then
+    print_error "Vaultwarden OCI image version mismatch for release $VW_VERSION"
+    exit 1
+fi
+
+report_progress 55 "Extracting Vaultwarden $VW_VERSION and Web Vault ($OCI_ARCH)..."
+LAYER_DIGESTS="$(jq -er '.layers[].digest' <<< "$MANIFEST")"
+while IFS= read -r LAYER_DIGEST; do
+    if [[ ! "$LAYER_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+        print_error "Invalid Vaultwarden OCI layer digest"
+        exit 1
+    fi
+    BLOB_FILE="$TMP_EXTRACT/layer.tar.gz"
+    af_logged vaultwarden_oci_fetch "$OCI_REGISTRY/blobs/$LAYER_DIGEST" -o "$BLOB_FILE"
+    verify_sha256 "$BLOB_FILE" "${LAYER_DIGEST#sha256:}" "Vaultwarden OCI layer"
+    tar -xzf "$BLOB_FILE" --no-same-owner --no-same-permissions -C "$TMP_EXTRACT" vaultwarden web-vault 2>/dev/null ||
+        tar -xzf "$BLOB_FILE" --no-same-owner --no-same-permissions -C "$TMP_EXTRACT" ./vaultwarden ./web-vault 2>/dev/null || true
+    rm -f -- "$BLOB_FILE"
+done <<< "$LAYER_DIGESTS"
+
+if [[ ! -f "$TMP_EXTRACT/vaultwarden" || -L "$TMP_EXTRACT/vaultwarden" ]]; then
+    print_error "Failed to extract vaultwarden binary from official OCI package"
+    exit 1
+fi
+
+if ! id -u vaultwarden >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/vaultwarden --shell /usr/sbin/nologin vaultwarden
+fi
+mkdir -p /opt/vaultwarden /var/lib/vaultwarden/data /etc/vaultwarden
 
 chmod 755 "${TMP_EXTRACT}/vaultwarden"
 stage_app_archive "$TMP_EXTRACT" /opt/vaultwarden vaultwarden /var/lib/vaultwarden "$PACKAGE_NAME" "." /etc/vaultwarden

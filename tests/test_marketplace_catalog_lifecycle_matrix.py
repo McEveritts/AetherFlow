@@ -522,7 +522,38 @@ elif command in ('curl', 'wget'):
         if checksum_opt_out() or os.environ.get('AF_TEST_CHECKSUM_MANIFEST') or os.environ.get('AF_TEST_NO_LOCAL_SHA256') or failure == 'archive' or bare_url.endswith(('.sha256', '.sha256sum')) or 'SHASUMS256.txt' in bare_url:
             return
         pathlib.Path(str(destination) + '.sha256').write_text(hashlib.sha256(payload).hexdigest() + '\n')
-    if target and target != '/dev/null':
+    vaultwarden_registry = 'https://ghcr.io/v2/dani-garcia/vaultwarden/'
+    if app == 'vaultwarden' and url.startswith(vaultwarden_registry):
+        resource = url.removeprefix(vaultwarden_registry)
+        release = (root / 'release.tar.gz').read_bytes()
+        layer_digest = 'sha256:' + hashlib.sha256(release).hexdigest()
+        if failure == 'oci-layer-checksum':
+            layer_digest = 'sha256:' + '0' * 64
+        elif failure == 'oci-layer-digest':
+            layer_digest = 'sha256:fixture-layer'
+        image_version = '9.9.9' if failure == 'oci-version' else version
+        config = json.dumps({'config': {'Labels': {'org.opencontainers.image.version': image_version}}}).encode()
+        config_digest = 'sha256:' + hashlib.sha256(config).hexdigest()
+        manifest = json.dumps({'config': {'digest': config_digest}, 'layers': [{'digest': layer_digest}]}).encode()
+        manifest_digest = 'sha256:' + hashlib.sha256(manifest).hexdigest()
+        if failure == 'download':
+            sys.exit(22)
+        if resource in ('manifests/' + version, 'manifests/v' + version, 'manifests/latest'):
+            if failure == 'oci-unavailable' and resource != 'manifests/latest':
+                sys.exit(22)
+            if failure == 'oci-prefixed-tag' and resource == 'manifests/' + version:
+                sys.exit(22)
+            index = {'manifests': [{'digest': manifest_digest, 'platform': {'architecture': 'amd64', 'os': 'linux'}}]}
+            sys.stdout.write(json.dumps(index))
+        elif resource == 'manifests/' + manifest_digest:
+            pathlib.Path(target).write_bytes(manifest)
+        elif resource == 'blobs/' + config_digest:
+            pathlib.Path(target).write_bytes(config + (b' ' if failure == 'oci-config-checksum' else b''))
+        elif resource == 'blobs/' + layer_digest:
+            pathlib.Path(target).write_bytes(b'corrupt release' if failure == 'archive' else release)
+        else:
+            sys.exit(22)
+    elif target and target != '/dev/null':
         if failure == 'download': sys.exit(22)
         bare = url.split('?', 1)[0]
         checksum_name = bare.rsplit('/', 1)[-1]
@@ -585,10 +616,29 @@ elif command in ('curl', 'wget'):
         print(json.dumps({'tag_name': 'v' + version, 'token': 'fixture-token', 'assets': [], 'fixture_url': url}))
 elif command == 'jq':
     incoming = sys.stdin.read()
-    query = next((entry for entry in arguments if entry.startswith(('.', 'if ', '['))), '')
+    query = next((entry for entry in arguments if entry.lstrip().startswith(('.', 'if ', '[', 'first('))), '')
     if app == 'notifiarr' and os.environ.get('AF_FIXTURE_NOTIFIARR_GZIP'):
         sys.exit(subprocess.run(['/usr/bin/jq', *arguments], input=incoming, text=True).returncode)
     elif 'token' in query: print('fixture-token')
+    elif app == 'vaultwarden':
+        data = json.loads(incoming)
+        if '.manifests' in query:
+            arch = arguments[arguments.index('arch') + 1]
+            for manifest in data.get('manifests', []):
+                platform = manifest.get('platform', {})
+                if platform.get('os') == 'linux' and platform.get('architecture') == arch:
+                    if arch != 'arm' or platform.get('variant') == 'v7':
+                        print(manifest['digest'])
+                        break
+        elif '.config.digest' in query:
+            print(data.get('config', {}).get('digest', ''))
+        elif 'org.opencontainers.image.version' in query:
+            print(data.get('config', {}).get('Labels', {}).get('org.opencontainers.image.version', ''))
+        elif '.layers' in query:
+            for layer in data.get('layers', []):
+                print(layer['digest'])
+        else:
+            sys.exit(2)
     elif '.layers' in query or '.manifests' in query: print('sha256:' + hashlib.sha256((root / 'release.tar.gz').read_bytes()).hexdigest())
     elif 'digest' in query: print('sha256:' + hashlib.sha256((root / 'release.tar.gz').read_bytes()).hexdigest())
     elif 'browser_download_url' in query:
@@ -3541,13 +3591,43 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
                 self.assertNotEqual(fixture.run("update", 18343).returncode, 0)
                 self.assertEqual(victim.read_text(), "ROCKET_PORT=8343\nADMIN_TOKEN=operator-secret\n")
 
+    def test_vaultwarden_exact_version_uses_only_matching_registry_tags(self):
+        fixture = self.fixture("vaultwarden")
+        result = fixture.run("update", AF_TARGET_VERSION="v2.1.0", AF_FIXTURE_FAILURE="oci-prefixed-tag")
+        self.assert_success(result)
+        registry_calls = (fixture.root / "commands.jsonl").read_text()
+        self.assertIn("/manifests/2.1.0", registry_calls)
+        self.assertIn("/manifests/v2.1.0", registry_calls)
+        self.assertNotIn("/manifests/latest", registry_calls)
+        self.assertEqual((fixture.root / "opt/vaultwarden/.af-version").read_text().strip(), "2.1.0")
+
+    def test_vaultwarden_missing_or_mismatched_image_preserves_previous_runtime(self):
+        fixture = self.fixture("vaultwarden")
+        self.assert_success(fixture.run())
+        runtime = fixture.root / "opt/vaultwarden/vaultwarden"
+        config = fixture.root / "etc/vaultwarden/vaultwarden.env"
+        config.chmod(0o640)
+        previous = runtime.read_bytes(), config.read_bytes(), fixture.lock.read_bytes()
+        log = fixture.root / "commands.jsonl"
+        for failure, message in (
+            ("oci-unavailable", "No official Vaultwarden OCI image for exact release 2.1.0"),
+            ("oci-version", "Vaultwarden OCI image version mismatch for release 2.1.0"),
+            ("oci-config-checksum", "Vaultwarden OCI configuration SHA-256 digest mismatch"),
+        ):
+            with self.subTest(failure=failure):
+                log.write_text("")
+                result = fixture.run("update", 18343, AF_TARGET_VERSION="2.1.0", AF_FIXTURE_FAILURE=failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("/manifests/latest", log.read_text())
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertFalse(any(call[0] == "systemctl" for call in calls))
+                self.assertEqual((runtime.read_bytes(), config.read_bytes(), fixture.lock.read_bytes()), previous)
+                self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+
     def test_vaultwarden_bad_layer_digest_cannot_install_runtime_or_receipt(self):
         fixture = self.fixture("vaultwarden")
-        fixture.file("mock-bin/jq", HOST_COMMAND.replace(
-            "elif '.layers' in query or '.manifests' in query: print('sha256:' + hashlib.sha256((root / 'release.tar.gz').read_bytes()).hexdigest())",
-            "elif '.layers' in query or '.manifests' in query: print('sha256:' + '0' * 64)",
-        )).chmod(0o755)
-        result = fixture.run()
+        result = fixture.run(AF_FIXTURE_FAILURE="oci-layer-checksum")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Vaultwarden OCI layer SHA-256 digest mismatch", result.stderr)
         self.assertFalse((fixture.root / "opt/vaultwarden/vaultwarden").exists())
@@ -3556,14 +3636,10 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
 
     def test_vaultwarden_malformed_layer_digest_is_rejected_before_download(self):
         fixture = self.fixture("vaultwarden")
-        fixture.file("mock-bin/jq", HOST_COMMAND.replace(
-            "elif '.layers' in query or '.manifests' in query: print('sha256:' + hashlib.sha256((root / 'release.tar.gz').read_bytes()).hexdigest())",
-            "elif '.layers' in query or '.manifests' in query: print('sha256:fixture-layer')",
-        )).chmod(0o755)
-        result = fixture.run()
+        result = fixture.run(AF_FIXTURE_FAILURE="oci-layer-digest")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid Vaultwarden OCI layer digest", result.stderr)
-        self.assertNotIn("/blobs/", (fixture.root / "commands.jsonl").read_text())
+        self.assertNotIn("/blobs/sha256:fixture-layer", (fixture.root / "commands.jsonl").read_text())
         self.assertFalse((fixture.root / "opt/vaultwarden/vaultwarden").exists())
         self.assertFalse(fixture.lock.exists())
 
