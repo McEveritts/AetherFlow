@@ -31,8 +31,11 @@ class TestRunner:
         
         self.inspector = CodebaseInspector(PROJECT_ROOT)
         self.client = AetherFlowApiClient(base_url)
-        if self.mode == "live" and self.client.is_server_reachable():
-            self.client.ensure_live_authenticated()
+        if self.mode == "live":
+            if not self.client.is_server_reachable(timeout=10):
+                raise RuntimeError("The live E2E server did not respond to readiness.")
+            if not self.client.ensure_live_authenticated():
+                raise RuntimeError("The live E2E runner could not sign in with the configured credentials.")
         
         self.all_tests: List[TestCase] = []
         self.results: List[Dict[str, Any]] = []

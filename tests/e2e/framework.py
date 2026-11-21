@@ -217,7 +217,7 @@ class AetherFlowApiClient:
         code, resp, _ = self.request("POST", "/api/v1/public/auth/login", {
             "username": self.auth_username,
             "password": self.auth_password,
-        })
+        }, timeout=15)
         if code == 200:
             token = resp.get("token")
             if token:
