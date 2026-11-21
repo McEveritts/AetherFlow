@@ -18,7 +18,13 @@ else
 fi
 
 require_root
-validate_config_paths /etc/notifiarr/notifiarr.conf
+validate_config_paths \
+    /etc/notifiarr/notifiarr.conf \
+    /var/lib/sonarr/config.xml \
+    /var/lib/radarr/config.xml \
+    /var/lib/lidarr/config.xml \
+    /var/lib/readarr/config.xml \
+    /var/lib/prowlarr/config.xml
 
 PACKAGE_NAME="notifiarr"
 APP_NAME="notifiarr"
@@ -29,6 +35,10 @@ LOG_DIR="/var/log/notifiarr"
 BIN_PATH="/usr/local/bin/notifiarr"
 SERVICE_FILE="/etc/systemd/system/notifiarr.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5454}}"
+if [[ ! "$APP_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    log_error "Invalid ${APP_NAME} port: ${APP_PORT}"
+    exit 1
+fi
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p /install
@@ -115,91 +125,18 @@ rm -rf "${TMP_TAR}" "${TMP_DIR}"
 queue_app_version "${CONFIG_DIR}/.af-version" "${LATEST_TAG#v}"
 
 report_progress 75 "Configuring ${APP_NAME} integration and credentials..."
-extract_api_key() {
-    safe_config_python "$1" <<'PYEOF'
-import sys, xml.etree.ElementTree as ET
-try:
-    with ManagedConfig(sys.argv[1], create_parents=False) as config:
-        text = config.read_text()
-    key = ET.fromstring(text).findtext("ApiKey") if text else None
-    if key: print(key.strip())
-except (FileNotFoundError, ET.ParseError):
-    pass
-PYEOF
-}
-SONARR_KEY="$(extract_api_key /var/lib/sonarr/config.xml)"
-RADARR_KEY="$(extract_api_key /var/lib/radarr/config.xml)"
-LIDARR_KEY="$(extract_api_key /var/lib/lidarr/config.xml)"
-READARR_KEY="$(extract_api_key /var/lib/readarr/config.xml)"
-PROWLARR_KEY="$(extract_api_key /var/lib/prowlarr/config.xml)"
-
 NOTIFIARR_NEW_CONFIG=false
-validate_config_paths "${CONFIG_DIR}/notifiarr.conf"
-if [[ ! -s "${CONFIG_DIR}/notifiarr.conf" ]]; then
+validate_config_paths \
+    "${CONFIG_DIR}/notifiarr.conf" \
+    /var/lib/sonarr/config.xml \
+    /var/lib/radarr/config.xml \
+    /var/lib/lidarr/config.xml \
+    /var/lib/readarr/config.xml \
+    /var/lib/prowlarr/config.xml
+if [[ ! -s "${CONFIG_DIR}/notifiarr.conf" ]] || ! grep -q '[^[:space:]]' "${CONFIG_DIR}/notifiarr.conf"; then
     NOTIFIARR_NEW_CONFIG=true
-    {
-    cat <<EOF
-# Notifiarr configuration
-api_key = ""
-bind_addr = "127.0.0.1:${APP_PORT}"
-ui_password = ""
-urlbase = "/"
-quiet = false
-log_file = "${LOG_DIR}/app.log"
-http_log = "${LOG_DIR}/http.log"
-EOF
-
-    if [[ -n "${SONARR_KEY}" ]]; then
-        cat <<EOF
-
-[[sonarr]]
-  name = "AetherFlow Sonarr"
-  url = "http://127.0.0.1:8989"
-  api_key = "${SONARR_KEY}"
-EOF
-    fi
-
-    if [[ -n "${RADARR_KEY}" ]]; then
-        cat <<EOF
-
-[[radarr]]
-  name = "AetherFlow Radarr"
-  url = "http://127.0.0.1:7878"
-  api_key = "${RADARR_KEY}"
-EOF
-    fi
-
-    if [[ -n "${LIDARR_KEY}" ]]; then
-        cat <<EOF
-
-[[lidarr]]
-  name = "AetherFlow Lidarr"
-  url = "http://127.0.0.1:8686"
-  api_key = "${LIDARR_KEY}"
-EOF
-    fi
-
-    if [[ -n "${READARR_KEY}" ]]; then
-        cat <<EOF
-
-[[readarr]]
-  name = "AetherFlow Readarr"
-  url = "http://127.0.0.1:8787"
-  api_key = "${READARR_KEY}"
-EOF
-    fi
-
-    if [[ -n "${PROWLARR_KEY}" ]]; then
-        cat <<EOF
-
-[[prowlarr]]
-  name = "AetherFlow Prowlarr"
-  url = "http://127.0.0.1:9696"
-  api_key = "${PROWLARR_KEY}"
-EOF
-    fi
-    } | write_config_file "${CONFIG_DIR}/notifiarr.conf" 0600
 fi
+sync_servarr_toml_config "notifiarr" "${CONFIG_DIR}/notifiarr.conf" "${APP_PORT}" "${LOG_DIR}"
 
 set_config_value "${CONFIG_DIR}/notifiarr.conf" ini bind_addr "\"127.0.0.1:${APP_PORT}\""
 if [[ "$NOTIFIARR_NEW_CONFIG" == true || ( -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != 1 ) ]]; then
@@ -220,7 +157,7 @@ safe_write_text(config, text, 0o600)
 PYEOF
 fi
 
-chmod 600 "${CONFIG_DIR}/notifiarr.conf"
+set_config_file_mode 0600 "${CONFIG_DIR}/notifiarr.conf"
 chown -hRP "${APP_USER}:${APP_USER}" "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."

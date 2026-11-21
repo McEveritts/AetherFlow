@@ -2216,16 +2216,22 @@ class ManagedConfig:
         if current is not None and (current.st_dev, current.st_ino) != (self.metadata.st_dev, self.metadata.st_ino):
             raise ValueError('Managed configuration target changed')
 
-    def read_bytes(self):
+    def read_bytes(self, max_bytes=None):
         if self.descriptor is None:
             return b''
-        self.validate(os.fstat(self.descriptor))
+        metadata = os.fstat(self.descriptor)
+        self.validate(metadata)
+        if max_bytes is not None and metadata.st_size > max_bytes:
+            raise ValueError('Managed configuration exceeds maximum allowed size')
         os.lseek(self.descriptor, 0, os.SEEK_SET)
         with os.fdopen(os.dup(self.descriptor), 'rb') as source:
-            return source.read()
+            data = source.read() if max_bytes is None else source.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
+            raise ValueError('Managed configuration exceeds maximum allowed size')
+        return data
 
-    def read_text(self):
-        return self.read_bytes().decode('utf-8')
+    def read_text(self, max_bytes=None):
+        return self.read_bytes(max_bytes=max_bytes).decode('utf-8')
 
     def write_text(self, text, mode=None):
         self.check_target()
@@ -2265,9 +2271,9 @@ class ManagedConfig:
     def __exit__(self, *error):
         self.close()
 
-def safe_read_text(filename):
+def safe_read_text(filename, max_bytes=None):
     with ManagedConfig(filename) as config:
-        return config.read_text()
+        return config.read_text(max_bytes=max_bytes)
 
 def safe_write_text(filename, text, mode=None):
     with ManagedConfig(filename) as config:
@@ -2759,6 +2765,499 @@ for filename in sys.argv[2:]:
         os.fchmod(config.descriptor, mode)
         config.check_target()
 PYEOF
+}
+
+# Discover effective local Servarr URLs and API keys from bounded, verified
+# config.xml files and synchronize Notifiarr or Unpackerr TOML configs
+# without clobbering operator-edited sections or exposing keys in logs.
+sync_servarr_toml_config() {
+    local consumer="$1"
+    local target_config="$2"
+    local app_port="${3:-}"
+    local log_dir="${4:-}"
+    local summary line level message
+    summary="$(safe_config_python "$consumer" "$target_config" "$app_port" "$log_dir" <<'PYEOF'
+import ipaddress, json, os, re, sys, xml.etree.ElementTree as ET
+try:
+    import tomllib as _tomllib
+except ModuleNotFoundError:
+    _tomllib = None
+
+def _sync_servarr_toml_config():
+    MAX_SERVARR_XML_BYTES = 262144
+    MAX_TARGET_CONF_BYTES = 1048576
+    UNPARSEABLE = object()
+
+    SERVARR_SPECS = {
+        'notifiarr': (
+            ('sonarr', 'AetherFlow Sonarr', 8989),
+            ('radarr', 'AetherFlow Radarr', 7878),
+            ('lidarr', 'AetherFlow Lidarr', 8686),
+            ('readarr', 'AetherFlow Readarr', 8787),
+            ('prowlarr', 'AetherFlow Prowlarr', 9696),
+        ),
+        'unpackerr': (
+            ('sonarr', None, 8989),
+            ('radarr', None, 7878),
+            ('lidarr', None, 8686),
+            ('readarr', None, 8787),
+        ),
+    }
+    UNPACKERR_PATHS = {
+        'sonarr': ['/downloads', '/mnt/unionfs', '/var/lib/rtorrent/downloads'],
+        'radarr': ['/downloads', '/mnt/unionfs', '/var/lib/rtorrent/downloads'],
+        'lidarr': ['/downloads', '/mnt/unionfs'],
+        'readarr': ['/downloads', '/mnt/unionfs'],
+    }
+    MARKER_RE = re.compile(r'^\s*#\s*aetherflow-managed:\s*([a-z0-9_-]+)\s+url=(\S+)\s*$')
+    ARRAY_HEADER_RE = re.compile(r'^\s*\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]\s*(?:#.*)?$')
+    TABLE_HEADER_RE = re.compile(r'^\s*\[\s*([A-Za-z0-9_.-]+)\s*\]\s*(?:#.*)?$')
+    FIELD_RE = re.compile(r'^([ \t]*)(name|url|api_key)\s*=\s*(.*)$')
+
+    def toml_quote(value):
+        return json.dumps(str(value), ensure_ascii=False).replace('\x7f', '\\u007f')
+
+    def toml_array(values):
+        return '[' + ', '.join(toml_quote(item) for item in values) + ']'
+
+    def parse_toml_string(raw):
+        text = raw.strip()
+        if not text:
+            return UNPARSEABLE
+        if text.startswith('"""') or text.startswith("'''"):
+            return UNPARSEABLE
+        if text[0] == '"':
+            index = 1
+            escaped = False
+            while index < len(text):
+                ch = text[index]
+                if escaped:
+                    escaped = False
+                elif ch == '\\':
+                    escaped = True
+                elif ch == '"':
+                    remainder = text[index + 1:].strip()
+                    if remainder and not remainder.startswith('#'):
+                        return UNPARSEABLE
+                    literal = text[:index + 1]
+                    if _tomllib is not None:
+                        try:
+                            parsed = _tomllib.loads('v = ' + literal).get('v')
+                            return parsed if isinstance(parsed, str) else UNPARSEABLE
+                        except Exception:
+                            return UNPARSEABLE
+                    try:
+                        parsed = json.loads(literal)
+                        return parsed if isinstance(parsed, str) else UNPARSEABLE
+                    except json.JSONDecodeError:
+                        return UNPARSEABLE
+                index += 1
+            return UNPARSEABLE
+        if text[0] == "'":
+            end = text.find("'", 1)
+            if end == -1:
+                return UNPARSEABLE
+            remainder = text[end + 1:].strip()
+            if remainder and not remainder.startswith('#'):
+                return UNPARSEABLE
+            return text[1:end]
+        return UNPARSEABLE
+
+    def advance_multiline_state(text, in_delim):
+        i = 0
+        n = len(text)
+        while i < n:
+            if in_delim is not None:
+                if in_delim == '"""':
+                    if text[i] == '\\':
+                        i += 2
+                        continue
+                    if text.startswith('"""', i):
+                        in_delim = None
+                        i += 3
+                        continue
+                else:
+                    if text.startswith("'''", i):
+                        in_delim = None
+                        i += 3
+                        continue
+                i += 1
+                continue
+            ch = text[i]
+            if ch == '#':
+                break
+            if text.startswith('"""', i):
+                in_delim = '"""'
+                i += 3
+                continue
+            if text.startswith("'''", i):
+                in_delim = "'''"
+                i += 3
+                continue
+            if ch == '"':
+                i += 1
+                while i < n:
+                    if text[i] == '\\':
+                        i += 2
+                        continue
+                    if text[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if ch == "'":
+                end = text.find("'", i + 1)
+                if end == -1:
+                    break
+                i = end + 1
+                continue
+            i += 1
+        return in_delim
+
+    def normalize_host(raw_host):
+        host = (raw_host or '').strip()
+        if not host or host in ('*', '0.0.0.0'):
+            return '127.0.0.1'
+        if host in ('::', '[::]'):
+            return '[::1]'
+        unbracketed = host[1:-1] if host.startswith('[') and host.endswith(']') else host
+        try:
+            address = ipaddress.ip_address(unbracketed)
+        except ValueError:
+            if re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', host):
+                return host
+            raise ValueError('unsafe BindAddress')
+        if isinstance(address, ipaddress.IPv6Address):
+            return '[::1]' if address.is_unspecified else f'[{address.compressed}]'
+        return '127.0.0.1' if address.is_unspecified else str(address)
+
+    def normalize_port(raw_port, default_port):
+        text = (raw_port or '').strip()
+        if not text:
+            return int(default_port)
+        if not text.isdecimal():
+            raise ValueError('invalid Port')
+        port = int(text)
+        if not 1 <= port <= 65535:
+            raise ValueError('out-of-range Port')
+        return port
+
+    def normalize_url_base(raw_base):
+        base = (raw_base or '').strip()
+        if not base:
+            return ''
+        if not base.startswith('/'):
+            base = '/' + base
+        if not re.fullmatch(r'/[A-Za-z0-9._/-]*', base):
+            raise ValueError('unsafe UrlBase')
+        base = base.rstrip('/')
+        if not base:
+            return ''
+        if any(part in ('.', '..') for part in base.split('/')) or '//' in base:
+            raise ValueError('unsafe UrlBase')
+        return base
+
+    def read_servarr_upstream(app, default_port):
+        xml_path = '/var/lib/' + app + '/config.xml'
+        try:
+            with ManagedConfig(xml_path, create_parents=False) as cfg:
+                if cfg.descriptor is None:
+                    return None, f'INFO: Skipped {app} integration (config.xml not present)'
+                raw_bytes = cfg.read_bytes(max_bytes=MAX_SERVARR_XML_BYTES)
+                cfg.check_target()
+        except FileNotFoundError:
+            return None, f'INFO: Skipped {app} integration (service config directory not present)'
+        try:
+            raw = raw_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return None, f'WARN: Skipped {app} integration (config.xml is not valid UTF-8)'
+        if not raw.strip():
+            return None, f'WARN: Skipped {app} integration (config.xml is empty)'
+        upper = raw.upper()
+        if '<!DOCTYPE' in upper or '<!ENTITY' in upper:
+            return None, f'WARN: Skipped {app} integration (config.xml contains disallowed XML declaration)'
+        try:
+            root = ET.fromstring(raw.lstrip('\ufeff'))
+        except ET.ParseError:
+            return None, f'WARN: Skipped {app} integration (config.xml is malformed)'
+        if root.tag != 'Config':
+            return None, f'WARN: Skipped {app} integration (unexpected config.xml root element)'
+        api_key = (root.findtext('ApiKey') or '').strip()
+        if not api_key:
+            return None, f'WARN: Skipped {app} integration (ApiKey missing in config.xml)'
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in api_key):
+            return None, f'WARN: Skipped {app} integration (ApiKey contains control characters)'
+        try:
+            host = normalize_host(root.findtext('BindAddress'))
+            port = normalize_port(root.findtext('Port'), default_port)
+            url_base = normalize_url_base(root.findtext('UrlBase'))
+        except ValueError as err:
+            return None, f'WARN: Skipped {app} integration ({err})'
+        return {
+            'url': f'http://{host}:{port}{url_base}',
+            'api_key': api_key,
+            'stock_url': f'http://127.0.0.1:{default_port}',
+        }, None
+
+    def render_block(consumer_name, app, title, info):
+        block = [
+            f'# aetherflow-managed: {app} url={info["url"]}\n',
+            f'[[{app}]]\n',
+        ]
+        if consumer_name == 'notifiarr':
+            block.append(f'  name = {toml_quote(title)}\n')
+            block.append(f'  url = {toml_quote(info["url"])}\n')
+            block.append(f'  api_key = {toml_quote(info["api_key"])}\n')
+        else:
+            block.append(f'  url = {toml_quote(info["url"])}\n')
+            block.append(f'  api_key = {toml_quote(info["api_key"])}\n')
+            block.append(f'  paths = {toml_array(UNPACKERR_PATHS[app])}\n')
+            block.append('  protocols = "torrent"\n')
+            block.append('  timeout = "10s"\n')
+            block.append('  delete_orig = false\n')
+        return block
+
+    def render_fresh(consumer_name, discovered_map, port_str, log_dir_path):
+        out = []
+        if consumer_name == 'notifiarr':
+            if not port_str.isdecimal() or not 1 <= int(port_str) <= 65535:
+                raise ValueError('Invalid Notifiarr bind port')
+            if not log_dir_path:
+                raise ValueError('Missing Notifiarr log directory')
+            out.extend([
+                '# Notifiarr configuration\n',
+                'api_key = ""\n',
+                f'bind_addr = {toml_quote(f"127.0.0.1:{port_str}")}\n',
+                'ui_password = ""\n',
+                'urlbase = "/"\n',
+                'quiet = false\n',
+                f'log_file = {toml_quote(os.path.join(log_dir_path, "app.log"))}\n',
+                f'http_log = {toml_quote(os.path.join(log_dir_path, "http.log"))}\n',
+            ])
+            for app, title, _ in SERVARR_SPECS['notifiarr']:
+                if app in discovered_map:
+                    out.append('\n')
+                    out.extend(render_block('notifiarr', app, title, discovered_map[app]))
+        else:
+            out.extend([
+                '# Unpackerr Configuration - Generated by AetherFlow\n',
+                'debug = false\n',
+                'quiet = false\n',
+                'error_stderr = false\n',
+                'activity = false\n',
+                'log_queues = "1m"\n',
+                'log_files = 10\n',
+                'log_file_mb = 10\n',
+                'interval = "2m"\n',
+                'start_delay = "1m"\n',
+                'retry_delay = "5m"\n',
+                'max_retries = 3\n',
+                'parallel = 1\n',
+                'file_mode = "0644"\n',
+                'dir_mode = "0755"\n',
+            ])
+            for app, title, default_port in SERVARR_SPECS['unpackerr']:
+                if app in discovered_map:
+                    out.append('\n')
+                    out.extend(render_block('unpackerr', app, title, discovered_map[app]))
+                elif app in ('sonarr', 'radarr'):
+                    out.extend([
+                        '\n',
+                        f'# [[{app}]]\n',
+                        f'#   url = "http://127.0.0.1:{default_port}"\n',
+                        '#   api_key = ""\n',
+                        '#   paths = ["/downloads", "/mnt/unionfs"]\n',
+                    ])
+        return ''.join(out)
+
+    def scan_sections(lines):
+        sections = []
+        current = None
+        in_delim = None
+        for idx, raw_line in enumerate(lines):
+            stripped = raw_line.rstrip('\r\n')
+            if in_delim is not None:
+                in_delim = advance_multiline_state(stripped, in_delim)
+                continue
+            arr_match = ARRAY_HEADER_RE.match(stripped)
+            tbl_match = None if arr_match else TABLE_HEADER_RE.match(stripped)
+            if arr_match or tbl_match:
+                if current is not None:
+                    current['end'] = idx
+                    sections.append(current)
+                table_name = arr_match.group(1) if arr_match else tbl_match.group(1)
+                kind = 'array' if arr_match else 'table'
+                marker_line = None
+                marker_url = None
+                if kind == 'array' and idx > 0:
+                    m_match = MARKER_RE.match(lines[idx - 1].rstrip('\r\n'))
+                    if m_match and m_match.group(1) == table_name:
+                        marker_line = idx - 1
+                        marker_url = m_match.group(2)
+                current = {
+                    'kind': kind,
+                    'table': table_name,
+                    'start': idx,
+                    'end': len(lines),
+                    'marker_line': marker_line,
+                    'marker_url': marker_url,
+                    'fields': {},
+                    'ambiguous': False,
+                }
+                continue
+            if current is not None:
+                f_match = FIELD_RE.match(stripped)
+                if f_match:
+                    indent, key, rhs = f_match.group(1), f_match.group(2), f_match.group(3)
+                    if key in current['fields']:
+                        current['ambiguous'] = True
+                    else:
+                        current['fields'][key] = (idx, indent, parse_toml_string(rhs))
+            in_delim = advance_multiline_state(stripped, in_delim)
+        if current is not None:
+            current['end'] = len(lines)
+            sections.append(current)
+        return sections
+
+    def sync_existing_upstream(lines, consumer_name, app, title, info):
+        sections = scan_sections(lines)
+        matching = [s for s in sections if s['kind'] == 'array' and s['table'] == app]
+        if not matching:
+            updated = list(lines)
+            if updated and not updated[-1].endswith('\n'):
+                updated[-1] = updated[-1] + '\n'
+            if updated and updated[-1].strip():
+                updated.append('\n')
+            updated.extend(render_block(consumer_name, app, title, info))
+            return updated, f'INFO: Added late-installed {app} integration -> {info["url"]}'
+
+        for section in matching:
+            if section['ambiguous']:
+                continue
+            cur_name = section['fields']['name'][2] if 'name' in section['fields'] else None
+            cur_url = section['fields']['url'][2] if 'url' in section['fields'] else None
+            cur_key = section['fields']['api_key'][2] if 'api_key' in section['fields'] else None
+            if UNPARSEABLE in (cur_name, cur_url, cur_key):
+                continue
+            is_marked = section['marker_line'] is not None
+            if consumer_name == 'notifiarr':
+                if is_marked:
+                    name_ok = cur_name is None or cur_name == title
+                    url_ok = cur_url is None or cur_url == '' or cur_url == section['marker_url']
+                    key_ok = cur_key is None or cur_key == '' or cur_key == info['api_key']
+                    repairable = name_ok and url_ok and key_ok
+                else:
+                    norm_url = cur_url.rstrip('/') if isinstance(cur_url, str) else None
+                    repairable = (cur_name == title and norm_url == info['stock_url'] and cur_key == info['api_key'])
+            else:
+                if is_marked:
+                    url_ok = cur_url is None or cur_url == '' or cur_url == section['marker_url']
+                    key_ok = cur_key is None or cur_key == '' or cur_key == info['api_key']
+                    repairable = url_ok and key_ok
+                else:
+                    norm_url = cur_url.rstrip('/') if isinstance(cur_url, str) else None
+                    repairable = (norm_url == info['stock_url'] and cur_key == info['api_key'])
+            if not repairable:
+                continue
+
+            updated = list(lines)
+            expected_marker = f'# aetherflow-managed: {app} url={info["url"]}\n'
+            default_indent = '  '
+            for probe_key in ('url', 'api_key', 'name'):
+                if probe_key in section['fields']:
+                    default_indent = section['fields'][probe_key][1]
+                    break
+
+            insertions = []
+            if is_marked:
+                if updated[section['marker_line']] != expected_marker:
+                    updated[section['marker_line']] = expected_marker
+            else:
+                insertions.append((section['start'], expected_marker))
+
+            if 'url' in section['fields']:
+                url_idx, url_indent, _ = section['fields']['url']
+                if cur_url != info['url']:
+                    updated[url_idx] = f'{url_indent}url = {toml_quote(info["url"])}\n'
+                after_url_idx = url_idx + 1
+            else:
+                url_insert_idx = (section['fields']['name'][0] + 1) if 'name' in section['fields'] else (section['start'] + 1)
+                insertions.append((url_insert_idx, f'{default_indent}url = {toml_quote(info["url"])}\n'))
+                after_url_idx = url_insert_idx
+
+            if is_marked and cur_key in (None, ''):
+                if 'api_key' in section['fields']:
+                    key_idx, key_indent, _ = section['fields']['api_key']
+                    updated[key_idx] = f'{key_indent}api_key = {toml_quote(info["api_key"])}\n'
+                else:
+                    insertions.append((after_url_idx, f'{default_indent}api_key = {toml_quote(info["api_key"])}\n'))
+
+            for insert_idx, insert_line in sorted(insertions, key=lambda item: item[0], reverse=True):
+                updated.insert(insert_idx, insert_line)
+
+            if updated != lines:
+                return updated, f'INFO: Repaired {app} integration -> {info["url"]}'
+            return lines, f'INFO: Verified {app} integration -> {info["url"]}'
+
+        return lines, f'INFO: Preserved operator-configured {app} integration'
+
+    consumer_name, target_path, port_str, log_dir_path = sys.argv[1:5]
+    if consumer_name not in SERVARR_SPECS:
+        raise ValueError('Unsupported Servarr integration consumer: ' + consumer_name)
+
+    logs = []
+    discovered = {}
+    for app, _, default_port in SERVARR_SPECS[consumer_name]:
+        info, note = read_servarr_upstream(app, default_port)
+        if note:
+            logs.append(note)
+        elif info is not None:
+            discovered[app] = info
+
+    with ManagedConfig(target_path, create_parents=True) as target:
+        existing = target.read_text(max_bytes=MAX_TARGET_CONF_BYTES)
+        if not existing.strip():
+            rendered = render_fresh(consumer_name, discovered, port_str, log_dir_path)
+            target.write_text(rendered, 0o600)
+            for app, _, _ in SERVARR_SPECS[consumer_name]:
+                if app in discovered:
+                    logs.append(f'INFO: Configured {app} integration -> {discovered[app]["url"]}')
+        else:
+            lines = existing.splitlines(keepends=True)
+            for app, title, _ in SERVARR_SPECS[consumer_name]:
+                if app in discovered:
+                    lines, note = sync_existing_upstream(lines, consumer_name, app, title, discovered[app])
+                    logs.append(note)
+            rendered = ''.join(lines)
+            if rendered != existing:
+                target.write_text(rendered, 0o600)
+
+    if not discovered:
+        logs.append(f'INFO: No local Servarr upstreams configured for {consumer_name}; reinstall {consumer_name} after installing Servarr apps to wire integrations automatically')
+
+    for entry in logs:
+        print(entry)
+
+_sync_servarr_toml_config()
+PYEOF
+    )" || return $?
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        level="${line%%:*}"
+        message="${line#*: }"
+        case "$level" in
+            WARN)
+                if declare -F log_warn >/dev/null 2>&1; then
+                    log_warn "$message"
+                fi
+                ;;
+            INFO)
+                if declare -F log_info >/dev/null 2>&1; then
+                    log_info "$message"
+                fi
+                ;;
+        esac
+    done <<< "$summary"
 }
 
 # Change one listen setting without rebuilding the user's application config.
