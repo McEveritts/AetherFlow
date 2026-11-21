@@ -3951,9 +3951,13 @@ pub fn load_worker_registration_state_nofollow(
 }
 
 const MAX_WORKER_ACK_OUTBOX_ENTRIES: usize = 256;
-const MAX_WORKER_ACK_OUTBOX_BYTES: usize = 256 * 1024;
+const MAX_WORKER_ACK_OUTBOX_BYTES: usize = 512 * 1024;
 const MAX_WORKER_COMMAND_RECEIPTS: usize = 256;
 const MAX_WORKER_COMMAND_RECEIPTS_BYTES: usize = 512 * 1024;
+const MAX_RECEIPT_RESULT_MESSAGE_BYTES: usize = 1024;
+const MAX_RECEIPT_RESULT_MESSAGE_JSON_BYTES: usize = 1280;
+const RECEIPT_INTENT_COMPLETION_HEADROOM_BYTES: usize = 1536;
+const OUTBOX_INTENT_COMPLETION_HEADROOM_BYTES: usize = 1536;
 
 /// Resolves the durable `0600` worker command-ack outbox file path.
 pub fn resolve_worker_ack_outbox_path(state_path: &Path) -> std::path::PathBuf {
@@ -3983,7 +3987,58 @@ pub fn resolve_worker_command_receipts_path(outbox_path: &Path) -> std::path::Pa
         .join("cluster_worker_command_receipts.json")
 }
 
-/// Atomically persists bounded unconfirmed worker command acks (`0600`, confined `O_NOFOLLOW`).
+fn validate_worker_ack_outbox(acks: &[WorkerCommandAck]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        acks.len() <= MAX_WORKER_ACK_OUTBOX_ENTRIES,
+        "worker ack outbox exceeds maximum entry limit ({} > {})",
+        acks.len(),
+        MAX_WORKER_ACK_OUTBOX_ENTRIES
+    );
+    let mut seen = std::collections::HashSet::with_capacity(acks.len());
+    for ack in acks {
+        let clean_id = ack.id.trim();
+        anyhow::ensure!(
+            !clean_id.is_empty(),
+            "worker ack outbox contains an entry with empty command id"
+        );
+        anyhow::ensure!(
+            seen.insert(clean_id),
+            "worker ack outbox contains duplicate command id '{}'",
+            truncate_diagnostic_utf8(clean_id, 64)
+        );
+        anyhow::ensure!(
+            WorkerCommandReceiptPhase::from_ack_status(&ack.status).is_some(),
+            "worker ack outbox contains unsupported status '{}' for '{}'",
+            truncate_diagnostic_utf8(&ack.status, 64),
+            truncate_diagnostic_utf8(clean_id, 64)
+        );
+        anyhow::ensure!(
+            !matches!(ack.lease_generation, Some(g) if g <= 0),
+            "worker ack outbox contains non-positive lease_generation for '{}'",
+            truncate_diagnostic_utf8(clean_id, 64)
+        );
+    }
+    Ok(())
+}
+
+fn serialize_worker_ack_outbox_bounded(acks: &[WorkerCommandAck]) -> anyhow::Result<Vec<u8>> {
+    validate_worker_ack_outbox(acks)?;
+    let pretty = serde_json::to_vec_pretty(acks)?;
+    if pretty.len() <= MAX_WORKER_ACK_OUTBOX_BYTES {
+        return Ok(pretty);
+    }
+    let compact = serde_json::to_vec(acks)?;
+    anyhow::ensure!(
+        compact.len() <= MAX_WORKER_ACK_OUTBOX_BYTES,
+        "worker ack outbox exceeds maximum byte bound ({} > {} bytes)",
+        compact.len(),
+        MAX_WORKER_ACK_OUTBOX_BYTES
+    );
+    Ok(compact)
+}
+
+/// Atomically persists bounded unconfirmed worker command acks (`0600`, confined `O_NOFOLLOW`),
+/// failing closed instead of silently dropping unconfirmed entries or writing oversized files.
 pub fn persist_worker_ack_outbox_atomic(
     path: &Path,
     acks: &[WorkerCommandAck],
@@ -3995,12 +4050,7 @@ pub fn persist_worker_ack_outbox_atomic(
         anyhow::bail!("worker ack outbox path must have a filename");
     };
 
-    let bounded: &[WorkerCommandAck] = if acks.len() > MAX_WORKER_ACK_OUTBOX_ENTRIES {
-        &acks[acks.len() - MAX_WORKER_ACK_OUTBOX_ENTRIES..]
-    } else {
-        acks
-    };
-    let payload = serde_json::to_vec_pretty(bounded)?;
+    let payload = serialize_worker_ack_outbox_bounded(acks)?;
 
     #[cfg(unix)]
     {
@@ -4041,51 +4091,61 @@ pub fn persist_worker_ack_outbox_atomic(
     }
 }
 
-/// Loads persisted unconfirmed worker command acks safely using confined `O_NOFOLLOW` I/O.
-pub fn load_worker_ack_outbox_nofollow(path: &Path) -> Vec<WorkerCommandAck> {
-    let raw = {
+/// Strictly loads persisted unconfirmed worker command acks using confined `O_NOFOLLOW` I/O.
+/// Missing files return `Ok(Vec::new())`; symlinks, hardlinks, non-regular files, oversized files,
+/// malformed JSON, or invalid entries fail closed with `Err`.
+pub fn load_worker_ack_outbox_strict(path: &Path) -> anyhow::Result<Vec<WorkerCommandAck>> {
+    let raw_opt = {
         #[cfg(unix)]
         {
             let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
-                return Vec::new();
+                anyhow::bail!("worker ack outbox path must have a parent directory");
             };
             let Some(file_name) = path.file_name() else {
-                return Vec::new();
+                anyhow::bail!("worker ack outbox path must have a filename");
             };
-            let Ok(Some(dir)) = af_runner::job_receipts::ReceiptDirectory::open_existing(parent)
+            let Some(dir) = af_runner::job_receipts::ReceiptDirectory::open_existing(parent)
+                .context("opening confined worker ack outbox directory")?
             else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
-            match dir.read_regular_bounded(file_name, MAX_WORKER_ACK_OUTBOX_BYTES) {
-                Ok(Some(bytes)) => bytes,
-                _ => return Vec::new(),
-            }
+            dir.read_regular_bounded(file_name, MAX_WORKER_ACK_OUTBOX_BYTES)
+                .context("reading confined worker ack outbox")?
         }
         #[cfg(not(unix))]
         {
-            let Ok(file) = std::fs::File::open(path) else {
-                return Vec::new();
-            };
-            let mut buf = Vec::new();
-            if file
-                .take(MAX_WORKER_ACK_OUTBOX_BYTES as u64)
-                .read_to_end(&mut buf)
-                .is_err()
-            {
-                return Vec::new();
+            match std::fs::File::open(path) {
+                Ok(file) => {
+                    let mut buf = Vec::new();
+                    file.take((MAX_WORKER_ACK_OUTBOX_BYTES as u64) + 1)
+                        .read_to_end(&mut buf)?;
+                    if buf.len() > MAX_WORKER_ACK_OUTBOX_BYTES {
+                        anyhow::bail!("worker ack outbox exceeds maximum size");
+                    }
+                    Some(buf)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => return Err(err.into()),
             }
-            buf
         }
     };
 
-    let mut parsed: Vec<WorkerCommandAck> = serde_json::from_slice(&raw).unwrap_or_default();
-    if parsed.len() > MAX_WORKER_ACK_OUTBOX_ENTRIES {
-        parsed.drain(0..(parsed.len() - MAX_WORKER_ACK_OUTBOX_ENTRIES));
-    }
-    parsed
+    let Some(raw) = raw_opt else {
+        return Ok(Vec::new());
+    };
+    let parsed: Vec<WorkerCommandAck> =
+        serde_json::from_slice(&raw).context("parsing worker ack outbox JSON")?;
+    validate_worker_ack_outbox(&parsed)?;
+    Ok(parsed)
 }
 
-/// Appends or updates an unconfirmed ack and durably persists the `0600` outbox before updating memory.
+/// Loads persisted unconfirmed worker command acks safely using confined `O_NOFOLLOW` I/O.
+pub fn load_worker_ack_outbox_nofollow(path: &Path) -> Vec<WorkerCommandAck> {
+    load_worker_ack_outbox_strict(path).unwrap_or_default()
+}
+
+/// Appends or updates an unconfirmed ack and durably persists the `0600` outbox before updating
+/// memory. Fails closed rather than dropping existing unconfirmed entries when saturated.
 pub fn enqueue_worker_ack_outbox_entry(
     outbox_path: &Path,
     pending: &mut Vec<WorkerCommandAck>,
@@ -4095,9 +4155,11 @@ pub fn enqueue_worker_ack_outbox_entry(
     if let Some(existing) = next.iter_mut().find(|a| a.id == ack.id) {
         *existing = ack;
     } else {
-        if next.len() >= MAX_WORKER_ACK_OUTBOX_ENTRIES {
-            next.remove(0);
-        }
+        anyhow::ensure!(
+            next.len() < MAX_WORKER_ACK_OUTBOX_ENTRIES,
+            "worker ack outbox saturated at {} unconfirmed entries",
+            MAX_WORKER_ACK_OUTBOX_ENTRIES
+        );
         next.push(ack);
     }
     persist_worker_ack_outbox_atomic(outbox_path, &next)?;
@@ -4134,9 +4196,11 @@ pub fn evict_confirmed_acks_from_outbox(
 ///   or `Failed` or replaying the mutation.
 /// - Terminal receipts (`Executed`, `Failed`, `Unknown`) are persisted before ACK and reattached
 ///   to freshly observed higher `lease_generation` values without rerunning the side effect.
-/// - Storage is bounded to `MAX_WORKER_COMMAND_RECEIPTS` (256) entries; oldest confirmed terminal
-///   receipts are evicted first. Loss or deletion of the worker state directory removes local
-///   intent/outcome history.
+/// - Storage is bounded to `MAX_WORKER_COMMAND_RECEIPTS` (256) entries and
+///   `MAX_WORKER_COMMAND_RECEIPTS_BYTES` (512 KiB); only master-confirmed terminal receipts are
+///   recycled. When saturated by unconfirmed outcomes or active intents, new dispatches fail
+///   closed with backpressure while existing commands, reattachments, and ACKs continue to drain.
+///   Loss or deletion of the worker state directory removes local intent/outcome history.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerCommandReceiptPhase {
@@ -4284,6 +4348,21 @@ impl WorkerCommandIdentity {
     }
 }
 
+fn truncate_receipt_result_message(input: &str) -> String {
+    let mut s = truncate_utf8(input, MAX_RECEIPT_RESULT_MESSAGE_BYTES);
+    while serde_json::to_string(s)
+        .map(|encoded| encoded.len())
+        .unwrap_or(usize::MAX)
+        > MAX_RECEIPT_RESULT_MESSAGE_JSON_BYTES
+    {
+        let Some((last_idx, _)) = s.char_indices().next_back() else {
+            return String::new();
+        };
+        s = &s[..last_idx];
+    }
+    s.to_string()
+}
+
 fn build_interrupted_intent_unknown_message(receipt: &WorkerCommandReceipt) -> String {
     let op = receipt
         .action
@@ -4295,39 +4374,97 @@ fn build_interrupted_intent_unknown_message(receipt: &WorkerCommandReceipt) -> S
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("unknown target");
-    truncate_utf8(
-        &format!(
-            "worker restarted after persisting execution intent for {op} {target} before a final outcome was recorded; mutation may have occurred — inspect service state before retrying"
-        ),
-        1024,
-    )
-    .to_string()
+    truncate_receipt_result_message(&format!(
+        "worker restarted after persisting execution intent for {op} {target} before a final outcome was recorded; mutation may have occurred — inspect service state before retrying"
+    ))
 }
 
-fn prune_worker_command_receipts(receipts: &mut Vec<WorkerCommandReceipt>) {
-    while receipts.len() > MAX_WORKER_COMMAND_RECEIPTS {
-        if let Some(pos) = receipts
-            .iter()
-            .position(|r| r.ack_confirmed && r.phase.is_terminal())
-        {
+#[inline]
+fn is_recyclable_receipt(receipt: &WorkerCommandReceipt) -> bool {
+    receipt.ack_confirmed && receipt.phase.is_terminal()
+}
+
+fn recycle_confirmed_worker_command_receipts(
+    receipts: &mut Vec<WorkerCommandReceipt>,
+    max_entries: usize,
+) -> usize {
+    let mut recycled = 0;
+    while receipts.len() > max_entries {
+        if let Some(pos) = receipts.iter().position(is_recyclable_receipt) {
             receipts.remove(pos);
-        } else if let Some(pos) = receipts.iter().position(|r| r.phase.is_terminal()) {
-            receipts.remove(pos);
+            recycled += 1;
         } else {
-            receipts.remove(0);
+            break;
         }
     }
+    recycled
 }
 
-/// Atomically persists the bounded `0600` worker command execution receipt ledger via
-/// `af_runner::job_receipts::ConfinedFileLock`.
-pub fn persist_worker_command_receipts_atomic(
+fn validate_worker_command_receipts(receipts: &[WorkerCommandReceipt]) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(receipts.len());
+    for receipt in receipts {
+        let clean_id = receipt.id.trim();
+        anyhow::ensure!(
+            !clean_id.is_empty(),
+            "worker command receipts contain an entry with empty command id"
+        );
+        anyhow::ensure!(
+            seen.insert(clean_id),
+            "worker command receipts contain duplicate command id '{}'",
+            truncate_diagnostic_utf8(clean_id, 64)
+        );
+        anyhow::ensure!(
+            !matches!(receipt.lease_generation, Some(g) if g <= 0),
+            "worker command receipts contain non-positive lease_generation for '{}'",
+            truncate_diagnostic_utf8(clean_id, 64)
+        );
+        anyhow::ensure!(
+            !(receipt.phase == WorkerCommandReceiptPhase::Intent && receipt.ack_confirmed),
+            "worker command receipts contain confirmed intent for '{}'",
+            truncate_diagnostic_utf8(clean_id, 64)
+        );
+    }
+    Ok(())
+}
+
+fn prepare_receipts_for_persistence(
+    receipts: &mut Vec<WorkerCommandReceipt>,
+) -> anyhow::Result<Vec<u8>> {
+    validate_worker_command_receipts(receipts)?;
+    recycle_confirmed_worker_command_receipts(receipts, MAX_WORKER_COMMAND_RECEIPTS);
+    anyhow::ensure!(
+        receipts.len() <= MAX_WORKER_COMMAND_RECEIPTS,
+        "worker command receipt ledger saturated: {} unconfirmed/intent receipts exceed limit {}",
+        receipts.len(),
+        MAX_WORKER_COMMAND_RECEIPTS
+    );
+
+    let mut payload = serde_json::to_vec_pretty(receipts)?;
+    while payload.len() > MAX_WORKER_COMMAND_RECEIPTS_BYTES {
+        if let Some(pos) = receipts.iter().position(is_recyclable_receipt) {
+            receipts.remove(pos);
+            payload = serde_json::to_vec_pretty(receipts)?;
+        } else {
+            break;
+        }
+    }
+    if payload.len() > MAX_WORKER_COMMAND_RECEIPTS_BYTES {
+        payload = serde_json::to_vec(receipts)?;
+    }
+    anyhow::ensure!(
+        payload.len() <= MAX_WORKER_COMMAND_RECEIPTS_BYTES,
+        "worker command receipt ledger exceeds maximum byte bound ({} > {} bytes) with no confirmed receipts available to recycle",
+        payload.len(),
+        MAX_WORKER_COMMAND_RECEIPTS_BYTES
+    );
+    Ok(payload)
+}
+
+fn persist_worker_command_receipts_in_place(
     path: &Path,
-    receipts: &[WorkerCommandReceipt],
+    receipts: &mut Vec<WorkerCommandReceipt>,
 ) -> anyhow::Result<()> {
-    let mut bounded = receipts.to_vec();
-    prune_worker_command_receipts(&mut bounded);
-    let payload = serde_json::to_vec_pretty(&bounded)?;
+    let payload = prepare_receipts_for_persistence(receipts)?;
 
     #[cfg(unix)]
     {
@@ -4370,9 +4507,20 @@ pub fn persist_worker_command_receipts_atomic(
     }
 }
 
+/// Atomically persists the bounded `0600` worker command execution receipt ledger via
+/// `af_runner::job_receipts::ConfinedFileLock`. Recycles ONLY master-confirmed terminal receipts;
+/// fails closed instead of dropping unconfirmed/intent entries or exceeding the byte bound.
+pub fn persist_worker_command_receipts_atomic(
+    path: &Path,
+    receipts: &[WorkerCommandReceipt],
+) -> anyhow::Result<()> {
+    let mut bounded = receipts.to_vec();
+    persist_worker_command_receipts_in_place(path, &mut bounded)
+}
+
 /// Strictly loads persisted worker command execution receipts using confined `O_NOFOLLOW` I/O.
-/// Missing files return `Ok(Vec::new())`; symlinks, hardlinks, non-regular files, and malformed
-/// JSON fail closed with `Err`.
+/// Missing files return `Ok(Vec::new())`; symlinks, hardlinks, non-regular files, oversized files,
+/// malformed JSON, invalid entries, or over-capacity unconfirmed ledgers fail closed with `Err`.
 pub fn load_worker_command_receipts_strict(
     path: &Path,
 ) -> anyhow::Result<Vec<WorkerCommandReceipt>> {
@@ -4416,7 +4564,14 @@ pub fn load_worker_command_receipts_strict(
     };
     let mut parsed: Vec<WorkerCommandReceipt> =
         serde_json::from_slice(&raw).context("parsing worker command receipts JSON")?;
-    prune_worker_command_receipts(&mut parsed);
+    validate_worker_command_receipts(&parsed)?;
+    recycle_confirmed_worker_command_receipts(&mut parsed, MAX_WORKER_COMMAND_RECEIPTS);
+    anyhow::ensure!(
+        parsed.len() <= MAX_WORKER_COMMAND_RECEIPTS,
+        "worker command receipt ledger contains {} unconfirmed/intent entries, exceeding limit {}",
+        parsed.len(),
+        MAX_WORKER_COMMAND_RECEIPTS
+    );
     Ok(parsed)
 }
 
@@ -4435,7 +4590,27 @@ pub(crate) enum WorkerCommandDispatchPlan {
     AlreadyInFlight,
     RejectedStaleLease,
     RejectedConflictingIdentity,
+    RejectedCapacitySaturated,
     RejectedStorageFailure,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CapacityBackpressureReason {
+    ReceiptEntryLimit,
+    ReceiptByteLimit,
+    OutboxEntryLimit,
+    OutboxByteLimit,
+}
+
+impl CapacityBackpressureReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReceiptEntryLimit => "receipt_entry_limit",
+            Self::ReceiptByteLimit => "receipt_byte_limit",
+            Self::OutboxEntryLimit => "outbox_entry_limit",
+            Self::OutboxByteLimit => "outbox_byte_limit",
+        }
+    }
 }
 
 struct WorkerCommandRuntimeState {
@@ -4444,6 +4619,72 @@ struct WorkerCommandRuntimeState {
     pending_acks: Vec<WorkerCommandAck>,
     in_flight: std::collections::HashSet<String>,
     storage_corrupt: Option<String>,
+}
+
+fn try_prepare_new_receipt_with_backpressure(
+    guard: &WorkerCommandRuntimeState,
+    candidate: WorkerCommandReceipt,
+) -> Result<Vec<WorkerCommandReceipt>, CapacityBackpressureReason> {
+    let candidate_ack = candidate.to_ack();
+    let mut next_receipts = guard.receipts.clone();
+    next_receipts.push(candidate);
+
+    // 1. Entry bound: recycle ONLY master-confirmed terminal receipts.
+    recycle_confirmed_worker_command_receipts(&mut next_receipts, MAX_WORKER_COMMAND_RECEIPTS);
+    if next_receipts.len() > MAX_WORKER_COMMAND_RECEIPTS {
+        return Err(CapacityBackpressureReason::ReceiptEntryLimit);
+    }
+
+    // 2. Receipt byte bound (reserving worst-case completion headroom for every active `Intent`).
+    let intent_count = next_receipts
+        .iter()
+        .filter(|r| r.phase == WorkerCommandReceiptPhase::Intent)
+        .count();
+    let receipt_headroom = intent_count.saturating_mul(RECEIPT_INTENT_COMPLETION_HEADROOM_BYTES);
+    loop {
+        let pretty_len = serde_json::to_vec_pretty(&next_receipts)
+            .map(|buf| buf.len())
+            .unwrap_or(usize::MAX);
+        if pretty_len.saturating_add(receipt_headroom) <= MAX_WORKER_COMMAND_RECEIPTS_BYTES {
+            break;
+        }
+        if let Some(pos) = next_receipts.iter().position(is_recyclable_receipt) {
+            next_receipts.remove(pos);
+        } else {
+            return Err(CapacityBackpressureReason::ReceiptByteLimit);
+        }
+    }
+
+    // 3. Outbox entry and byte bounds (reserving future ACK slots & bytes for active `Intent`s).
+    let mut projected_pending = guard.pending_acks.clone();
+    if let Some(ack) = candidate_ack {
+        if let Some(existing) = projected_pending.iter_mut().find(|a| a.id == ack.id) {
+            *existing = ack;
+        } else {
+            projected_pending.push(ack);
+        }
+    }
+    let pending_intent_slots = next_receipts
+        .iter()
+        .filter(|r| {
+            r.phase == WorkerCommandReceiptPhase::Intent
+                && !projected_pending.iter().any(|a| a.id == r.id)
+        })
+        .count();
+    if projected_pending.len().saturating_add(pending_intent_slots) > MAX_WORKER_ACK_OUTBOX_ENTRIES
+    {
+        return Err(CapacityBackpressureReason::OutboxEntryLimit);
+    }
+    let outbox_pretty_len = serde_json::to_vec_pretty(&projected_pending)
+        .map(|buf| buf.len())
+        .unwrap_or(usize::MAX);
+    let outbox_headroom =
+        pending_intent_slots.saturating_mul(OUTBOX_INTENT_COMPLETION_HEADROOM_BYTES);
+    if outbox_pretty_len.saturating_add(outbox_headroom) > MAX_WORKER_ACK_OUTBOX_BYTES {
+        return Err(CapacityBackpressureReason::OutboxByteLimit);
+    }
+
+    Ok(next_receipts)
 }
 
 /// Coordinates durable confined worker command execution intent, terminal receipts,
@@ -4492,8 +4733,21 @@ impl WorkerCommandCoordinator {
         receipts_path: &Path,
     ) -> Self {
         let clean_node = node_id.trim().to_string();
-        let mut pending_acks = load_worker_ack_outbox_nofollow(outbox_path);
         let mut storage_corrupt: Option<String> = None;
+
+        let mut pending_acks = match load_worker_ack_outbox_strict(outbox_path) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                let err_str = truncate_diagnostic_utf8(&err.to_string(), 512);
+                tracing::error!(
+                    path = %outbox_path.display(),
+                    error = %err_str,
+                    "failed loading confined worker ack outbox; failing closed for new mutations"
+                );
+                storage_corrupt = Some(err_str);
+                Vec::new()
+            }
+        };
 
         let mut receipts = match load_worker_command_receipts_strict(receipts_path) {
             Ok(loaded) => loaded,
@@ -4504,7 +4758,9 @@ impl WorkerCommandCoordinator {
                     error = %err_str,
                     "failed loading confined worker command receipts; failing closed for new mutations"
                 );
-                storage_corrupt = Some(err_str);
+                if storage_corrupt.is_none() {
+                    storage_corrupt = Some(err_str);
+                }
                 Vec::new()
             }
         };
@@ -4512,28 +4768,39 @@ impl WorkerCommandCoordinator {
         if storage_corrupt.is_none() {
             let now_iso = Utc::now().to_rfc3339();
             let mut receipts_changed = false;
+            let confirmed_receipt_ids: std::collections::HashSet<String> = receipts
+                .iter()
+                .filter(|r| r.ack_confirmed && r.phase.is_terminal())
+                .map(|r| r.id.trim().to_string())
+                .collect();
 
             // 1. Import legacy outbox entries so restarted/upgraded workers recognize completed
-            //    commands even when no receipt ledger existed previously.
+            //    commands even when no receipt ledger existed previously. Never let a stale or
+            //    generation-less outbox entry overwrite a generation-fenced `Intent`.
             for ack in &pending_acks {
                 let clean_id = ack.id.trim();
-                if clean_id.is_empty() {
-                    continue;
-                }
                 let Some(phase) = WorkerCommandReceiptPhase::from_ack_status(&ack.status) else {
                     continue;
                 };
-                if let Some(existing) = receipts.iter_mut().find(|r| r.id == clean_id) {
+                let valid_gen = ack.lease_generation.filter(|&g| g > 0);
+                if let Some(existing) = receipts.iter_mut().find(|r| r.id.trim() == clean_id) {
                     if existing.phase == WorkerCommandReceiptPhase::Intent {
-                        let non_stale = match (existing.lease_generation, ack.lease_generation) {
+                        let node_matches = existing
+                            .node_id
+                            .as_deref()
+                            .is_none_or(|rn| clean_node.is_empty() || rn == clean_node);
+                        let lease_proven = match (existing.lease_generation, valid_gen) {
                             (Some(rec_gen), Some(ack_gen)) => ack_gen >= rec_gen,
-                            _ => true,
+                            (Some(_), None) => false,
+                            (None, _) => true,
                         };
-                        if non_stale {
+                        if node_matches && lease_proven {
                             existing.phase = phase;
-                            existing.lease_generation =
-                                ack.lease_generation.or(existing.lease_generation);
-                            existing.result_message = ack.result_message.clone();
+                            existing.lease_generation = valid_gen.or(existing.lease_generation);
+                            existing.result_message = ack
+                                .result_message
+                                .as_deref()
+                                .map(truncate_receipt_result_message);
                             existing.ack_confirmed = false;
                             existing.updated_at = now_iso.clone();
                             receipts_changed = true;
@@ -4547,8 +4814,11 @@ impl WorkerCommandCoordinator {
                         target: None,
                         action: None,
                         phase,
-                        lease_generation: ack.lease_generation,
-                        result_message: ack.result_message.clone(),
+                        lease_generation: valid_gen,
+                        result_message: ack
+                            .result_message
+                            .as_deref()
+                            .map(truncate_receipt_result_message),
                         ack_confirmed: false,
                         updated_at: now_iso.clone(),
                     });
@@ -4575,7 +4845,9 @@ impl WorkerCommandCoordinator {
             }
 
             if receipts_changed {
-                if let Err(err) = persist_worker_command_receipts_atomic(receipts_path, &receipts) {
+                if let Err(err) =
+                    persist_worker_command_receipts_in_place(receipts_path, &mut receipts)
+                {
                     let err_str = truncate_diagnostic_utf8(&err.to_string(), 512);
                     tracing::error!(
                         path = %receipts_path.display(),
@@ -4586,11 +4858,21 @@ impl WorkerCommandCoordinator {
                 }
             }
 
-            // 3. Reconcile any unconfirmed terminal receipts (including newly recovered `Unknown`
-            //    receipts or results persisted just before a crash) into the 0600 ack outbox.
+            // 3. Reconcile authoritative receipts into the 0600 ack outbox without dropping any
+            //    unconfirmed entries. Confirmed receipts are pruned from the outbox first.
             if storage_corrupt.is_none() {
                 let mut next_pending = pending_acks.clone();
                 let mut outbox_changed = false;
+
+                let before_len = next_pending.len();
+                next_pending.retain(|ack| {
+                    let clean_id = ack.id.trim();
+                    !confirmed_receipt_ids.contains(clean_id)
+                });
+                if next_pending.len() != before_len {
+                    outbox_changed = true;
+                }
+
                 for receipt in &receipts {
                     if receipt.ack_confirmed || !receipt.phase.is_terminal() {
                         continue;
@@ -4603,22 +4885,15 @@ impl WorkerCommandCoordinator {
                     let Some(ack) = receipt.to_ack() else {
                         continue;
                     };
-                    if let Some(existing) = next_pending.iter_mut().find(|a| a.id == ack.id) {
-                        let should_replace = match (existing.lease_generation, ack.lease_generation)
-                        {
-                            (Some(eg), Some(ag)) => ag >= eg && *existing != ack,
-                            (None, Some(_)) => true,
-                            (Some(_), None) => false,
-                            (None, None) => *existing != ack,
-                        };
-                        if should_replace {
+                    if let Some(existing) = next_pending
+                        .iter_mut()
+                        .find(|a| a.id.trim() == ack.id.as_str())
+                    {
+                        if *existing != ack {
                             *existing = ack;
                             outbox_changed = true;
                         }
                     } else {
-                        if next_pending.len() >= MAX_WORKER_ACK_OUTBOX_ENTRIES {
-                            next_pending.remove(0);
-                        }
                         next_pending.push(ack);
                         outbox_changed = true;
                     }
@@ -4627,11 +4902,13 @@ impl WorkerCommandCoordinator {
                     match persist_worker_ack_outbox_atomic(outbox_path, &next_pending) {
                         Ok(()) => pending_acks = next_pending,
                         Err(err) => {
-                            tracing::warn!(
+                            let err_str = truncate_diagnostic_utf8(&err.to_string(), 512);
+                            tracing::error!(
                                 path = %outbox_path.display(),
-                                error = %err,
-                                "failed persisting reconciled worker ack outbox on startup"
+                                error = %err_str,
+                                "failed persisting reconciled worker ack outbox on startup; failing closed"
                             );
+                            storage_corrupt = Some(err_str);
                         }
                     }
                 }
@@ -4671,8 +4948,14 @@ impl WorkerCommandCoordinator {
         let Ok(mut guard) = self.state.lock() else {
             return;
         };
-        let _ =
-            evict_confirmed_acks_from_outbox(&self.outbox_path, &mut guard.pending_acks, confirmed_ids);
+        let _ = evict_confirmed_acks_from_outbox(
+            &self.outbox_path,
+            &mut guard.pending_acks,
+            confirmed_ids,
+        );
+        if guard.storage_corrupt.is_some() {
+            return;
+        }
         let mut next_receipts = guard.receipts.clone();
         let mut receipts_changed = false;
         let now_iso = Utc::now().to_rfc3339();
@@ -4687,7 +4970,8 @@ impl WorkerCommandCoordinator {
             }
         }
         if receipts_changed
-            && persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts).is_ok()
+            && persist_worker_command_receipts_in_place(&self.receipts_path, &mut next_receipts)
+                .is_ok()
         {
             guard.receipts = next_receipts;
         }
@@ -4717,7 +5001,9 @@ impl WorkerCommandCoordinator {
         let identity = WorkerCommandIdentity::from_command(&guard.node_id, &cmd);
         let now_iso = Utc::now().to_rfc3339();
 
-        // 1. Check durable receipts for existing intent or terminal outcome.
+        // 1. Check durable receipts for existing intent or terminal outcome FIRST so existing
+        //    commands, reattachments, and orphaned-intent recoveries continue draining even at
+        //    capacity saturation.
         if let Some(idx) = guard.receipts.iter().position(|r| r.id == cmd_id) {
             let existing = guard.receipts[idx].clone();
             if !existing.matches_identity(&identity) {
@@ -4752,9 +5038,9 @@ impl WorkerCommandCoordinator {
                             let mut next_receipts = guard.receipts.clone();
                             next_receipts[idx].lease_generation = Some(fresh_gen);
                             next_receipts[idx].updated_at = now_iso;
-                            if persist_worker_command_receipts_atomic(
+                            if persist_worker_command_receipts_in_place(
                                 &self.receipts_path,
-                                &next_receipts,
+                                &mut next_receipts,
                             )
                             .is_ok()
                             {
@@ -4779,9 +5065,10 @@ impl WorkerCommandCoordinator {
                     Some(a) => a,
                     None => return WorkerCommandDispatchPlan::RejectedStorageFailure,
                 };
-                if let Err(err) =
-                    persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
-                {
+                if let Err(err) = persist_worker_command_receipts_in_place(
+                    &self.receipts_path,
+                    &mut next_receipts,
+                ) {
                     tracing::error!(
                         command_id = %cmd_id,
                         error = %err,
@@ -4838,9 +5125,10 @@ impl WorkerCommandCoordinator {
                 None => return WorkerCommandDispatchPlan::RejectedStorageFailure,
             };
             if receipt_dirty {
-                if let Err(err) =
-                    persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
-                {
+                if let Err(err) = persist_worker_command_receipts_in_place(
+                    &self.receipts_path,
+                    &mut next_receipts,
+                ) {
                     tracing::error!(
                         command_id = %cmd_id,
                         error = %err,
@@ -4907,7 +5195,7 @@ impl WorkerCommandCoordinator {
                 action: None,
                 phase: WorkerCommandReceiptPhase::Failed,
                 lease_generation: incoming_gen,
-                result_message: Some(msg),
+                result_message: Some(truncate_receipt_result_message(&msg)),
                 ack_confirmed: false,
                 updated_at: now_iso,
             };
@@ -4930,11 +5218,11 @@ impl WorkerCommandCoordinator {
             return self.persist_immediate_terminal_receipt(&mut guard, receipt);
         }
 
-        // 3. Admitted non-idempotent service mutation: persist durable `Intent` receipt BEFORE
-        //    invoking `control_service`. If intent persistence fails, refuse admission so the
-        //    command remains genuinely unstarted.
-        let mut next_receipts = guard.receipts.clone();
-        next_receipts.push(WorkerCommandReceipt {
+        // 3. Admitted non-idempotent service mutation: check bounded backpressure (recycling ONLY
+        //    master-confirmed terminal receipts) and persist durable `Intent` receipt BEFORE
+        //    invoking `control_service`. If saturated or persistence fails, refuse admission so
+        //    the command remains genuinely unstarted.
+        let intent_receipt = WorkerCommandReceipt {
             id: cmd_id.clone(),
             node_id: (!identity.node_id.is_empty()).then_some(identity.node_id),
             cmd_type: Some(identity.cmd_type),
@@ -4945,10 +5233,27 @@ impl WorkerCommandCoordinator {
             result_message: None,
             ack_confirmed: false,
             updated_at: now_iso,
-        });
-        prune_worker_command_receipts(&mut next_receipts);
+        };
+        let mut next_receipts = match try_prepare_new_receipt_with_backpressure(
+            &guard,
+            intent_receipt,
+        ) {
+            Ok(planned) => planned,
+            Err(reason) => {
+                tracing::warn!(
+                    command_id = %cmd_id,
+                    service = %identity.target,
+                    action = %svc_action,
+                    reason = reason.as_str(),
+                    receipt_count = guard.receipts.len(),
+                    pending_ack_count = guard.pending_acks.len(),
+                    "applying fail-closed backpressure: worker receipt/outbox saturated by unconfirmed outcomes or active intents"
+                );
+                return WorkerCommandDispatchPlan::RejectedCapacitySaturated;
+            }
+        };
         if let Err(err) =
-            persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
+            persist_worker_command_receipts_in_place(&self.receipts_path, &mut next_receipts)
         {
             tracing::error!(
                 command_id = %cmd_id,
@@ -4978,11 +5283,21 @@ impl WorkerCommandCoordinator {
         let Some(ack) = receipt.to_ack() else {
             return WorkerCommandDispatchPlan::RejectedStorageFailure;
         };
-        let mut next_receipts = guard.receipts.clone();
-        next_receipts.push(receipt);
-        prune_worker_command_receipts(&mut next_receipts);
+        let mut next_receipts = match try_prepare_new_receipt_with_backpressure(guard, receipt) {
+            Ok(planned) => planned,
+            Err(reason) => {
+                tracing::warn!(
+                    command_id = %ack.id,
+                    reason = reason.as_str(),
+                    receipt_count = guard.receipts.len(),
+                    pending_ack_count = guard.pending_acks.len(),
+                    "applying fail-closed backpressure before immediate terminal command dispatch"
+                );
+                return WorkerCommandDispatchPlan::RejectedCapacitySaturated;
+            }
+        };
         if let Err(err) =
-            persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)
+            persist_worker_command_receipts_in_place(&self.receipts_path, &mut next_receipts)
         {
             tracing::error!(
                 command_id = %ack.id,
@@ -5022,7 +5337,10 @@ impl WorkerCommandCoordinator {
         let (phase, result_message) = match result {
             Ok(()) => (
                 WorkerCommandReceiptPhase::Executed,
-                Some(format!("{} {} succeeded", mutation.action, mutation.service)),
+                Some(truncate_receipt_result_message(&format!(
+                    "{} {} succeeded",
+                    mutation.action, mutation.service
+                ))),
             ),
             Err(err_msg) => {
                 tracing::warn!(
@@ -5033,7 +5351,7 @@ impl WorkerCommandCoordinator {
                 );
                 (
                     WorkerCommandReceiptPhase::Failed,
-                    Some(truncate_utf8(&err_msg, 1024).to_string()),
+                    Some(truncate_receipt_result_message(&err_msg)),
                 )
             }
         };
@@ -5069,8 +5387,7 @@ impl WorkerCommandCoordinator {
             });
             gen
         };
-        prune_worker_command_receipts(&mut next_receipts);
-        persist_worker_command_receipts_atomic(&self.receipts_path, &next_receipts)?;
+        persist_worker_command_receipts_in_place(&self.receipts_path, &mut next_receipts)?;
         guard.receipts = next_receipts;
 
         let ack = WorkerCommandAck {
@@ -5417,6 +5734,7 @@ async fn run_worker_registration_and_heartbeat_loop(
                             WorkerCommandDispatchPlan::AlreadyInFlight
                             | WorkerCommandDispatchPlan::RejectedStaleLease
                             | WorkerCommandDispatchPlan::RejectedConflictingIdentity
+                            | WorkerCommandDispatchPlan::RejectedCapacitySaturated
                             | WorkerCommandDispatchPlan::RejectedStorageFailure => {}
                         }
                     }
@@ -7488,6 +7806,467 @@ mod tests {
             loaded_bounded.iter().any(|r| r.id == "cmd-active-intent"),
             "active intent receipt must survive eviction of older confirmed receipts"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_command_saturation_preserves_unconfirmed_and_intents_applies_backpressure_and_drains()
+    {
+        let root = env::temp_dir().join(format!("af-cluster-sat-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let outbox_path = root.join("state/cluster_worker_ack_outbox.json");
+        let receipts_path = resolve_worker_command_receipts_path(&outbox_path);
+
+        // 1. Direct persistence must NEVER evict unconfirmed terminal receipts or active intents.
+        let unconfirmed_overflow: Vec<WorkerCommandReceipt> = (0..=MAX_WORKER_COMMAND_RECEIPTS)
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-direct-unconfirmed-{i}"),
+                node_id: Some("node-sat".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some("sonarr".to_string()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: Some(1),
+                result_message: Some("restart sonarr succeeded".to_string()),
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        assert!(persist_worker_command_receipts_atomic(&receipts_path, &unconfirmed_overflow).is_err());
+
+        let intent_overflow: Vec<WorkerCommandReceipt> = (0..=MAX_WORKER_COMMAND_RECEIPTS)
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-direct-intent-{i}"),
+                node_id: Some("node-sat".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some("sonarr".to_string()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Intent,
+                lease_generation: Some(1),
+                result_message: None,
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        assert!(persist_worker_command_receipts_atomic(&receipts_path, &intent_overflow).is_err());
+
+        // 2. Saturate coordinator with 255 unconfirmed terminal receipts + 1 active in-flight Intent
+        //    (seed the first 254 via durable startup reconciliation, then execute slots 255 & 256 live).
+        let seeded_unconfirmed: Vec<WorkerCommandReceipt> = (0..(MAX_WORKER_COMMAND_RECEIPTS - 2))
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-unconfirmed-{i}"),
+                node_id: Some("node-sat".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some("sonarr".to_string()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: Some(1),
+                result_message: Some("restart sonarr succeeded".to_string()),
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        persist_worker_command_receipts_atomic(&receipts_path, &seeded_unconfirmed).unwrap();
+
+        let worker =
+            WorkerCommandCoordinator::load_and_recover("node-sat", &outbox_path, &receipts_path);
+        assert_eq!(
+            worker.pending_acks_snapshot().len(),
+            MAX_WORKER_COMMAND_RECEIPTS - 2
+        );
+        let slot_255_cmd = PendingWorkerCommand {
+            id: format!("cmd-unconfirmed-{}", MAX_WORKER_COMMAND_RECEIPTS - 2),
+            cmd_type: "restart_service".to_string(),
+            params: HashMap::from([("service".to_string(), "sonarr".to_string())]),
+            lease_generation: 1,
+        };
+        let slot_255_mutation = match worker.prepare_command_dispatch(slot_255_cmd) {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("expected Execute for 255th slot, got {other:?}"),
+        };
+        worker
+            .complete_admitted_mutation(&slot_255_mutation, Ok(()))
+            .unwrap();
+        let inflight_cmd = PendingWorkerCommand {
+            id: "cmd-inflight-last".to_string(),
+            cmd_type: "restart_service".to_string(),
+            params: HashMap::from([("service".to_string(), "radarr".to_string())]),
+            lease_generation: 1,
+        };
+        let inflight_mutation = match worker.prepare_command_dispatch(inflight_cmd) {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("expected Execute for 256th slot, got {other:?}"),
+        };
+
+        // 3. At saturation, unseen new commands (both mutating and non-mutating) MUST fail closed
+        //    with explicit backpressure BEFORE dispatch and WITHOUT evicting any entry.
+        let fresh_mutation = PendingWorkerCommand {
+            id: "cmd-fresh-blocked".to_string(),
+            cmd_type: "restart_service".to_string(),
+            params: HashMap::from([("service".to_string(), "plex".to_string())]),
+            lease_generation: 1,
+        };
+        assert_eq!(
+            worker.prepare_command_dispatch(fresh_mutation.clone()),
+            WorkerCommandDispatchPlan::RejectedCapacitySaturated
+        );
+        assert_eq!(
+            worker.prepare_command_dispatch(PendingWorkerCommand {
+                id: "cmd-fresh-ping-blocked".to_string(),
+                cmd_type: "ping".to_string(),
+                params: HashMap::new(),
+                lease_generation: 1,
+            }),
+            WorkerCommandDispatchPlan::RejectedCapacitySaturated
+        );
+
+        let disk_at_sat = load_worker_command_receipts_strict(&receipts_path).unwrap();
+        assert_eq!(disk_at_sat.len(), MAX_WORKER_COMMAND_RECEIPTS);
+        assert!(disk_at_sat.iter().any(|r| r.id == "cmd-unconfirmed-0"));
+        assert!(disk_at_sat
+            .iter()
+            .any(|r| r.id == "cmd-inflight-last" && r.phase == WorkerCommandReceiptPhase::Intent));
+        assert!(!disk_at_sat.iter().any(|r| r.id == "cmd-fresh-blocked"));
+
+        // 4. At saturation, existing commands MUST still reattach, complete, and drain ACKs.
+        let reattach_cmd = PendingWorkerCommand {
+            id: "cmd-unconfirmed-0".to_string(),
+            cmd_type: "restart_service".to_string(),
+            params: HashMap::from([("service".to_string(), "sonarr".to_string())]),
+            lease_generation: 2,
+        };
+        let reattached = match worker.prepare_command_dispatch(reattach_cmd) {
+            WorkerCommandDispatchPlan::SendAckOnly(ack) => ack,
+            other => panic!("existing receipt must reattach at saturation, got {other:?}"),
+        };
+        assert_eq!(reattached.id, "cmd-unconfirmed-0");
+        assert_eq!(reattached.lease_generation, Some(2));
+        assert_eq!(reattached.status, WORKER_COMMAND_STATUS_EXECUTED);
+
+        let finished_ack = worker
+            .complete_admitted_mutation(&inflight_mutation, Ok(()))
+            .expect("in-flight intent must complete cleanly at saturation");
+        assert_eq!(finished_ack.id, "cmd-inflight-last");
+        assert_eq!(finished_ack.status, WORKER_COMMAND_STATUS_EXECUTED);
+        assert_eq!(
+            worker.pending_acks_snapshot().len(),
+            MAX_WORKER_COMMAND_RECEIPTS
+        );
+
+        // 5. Confirming ONE receipt via master ACK frees exactly one recyclable slot and unblocks
+        //    the next dispatch without losing any other unconfirmed receipt.
+        worker.mark_confirmed(&["cmd-unconfirmed-0".to_string()]);
+        assert_eq!(
+            worker.pending_acks_snapshot().len(),
+            MAX_WORKER_COMMAND_RECEIPTS - 1
+        );
+
+        let unblocked = match worker.prepare_command_dispatch(fresh_mutation) {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("expected Execute after one confirmed receipt drained, got {other:?}"),
+        };
+        assert_eq!(unblocked.id, "cmd-fresh-blocked");
+        let after_recycle = load_worker_command_receipts_strict(&receipts_path).unwrap();
+        assert_eq!(after_recycle.len(), MAX_WORKER_COMMAND_RECEIPTS);
+        assert!(!after_recycle.iter().any(|r| r.id == "cmd-unconfirmed-0"));
+        assert!(after_recycle.iter().any(|r| r.id == "cmd-unconfirmed-1"));
+        assert!(after_recycle.iter().any(|r| r.id == "cmd-inflight-last"));
+        assert!(after_recycle
+            .iter()
+            .any(|r| r.id == "cmd-fresh-blocked" && r.phase == WorkerCommandReceiptPhase::Intent));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_command_byte_bound_and_legacy_outbox_reconciliation_guards() {
+        let root = env::temp_dir().join(format!("af-cluster-recon-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 1. Outbox fits 256 max-length (1024-byte) result messages cleanly and rejects overflow.
+        let full_outbox_path = root.join("full_outbox/cluster_worker_ack_outbox.json");
+        let msg_1024 = "m".repeat(1024);
+        let full_acks: Vec<WorkerCommandAck> = (0..MAX_WORKER_ACK_OUTBOX_ENTRIES)
+            .map(|i| WorkerCommandAck {
+                id: format!("cmd-full-ack-{i:03}"),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some(msg_1024.clone()),
+                lease_generation: Some(1),
+            })
+            .collect();
+        persist_worker_ack_outbox_atomic(&full_outbox_path, &full_acks)
+            .expect("256 max-length ACKs must fit within outbox byte bound");
+        assert_eq!(
+            load_worker_ack_outbox_strict(&full_outbox_path)
+                .unwrap()
+                .len(),
+            MAX_WORKER_ACK_OUTBOX_ENTRIES
+        );
+
+        let mut oversized_outbox = vec![WorkerCommandAck {
+            id: "cmd-giant-outbox".to_string(),
+            status: WORKER_COMMAND_STATUS_FAILED.to_string(),
+            result_message: Some("z".repeat(MAX_WORKER_ACK_OUTBOX_BYTES + 16)),
+            lease_generation: Some(1),
+        }];
+        let giant_outbox_path = root.join("giant_outbox/cluster_worker_ack_outbox.json");
+        assert!(
+            persist_worker_ack_outbox_atomic(&giant_outbox_path, &oversized_outbox).is_err(),
+            "outbox persistence must fail closed instead of writing an unreadable oversized file"
+        );
+        oversized_outbox.clear();
+
+        // 2. Receipt byte-bound enforcement recycles ONLY confirmed entries and applies
+        //    backpressure before dispatch even when entry count < MAX_WORKER_COMMAND_RECEIPTS.
+        let byte_outbox = root.join("byte_bound/cluster_worker_ack_outbox.json");
+        let byte_receipts = resolve_worker_command_receipts_path(&byte_outbox);
+        let big_target = "s".repeat(16 * 1024);
+        let unconfirmed_heavy: Vec<WorkerCommandReceipt> = (0..31)
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-heavy-{i:02}"),
+                node_id: Some("node-bytes".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some(big_target.clone()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: Some(1),
+                result_message: Some("ok".to_string()),
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        persist_worker_command_receipts_atomic(&byte_receipts, &unconfirmed_heavy).unwrap();
+
+        let mut too_big_unconfirmed = unconfirmed_heavy.clone();
+        too_big_unconfirmed.push(WorkerCommandReceipt {
+            id: "cmd-heavy-overflow".to_string(),
+            node_id: Some("node-bytes".to_string()),
+            cmd_type: Some("restart_service".to_string()),
+            target: Some(big_target.clone()),
+            action: Some("restart".to_string()),
+            phase: WorkerCommandReceiptPhase::Executed,
+            lease_generation: Some(1),
+            result_message: Some("ok".to_string()),
+            ack_confirmed: false,
+            updated_at: "2026-11-21T00:00:00Z".to_string(),
+        });
+        assert!(
+            persist_worker_command_receipts_atomic(&byte_receipts, &too_big_unconfirmed).is_err(),
+            "receipt persistence must fail closed on byte overflow when no confirmed entries exist"
+        );
+
+        let byte_worker =
+            WorkerCommandCoordinator::load_and_recover("node-bytes", &byte_outbox, &byte_receipts);
+        assert_eq!(
+            byte_worker.prepare_command_dispatch(PendingWorkerCommand {
+                id: "cmd-heavy-new".to_string(),
+                cmd_type: "restart_service".to_string(),
+                params: HashMap::from([("service".to_string(), big_target.clone())]),
+                lease_generation: 1,
+            }),
+            WorkerCommandDispatchPlan::RejectedCapacitySaturated
+        );
+
+        // Confirming one heavy receipt frees enough bytes to recycle it and admit the new command,
+        // and the reserved Intent completion headroom lets it complete cleanly within the byte bound.
+        byte_worker.mark_confirmed(&["cmd-heavy-00".to_string()]);
+        let admitted_heavy = match byte_worker.prepare_command_dispatch(PendingWorkerCommand {
+            id: "cmd-heavy-new".to_string(),
+            cmd_type: "restart_service".to_string(),
+            params: HashMap::from([("service".to_string(), big_target)]),
+            lease_generation: 1,
+        }) {
+            WorkerCommandDispatchPlan::Execute(m) => m,
+            other => panic!("expected Execute after recycling confirmed heavy receipt, got {other:?}"),
+        };
+        assert_eq!(admitted_heavy.id, "cmd-heavy-new");
+        let completed_heavy = byte_worker
+            .complete_admitted_mutation(&admitted_heavy, Err("e".repeat(1024)))
+            .expect("reserved byte headroom must allow admitted intent to persist full-size outcome");
+        assert_eq!(completed_heavy.status, WORKER_COMMAND_STATUS_FAILED);
+        assert_eq!(
+            load_worker_command_receipts_strict(&byte_receipts)
+                .unwrap()
+                .len(),
+            31
+        );
+
+        // 3. Corrupt / invalid legacy outbox fails closed instead of disappearing authority.
+        let bad_outbox_dir = root.join("bad_outbox");
+        std::fs::create_dir_all(&bad_outbox_dir).unwrap();
+        let bad_outbox = bad_outbox_dir.join("cluster_worker_ack_outbox.json");
+        let bad_receipts = resolve_worker_command_receipts_path(&bad_outbox);
+        std::fs::write(
+            &bad_outbox,
+            r#"[{"id":"cmd-bad-gen","status":"executed","lease_generation":0}]"#,
+        )
+        .unwrap();
+        assert!(load_worker_ack_outbox_strict(&bad_outbox).is_err());
+        let bad_worker =
+            WorkerCommandCoordinator::load_and_recover("node-bad", &bad_outbox, &bad_receipts);
+        assert_eq!(
+            bad_worker.prepare_command_dispatch(PendingWorkerCommand {
+                id: "cmd-bad-gen".to_string(),
+                cmd_type: "restart_service".to_string(),
+                params: HashMap::from([("service".to_string(), "sonarr".to_string())]),
+                lease_generation: 1,
+            }),
+            WorkerCommandDispatchPlan::RejectedStorageFailure
+        );
+
+        // 4. Generation-less legacy outbox entry MUST NOT overwrite a leased `Intent` as `Executed`.
+        let gen_outbox = root.join("gen_guard/cluster_worker_ack_outbox.json");
+        let gen_receipts = resolve_worker_command_receipts_path(&gen_outbox);
+        persist_worker_command_receipts_atomic(
+            &gen_receipts,
+            &[WorkerCommandReceipt {
+                id: "cmd-leased-intent".to_string(),
+                node_id: Some("node-gen".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some("sonarr".to_string()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Intent,
+                lease_generation: Some(2),
+                result_message: None,
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            }],
+        )
+        .unwrap();
+        persist_worker_ack_outbox_atomic(
+            &gen_outbox,
+            &[WorkerCommandAck {
+                id: "cmd-leased-intent".to_string(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("unproven legacy ack".to_string()),
+                lease_generation: None,
+            }],
+        )
+        .unwrap();
+        let gen_worker =
+            WorkerCommandCoordinator::load_and_recover("node-gen", &gen_outbox, &gen_receipts);
+        let recovered_gen = load_worker_command_receipts_strict(&gen_receipts).unwrap();
+        assert_eq!(recovered_gen.len(), 1);
+        assert_eq!(recovered_gen[0].phase, WorkerCommandReceiptPhase::Unknown);
+        assert_eq!(recovered_gen[0].lease_generation, Some(2));
+        let reconciled_outbox = load_worker_ack_outbox_strict(&gen_outbox).unwrap();
+        assert_eq!(reconciled_outbox.len(), 1);
+        assert_eq!(reconciled_outbox[0].status, WORKER_COMMAND_STATUS_UNKNOWN);
+        assert_eq!(reconciled_outbox[0].lease_generation, Some(2));
+        drop(gen_worker);
+
+        // 5. Startup legacy outbox import with 256 unconfirmed receipts + 1 extra legacy outbox
+        //    entry fails closed instead of dropping authority, while preserving pending ACKs.
+        let sat_recon_outbox = root.join("sat_recon/cluster_worker_ack_outbox.json");
+        let sat_recon_receipts = resolve_worker_command_receipts_path(&sat_recon_outbox);
+        let sat_256: Vec<WorkerCommandReceipt> = (0..MAX_WORKER_COMMAND_RECEIPTS)
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-sat-rec-{i:03}"),
+                node_id: Some("node-recon".to_string()),
+                cmd_type: Some("restart_service".to_string()),
+                target: Some("sonarr".to_string()),
+                action: Some("restart".to_string()),
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: Some(1),
+                result_message: Some("ok".to_string()),
+                ack_confirmed: false,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        persist_worker_command_receipts_atomic(&sat_recon_receipts, &sat_256).unwrap();
+        persist_worker_ack_outbox_atomic(
+            &sat_recon_outbox,
+            &[WorkerCommandAck {
+                id: "cmd-legacy-extra-257".to_string(),
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("legacy ok".to_string()),
+                lease_generation: Some(1),
+            }],
+        )
+        .unwrap();
+        let sat_recon_worker = WorkerCommandCoordinator::load_and_recover(
+            "node-recon",
+            &sat_recon_outbox,
+            &sat_recon_receipts,
+        );
+        assert_eq!(
+            sat_recon_worker.prepare_command_dispatch(PendingWorkerCommand {
+                id: "cmd-blocked-after-overflow".to_string(),
+                cmd_type: "restart_service".to_string(),
+                params: HashMap::from([("service".to_string(), "sonarr".to_string())]),
+                lease_generation: 1,
+            }),
+            WorkerCommandDispatchPlan::RejectedStorageFailure
+        );
+        assert_eq!(sat_recon_worker.pending_acks_snapshot().len(), 1);
+        assert_eq!(
+            load_worker_command_receipts_strict(&sat_recon_receipts)
+                .unwrap()
+                .len(),
+            MAX_WORKER_COMMAND_RECEIPTS
+        );
+
+        // 6. Startup legacy outbox import with confirmed receipts recycles confirmed entries and
+        //    prunes already-confirmed IDs lingering in the outbox.
+        let recycle_recon_outbox = root.join("recycle_recon/cluster_worker_ack_outbox.json");
+        let recycle_recon_receipts = resolve_worker_command_receipts_path(&recycle_recon_outbox);
+        let confirmed_256: Vec<WorkerCommandReceipt> = (0..MAX_WORKER_COMMAND_RECEIPTS)
+            .map(|i| WorkerCommandReceipt {
+                id: format!("cmd-conf-rec-{i:03}"),
+                node_id: Some("node-recon2".to_string()),
+                cmd_type: Some("ping".to_string()),
+                target: Some(String::new()),
+                action: None,
+                phase: WorkerCommandReceiptPhase::Executed,
+                lease_generation: Some(1),
+                result_message: Some("pong".to_string()),
+                ack_confirmed: true,
+                updated_at: "2026-11-21T00:00:00Z".to_string(),
+            })
+            .collect();
+        persist_worker_command_receipts_atomic(&recycle_recon_receipts, &confirmed_256).unwrap();
+        persist_worker_ack_outbox_atomic(
+            &recycle_recon_outbox,
+            &[
+                WorkerCommandAck {
+                    id: "cmd-conf-rec-000".to_string(),
+                    status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                    result_message: Some("pong".to_string()),
+                    lease_generation: Some(1),
+                },
+                WorkerCommandAck {
+                    id: "cmd-conf-rec-005".to_string(),
+                    status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                    result_message: Some("pong".to_string()),
+                    lease_generation: Some(1),
+                },
+                WorkerCommandAck {
+                    id: "cmd-legacy-imported".to_string(),
+                    status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                    result_message: Some("legacy done".to_string()),
+                    lease_generation: Some(1),
+                },
+            ],
+        )
+        .unwrap();
+        let recycle_worker = WorkerCommandCoordinator::load_and_recover(
+            "node-recon2",
+            &recycle_recon_outbox,
+            &recycle_recon_receipts,
+        );
+        let post_recon_receipts =
+            load_worker_command_receipts_strict(&recycle_recon_receipts).unwrap();
+        assert_eq!(post_recon_receipts.len(), MAX_WORKER_COMMAND_RECEIPTS);
+        assert!(post_recon_receipts
+            .iter()
+            .any(|r| r.id == "cmd-legacy-imported" && !r.ack_confirmed));
+        let post_recon_outbox = load_worker_ack_outbox_strict(&recycle_recon_outbox).unwrap();
+        assert_eq!(post_recon_outbox.len(), 1);
+        assert_eq!(post_recon_outbox[0].id, "cmd-legacy-imported");
+        drop(recycle_worker);
 
         let _ = std::fs::remove_dir_all(&root);
     }
