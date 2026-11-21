@@ -74,10 +74,24 @@ else
     af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
     af_logged git -C "$BUILD_DIR" fetch --tags --depth 1 origin 2>/dev/null || true
 fi
+if [[ -e /srv/rutorrent && ! -L /srv/rutorrent ]]; then
+    print_error "/srv/rutorrent is an existing data directory; refusing to replace it with a symlink"
+    exit 1
+fi
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
 RUNTIME_SNAPSHOT_READY=false
 RUNTIME_STOPPED=false
-RUNTIME_PATHS=("/var/www/rutorrent" "/var/lib/rutorrent" "/etc/apache2/sites-available/rutorrent.conf" "/etc/apache2/conf-available/aetherflow-rutorrent-listen.conf")
+INSTALL_COMMITTED=false
+RUNTIME_PATHS=(
+    "/var/www/rutorrent"
+    "/var/lib/rutorrent"
+    "/srv/rutorrent"
+    "/etc/apache2/AetherFlow/rutorrent.htpasswd"
+    "/etc/apache2/sites-available/rutorrent.conf"
+    "/etc/apache2/sites-enabled/rutorrent.conf"
+    "/etc/apache2/conf-available/aetherflow-rutorrent-listen.conf"
+    "/etc/apache2/conf-enabled/aetherflow-rutorrent-listen.conf"
+)
 rollback_web_runtime() {
     local status="$?" runtime_index runtime_path restore_failed=false
     trap - EXIT INT TERM
@@ -217,13 +231,15 @@ fi
 
 af_logged a2enmod rewrite headers env dir mime
 af_logged a2ensite rutorrent.conf
-af_logged systemctl enable --now apache2
 af_logged apache2ctl configtest
+af_logged systemctl enable --now apache2
 af_logged systemctl reload apache2
 
 systemctl is-active --quiet apache2
+wait_for_apache_app_ready "${PACKAGE_NAME}" "$APP_PORT" "/"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
+INSTALL_COMMITTED=true
 report_progress 100 "ruTorrent installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

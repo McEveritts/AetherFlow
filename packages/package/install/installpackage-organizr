@@ -82,7 +82,15 @@ fi
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-web-runtime-")"
 RUNTIME_SNAPSHOT_READY=false
 RUNTIME_STOPPED=false
-RUNTIME_PATHS=("/var/www/organizr" "/var/lib/organizr" "/etc/apache2/sites-available/organizr.conf" "/etc/apache2/conf-available/aetherflow-organizr-listen.conf")
+INSTALL_COMMITTED=false
+RUNTIME_PATHS=(
+    "/var/www/organizr"
+    "/var/lib/organizr"
+    "/etc/apache2/sites-available/organizr.conf"
+    "/etc/apache2/sites-enabled/organizr.conf"
+    "/etc/apache2/conf-available/aetherflow-organizr-listen.conf"
+    "/etc/apache2/conf-enabled/aetherflow-organizr-listen.conf"
+)
 rollback_web_runtime() {
     local status="$?" runtime_index runtime_path restore_failed=false
     trap - EXIT INT TERM
@@ -184,13 +192,15 @@ fi
 
 af_logged a2enmod rewrite headers env dir mime
 af_logged a2ensite organizr.conf
-af_logged systemctl enable --now apache2
 af_logged apache2ctl configtest
+af_logged systemctl enable --now apache2
 af_logged systemctl reload apache2
 
 systemctl is-active --quiet apache2
+wait_for_apache_app_ready "${PACKAGE_NAME}" "$APP_PORT" "/"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
+INSTALL_COMMITTED=true
 report_progress 100 "Organizr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

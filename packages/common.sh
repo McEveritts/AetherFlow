@@ -3470,6 +3470,223 @@ remove_apache_app_listener() {
     rm -f -- "$apache_root/conf-enabled/$config" "$apache_root/conf-available/$config"
 }
 
+apache_app_readiness_target() {
+    local package_name="$1" port="$2" default_path="${3:-/}" apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}" vhost_conf expected_root
+    [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( 10#$port > 0 && 10#$port <= 65535 )) || return 1
+    [[ "$default_path" == /* ]] || return 1
+    vhost_conf="${apache_root}/sites-available/${package_name}.conf"
+    expected_root="/var/www/${package_name}"
+    if [[ ! -e "$vhost_conf" && ! -L "$vhost_conf" ]]; then
+        printf 'http://127.0.0.1:%s%s\n\n' "$port" "$default_path"
+        return 0
+    fi
+    safe_config_python "$vhost_conf" "$port" "$default_path" "$expected_root" <<'PYEOF'
+import re, sys
+
+vhost_conf, fallback_port, default_path, expected_root = sys.argv[1:5]
+raw = safe_read_text(vhost_conf)
+
+blocks = []
+current = None
+for line in raw.splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        continue
+    m_open = re.match(r'^<VirtualHost\s+([^>]+)>\s*$', stripped, re.IGNORECASE)
+    if m_open:
+        current = {'header': m_open.group(1).strip(), 'lines': []}
+        blocks.append(current)
+        continue
+    if re.match(r'^</VirtualHost>\s*$', stripped, re.IGNORECASE):
+        current = None
+        continue
+    if current is not None:
+        current['lines'].append(stripped)
+
+def parse_vhost_endpoint(header):
+    tokens = header.split()
+    token = tokens[0] if tokens else ''
+    m = re.fullmatch(r'(\[[^\]]+\]|[^:\s]+)(?::([0-9]+|\*))?', token)
+    if not m:
+        return '127.0.0.1', None
+    raw_host, raw_port = m.group(1), m.group(2)
+    port_val = raw_port if (raw_port and raw_port.isdecimal() and 1 <= int(raw_port) <= 65535) else None
+    return raw_host, port_val
+
+selected = None
+for block in blocks:
+    _, block_port = parse_vhost_endpoint(block['header'])
+    if block_port == fallback_port:
+        selected = block
+        break
+if selected is None and blocks:
+    selected = blocks[0]
+
+raw_host = '127.0.0.1'
+port = fallback_port
+if selected is not None:
+    raw_host, parsed_port = parse_vhost_endpoint(selected['header'])
+    if parsed_port is not None:
+        port = parsed_port
+    lines = selected['lines']
+else:
+    lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.strip().startswith('#')]
+
+host_map = {'*': '127.0.0.1', '_default_': '127.0.0.1', '0.0.0.0': '127.0.0.1', '127.0.0.1': '127.0.0.1', '::': '[::1]', '[::]': '[::1]', '::1': '[::1]', '[::1]': '[::1]'}
+host = host_map.get(raw_host.lower(), raw_host)
+if not re.fullmatch(r'[A-Za-z0-9_.:\[\]-]+', host):
+    raise ValueError('Unsafe Apache VirtualHost listener')
+if ':' in host and not host.startswith('['):
+    host = '[' + host + ']'
+
+scheme = 'http'
+server_name = ''
+docroot = None
+aliases = []
+
+def unquote(val):
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+        return val[1:-1]
+    return val
+
+for line in lines:
+    if re.match(r'^SSLEngine\s+on(?:\s|$|#)', line, re.IGNORECASE):
+        scheme = 'https'
+    m_sn = re.match(r'^ServerName\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+    if m_sn and not server_name:
+        cand = unquote(m_sn.group(1))
+        cand = re.sub(r'^https?://', '', cand, flags=re.IGNORECASE)
+        cand = cand.split(':', 1)[0].strip()
+        if re.fullmatch(r'[A-Za-z0-9._-]+', cand):
+            server_name = cand
+    m_dr = re.match(r'^DocumentRoot\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+    if m_dr and docroot is None:
+        docroot = unquote(m_dr.group(1)).rstrip('/') or '/'
+    m_al = re.match(r'^Alias\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))\s+("([^"]+)"|\'([^\']+)\'|([^\s#]+))', line, re.IGNORECASE)
+    if m_al:
+        aliases.append((unquote(m_al.group(1)), unquote(m_al.group(5)).rstrip('/') or '/'))
+
+expected_norm = expected_root.rstrip('/') or '/'
+probe_path = default_path
+if docroot is not None and docroot != expected_norm:
+    for prefix, target in aliases:
+        if target == expected_norm and re.fullmatch(r'/[A-Za-z0-9._/-]*', prefix):
+            parts = prefix.split('/')
+            if '..' not in parts and '.' not in parts and '//' not in prefix:
+                clean_prefix = prefix.rstrip('/')
+                if default_path == '/':
+                    probe_path = (clean_prefix + '/') if clean_prefix else '/'
+                else:
+                    probe_path = clean_prefix + default_path
+                break
+
+print(f'{scheme}://{host}:{port}{probe_path}')
+print(server_name)
+PYEOF
+}
+
+apache_app_probe_body_is_healthy() {
+    local package_name="$1" probe_file="$2" sample="" trimmed=""
+    sample="$(head -c 8192 "$probe_file" 2>/dev/null | tr -d '\0' || true)"
+    trimmed="${sample#"${sample%%[![:space:]]*}"}"
+    if [[ "$trimmed" == '<?='* || "$trimmed" == $'\xef\xbb\xbf<?='* ]]; then
+        return 1
+    fi
+    if printf '%s' "$sample" | LC_ALL=C grep -Eiq '<\?php([[:space:]]|$)'; then
+        return 1
+    fi
+    if printf '%s' "$sample" | LC_ALL=C grep -Eiq '<b>(Fatal|Parse) error</b>:|(^|[[:space:]])(Fatal|Parse) error:.* in /'; then
+        return 1
+    fi
+    if printf '%s' "$sample" | LC_ALL=C grep -Eiq 'Apache2 (Debian|Ubuntu) Default Page|<h1[^>]*>[[:space:]]*It works![[:space:]]*</h1>'; then
+        return 1
+    fi
+    if [[ "$package_name" == "nextcloud" ]]; then
+        if printf '%s' "$sample" | LC_ALL=C grep -Eiq '"installed"[[:space:]]*:[[:space:]]*false|"maintenance"[[:space:]]*:[[:space:]]*true'; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+wait_for_apache_app_ready() {
+    local package_name="$1" port="$2" default_path="${3:-/}" attempts="${4:-${AF_READINESS_ATTEMPTS:-30}}"
+    local attempt target_output="" ready_url="" server_name="" probe_file="" http_status="" auth_credentials=""
+    local -a target_lines=() curl_tls_args=() curl_host_args=()
+    local loopback_https_re='^https://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
+    local loopback_url_re='^https?://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
+
+    [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    [[ "$port" =~ ^[0-9]{1,5}$ && "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
+    (( 10#$port > 0 && 10#$port <= 65535 && 10#$attempts <= 300 )) || return 1
+    [[ "$default_path" == /* ]] || return 1
+
+    target_output="$(apache_app_readiness_target "$package_name" "$port" "$default_path")" || return 1
+    mapfile -t target_lines <<< "$target_output"
+    ready_url="${target_lines[0]:-}"
+    server_name="${target_lines[1]:-}"
+    [[ -n "$ready_url" ]] || return 1
+
+    if [[ "$ready_url" =~ $loopback_https_re ]]; then
+        curl_tls_args=(-k)
+    fi
+    if [[ -n "$server_name" ]]; then
+        curl_host_args=(-H "Host: ${server_name}")
+    fi
+    if [[ "$package_name" == "rutorrent" && "$ready_url" =~ $loopback_url_re && -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" ]]; then
+        auth_credentials="${MASTER_USER}:${MASTER_PASS}"
+        auth_credentials="${auth_credentials//\\/\\\\}"
+        auth_credentials="${auth_credentials//\"/\\\"}"
+        if [[ "$auth_credentials" == *$'\n'* || "$auth_credentials" == *$'\r'* ]]; then
+            auth_credentials=""
+        fi
+    fi
+
+    local probe_dir="${TMPDIR:-/tmp}"
+    mkdir -p "$probe_dir" || return 1
+    probe_file="$(mktemp "${probe_dir}/af-apache-ready.XXXXXX")" || return 1
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if systemctl is-active --quiet apache2; then
+            : >"$probe_file"
+            if curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+                if apache_app_probe_body_is_healthy "$package_name" "$probe_file"; then
+                    rm -f -- "$probe_file"
+                    return 0
+                fi
+            else
+                http_status="$(curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || true)"
+                if [[ "$http_status" == "401" ]]; then
+                    if [[ -n "$auth_credentials" ]]; then
+                        : >"$probe_file"
+                        if printf 'user = "%s"\n' "$auth_credentials" | curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+                            if apache_app_probe_body_is_healthy "$package_name" "$probe_file"; then
+                                rm -f -- "$probe_file"
+                                return 0
+                            fi
+                        else
+                            http_status="$(printf 'user = "%s"\n' "$auth_credentials" | curl "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || true)"
+                            if [[ "$http_status" == "401" ]]; then
+                                rm -f -- "$probe_file"
+                                return 0
+                            fi
+                        fi
+                    else
+                        rm -f -- "$probe_file"
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+        if (( attempt < attempts )); then sleep 1; fi
+    done
+    rm -f -- "$probe_file"
+    print_error "Apache application ${package_name} did not become ready at ${ready_url}."
+    return 1
+}
+
 check_dns_port_53_available() {
     local package_name="$1" competing_package="$2" self_proc_regex="$3"
     local dns_port="${4:-${AF_DNS_PORT:-53}}"

@@ -307,10 +307,11 @@ APACHE_STOPPED=false
 af_logged systemctl reload apache2
 
 systemctl is-active --quiet apache2
-wait_for_service_ready apache2 "$APP_PORT" /status.php
+wait_for_apache_app_ready "${PACKAGE_NAME}" "$APP_PORT" "/status.php"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
+INSTALL_COMMITTED=true
 RUNTIME_CHANGED=false
 report_progress 100 "Nextcloud installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"
