@@ -4889,20 +4889,24 @@ PYEOF
 af_verify_local_dns_lookup() {
     local dns_port="${1:-53}"
     local max_attempts="${2:-15}"
-    python3 - "$dns_port" "$max_attempts" <<'PYEOF'
+    local retry_delay="${3:-1}"
+    local timeout_sec="${4:-2.0}"
+    python3 - "$dns_port" "$max_attempts" "$retry_delay" "$timeout_sec" <<'PYEOF'
 import os, socket, struct, sys, time
 
 port = int(sys.argv[1])
 attempts = max(1, int(sys.argv[2]))
+retry_delay = max(0.0, float(sys.argv[3]))
+timeout_sec = max(0.1, float(sys.argv[4]))
 question = b"\x09localhost\x00" + struct.pack(">HH", 1, 1)
 
 last_err = None
-for _ in range(attempts):
+for attempt in range(attempts):
     txid = struct.unpack(">H", os.urandom(2))[0]
     header = struct.pack(">HHHHHH", txid, 0x0100, 1, 0, 0, 0)
     packet = header + question
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(2.0)
+    sock.settimeout(timeout_sec)
     try:
         sock.connect(("127.0.0.1", port))
         sock.send(packet)
@@ -4917,7 +4921,8 @@ for _ in range(attempts):
         last_err = str(exc)
     finally:
         sock.close()
-    time.sleep(1)
+    if attempt + 1 < attempts and retry_delay > 0:
+        time.sleep(retry_delay)
 
 print(f"Local DNS lookup probe failed against 127.0.0.1:{port}: {last_err}", file=sys.stderr)
 raise SystemExit(1)

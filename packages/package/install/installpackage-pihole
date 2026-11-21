@@ -42,7 +42,7 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl bind9-dnsutils iproute2 ca-certificates
 
 report_progress 25 "Freeing port 53 from systemd-resolved stub listener..."
-validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf /var/backups/.af-backup-root
+validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf /etc/systemd/resolved.conf.d/90-pi-hole-disable-stub-listener.conf /etc/pihole/setupVars.conf /var/backups/.af-backup-root
 mkdir -p /var/backups
 PIHOLE_BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-pihole.XXXXXX)"
 chmod 700 "$PIHOLE_BACKUP_DIR"
@@ -62,7 +62,7 @@ elif [[ -e /etc/resolv.conf ]]; then
     cp -a -- /etc/resolv.conf "$PIHOLE_BACKUP_DIR/resolv.conf"
 fi
 af_backup_resolv_conf_state "pihole"
-PIHOLE_STATE_PATHS=(/etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf)
+PIHOLE_STATE_PATHS=(/etc/systemd/resolved.conf.d/pihole.conf /etc/systemd/resolved.conf.d/90-pi-hole-disable-stub-listener.conf /etc/pihole/setupVars.conf)
 if [[ -d /etc/lighttpd ]]; then
     PIHOLE_STATE_PATHS+=(/etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf)
     validate_config_paths /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf
@@ -116,6 +116,14 @@ stop_systemd_unit pihole-FTL
 snapshot_app_state "$PIHOLE_BACKUP_DIR" /etc/pihole /etc/dnsmasq.d /var/lib/pihole
 
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    (
+        umask 022
+        if [[ ! -e /etc/systemd/resolved.conf.d ]]; then
+            install -d -m 0755 /etc/systemd/resolved.conf.d
+        elif [[ -d /etc/systemd/resolved.conf.d && ! -L /etc/systemd/resolved.conf.d ]]; then
+            chmod a+rx /etc/systemd/resolved.conf.d
+        fi
+    )
     write_config_file /etc/systemd/resolved.conf.d/pihole.conf 0644 <<'EOF'
 [Resolve]
 DNSStubListener=no
@@ -156,13 +164,30 @@ fi
 
 report_progress 65 "Running official Pi-hole installer..."
 PIHOLE_BOOTSTRAP_SHA256="${AF_PIHOLE_BOOTSTRAP_SHA256:-4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8}"
-if ! af_logged fetch_and_run "https://raw.githubusercontent.com/pi-hole/pi-hole/f7c0220e63e753c664a1ec08d42d6b647b86005d/automated%20install/basic-install.sh" "$PIHOLE_BOOTSTRAP_SHA256" --unattended; then
+if [[ -d /var/www && ! -L /var/www ]]; then
+    chmod a+rx /var/www
+fi
+if [[ -d /var/www/html && ! -L /var/www/html ]]; then
+    chmod a+rx /var/www/html
+fi
+if ! ( umask 022; af_logged fetch_and_run "https://raw.githubusercontent.com/pi-hole/pi-hole/f7c0220e63e753c664a1ec08d42d6b647b86005d/automated%20install/basic-install.sh" "$PIHOLE_BOOTSTRAP_SHA256" --unattended ); then
     print_error "Pi-hole bootstrap verification or execution failed."
     exit 1
 fi
+if [[ -d /var/www && ! -L /var/www ]]; then
+    chmod a+rx /var/www
+fi
+if [[ -d /var/www/html && ! -L /var/www/html ]]; then
+    chmod a+rx /var/www/html
+fi
+PIHOLE_V6_CONFIG=false
+if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
+    PIHOLE_V6_CONFIG=true
+    stop_systemd_unit pihole-FTL
+fi
 if command_exists pihole && { [[ "$PIHOLE_EXISTING" != true ]] || [[ -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != 1 ]]; }; then
     PIHOLE_WEBPASS_HASH="$(printf '%s' "${AF_CONFIG_PASS:-$MASTER_PASS}" | sha256sum | awk '{printf "%s", $1}' | sha256sum | awk '{print $1}')"
-    if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
+    if [[ "$PIHOLE_V6_CONFIG" == true ]]; then
         AF_PIHOLE_PWHASH="$PIHOLE_WEBPASS_HASH" safe_config_python /etc/pihole/pihole.toml <<'PYEOF'
 import json, os, re
 path = '/etc/pihole/pihole.toml'
@@ -187,8 +212,10 @@ fi
 
 report_progress 85 "Configuring Pi-hole Web Admin interface on port ${APP_PORT}..."
 # Support both Pi-hole v6 (embedded pihole-FTL webserver) and v5 (lighttpd)
-if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
+PIHOLE_WEB_PROVIDER=""
+if [[ "$PIHOLE_V6_CONFIG" == true ]]; then
     af_logged pihole-FTL --config webserver.port "${APP_PORT}o"
+    PIHOLE_WEB_PROVIDER="pihole-FTL"
 fi
 if [[ -d /etc/lighttpd ]]; then
     safe_config_python "$APP_PORT" /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf <<'PYEOF'
@@ -205,13 +232,18 @@ with contextlib.ExitStack() as stack:
         config.write_text(text, 0o644)
 PYEOF
     af_logged systemctl restart lighttpd
+    [[ -n "$PIHOLE_WEB_PROVIDER" ]] || PIHOLE_WEB_PROVIDER="lighttpd"
+fi
+if [[ -z "$PIHOLE_WEB_PROVIDER" ]]; then
+    print_error "Pi-hole web admin provider not found (neither /etc/pihole/pihole.toml nor /etc/lighttpd exists)."
+    exit 1
 fi
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now pihole-FTL
 af_logged systemctl restart pihole-FTL
-af_verify_local_dns_lookup 53
 wait_for_service_ready pihole-FTL "$APP_PORT" /admin/
+af_verify_local_dns_lookup 53 30
 PIHOLE_VERSION="$(pihole-FTL -v | head -n1)"
 queue_app_version /etc/pihole/.af-version "${PIHOLE_VERSION#v}"
 
