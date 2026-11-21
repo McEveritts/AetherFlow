@@ -6400,18 +6400,23 @@ async fn post_runner_plugin_json<T: Serialize + ?Sized>(
             .header("Host", "unix")
             .header("Content-Type", "application/json")
             .body(Full::new(Bytes::from(body_bytes)))
-            .map_err(|err| PluginRunnerError::Runtime(format!("Failed to build runner request: {err}")))?;
+            .map_err(|err| {
+                PluginRunnerError::Runtime(format!("Failed to build runner request: {err}"))
+            })?;
 
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|err| PluginRunnerError::Runtime(format!("Runner request failed ({endpoint}): {err}")))?;
+        let resp = sender.send_request(req).await.map_err(|err| {
+            PluginRunnerError::Runtime(format!("Runner request failed ({endpoint}): {err}"))
+        })?;
         let status = resp.status();
         let collected = resp
             .into_body()
             .collect()
             .await
-            .map_err(|err| PluginRunnerError::Runtime(format!("Failed to read runner response ({endpoint}): {err}")))?
+            .map_err(|err| {
+                PluginRunnerError::Runtime(format!(
+                    "Failed to read runner response ({endpoint}): {err}"
+                ))
+            })?
             .to_bytes();
         let decoded: RunnerResponse = serde_json::from_slice(&collected).map_err(|err| {
             PluginRunnerError::Runtime(format!(
@@ -6422,9 +6427,9 @@ async fn post_runner_plugin_json<T: Serialize + ?Sized>(
         Ok((status, decoded))
     };
 
-    tokio::time::timeout(timeout, fut)
-        .await
-        .map_err(|_| PluginRunnerError::Runtime(format!("Runner plugin request timed out ({endpoint})")))?
+    tokio::time::timeout(timeout, fut).await.map_err(|_| {
+        PluginRunnerError::Runtime(format!("Runner plugin request timed out ({endpoint})"))
+    })?
 }
 
 #[cfg(not(unix))]

@@ -528,10 +528,7 @@ pub fn validate_relative_plugin_subpath(
             || c.is_control()
             || matches!(c, '%' | ':' | ';' | '"' | '\'' | '\\' | '$' | '`')
     }) {
-        return Err(format!(
-            "Path '{}' contains disallowed characters",
-            trimmed
-        ));
+        return Err(format!("Path '{}' contains disallowed characters", trimmed));
     }
     let rel_path = StdPath::new(trimmed);
     if rel_path.is_absolute() {
@@ -1557,7 +1554,11 @@ pub async fn stop_plugin_instance(
     let (active_monitor, active_runtime_id, active_port) = {
         let mut procs = ACTIVE_PROCESSES.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = procs.get_mut(&manifest.id) {
-            (entry.monitor.take(), Some(entry.runtime_id), Some(entry.port))
+            (
+                entry.monitor.take(),
+                Some(entry.runtime_id),
+                Some(entry.port),
+            )
         } else {
             (None, None, None)
         }
@@ -2843,8 +2844,11 @@ pub(crate) mod tests {
         fs::create_dir_all(&hooks_dir).unwrap();
         fs::set_permissions(&plugins_root, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&plugin_dir, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(plugin_dir.join("backend"), fs::Permissions::from_mode(0o755))
-            .unwrap();
+        fs::set_permissions(
+            plugin_dir.join("backend"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
         let forbidden_marker = tmp.join("api-user-executed.marker");
@@ -3157,8 +3161,11 @@ pub(crate) mod tests {
         fs::create_dir_all(&hooks_dir).unwrap();
         fs::set_permissions(&plugins_root, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&plugin_dir, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(plugin_dir.join("backend"), fs::Permissions::from_mode(0o755))
-            .unwrap();
+        fs::set_permissions(
+            plugin_dir.join("backend"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
         let start_hook = hooks_dir.join("start.sh");
@@ -3381,7 +3388,10 @@ esac
             reg_after_fail.allocated_port, 21222,
             "failed start must restore previous allocated port"
         );
-        assert!(!ACTIVE_PROCESSES.lock().unwrap().contains_key("isolated-demo"));
+        assert!(!ACTIVE_PROCESSES
+            .lock()
+            .unwrap()
+            .contains_key("isolated-demo"));
 
         runner_task.abort();
         let _ = fs::remove_file(&sock_path);
@@ -3422,7 +3432,10 @@ esac
 
         let (manifests, rejected) = discover_plugins_in_dir(&plugins_root);
         assert!(rejected.is_empty());
-        let manifest = manifests.into_iter().find(|m| m.id == "external-only").unwrap();
+        let manifest = manifests
+            .into_iter()
+            .find(|m| m.id == "external-only")
+            .unwrap();
 
         let started = start_plugin_instance(&manifest).await.unwrap();
         assert!(started.enabled);
