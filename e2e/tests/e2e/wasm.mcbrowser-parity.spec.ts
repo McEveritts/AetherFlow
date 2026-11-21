@@ -172,46 +172,75 @@ test('deep-links Settings to McBrowser Policy, renders lazy grid thumbnails, and
   ).toBe(false);
 });
 
+function relativeLuminance(color: string): number {
+  const match = color.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
+  if (!match) {
+    throw new Error(`Expected opaque rgb() color, got ${color}`);
+  }
+  const [r, g, b] = match.slice(1).map((n) => {
+    const c = Number(n) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 function contrastRatio(foreground: string, background: string): number {
-  const parse = (color: string) => {
-    const match = color.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
-    if (!match) {
-      throw new Error(`Expected opaque rgb() color, got ${color}`);
-    }
-    return match.slice(1).map((n) => {
-      const c = Number(n) / 255;
-      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-    });
-  };
-  const lum = ([r, g, b]: number[]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  const fg = lum(parse(foreground));
-  const bg = lum(parse(background));
+  const fg = relativeLuminance(foreground);
+  const bg = relativeLuminance(background);
   return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
 }
 
-async function expectEditorSurfaceContrast(editorRoot: import('@playwright/test').Locator) {
+async function expectEditorSurfaceContrast(
+  editorRoot: import('@playwright/test').Locator,
+  expectedTone: 'dark' | 'light',
+) {
   await expect(editorRoot.locator('.af-token-comment').first()).toBeVisible();
   for (const selector of [
     '.af-editor-gutter',
     '.af-token-comment',
     '> [role="status"]',
     '.af-editor-toolbar button.glass-button:not([disabled])',
+    '.af-editor-toolbar select.glass-input',
   ]) {
     const target = selector.startsWith('>')
       ? editorRoot.locator(`:scope ${selector}`).first()
       : editorRoot.locator(selector).first();
     const colors = await target.evaluate((element, sel) => {
+      const activeColorTransitions = (node: Element) =>
+        node
+          .getAnimations()
+          .map((animation) => ('transitionProperty' in animation ? String(animation.transitionProperty) : ''))
+          .filter((prop) => prop === 'color' || prop === 'background-color');
+
       let surface: Element | null = element;
       while (surface) {
         const background = getComputedStyle(surface).backgroundColor;
         if (background !== 'rgba(0, 0, 0, 0)' && background !== 'transparent') {
-          return { foreground: getComputedStyle(element).color, background };
+          const colorTransitions = [
+            ...activeColorTransitions(element),
+            ...(surface === element ? [] : activeColorTransitions(surface)),
+          ];
+          return {
+            foreground: getComputedStyle(element).color,
+            background,
+            colorTransitions,
+          };
         }
         surface = surface.parentElement;
       }
       throw new Error(`Expected an opaque background for ${sel}`);
     }, selector);
+    expect(
+      colors.colorTransitions,
+      `${selector} must switch color/background atomically without mid-transition contrast collapse`,
+    ).toEqual([]);
     expect(colors.background, `${selector} background must be opaque`).toMatch(/^rgb\(/);
+    const bgLuminance = relativeLuminance(colors.background);
+    if (expectedTone === 'light') {
+      expect(bgLuminance, `${selector} background must match light editor tone`).toBeGreaterThan(0.5);
+    } else {
+      expect(bgLuminance, `${selector} background must match dark editor tone`).toBeLessThan(0.2);
+    }
     expect(contrastRatio(colors.foreground, colors.background), `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
   }
 }
@@ -305,26 +334,29 @@ test('honors persisted non-dropdown 109.1 editor themes, auto-detects filename s
   // Verify dark editor remains WCAG AA readable inside a light outer dashboard.
   await page.evaluate(() => {
     document.documentElement.dataset.theme = 'light';
+    document.documentElement.classList.remove('dark');
     document.documentElement.classList.add('light');
   });
-  await expectEditorSurfaceContrast(editorRoot);
+  await expectEditorSurfaceContrast(editorRoot, 'dark');
 
   // Switch to light 'chrome' editor inside a dark outer dashboard and verify WCAG AA contrast.
   await page.evaluate(() => {
     document.documentElement.dataset.theme = 'dark';
     document.documentElement.classList.remove('light');
+    document.documentElement.classList.add('dark');
   });
   await editorDialog.getByTestId('editor-theme-select').selectOption('chrome');
   await expect(editorRoot).toHaveAttribute('data-editor-theme', 'chrome');
   await expect(editorRoot).toHaveAttribute('data-editor-tone', 'light');
   await expect(editorRoot).toHaveClass(/af-editor-theme-chrome/);
-  await expectEditorSurfaceContrast(editorRoot);
+  await expectEditorSurfaceContrast(editorRoot, 'light');
 
   // Switch theme to 'dracula' -> updates class & persists via PUT /preferences preserving unrelated fields.
   await editorDialog.getByTestId('editor-theme-select').selectOption('dracula');
   await expect(editorRoot).toHaveAttribute('data-editor-theme', 'dracula');
   await expect(editorRoot).toHaveAttribute('data-editor-tone', 'dark');
   await expect(editorRoot).toHaveClass(/af-editor-theme-dracula/);
+  await expectEditorSurfaceContrast(editorRoot, 'dark');
   await expect.poll(() => prefPuts.at(-1)?.editor_theme).toBe('dracula');
   expect(prefPuts.at(-1)).toMatchObject({ editor_theme: 'dracula', show_hidden: true, locale: 'de' });
   await editorDialog.getByRole('button', { name: 'Close dialog' }).click();
