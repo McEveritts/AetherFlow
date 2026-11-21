@@ -38,7 +38,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Prometheus..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar ca-certificates jq
 
 if ! id -u prometheus >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --shell /usr/sbin/nologin prometheus
@@ -89,7 +89,7 @@ rollback_runtime() {
 trap rollback_runtime EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-report_progress 30 "Downloading latest Prometheus (${PROM_ARCH})..."
+report_progress 30 "Downloading Prometheus (${PROM_ARCH})..."
 PROM_VERSION="$(github_latest_tag "prometheus/prometheus" "2.53.1")"
 PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz"
 
@@ -103,7 +103,8 @@ rm -f "$TMP_TAR"
 PROM_EXTRACTED="$TMP_DIR/prometheus-${PROM_VERSION}.${PROM_ARCH}"
 
 report_progress 50 "Downloading and extracting Node Exporter..."
-NE_VERSION="$(github_latest_tag "prometheus/node_exporter" "1.8.2")"
+# The lifecycle target identifies Prometheus. Node Exporter has its own releases.
+NE_VERSION="$(AF_TARGET_VERSION= github_latest_tag "prometheus/node_exporter" "1.8.2")"
 NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
 TMP_NE="$TMP_DIR/node_exporter.tar.gz"
 af_logged download_file "$NE_URL" "$TMP_NE"
@@ -165,8 +166,6 @@ EOF
 fi
 
 chown -hRP prometheus:prometheus /etc/prometheus /var/lib/prometheus
-chown prometheus:prometheus /usr/local/bin/prometheus /usr/local/bin/promtool
-chown node_exporter:node_exporter /usr/local/bin/node_exporter
 
 report_progress 85 "Configuring and starting prometheus.service and node_exporter.service..."
 sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/prometheus.service
@@ -216,8 +215,20 @@ af_logged systemctl restart node_exporter
 af_logged systemctl enable --now prometheus
 af_logged systemctl restart prometheus
 
-systemctl is-active --quiet node_exporter prometheus
-queue_app_version /etc/prometheus/.af-version "${PROM_VERSION#v}"
+report_progress 95 "Verifying HTTP readiness and running versions for Prometheus and Node Exporter..."
+no_proxy=127.0.0.1 wait_for_service_ready prometheus "$APP_PORT" /-/ready
+no_proxy=127.0.0.1 wait_for_service_ready node_exporter 9100 /metrics
+PROM_LIVE_VERSION="$(curl --noproxy '*' --proto '=http' -fsS --connect-timeout 2 --max-time 5 \
+    --max-filesize 65536 "http://127.0.0.1:${APP_PORT}/api/v1/status/buildinfo" |
+    jq -er 'select(.status == "success") | .data.version')"
+NE_LIVE_VERSION="$(curl --noproxy '*' --proto '=http' -fsS --connect-timeout 2 --max-time 5 \
+    --max-filesize 4194304 "http://127.0.0.1:9100/metrics" |
+    sed -nE '/^node_exporter_build_info\{/s/.*[{,]version="([^"]+)".*/\1/p')"
+if [[ "$PROM_LIVE_VERSION" != "$PROM_VERSION" || "$NE_LIVE_VERSION" != "$NE_VERSION" ]]; then
+    print_error "Running Prometheus or Node Exporter version does not match the release downloaded."
+    exit 1
+fi
+queue_app_version /etc/prometheus/.af-version "$PROM_LIVE_VERSION"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

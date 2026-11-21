@@ -481,6 +481,8 @@ elif command in ('curl', 'wget'):
     for option in ('-o', '-O', '-qO', '--output'):
         if option in arguments: target = arguments[arguments.index(option) + 1]
     url = next((entry for entry in arguments if entry.startswith('http')), '')
+    if app == 'prometheus' and '/prometheus/node_exporter/releases/' in url:
+        version = '1.8.2'
     def checksum_opt_out():
         return os.environ.get('AF_TEST_DISABLE_CHECKSUM_URLS', '') not in ('', '0') or failure in ('checksum', 'missing-checksum', 'corrupt-checksum')
     def artifact_bytes(source_url):
@@ -565,7 +567,13 @@ elif command in ('curl', 'wget'):
             print('200')
     elif any('127.0.0.1' in entry for entry in arguments):
         if failure == 'readiness': sys.exit(22)
-        print(json.dumps({'status': 'ok' if app == 'maintainerr' else 'OK', 'database': 'ok', 'version': version, 'apiKey': 'retained-api-key'}))
+        if app == 'prometheus' and url.endswith('/api/v1/status/buildinfo'):
+            print(json.dumps({'status': 'success', 'data': {'version': '1.0.0' if failure == 'prometheus-version' else version}}))
+        elif app == 'prometheus' and url == 'http://127.0.0.1:9100/metrics':
+            observed_version = '1.0.0' if failure == 'exporter-version' else '1.8.2'
+            print('node_exporter_build_info{version="' + observed_version + '"} 1')
+        else:
+            print(json.dumps({'status': 'ok' if app == 'maintainerr' else 'OK', 'database': 'ok', 'version': version, 'apiKey': 'retained-api-key'}))
     elif url.split('?', 1)[0].endswith(('.tar.gz', '.tgz', '.tar.xz', '.zip')):
         sys.stdout.buffer.write(artifact_bytes(url))
     else:
@@ -709,13 +717,13 @@ elif command == 'install':
             position += 1
     os.execv('/usr/bin/install', ['/usr/bin/install', *selected])
 elif command == 'apt-get':
-    if failure == 'apt' and arguments[-1] == 'netdata': sys.exit(100)
+    if failure == 'apt' and (arguments[-1] == 'netdata' or any(arg.startswith('mergerfs=') for arg in arguments)): sys.exit(100)
     if os.environ.get('AF_FIXTURE_PERSISTENT_APT') == '1':
         state_file = root / 'dpkg-state.json'
         state = json.loads(state_file.read_text()) if state_file.exists() else {}
         for argument in arguments[1:]:
             package, separator, requested = argument.partition('=')
-            if package not in ('grafana', 'wireguard', 'wireguard-tools'):
+            if package not in ('grafana', 'wireguard', 'wireguard-tools', 'mergerfs'):
                 continue
             if arguments[0] == 'remove':
                 state.pop(package, None)
@@ -925,7 +933,9 @@ stat() {
         command stat "$@"
     fi
 }
-github_latest_tag() { [[ "${3:-}" != false ]] || printf v; printf '%s\n' "$AF_FIXTURE_VERSION"; }
+if [[ "$AF_FIXTURE_APP" != prometheus ]]; then
+    github_latest_tag() { [[ "${3:-}" != false ]] || printf v; printf '%s\n' "$AF_FIXTURE_VERSION"; }
+fi
 get_base_domain() { printf 'fixture.example\n'; }
 seed_jellyfin_master_user() { :; }
 '''
@@ -1045,7 +1055,7 @@ youtube_private_port() {
             output.addfile(entry, io.BytesIO(binary))
         for filename, directory, names in (
             ("prometheus.tar.gz", "prometheus-2.1.0.linux-amd64", ("prometheus", "promtool")),
-            ("node-exporter.tar.gz", "node_exporter-2.1.0.linux-amd64", ("node_exporter",)),
+            ("node-exporter.tar.gz", "node_exporter-1.8.2.linux-amd64", ("node_exporter",)),
         ):
             with tarfile.open(self.root / filename, "w:gz") as output:
                 for name in names:
@@ -2292,6 +2302,28 @@ os.execv(str(root / 'usr/bin/systemctl'), [str(root / 'usr/bin/systemctl'), *arg
                 self.assertEqual(runtime.read_text(), "retained runtime\n")
                 self.assertEqual(state.read_text(), "retained state\n")
 
+    def test_prometheus_target_is_independent_of_node_exporter_and_matches_running_versions(self):
+        fixture = self.fixture("prometheus")
+        self.assert_success(fixture.run("install", 19090, AF_TARGET_VERSION="v2.1.0"))
+        version_file = fixture.root / "etc/prometheus/.af-version"
+        self.assertEqual(version_file.read_text().strip(), "2.1.0")
+        commands = [json.loads(line) for line in (fixture.root / "commands.jsonl").read_text().splitlines()]
+        urls = {arg for command in commands if command[0] == "curl"
+                for arg in command[1:] if arg.startswith("http")}
+        self.assertIn("https://github.com/prometheus/prometheus/releases/download/v2.1.0/prometheus-2.1.0.linux-amd64.tar.gz", urls)
+        self.assertIn("https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz", urls)
+        self.assertIn("http://127.0.0.1:19090/-/ready", urls)
+        self.assertIn("http://127.0.0.1:19090/api/v1/status/buildinfo", urls)
+        self.assertIn("http://127.0.0.1:9100/metrics", urls)
+        receipt = fixture.lock.stat().st_mtime_ns
+        for failure in ("prometheus-version", "exporter-version"):
+            with self.subTest(failure=failure):
+                result = fixture.run("update", 19090, AF_TARGET_VERSION="v2.1.0", AF_FIXTURE_FAILURE=failure)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("version does not match", result.stdout + result.stderr)
+                self.assertEqual(version_file.read_text().strip(), "2.1.0")
+                self.assertEqual(fixture.lock.stat().st_mtime_ns, receipt)
+
     def test_prometheus_node_exporter_download_failure_precedes_quiescence(self):
         fixture = self.fixture("prometheus")
         self.assert_success(fixture.run("install"))
@@ -2313,6 +2345,28 @@ os.execv(str(root / 'usr/bin/curl'), [str(root / 'usr/bin/curl'), *arguments])
         self.assertTrue(fixture.lock.exists())
         commands = [json.loads(line) for line in (fixture.root / "commands.jsonl").read_text().splitlines()[command_count:]]
         self.assertFalse(any(entry[:2] in (["systemctl", "stop"], ["systemctl", "restart"]) for entry in commands))
+
+    def test_mergerfs_pinned_apt_update_records_debian_version_and_never_uses_github_fallback(self):
+        fixture = self.fixture("mergerfs")
+        target = "2.40.2-2+deb13u1"
+        self.assert_success(fixture.run("install", AF_FIXTURE_PERSISTENT_APT="1"))
+        self.assert_success(fixture.run("update", AF_TARGET_VERSION=target, AF_FIXTURE_VERSION="2.40.9-1",
+                                        AF_FIXTURE_PERSISTENT_APT="1"))
+        version_file = fixture.root / "var/lib/mergerfs/.af-version"
+        self.assertEqual(version_file.read_text().strip(), target)
+        calls_file = fixture.root / "commands.jsonl"
+        commands = [json.loads(line) for line in calls_file.read_text().splitlines()]
+        self.assertTrue(any(call[:2] == ["apt-get", "install"] and f"mergerfs={target}" in call
+                            for call in commands))
+        receipt = fixture.lock.stat().st_mtime_ns
+        result = fixture.run("update", AF_TARGET_VERSION="2.40.3-1", AF_FIXTURE_FAILURE="apt",
+                             AF_FIXTURE_PERSISTENT_APT="1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("requested MergerFS APT version", result.stdout + result.stderr)
+        subsequent = [json.loads(line) for line in calls_file.read_text().splitlines()[len(commands):]]
+        self.assertFalse(any(call[0] == "curl" for call in subsequent))
+        self.assertEqual(version_file.read_text().strip(), target)
+        self.assertEqual(fixture.lock.stat().st_mtime_ns, receipt)
 
     def test_flood_retained_reinstall_restarts_service_and_rejects_empty_version(self):
         fixture = self.fixture("flood")

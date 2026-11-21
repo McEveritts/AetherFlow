@@ -703,13 +703,13 @@
     ]
   },
   "prometheus": {
-    "update_source": "apt",
+    "update_source": "github",
     "require_download_sha256": true,
     "update_package": "prometheus",
+    "update_repo": "prometheus/prometheus",
     "version_command": [
-      "sh",
-      "-c",
-      "/usr/bin/prometheus --version || /usr/local/bin/prometheus --version"
+      "/usr/local/bin/prometheus",
+      "--version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
