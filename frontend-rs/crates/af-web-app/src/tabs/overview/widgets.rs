@@ -1086,6 +1086,16 @@ struct BandwidthApplyOutcome {
     is_partial_or_warning: bool,
 }
 
+impl BandwidthApplyOutcome {
+    fn aria_role(&self) -> &'static str {
+        if self.is_error {
+            "alert"
+        } else {
+            "status"
+        }
+    }
+}
+
 fn non_empty_str(value: &Value) -> Option<String> {
     value
         .as_str()
@@ -1564,12 +1574,10 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                         let outcome = summarize_bandwidth_apply_outcome(
                                             context, ok, status, &payload, &body_text, &limits,
                                         );
-                                        context.toast(outcome.message.clone(), outcome.is_error);
                                         bandwidth_feedback.set(Some(outcome));
                                     }
                                     Err(failure) => {
                                         let message = tt(context, &failure.message);
-                                        context.toast(message.clone(), true);
                                         bandwidth_feedback.set(Some(BandwidthApplyOutcome {
                                             message,
                                             is_error: true,
@@ -1585,13 +1593,14 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                     </button>
                     {move || {
                         bandwidth_feedback.get().map(|outcome| {
+                            let role = outcome.aria_role();
                             let class = if outcome.is_error || outcome.is_partial_or_warning {
                                 "text-sm text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 mt-3"
                             } else {
                                 "text-sm text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 mt-3"
                             };
                             view! {
-                                <p role="status" class=class>
+                                <p role=role class=class>
                                     {outcome.message}
                                 </p>
                             }
@@ -1689,6 +1698,7 @@ mod tests {
             );
             assert!(partial.is_error);
             assert!(partial.is_partial_or_warning);
+            assert_eq!(partial.aria_role(), "alert");
             assert!(partial
                 .message
                 .contains("Bandwidth limits partially applied"));
@@ -1713,6 +1723,7 @@ mod tests {
             );
             assert!(failed_with_recovery.is_error);
             assert!(failed_with_recovery.is_partial_or_warning);
+            assert_eq!(failed_with_recovery.aria_role(), "alert");
             assert!(failed_with_recovery
                 .message
                 .contains("qBittorrent rejected setUploadLimit"));
@@ -1737,6 +1748,7 @@ mod tests {
             );
             assert!(!clean.is_error);
             assert!(!clean.is_partial_or_warning);
+            assert_eq!(clean.aria_role(), "status");
             assert!(clean.message.contains("Bandwidth limits applied"));
             assert!(clean.message.contains("qbittorrent"));
         });

@@ -225,6 +225,18 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     await json(route, { servers: [], activeSessions: [], liveSummary: {}, analytics: {} });
   });
 
+  // SettingsTab mounts SystemUpdates immediately on the default General subtab,
+  // which probes runner availability for administrators. Keep it inside the
+  // mocked session so it cannot fall through to the isolated live server, get
+  // HTTP 401, and trigger session-expiry revalidation or logout.
+  await page.route(/\/api\/v1\/admin\/network\/status(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, { platform: 'linux', runner_available: false });
+  });
+
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/(check|status)/, async (route: Route) => {
     if (new URL(route.request().url()).pathname.endsWith('/status')) {
       await json(route, { state: 'idle', phase: '', operationId: '', error: '' });

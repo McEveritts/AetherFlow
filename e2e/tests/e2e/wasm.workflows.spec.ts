@@ -11,8 +11,10 @@ async function settings(page: Page, tab: 'Backups & Restore' | 'Security & 2FA')
 }
 
 test.describe('WASM restored workflows', () => {
-  test('shows persisted backup schedule, toggles it, and preserves the password draft across polling', async ({ page }) => {
-    await page.clock.install();
+  test('shows persisted backup schedule, toggles it, and preserves the password draft across polling', async ({ page, browserName }) => {
+    if (browserName === 'webkit') test.setTimeout(60_000);
+    await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
     let mode: 'smart' | 'manual' = 'smart';
     let reads = 0;
@@ -40,23 +42,37 @@ test.describe('WASM restored workflows', () => {
     await expect(schedule).toContainText('Confidence: 80%');
     await expect(schedule).toContainText('2026-11-18T04:00:00Z');
     await page.getByRole('grid', { name: 'Verified backup manifests' }).getByText('snapshot.sqlite').click();
-    const password = page.getByRole('dialog', { name: 'Download verified backup' }).getByLabel('Current password');
+    const dialog = page.getByRole('dialog', { name: 'Download verified backup' });
+    const password = dialog.getByLabel('Current password');
     await password.fill('unfinished-draft');
+    const readsBeforePoll = reads;
     await page.clock.fastForward('00:31');
-    await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => reads).toBeGreaterThan(readsBeforePoll);
     await expect(password).toHaveValue('unfinished-draft');
-    await page.getByRole('dialog', { name: 'Download verified backup' }).getByRole('button', { name: 'Close dialog' }).click();
+    const closeDialog = dialog.getByRole('button', { name: 'Close dialog' });
+    await expect(closeDialog).toBeEnabled();
+    await closeDialog.press('Enter');
+    await expect(dialog).toBeHidden();
     const disableSchedule = schedule.getByRole('button', { name: 'Disable automatic backups' });
     await expect(disableSchedule).toBeEnabled();
+    const readsBeforeDisable = reads;
     await disableSchedule.press('Enter');
     await expect(schedule).toContainText('Schedule mode: Manual');
+    await expect.poll(() => reads).toBeGreaterThan(readsBeforeDisable);
+    await expect(schedule.getByRole('button', { name: 'Enable automatic backups' })).toBeEnabled();
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.getByRole('tab', { name: 'Backups & Restore' }).press('Enter');
+    const backupsTab = page.getByRole('tab', { name: 'Backups & Restore', exact: true });
+    await expect(backupsTab).toBeVisible();
+    await backupsTab.press('Enter');
+    await expect(backupsTab).toHaveAttribute('aria-selected', 'true');
     await expect(schedule).toContainText('Schedule mode: Manual');
     const enableSchedule = schedule.getByRole('button', { name: 'Enable automatic backups' });
     await expect(enableSchedule).toBeEnabled();
+    const readsBeforeEnable = reads;
     await enableSchedule.press('Enter');
     await expect(schedule).toContainText('Schedule mode: Smart');
+    await expect.poll(() => reads).toBeGreaterThan(readsBeforeEnable);
+    await expect(schedule.getByRole('button', { name: 'Disable automatic backups' })).toBeEnabled();
     expect(writes).toEqual(['manual', 'smart']);
   });
 

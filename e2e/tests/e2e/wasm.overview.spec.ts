@@ -26,6 +26,7 @@ test('applies the displayed bandwidth recommendation explicitly and reports daem
   reject = true;
   await apply.click();
   await expect(page.getByRole('alert').filter({ hasText: 'Torrent daemon rejected RPC request' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Bandwidth limits applied' })).toHaveCount(0);
   await expect(apply).toBeEnabled();
   expect(applied).toHaveLength(2);
 });
