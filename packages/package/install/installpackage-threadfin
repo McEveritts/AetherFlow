@@ -149,10 +149,56 @@ stage_app_archive "$BUILD_DIR" /usr/local/bin/threadfin threadfin /var/lib/threa
 BUILD_DIR=""
 queue_app_version /var/lib/threadfin/.af-version "${TF_VERSION}"
 
+# Threadfin 1.2.37 overwrites -bind during host-IP discovery unless settings.json
+# defines a non-empty bindIpAddress. Seed a loopback default (with schema version
+# 0.5.0 for fresh installs) while preserving all existing operator settings.
+TF_BIND_ADDRESS="${AF_BIND_ADDRESS:-127.0.0.1}"
+TF_BIND_ADDRESS="${TF_BIND_ADDRESS#"${TF_BIND_ADDRESS%%[![:space:]]*}"}"
+TF_BIND_ADDRESS="${TF_BIND_ADDRESS%"${TF_BIND_ADDRESS##*[![:space:]]}"}"
+_tf_bind_re='^[][A-Za-z0-9.:-]+$'
+if [[ -z "$TF_BIND_ADDRESS" || ! "$TF_BIND_ADDRESS" =~ $_tf_bind_re ]]; then
+    print_error "Invalid Threadfin bind address: ${AF_BIND_ADDRESS:-}"
+    exit 1
+fi
+AF_BIND_ADDRESS="$TF_BIND_ADDRESS" safe_config_python /var/lib/threadfin/conf/settings.json <<'PYEOF'
+import json, os, sys
+
+filename = sys.argv[1]
+bind_address = (os.environ.get('AF_BIND_ADDRESS') or '127.0.0.1').strip()
+if not bind_address or any(ch.isspace() or ch == '\x00' for ch in bind_address):
+    raise ValueError('Invalid Threadfin bind address')
+
+with ManagedConfig(filename) as config:
+    raw = config.read_text(max_bytes=1024 * 1024)
+    if raw.strip():
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError('Threadfin settings must be a JSON object')
+        settings = loaded
+    else:
+        settings = {}
+
+    if not settings:
+        settings['version'] = '0.5.0'
+    else:
+        version = settings.get('version')
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError('Existing Threadfin settings require a non-empty version string')
+
+    current_bind = settings.get('bindIpAddress')
+    if isinstance(current_bind, str) and current_bind.strip():
+        sys.exit(0)
+    if current_bind is not None and not isinstance(current_bind, str):
+        raise ValueError('Threadfin bindIpAddress must be a string')
+
+    settings['bindIpAddress'] = bind_address
+    config.write_text(json.dumps(settings, indent=2) + '\n', mode=0o600)
+PYEOF
+
 chown -hRP threadfin:threadfin /var/lib/threadfin
 
 report_progress 85 "Configuring and starting threadfin.service on port ${APP_PORT}..."
-sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/threadfin.service
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${TF_BIND_ADDRESS}/g" <<'EOF' > /etc/systemd/system/threadfin.service
 [Unit]
 Description=Threadfin M3U and HDHomeRun IPTV Proxy
 After=syslog.target network-online.target
@@ -162,6 +208,7 @@ Wants=network-online.target
 Type=simple
 User=threadfin
 Group=threadfin
+Environment=HOME=/var/lib/threadfin
 WorkingDirectory=/var/lib/threadfin
 ExecStart=/usr/local/bin/threadfin -port=@AF_APP_PORT@ -bind=@AF_BIND_ADDRESS@ -config=/var/lib/threadfin/conf
 Restart=on-failure

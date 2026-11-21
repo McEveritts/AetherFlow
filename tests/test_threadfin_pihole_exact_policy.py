@@ -213,6 +213,74 @@ class ThreadfinExactVersionPolicyTests(unittest.TestCase):
                 curl_urls,
             )
 
+    def test_threadfin_seeds_loopback_settings_and_preserves_operator_config(self):
+        # 1. Fresh install seeds version 0.5.0 + loopback bindIpAddress and HOME in unit
+        with InstallerFixture("threadfin") as fixture:
+            res = fixture.run("install", port=34401)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            settings_path = fixture.root / "var/lib/threadfin/conf/settings.json"
+            self.assertTrue(settings_path.is_file())
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")),
+                {"version": "0.5.0", "bindIpAddress": "127.0.0.1"},
+            )
+            unit_text = (fixture.root / "etc/systemd/system/threadfin.service").read_text(encoding="utf-8")
+            self.assertIn(f"Environment=HOME={fixture.root}/var/lib/threadfin", unit_text)
+            self.assertIn("-port=34401 -bind=127.0.0.1 -config=", unit_text)
+
+        # 2. Existing settings with empty/null/missing bindIpAddress gets loopback default while keeping operator keys
+        for initial in (
+            '{"version": "0.5.0", "bindIpAddress": "", "tuner": 4, "custom": {"playlist": "keep"}}\n',
+            '{"version": "0.5.0", "bindIpAddress": null, "tuner": 4, "custom": {"playlist": "keep"}}\n',
+            '{"version": "0.5.0", "tuner": 4, "custom": {"playlist": "keep"}}\n',
+        ):
+            with self.subTest(initial=initial), InstallerFixture("threadfin") as fixture:
+                settings_path = fixture.file("var/lib/threadfin/conf/settings.json", initial)
+                res = fixture.run("reinstall", port=34401)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                updated = json.loads(settings_path.read_text(encoding="utf-8"))
+                self.assertEqual(updated["version"], "0.5.0")
+                self.assertEqual(updated["bindIpAddress"], "127.0.0.1")
+                self.assertEqual(updated["tuner"], 4)
+                self.assertEqual(updated["custom"], {"playlist": "keep"})
+
+        # 3. Existing settings with explicit non-empty bindIpAddress is preserved byte-for-byte
+        for explicit in (
+            '{"version":"0.5.0","bindIpAddress":"127.0.0.1","custom":"exact-bytes"}\n',
+            '{"version":"0.5.0","bindIpAddress":"192.0.2.10","custom":"exact-bytes"}\n',
+        ):
+            with self.subTest(explicit=explicit), InstallerFixture("threadfin") as fixture:
+                settings_path = fixture.file("var/lib/threadfin/conf/settings.json", explicit)
+                res = fixture.run("reinstall", port=34401)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(settings_path.read_text(encoding="utf-8"), explicit)
+
+    def test_threadfin_rejects_malformed_or_symlinked_settings_fail_closed(self):
+        for bad_payload in (
+            "{not-valid-json",
+            "[]\n",
+            '{"bindIpAddress": ""}\n',
+            '{"version": "", "bindIpAddress": ""}\n',
+            '{"version": "0.5.0", "bindIpAddress": 42}\n',
+        ):
+            with self.subTest(bad_payload=bad_payload), InstallerFixture("threadfin") as fixture:
+                settings_path = fixture.file("var/lib/threadfin/conf/settings.json", bad_payload)
+                res = fixture.run("install", port=34401)
+                self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertFalse(fixture.lock.exists())
+                self.assertEqual(settings_path.read_text(encoding="utf-8"), bad_payload)
+
+        with InstallerFixture("threadfin") as fixture:
+            outside = fixture.file("srv/outside-settings.json", '{"version":"0.5.0","bindIpAddress":""}\n')
+            conf_dir = fixture.root / "var/lib/threadfin/conf"
+            conf_dir.mkdir(parents=True, exist_ok=True)
+            link_path = conf_dir / "settings.json"
+            link_path.symlink_to(outside)
+            res = fixture.run("install", port=34401)
+            self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertFalse(fixture.lock.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), '{"version":"0.5.0","bindIpAddress":""}\n')
+
 
 class PiHoleExactVersionPolicyTests(unittest.TestCase):
     def test_pihole_rejects_any_af_target_version_before_any_state_mutation(self):
