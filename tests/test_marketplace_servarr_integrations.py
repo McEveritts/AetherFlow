@@ -181,6 +181,7 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
         parsed = parse_toml(config_path.read_text())
         self.assertEqual(parsed["interval"], "2m")
+        self.assertEqual(parsed["webserver"], {"listen_addr": ""})
         self.assertNotIn("prowlarr", parsed)
 
         expected = {
@@ -191,8 +192,9 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
         }
         for app, expected_url in expected.items():
             self.assertIn(app, parsed)
-            self.assertEqual(len(parsed[app]), 1)
-            entry = parsed[app][0]
+            self.assertIsInstance(parsed[app], dict)
+            self.assertEqual(list(parsed[app].keys()), ["0"])
+            entry = parsed[app]["0"]
             self.assertEqual(entry["url"], expected_url)
             self.assertEqual(entry["api_key"], tokens[app])
             self.assertEqual(entry["protocols"], "torrent")
@@ -200,6 +202,16 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
             self.assertIs(entry["delete_orig"], False)
 
         self.assert_no_tokens_exposed(fx, result, tokens.values())
+
+    def _primary_entry(self, parsed, consumer, app):
+        section = parsed[app]
+        if consumer == "unpackerr":
+            self.assertIsInstance(section, dict)
+            self.assertEqual(list(section.keys()), ["0"])
+            return section["0"]
+        self.assertIsInstance(section, list)
+        self.assertEqual(len(section), 1)
+        return section[0]
 
     def _assert_missing_upstreams_skip_cleanly(self, consumer, config_rel):
         fx = self.fixture(consumer)
@@ -217,10 +229,15 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
 
         result = fx.run("install")
         self.assert_success(result)
-        parsed = parse_toml((fx.root / config_rel).read_text())
+        raw_text = (fx.root / config_rel).read_text()
+        parsed = parse_toml(raw_text)
         self.assertIn("radarr", parsed)
-        self.assertEqual(parsed["radarr"][0]["url"], "http://127.0.0.1:17879/movies")
-        self.assertEqual(parsed["radarr"][0]["api_key"], radarr_token)
+        radarr_entry = self._primary_entry(parsed, consumer, "radarr")
+        self.assertEqual(radarr_entry["url"], "http://127.0.0.1:17879/movies")
+        self.assertEqual(radarr_entry["api_key"], radarr_token)
+        if consumer == "unpackerr":
+            self.assertEqual(parsed["webserver"], {"listen_addr": ""})
+            self.assertIn("# [sonarr.0]", raw_text)
         for skipped in ("sonarr", "lidarr", "readarr", "prowlarr"):
             self.assertNotIn(skipped, parsed)
 
@@ -272,10 +289,13 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
             self.assertEqual(after_late["ui_password"], "admin:bootstrap-password")
         else:
             self.assertEqual(after_late["interval"], "5m")
-        self.assertEqual(after_late["sonarr"][0]["url"], "http://127.0.0.1:18989/sonarr")
-        self.assertEqual(after_late["sonarr"][0]["api_key"], s_tok)
-        self.assertEqual(after_late["radarr"][0]["url"], "http://127.0.0.1:17878")
-        self.assertEqual(after_late["radarr"][0]["api_key"], r_tok_1)
+            self.assertEqual(after_late["webserver"], {"listen_addr": ""})
+        sonarr_late = self._primary_entry(after_late, consumer, "sonarr")
+        radarr_late = self._primary_entry(after_late, consumer, "radarr")
+        self.assertEqual(sonarr_late["url"], "http://127.0.0.1:18989/sonarr")
+        self.assertEqual(sonarr_late["api_key"], s_tok)
+        self.assertEqual(radarr_late["url"], "http://127.0.0.1:17878")
+        self.assertEqual(radarr_late["api_key"], r_tok_1)
         self.assert_no_tokens_exposed(fx, r2, (s_tok, r_tok_1))
 
         # 3. Operator adds custom per-block field; Sonarr moves port & UrlBase; run update
@@ -291,9 +311,10 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
         r3 = fx.run("update", port=15462 if consumer == "notifiarr" else None)
         self.assert_success(r3)
         after_move = parse_toml(config_path.read_text())
-        self.assertEqual(after_move["sonarr"][0]["url"], "http://127.0.0.1:19012/tv")
-        self.assertEqual(after_move["sonarr"][0]["api_key"], s_tok)
-        self.assertEqual(after_move["sonarr"][0]["custom_flag"], "keep-me")
+        sonarr_move = self._primary_entry(after_move, consumer, "sonarr")
+        self.assertEqual(sonarr_move["url"], "http://127.0.0.1:19012/tv")
+        self.assertEqual(sonarr_move["api_key"], s_tok)
+        self.assertEqual(sonarr_move["custom_flag"], "keep-me")
         self.assert_no_tokens_exposed(fx, r3, (s_tok, r_tok_1))
 
         # 4. Remove (retaining data), rotate Radarr key + clear managed api_key, install
@@ -309,10 +330,12 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
         r4 = fx.run("install", port=15463 if consumer == "notifiarr" else None)
         self.assert_success(r4)
         after_repair = parse_toml(config_path.read_text())
-        self.assertEqual(after_repair["radarr"][0]["url"], "http://127.0.0.1:17900/radarr")
-        self.assertEqual(after_repair["radarr"][0]["api_key"], r_tok_2)
-        self.assertEqual(after_repair["sonarr"][0]["url"], "http://127.0.0.1:19012/tv")
-        self.assertEqual(after_repair["sonarr"][0]["custom_flag"], "keep-me")
+        radarr_repair = self._primary_entry(after_repair, consumer, "radarr")
+        sonarr_repair = self._primary_entry(after_repair, consumer, "sonarr")
+        self.assertEqual(radarr_repair["url"], "http://127.0.0.1:17900/radarr")
+        self.assertEqual(radarr_repair["api_key"], r_tok_2)
+        self.assertEqual(sonarr_repair["url"], "http://127.0.0.1:19012/tv")
+        self.assertEqual(sonarr_repair["custom_flag"], "keep-me")
         self.assert_no_tokens_exposed(fx, r4, (s_tok, r_tok_1, r_tok_2))
 
     def test_notifiarr_late_installed_upstreams_and_retained_repair_flow(self):
@@ -410,9 +433,9 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
         self.assertEqual(parsed["lidarr"][0]["url"], "http://127.0.0.1:8686")
         self.assertEqual(parsed["lidarr"][0]["api_key"], "operator-custom-lidarr-token")
 
-        self.assertEqual(len(parsed["readarr"]), 1)
-        self.assertEqual(parsed["readarr"][0]["url"], "http://127.0.0.1:18787/readarr")
-        self.assertEqual(parsed["readarr"][0]["api_key"], rd_tok)
+        readarr_entry = self._primary_entry(parsed, consumer, "readarr")
+        self.assertEqual(readarr_entry["url"], "http://127.0.0.1:18787/readarr")
+        self.assertEqual(readarr_entry["api_key"], rd_tok)
 
         if consumer == "notifiarr":
             self.assertEqual(parsed["api_key"], "operator-notifiarr-key")
@@ -428,6 +451,108 @@ class MarketplaceServarrIntegrationTests(unittest.TestCase):
 
     def test_unpackerr_legacy_stock_url_repair_and_operator_preservation(self):
         self._assert_legacy_repair_and_operator_preservation("unpackerr", "etc/unpackerr/unpackerr.conf")
+
+    def test_unpackerr_v1_named_table_repair_and_operator_preservation(self):
+        fx = self.fixture("unpackerr")
+        s_tok = "0123456789abcdef0123456789abcdef"
+        r_tok = "fedcba9876543210fedcba9876543210"
+        l_tok = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        rd_tok = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        fx.file("var/lib/sonarr/config.xml", servarr_xml(
+            api_key=s_tok, port=18989, url_base="/arrcheck"
+        ))
+        fx.file("var/lib/radarr/config.xml", servarr_xml(
+            api_key=r_tok, port=17878, url_base="/radarr"
+        ))
+        fx.file("var/lib/lidarr/config.xml", servarr_xml(
+            api_key=l_tok, port=18686, url_base="/lidarr"
+        ))
+        fx.file("var/lib/readarr/config.xml", servarr_xml(
+            api_key=rd_tok, port=18787, url_base="/readarr"
+        ))
+
+        # Simulate Unpackerr v1.0.1 normalized [app.<slug>] layout with stripped comments
+        # and out-of-order sibling tables ([sonarr.0] separated from [sonarr.remote4k]).
+        existing_conf = (
+            'interval = "4m"\n\n'
+            '[webserver]\n'
+            '  listen_addr = "127.0.0.1:5656"\n'
+            '  ui_password = "!!cryptd!!admin:$2a$10$examplehash"\n\n'
+            '[sonarr.0]\n'
+            '  url = "http://127.0.0.1:8989"\n'
+            f'  api_key = "{s_tok}"\n'
+            '  paths = ["/mnt/custom-tv"]\n'
+            '  timeout = "25s"\n\n'
+            '[radarr.0]\n'
+            '  url = "https://radarr.lan.example/movies"\n'
+            f'  api_key = "{r_tok}"\n'
+            '  paths = ["/mnt/movies"]\n\n'
+            '[sonarr.remote4k]\n'
+            '  url = "http://10.0.0.9:8989"\n'
+            '  api_key = "remote-4k-token"\n'
+            '  paths = ["/mnt/4k"]\n\n'
+            '[lidarr.custom]\n'
+            '  url = "http://127.0.0.1:8686"\n'
+            '  api_key = "operator-custom-lidarr-token"\n'
+            '  paths = ["/mnt/music"]\n'
+        )
+        config_path = fx.file("etc/unpackerr/unpackerr.conf", existing_conf)
+
+        r1 = fx.run("update")
+        self.assert_success(r1)
+        parsed = parse_toml(config_path.read_text())
+        self.assertEqual(parsed["webserver"]["listen_addr"], "127.0.0.1:5656")
+        self.assertEqual(parsed["webserver"]["ui_password"], "!!cryptd!!admin:$2a$10$examplehash")
+        self.assertEqual(sorted(parsed["sonarr"]), ["0", "remote4k"])
+        self.assertEqual(parsed["sonarr"]["0"]["url"], "http://127.0.0.1:18989/arrcheck")
+        self.assertEqual(parsed["sonarr"]["0"]["api_key"], s_tok)
+        self.assertEqual(parsed["sonarr"]["0"]["paths"], ["/mnt/custom-tv"])
+        self.assertEqual(parsed["sonarr"]["0"]["timeout"], "25s")
+        self.assertEqual(parsed["sonarr"]["remote4k"]["url"], "http://10.0.0.9:8989")
+        self.assertEqual(parsed["sonarr"]["remote4k"]["api_key"], "remote-4k-token")
+        self.assertEqual(parsed["radarr"]["0"]["url"], "https://radarr.lan.example/movies")
+        self.assertEqual(parsed["lidarr"]["custom"]["api_key"], "operator-custom-lidarr-token")
+        self.assertEqual(parsed["readarr"]["0"]["url"], "http://127.0.0.1:18787/readarr")
+        self.assertEqual(parsed["readarr"]["0"]["api_key"], rd_tok)
+
+        # Follow-up endpoint move updates [sonarr.0] while leaving operator tables intact.
+        fx.file("var/lib/sonarr/config.xml", servarr_xml(
+            api_key=s_tok, port=19012, url_base="/tv"
+        ))
+        r2 = fx.run("reinstall")
+        self.assert_success(r2)
+        parsed_moved = parse_toml(config_path.read_text())
+        self.assertEqual(parsed_moved["sonarr"]["0"]["url"], "http://127.0.0.1:19012/tv")
+        self.assertEqual(parsed_moved["sonarr"]["remote4k"]["url"], "http://10.0.0.9:8989")
+        self.assertEqual(parsed_moved["radarr"]["0"]["url"], "https://radarr.lan.example/movies")
+
+        # Operator edit of [sonarr.0] URL must be preserved on subsequent reinstall.
+        edited = config_path.read_text().replace(
+            'url = "http://127.0.0.1:19012/tv"',
+            'url = "http://127.0.0.1:29999/custom-proxy"',
+            1,
+        )
+        config_path.write_text(edited)
+        r3 = fx.run("reinstall")
+        self.assert_success(r3)
+        parsed_preserved = parse_toml(config_path.read_text())
+        self.assertEqual(parsed_preserved["sonarr"]["0"]["url"], "http://127.0.0.1:29999/custom-proxy")
+        self.assert_no_tokens_exposed(fx, r3, (s_tok, r_tok, l_tok, rd_tok))
+
+    def test_unpackerr_retained_config_preserves_headless_default(self):
+        fx = self.fixture("unpackerr")
+        config = fx.file(
+            "etc/unpackerr/unpackerr.conf",
+            'interval = "3m"\n[webserver]\n# listen_addr = "0.0.0.0:5656"\nmetrics = false\n',
+        )
+
+        self.assert_success(fx.run("update"))
+
+        parsed = parse_toml(config.read_text())
+        self.assertEqual(parsed["interval"], "3m")
+        self.assertEqual(parsed["webserver"]["listen_addr"], "")
+        self.assertFalse(parsed["webserver"]["metrics"])
 
     def _reset_path(self, path):
         if path.is_symlink() or path.is_file() or path.exists():

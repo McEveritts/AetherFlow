@@ -2796,6 +2796,7 @@ sync_servarr_toml_config() {
     local log_dir="${4:-}"
     local summary line level message
     summary="$(safe_config_python "$consumer" "$target_config" "$app_port" "$log_dir" <<'PYEOF'
+from collections.abc import MutableMapping
 import ipaddress
 import os
 import re
@@ -2805,7 +2806,7 @@ import xml.etree.ElementTree as ET
 
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
-from tomlkit.items import AoT
+from tomlkit.items import AoT, Table
 
 PORTS = {"sonarr": 8989, "radarr": 7878, "lidarr": 8686, "readarr": 8787, "prowlarr": 9696}
 MANAGED = re.compile(r"(?:^| \| )aetherflow-managed (\S+)$")
@@ -2894,11 +2895,15 @@ def fresh_config(consumer, app_port, log_dir):
 
 def get_managed_table(document, consumer, app, key):
     group = document.get(app)
-    if not isinstance(group, AoT):
+    if isinstance(group, AoT):
+        tables = list(group)
+    elif consumer == "unpackerr" and isinstance(group, MutableMapping):
+        tables = [entry for entry in group.values() if isinstance(entry, Table)]
+    else:
         return None
     expected_name = f"AetherFlow {app.capitalize()}"
     stock_url = f"http://127.0.0.1:{PORTS[app]}"
-    for table in group:
+    for table in tables:
         if consumer == "notifiarr" and table.get("name", expected_name) != expected_name:
             continue
         url = table.get("url")
@@ -2918,14 +2923,17 @@ def update_integration(document, consumer, app, url, key):
         table = tomlkit.table()
         if consumer == "notifiarr":
             table["name"] = f"AetherFlow {app.capitalize()}"
+            group = tomlkit.aot()
+            group.append(table)
+            document[app] = group
         else:
             paths = ["/downloads", "/mnt/unionfs"]
             if app in ("sonarr", "radarr"):
                 paths.append("/var/lib/rtorrent/downloads")
             table.update({"paths": paths, "protocols": "torrent", "timeout": "10s", "delete_orig": False})
-        group = tomlkit.aot()
-        group.append(table)
-        document[app] = group
+            group = tomlkit.table(is_super_table=True)
+            group["0"] = table
+            document[app] = group
     else:
         table = get_managed_table(document, consumer, app, key)
         if table is None:
@@ -2956,13 +2964,23 @@ def sync(consumer, path, app_port, log_dir):
         except TOMLKitError:
             print(f"WARN: Preserved {consumer} configuration because its TOML could not be parsed")
             return
+        if consumer == "unpackerr":
+            # Unpackerr v1 enables a network listener and rewrites the config
+            # to persist a UI password unless the listen address is empty.
+            webserver = document.get("webserver")
+            if webserver is None:
+                webserver = tomlkit.table()
+                document["webserver"] = webserver
+            if isinstance(webserver, MutableMapping) and "listen_addr" not in webserver:
+                webserver["listen_addr"] = ""
+
         for app, (url, key) in discovered.items():
             update_integration(document, consumer, app, url, key)
         if consumer == "unpackerr" and not existing.strip():
             for app in ("sonarr", "radarr"):
                 if app not in discovered:
                     document.add(tomlkit.nl())
-                    document.add(tomlkit.comment(f"[[{app}]]"))
+                    document.add(tomlkit.comment(f"[{app}.0]"))
                     document.add(tomlkit.comment(f'  url = "http://127.0.0.1:{PORTS[app]}"'))
                     document.add(tomlkit.comment('  api_key = ""'))
                     document.add(tomlkit.comment('  paths = ["/downloads", "/mnt/unionfs"]'))
