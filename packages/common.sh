@@ -3610,7 +3610,7 @@ retain_app_data_directory() {
 }
 
 purge_app_archive_backups() {
-    local package="$1" destination="$2" backup
+    local package="$1" destination="$2" ownership="${3:-}" backup
     for backup in "${destination}".af-backup.*; do
         [[ -d "$backup" && ! -L "$backup" ]] || continue
         # Legacy replace_app_tree backups have no owner receipt. An explicit
@@ -3618,6 +3618,8 @@ purge_app_archive_backups() {
         if [[ -e "$backup/.af-archive-owner" || -L "$backup/.af-archive-owner" ]]; then
             [[ -f "$backup/.af-archive-owner" && ! -L "$backup/.af-archive-owner" ]] || continue
             [[ "$(cat "$backup/.af-archive-owner")" == "$package" ]] || continue
+        elif [[ "$ownership" == require-owner ]]; then
+            continue
         fi
         rm -rf -- "$backup" || return 1
     done
@@ -7531,7 +7533,7 @@ purge_system_user() {
             [[ "$status" == 2 ]] || return 1
         fi
     done
-    safe_rm_rf "/home/${username}"
+    [[ "${2:-}" == --keep-home ]] || safe_rm_rf "/home/${username}"
 }
 
 load_master_credentials() {

@@ -877,9 +877,8 @@
     "require_download_sha256": true,
     "update_repo": "rclone/rclone",
     "version_command": [
-      "bash",
-      "-lc",
-      "/usr/bin/rclone version"
+      "/opt/AetherFlow/apps/rclone/rclone",
+      "version"
     ],
     "version_regex": "rclone\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+[^\\s]*)",
     "sandbox_profile": "go",

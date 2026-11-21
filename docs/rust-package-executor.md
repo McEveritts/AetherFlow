@@ -140,7 +140,7 @@ Twelve Marketplace applications are registered in `BUILTIN_DECLARATIVE_RECIPES`.
 | `prometheus` | APT + Metrics Server | Installs `prometheus`, `prometheus-node-exporter`, writes `/etc/prometheus/prometheus.yml` (`127.0.0.1:9090`), and manages `prometheus.service`. |
 | `netdata` | APT + Local Telemetry Daemon | Installs `netdata`, writes `/etc/netdata/netdata.conf` bound to `127.0.0.1:19999`, and manages `netdata.service`. |
 | `mergerfs` | APT Union Filesystem | Installs `mergerfs` and `fuse3`, records installed dpkg version in `/var/lib/mergerfs/.af-version`, and manages `mergerfs.service`. |
-| `rclone` | APT + Rclone Web RCD / VFS | Installs `rclone` and `fuse3`, creates `rclone` user and `/var/lib/rclone`, and manages `rclone.service` (`127.0.0.1:5572`) and `rclone-vfs.service`. |
+| `rclone` | Upstream binary + Rclone Web RCD / VFS | Installs `fuse3` and the upstream executable at `/opt/AetherFlow/apps/rclone/rclone`. Manages `rclone.service` (`127.0.0.1:5572`) and `rclone-vfs.service`. The RC service uses `/etc/rclone/rclone.env`, with migration from `/etc/aetherflow/rclone.env` when needed. |
 | `syncthing` | APT Continuous File Sync | Installs `syncthing`, creates `syncthing` user and `/var/lib/syncthing`, and manages `syncthing.service`. |
 
 ### 5.2 Remaining Marketplace Packages (`PackageEngineMode::LegacyBashFallback`)

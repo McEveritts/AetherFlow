@@ -1445,7 +1445,8 @@ pub fn extract_app_runtime_meta_local_until(
         "rclone" => {
             for raw_path in &[
                 "/etc/systemd/system/rclone.service",
-                "/etc/rclone/rclone.env",
+                crate::package_executor::RCLONE_ENV,
+                crate::package_executor::RCLONE_LEGACY_ENV,
             ] {
                 if let Some(content) = read_runner_config_text(raw_path) {
                     let port = extract_runner_systemd_or_apache_port(&content).max(

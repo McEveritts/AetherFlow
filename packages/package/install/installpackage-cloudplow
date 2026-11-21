@@ -120,11 +120,19 @@ mkdir -p /var/log/cloudplow /mnt/local /mnt/remote /mnt/unionfs
 if [[ -f /opt/cloudplow/config.json ]]; then
     cp -p /opt/cloudplow/config.json "$BUILD_DIR/config.json"
 else
-    cat <<'EOF' > "$BUILD_DIR/config.json"
+    RCLONE_BINARY_PATH="/opt/AetherFlow/apps/rclone/rclone"
+    RCLONE_OWNER="${RCLONE_BINARY_PATH%/*}/.af-owner"
+    if [[ ! -x "$RCLONE_BINARY_PATH" || ! -f "$RCLONE_OWNER" || -L "$RCLONE_OWNER" ||
+          "$(cat -- "$RCLONE_OWNER")" != rclone ]]; then
+        if [[ -e "$RCLONE_BINARY_PATH" || -L "$RCLONE_BINARY_PATH" || -x /usr/bin/rclone ]]; then
+            RCLONE_BINARY_PATH="/usr/bin/rclone"
+        fi
+    fi
+    cat <<EOF > "$BUILD_DIR/config.json"
 {
   "core": {
     "dry_run": false,
-    "rclone_binary_path": "/usr/bin/rclone",
+    "rclone_binary_path": "${RCLONE_BINARY_PATH}",
     "rclone_config_path": "/root/.config/rclone/rclone.conf"
   },
   "hidden": {},

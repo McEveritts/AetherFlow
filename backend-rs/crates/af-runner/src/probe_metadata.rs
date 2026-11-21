@@ -638,6 +638,51 @@ fn find_git_dir_candidate(
     None
 }
 
+/// Selects the managed binary, with a read-only fallback for a pre-migration AetherFlow unit.
+pub fn rclone_version_program(root: Option<&Path>) -> Result<PathBuf, String> {
+    use crate::package_executor::{RCLONE_BIN, RCLONE_BIN_OWNER, RCLONE_ENV, RCLONE_LEGACY_ENV};
+
+    let root = root.unwrap_or(Path::new("/"));
+    let managed = root.join(RCLONE_BIN.trim_start_matches('/'));
+    let owner = root.join(RCLONE_BIN_OWNER.trim_start_matches('/'));
+    if crate::package_lifecycle::read_receipt_bounded_nofollow(&owner)?
+        .is_some_and(|receipt| receipt == b"rclone\n")
+    {
+        return Ok(managed);
+    }
+    let unit_path = root.join("etc/systemd/system/rclone.service");
+    let no_runtime = || "Rclone has no managed executable or recognized legacy unit".to_string();
+    let unit = crate::package_lifecycle::read_receipt_bounded_nofollow(&unit_path)?
+        .ok_or_else(no_runtime)?;
+    let unit = String::from_utf8_lossy(&unit);
+    let is_legacy = unit.lines().any(|line| line.trim() == "User=rclone")
+        && unit.lines().any(|line| {
+            line.trim()
+                .strip_prefix("EnvironmentFile=")
+                .is_some_and(|path| {
+                    matches!(path.trim_start_matches('-'), RCLONE_ENV | RCLONE_LEGACY_ENV)
+                })
+        });
+    if is_legacy
+        && unit.lines().any(|line| {
+            line.trim().strip_prefix("ExecStart=").is_some_and(|exec| {
+                exec.starts_with("/usr/bin/rclone rcd ") || exec.starts_with("/usr/bin/rclone gui ")
+            })
+        })
+    {
+        let legacy = root.join("usr/bin/rclone");
+        // The earlier native recipe installed this exact alias.
+        if std::fs::read_link(&legacy).is_ok_and(|target| {
+            target == Path::new("/usr/local/bin/rclone")
+                || target == Path::new("../local/bin/rclone")
+        }) {
+            return Ok(root.join("usr/local/bin/rclone"));
+        }
+        return Ok(legacy);
+    }
+    Err(no_runtime())
+}
+
 /// Intercepts metadata/git/receipt probes in pure Rust before spawning any subprocess.
 /// Returns `Some(Ok/Err)` when the command was statically resolved or handled safely in-process,
 /// or `None` when a compiled/system binary probe needs sandboxed subprocess execution.

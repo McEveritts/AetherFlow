@@ -18,9 +18,10 @@ async fn exercise_catalog_recipe(
     assert!(install.lock_present, "{package}");
     assert_eq!(install.resolved_version.as_deref(), Some("0.14.2"));
     let commands = runner.recorded_commands();
+    let dependency = if package == "rclone" { "fuse3" } else { apt_package };
     assert!(commands.iter().any(|command| command.program == "apt-get"
         && command.args.contains(&"install".into())
-        && command.args.contains(&apt_package.into())), "{package}");
+        && command.args.contains(&dependency.into())), "{package}");
     assert!(commands.iter().any(|command| command.program == "systemctl"
         && command.args.contains(&unit.into())), "{package}");
     let retained = root.join(retained_path.trim_start_matches('/'));
@@ -55,9 +56,13 @@ async fn exercise_catalog_recipe(
     ).await.unwrap();
     assert!(!retained.exists(), "explicit purge retained {package} state");
     assert_eq!(fs::read_to_string(unrelated).unwrap(), "never purge media branches");
-    assert!(runner.recorded_commands().iter().any(|command| command.program == "apt-get"
+    let apt_managed = runner.recorded_commands().iter().any(|command| command.program == "apt-get"
+        && command.args.contains(&apt_package.into()));
+    assert_eq!(apt_managed, package != "rclone", "{package}");
+    let apt_purged = runner.recorded_commands().iter().any(|command| command.program == "apt-get"
         && command.args.contains(&"purge".into())
-        && command.args.contains(&apt_package.into())), "{package}");
+        && command.args.contains(&apt_package.into()));
+    assert_eq!(apt_purged, package != "rclone", "{package}");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -257,7 +262,7 @@ async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and
             assert!(root.join("etc/systemd/system/rclone-vfs.service").is_file());
             let rclone_unit =
                 fs::read_to_string(root.join("etc/systemd/system/rclone.service")).unwrap();
-            assert!(rclone_unit.contains("EnvironmentFile=-/etc/rclone/rclone.env"));
+            assert!(rclone_unit.contains("EnvironmentFile=/etc/rclone/rclone.env"));
             executor
                 .execute_recipe(
                     &recipe_to_run,
@@ -651,19 +656,130 @@ async fn canonical_master_credentials() {
 }
 
 #[tokio::test]
+async fn rclone_legacy_credentials_survive_retained_remove_and_are_erased_on_purge() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    let root = create_isolated_test_dir("rclone-lifecycle");
+    let fixture = |logical: &str| root.join(logical.trim_start_matches('/'));
+    let credentials = b"# operator settings\nRCLONE_RC_USER=operator\nRCLONE_RC_PASS='retain spaces'\n";
+    let paths: [(&str, &[u8]); 9] = [
+        ("/etc/aetherflow/rclone.env", credentials),
+        ("/etc/aetherflow/aetherflow.env", b"unrelated"),
+        ("/etc/rclone/rclone.conf", b"[remote]\ntype = drive\n"),
+        ("/etc/rclone/custom.conf", b"custom config"),
+        ("/var/lib/rclone/cache/operator", b"retained cache"),
+        ("/usr/bin/rclone", b"distro binary"),
+        ("/usr/local/bin/rclone", b"operator binary"),
+        ("/mnt/remote/sentinel", b"operator data"),
+        ("/usr/bin/rclone.af-backup.foreign/sentinel", b"unclaimed archive"),
+    ];
+    for (logical, content) in paths {
+        let path = fixture(logical);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    let old_archive = fixture("/usr/bin/rclone.af-backup.legacy");
+    fs::create_dir(&old_archive).unwrap();
+    fs::write(old_archive.join(".af-archive-owner"), b"rclone\n").unwrap();
+    let canonical = fixture("/etc/rclone/rclone.env");
+    let managed = fixture(crate::package_executor::RCLONE_BIN);
+    let recipe = get_declarative_recipe("rclone").unwrap();
+    let runner = MockCommandRunner::default();
+    let mut env_cfg = PackageExecutionEnv::isolated(&root);
+    env_cfg.keep_existing_secrets = true;
+    let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
+
+    for action in [PackageAction::Install, PackageAction::Remove, PackageAction::Reinstall] {
+        executor.execute_recipe(&recipe, action, CancellationToken::new(), |_| {})
+            .await.unwrap();
+        let content = fs::read_to_string(&canonical).unwrap();
+        assert!(content.starts_with(std::str::from_utf8(credentials).unwrap()));
+        assert!(content.contains("RCLONE_USER=\"operator\"\nRCLONE_PASS=\"retain spaces\"\n"));
+        for (logical, content) in paths {
+            assert_eq!(fs::read(fixture(logical)).unwrap(), content, "{logical}");
+        }
+        assert_eq!(managed.is_file(), action != PackageAction::Remove);
+    }
+    let unit = fs::read_to_string(fixture("/etc/systemd/system/rclone.service")).unwrap();
+    assert!(unit.contains(&format!("ExecStart={} ", crate::package_executor::RCLONE_BIN)));
+    let vfs = fs::read_to_string(fixture("/etc/systemd/system/rclone-vfs.service")).unwrap();
+    assert!(vfs.contains(&format!("ExecStart={} mount ", crate::package_executor::RCLONE_BIN)));
+
+    env_cfg.delete_data = true;
+    DeclarativePackageExecutor::with_runner(env_cfg, runner)
+        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .await.unwrap();
+    for path in [canonical.clone(), managed, old_archive, fixture("/etc/aetherflow/rclone.env"),
+                 fixture("/etc/rclone/rclone.conf"), fixture("/var/lib/rclone")] {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    for index in [1, 3, 5, 6, 7, 8] {
+        let (logical, content) = paths[index];
+        assert_eq!(fs::read(fixture(logical)).unwrap(), content, "{logical}");
+    }
+    executor.execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .await.unwrap();
+    assert!(!fs::read_to_string(canonical).unwrap().contains("retain spaces"));
+    assert!(!fixture("/etc/aetherflow/rclone.env").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn rclone_failed_migration_restores_unit_and_credentials() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    let root = create_isolated_test_dir("rclone-migration-rollback");
+    let legacy = root.join("etc/aetherflow/rclone.env");
+    let unit = root.join("etc/systemd/system/rclone.service");
+    let distro = root.join("usr/bin/rclone");
+    let original: [(&Path, &[u8]); 3] = [
+        (&legacy, b"RCLONE_RC_USER=operator\nRCLONE_RC_PASS=legacy\n"),
+        (&unit, b"[Service]\nEnvironmentFile=/etc/aetherflow/rclone.env\nExecStart=/usr/bin/rclone rcd --rc-web-gui\n"),
+        (&distro, b"distribution binary"),
+    ];
+    for (path, content) in original {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    let mut recipe = get_declarative_recipe("rclone").unwrap();
+    recipe.install_steps.push(DeclarativeStep::RunCommand {
+        program: "/bin/false".into(),
+        args: vec!["fixture".into()],
+        only_if_delete_data: false,
+        ignore_errors: false,
+        progress_pct: 99,
+        description: "Inject a failure after Rclone migration".into(),
+    });
+    let runner = MockCommandRunner { fail_program: Some("/bin/false".into()), ..Default::default() };
+    let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
+    let error = executor
+        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .await.unwrap_err();
+    assert!(error.to_string().contains("/bin/false"), "{error}");
+    for (path, content) in original {
+        assert_eq!(fs::read(path).unwrap(), content, "{}", path.display());
+    }
+    for path in [
+        crate::package_executor::RCLONE_BIN,
+        crate::package_executor::RCLONE_BIN_OWNER,
+        crate::package_executor::RCLONE_ENV,
+    ] {
+        assert!(!root.join(path.trim_start_matches('/')).exists(), "{path}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn rclone_password_escaping() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    let prev_user = env::var_os("MASTER_USER");
-    let prev_pass = env::var_os("MASTER_PASS");
-    env::set_var("MASTER_USER", r#"admin"user"#);
-    env::set_var("MASTER_PASS", r#"valid"quoted\pass$word`1"#);
-
     let root = create_isolated_test_dir("rclone-escaping");
+    let legacy = root.join("etc/aetherflow/rclone.env");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let original = "RCLONE_RC_USER=\"admin\\\"user\"\nRCLONE_RC_PASS=old\n";
+    fs::write(&legacy, original).unwrap();
     let recipe = get_declarative_recipe("rclone").unwrap();
-    let executor = DeclarativePackageExecutor::with_runner(
-        PackageExecutionEnv::isolated(&root),
-        MockCommandRunner::default(),
-    );
+    let mut env_cfg = PackageExecutionEnv::isolated(&root);
+    env_cfg.password = Some(r#"valid"quoted\pass$word`1"#.to_string());
+    let executor = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
     executor
         .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
         .await
@@ -679,14 +795,7 @@ async fn rclone_password_escaping() {
         "unexpected rclone.env pass line: {env_content}"
     );
 
-    match prev_user {
-        Some(v) => env::set_var("MASTER_USER", v),
-        None => env::remove_var("MASTER_USER"),
-    }
-    match prev_pass {
-        Some(v) => env::set_var("MASTER_PASS", v),
-        None => env::remove_var("MASTER_PASS"),
-    }
+    assert_eq!(fs::read_to_string(legacy).unwrap(), original);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1116,20 +1225,11 @@ async fn af_aud_002_mergerfs_and_rclone_purge_preflight_and_mountpoint_guard() {
     let rclone_remove_idx = rclone_recipe
         .remove_steps
         .iter()
-        .position(|s| {
-            matches!(
-                s,
-                DeclarativeStep::RemovePaths { paths, .. }
-                    if paths.iter().any(|p| p == "/mnt/remote")
-            )
-        })
-        .expect("rclone DELETE_DATA=true uninstall must include /mnt/remote in RemovePaths");
-    assert!(
-        rclone_cmd_idx < rclone_remove_idx,
-        "rclone unmount preflight must run before RemovePaths"
-    );
+        .position(|s| matches!(s, DeclarativeStep::RemoveRcloneFiles { .. }))
+        .expect("rclone DELETE_DATA=true uninstall must remove AetherFlow files");
+    assert!(rclone_cmd_idx < rclone_remove_idx);
 
-    // Verify RemovePaths refuses to traverse a path listed as active in /proc/mounts
+    // The mock command leaves /proc/mounts unchanged, simulating an active mount.
     fs::create_dir_all(root.join("mnt/remote")).unwrap();
     fs::write(root.join("mnt/remote/sentinel.txt"), b"keep").unwrap();
     fs::create_dir_all(root.join("proc")).unwrap();
@@ -1150,7 +1250,7 @@ async fn af_aud_002_mergerfs_and_rclone_purge_preflight_and_mountpoint_guard() {
         .unwrap_err();
     assert!(
         err.to_string().contains("active mountpoint"),
-        "expected RemovePaths to refuse active mountpoint, got: {err}"
+        "expected purge preflight to refuse an active mountpoint, got: {err}"
     );
     assert!(
         root.join("mnt/remote/sentinel.txt").is_file(),

@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 import sys
@@ -686,13 +687,31 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
         app_dir = self.root / "opt/cloudplow"
         app_dir.mkdir(parents=True, exist_ok=True)
         (app_dir / ".af-version").write_text("deadbeef1234567890abcdef1234567890abcdef\n")
-        custom_cfg = json.dumps({"remotes": {"test": {"sync_remote": "custom:remote"}}})
+        custom_cfg = json.dumps({
+            "core": {"rclone_binary_path": "/srv/operator/bin/rclone"},
+            "remotes": {"test": {"sync_remote": "custom:remote"}},
+        })
         (app_dir / "config.json").write_text(custom_cfg)
 
         result = self.run_script("cloudplow")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((app_dir / "config.json").read_text(), custom_cfg)
         self.assertEqual((app_dir / ".af-version").read_text().strip(), "abcdef1234567890abcdef1234567890abcdef12")
+
+    def test_cloudplow_fresh_config_uses_managed_rclone_when_present(self):
+        managed = self.root / "opt/AetherFlow/apps/rclone/rclone"
+        managed.parent.mkdir(parents=True)
+        managed.touch()
+        managed.chmod(0o755)
+        managed.with_name(".af-owner").write_text("rclone\n")
+        distro = self.root / "usr/bin/rclone"
+        distro.touch()
+        distro.chmod(0o755)
+
+        result = self.run_script("cloudplow")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((self.root / "opt/cloudplow/config.json").read_text())
+        self.assertEqual(config["core"]["rclone_binary_path"], str(managed))
 
     def test_cloudplow_failed_download_preserves_old_version_and_restarts_service(self):
         app_dir = self.root / "opt/cloudplow"
@@ -1297,7 +1316,7 @@ source "{common_script}"
         # Rclone checks
         self.assertIn('af_prepare_job_scratch "${PACKAGE_NAME}"', rclone_text)
         self.assertIn('check_disk_space "${AF_JOB_SCRATCH_DIR}" 512', rclone_text)
-        self.assertIn('check_disk_space "/usr/bin" 512', rclone_text)
+        self.assertIn('check_disk_space "/opt" 512', rclone_text)
         self.assertIn('TMP_ZIP=$(mktemp "${AF_JOB_SCRATCH_DIR}/rclone-XXXXXX.zip")', rclone_text)
         self.assertIn('TMP_DIR=$(mktemp -d "${AF_JOB_SCRATCH_DIR}/rclone-extract-XXXXXX")', rclone_text)
         self.assertNotIn('mktemp /tmp/', rclone_text)
@@ -1524,6 +1543,121 @@ fi
         self.assertIn("EXIT_CODE=0", res_succ.stdout)
         self.assertFalse(backup_dir.exists(), "$backup_dir must be removed after component certification passes")
 
+    def prepare_rclone_fixture(self):
+        with zipfile.ZipFile(self.root / "rclone.zip", "w") as archive:
+            archive.writestr("rclone-linux/rclone", """#!/bin/sh
+case "$1" in
+    version) echo "rclone v1.75.2" ;;
+    rcd) echo "--rc-web-gui --rc-enable-metrics --rc-web-gui-no-open-browser" ;;
+esac
+""")
+        common = self.root / "opt/AetherFlow/packages/common.sh"
+        with common.open("a") as script:
+            script.write(self.rebase(common_functions(
+                "quiesce_services_for_rollback", "purge_systemd_unit", "purge_app_archive_backups"
+            )))
+            script.write(r"""
+download_file() { cp "$TEST_ROOT/rclone.zip" "$2"; }
+mountpoint() { return 1; }
+purge_system_user() { :; }
+curl() {
+    if [[ "$*" == *"-K -"* ]]; then
+        local auth
+        read -r auth
+        [[ -z "${EXPECTED_RCLONE_AUTH:-}" || "$auth" == "$EXPECTED_RCLONE_AUTH" ]] || return 1
+        printf 200
+    elif [[ "${RCLONE_READINESS_FAIL:-}" == 1 ]]; then
+        printf 200
+    else
+        printf 401
+    fi
+}
+""")
+        distro = self.root / "usr/bin/rclone"
+        distro.write_text("distro-rclone")
+        operator = self.root / "usr/local/bin/rclone"
+        operator.write_text("operator-rclone")
+        return distro, operator
+
+    def test_rclone_retained_remove_migration_reinstall_and_purge(self):
+        distro, operator = self.prepare_rclone_fixture()
+        legacy = self.root / "etc/aetherflow/rclone.env"
+        legacy.parent.mkdir()
+        legacy_content = 'RCLONE_USER="operator"\nRCLONE_PASS="space \\$word"\n'
+        rc_content = legacy_content + 'RCLONE_RC_USER="operator"\nRCLONE_RC_PASS="space \\$word"\n'
+        legacy.write_text(legacy_content)
+        unrelated = legacy.with_name("aetherflow.env")
+        unrelated.write_text("unrelated")
+        config = self.root / "etc/rclone/rclone.conf"
+        config.parent.mkdir()
+        config.write_text("[remote]\ntype = drive\n")
+        config.with_name("custom.conf").write_text("custom")
+        canonical = config.with_name("rclone.env")
+        managed = self.root / "opt/AetherFlow/apps/rclone/rclone"
+        legacy_backup = distro.with_name("rclone.af-backup.legacy")
+        legacy_backup.mkdir()
+        (legacy_backup / ".af-archive-owner").write_text("rclone\n")
+        (legacy_backup / "credential-backup").write_text(legacy_content)
+        foreign_backup = distro.with_name("rclone.af-backup.foreign")
+        foreign_backup.mkdir()
+        (foreign_backup / "sentinel").write_text("unrelated")
+
+        for action in ("install", "remove", "install"):
+            result = self.run_script(
+                "rclone", action, AF_TARGET_VERSION="1.75.2",
+                EXPECTED_RCLONE_AUTH='user = "operator:space $word"'
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(canonical.read_text(), rc_content)
+            self.assertEqual(legacy.read_text(), legacy_content)
+            self.assertEqual(config.read_text(), "[remote]\ntype = drive\n")
+            self.assertEqual(managed.exists(), action == "install")
+            self.assertEqual(distro.read_text(), "distro-rclone")
+            self.assertEqual(operator.read_text(), "operator-rclone")
+        for unit, command in (("rclone", "rcd"), ("rclone-vfs", "mount")):
+            content = (self.root / f"etc/systemd/system/{unit}.service").read_text()
+            self.assertIn(f"ExecStart={managed} {command} ", content)
+
+        result = self.run_script("rclone", "remove", DELETE_DATA="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for removed in (legacy, canonical, config, managed, legacy_backup):
+            self.assertFalse(removed.exists(), removed)
+        self.assertEqual(list(managed.parent.glob("rclone.af-backup.*")), [])
+        self.assertEqual(unrelated.read_text(), "unrelated")
+        self.assertEqual(config.with_name("custom.conf").read_text(), "custom")
+        self.assertEqual((foreign_backup / "sentinel").read_text(), "unrelated")
+        self.assertEqual(distro.read_text(), "distro-rclone")
+        self.assertEqual(operator.read_text(), "operator-rclone")
+
+        result = self.run_script("rclone", AF_TARGET_VERSION="1.75.2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("space", canonical.read_text())
+        self.assertFalse(legacy.exists())
+
+    def test_rclone_failed_migration_rolls_back_legacy_units_and_keeps_global_files(self):
+        distro, operator = self.prepare_rclone_fixture()
+        legacy = self.root / "etc/aetherflow/rclone.env"
+        legacy.parent.mkdir()
+        legacy.write_text("RCLONE_RC_USER=operator\nRCLONE_RC_PASS=legacy\n")
+        original_units = {
+            "rclone": f"[Service]\nEnvironmentFile={legacy}\nExecStart={distro} rcd\n",
+            "rclone-vfs": f"[Service]\nExecStart={distro} mount remote: /mnt/remote\n",
+        }
+        for unit, content in original_units.items():
+            (self.root / f"etc/systemd/system/{unit}.service").write_text(content)
+            (self.root / f"service_active_{unit}").touch()
+        result = self.run_script("rclone", AF_TARGET_VERSION="1.75.2", RCLONE_READINESS_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Authentication bypass detected", result.stderr)
+        for unit, content in original_units.items():
+            self.assertEqual((self.root / f"etc/systemd/system/{unit}.service").read_text(), content)
+            self.assertTrue((self.root / f"service_active_{unit}").exists())
+        self.assertFalse((self.root / "etc/rclone/rclone.env").exists())
+        self.assertFalse((self.root / "opt/AetherFlow/apps/rclone/rclone").exists())
+        self.assertIn("RCLONE_RC_PASS=legacy", legacy.read_text())
+        self.assertEqual(distro.read_text(), "distro-rclone")
+        self.assertEqual(operator.read_text(), "operator-rclone")
+
     def test_rclone_readiness_split_port_and_auth_verification(self):
         """Verify rclone wait_for_service_ready:
         - Detects and fails on authentication bypass (unauthenticated request returns 200).
@@ -1538,7 +1672,9 @@ fi
         # Extract wait_for_service_ready function definition
         start = rclone_script.index("wait_for_service_ready() {")
         end = rclone_script.index("\n}\n", start) + 3
-        fn_code = rclone_script[start:end]
+        helper_start = rclone_script.index("rclone_env_config() {")
+        helper_end = rclone_script.index("\n}\n", helper_start) + 3
+        fn_code = rclone_script[helper_start:helper_end] + rclone_script[start:end]
 
         env_file = self.root / "rclone.env"
         env_file.write_text("RCLONE_RC_USER=admin\nRCLONE_RC_PASS=supersecret\n")

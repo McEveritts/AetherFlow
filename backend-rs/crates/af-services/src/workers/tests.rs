@@ -2430,6 +2430,44 @@ fn test_do_not_collapse_consecutive_hyphens_in_build_metadata() {
 }
 
 #[tokio::test]
+async fn test_rclone_update_probe_ignores_unowned_executables() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = TEST_ENV_MUTEX.lock().await;
+    let root = std::env::temp_dir().join(format!("af-test-rclone-probe-{}", uuid::Uuid::new_v4()));
+    let distro = root.join("usr/bin/rclone");
+    let managed = root.join("opt/AetherFlow/apps/rclone/rclone");
+    for (path, version) in [(&distro, "1.50.0"), (&managed, "1.75.2")] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\necho 'rclone v{version}'\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let previous_root = std::env::var_os("AETHERFLOW_FS_ROOT");
+    std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+    let pkg = Package {
+        name: "rclone".into(),
+        update_source: "github_release".into(),
+        version_command: vec!["/opt/AetherFlow/apps/rclone/rclone".into(), "version".into()],
+        version_regex: r"rclone\s+v?([0-9]+\.[0-9]+\.[0-9]+[^\s]*)".into(),
+        ..Default::default()
+    };
+
+    let budget = Duration::from_secs(5);
+    let unowned = run_live_version_command(&pkg, budget).await;
+    std::fs::write(managed.with_file_name(".af-owner"), b"rclone\n").unwrap();
+    let owned = run_live_version_command(&pkg, budget).await;
+    match previous_root {
+        Some(path) => std::env::set_var("AETHERFLOW_FS_ROOT", path),
+        None => std::env::remove_var("AETHERFLOW_FS_ROOT"),
+    }
+    std::fs::remove_dir_all(root).unwrap();
+
+    assert!(unowned.is_err());
+    assert_eq!(owned.unwrap(), "1.75.2");
+}
+
+#[tokio::test]
 async fn test_probe_installed_package_version_strict_requires_independent_runtime_evidence() {
     let _env_guard = TEST_ENV_MUTEX.lock().await;
     let temp_dir =

@@ -2826,7 +2826,14 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                     version_command[2] = clean.to_string();
                 }
             }
-            let prog = resolve_probe_program(&version_command[0], fs_root.as_deref());
+            let prog = if pkg.name == "rclone"
+                && version_command[0] == "/opt/AetherFlow/apps/rclone/rclone"
+            {
+                af_runner::probe_metadata::rclone_version_program(fs_root.as_deref())
+                    .map_err(anyhow::Error::msg)?
+            } else {
+                resolve_probe_program(&version_command[0], fs_root.as_deref())
+            };
             let raw_args: Vec<String> = version_command[1..]
                 .iter()
                 .map(|arg| {

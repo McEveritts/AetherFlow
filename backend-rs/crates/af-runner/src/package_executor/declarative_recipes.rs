@@ -1672,40 +1672,97 @@ pub(super) fn build_mergerfs_recipe() -> DeclarativePackageRecipe {
     }
 }
 
-pub fn detect_rclone_exec_start_for_root(effective_root: &Path) -> &'static str {
-    let rclone_bin = effective_root.join("usr/bin/rclone");
-    let cmd_target = if rclone_bin.is_file() {
-        rclone_bin
-    } else if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
-        PathBuf::from("rclone")
-    } else if rclone_bin.exists() {
-        rclone_bin
-    } else {
-        PathBuf::from("rclone")
-    };
+fn read_rclone_env(path: &Path) -> Result<Option<String>, PackageExecutorError> {
+    crate::package_lifecycle::read_receipt_bounded_nofollow(path)
+        .map_err(PackageExecutorError::ExecutionError)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|_| {
+            PackageExecutorError::ExecutionError(format!("invalid UTF-8: {}", path.display()))
+        })
+}
 
-    let probe = std::process::Command::new(&cmd_target)
+fn rclone_runtime_owned(owner: &Path) -> Result<bool, PackageExecutorError> {
+    Ok(read_rclone_env(owner)?.is_some_and(|content| content.trim_end_matches('\n') == "rclone"))
+}
+
+fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn purge_owned_rclone_archives(
+    binary: &Path,
+    root: Option<&Path>,
+) -> Result<(), PackageExecutorError> {
+    let parent = binary
+        .parent()
+        .expect("Rclone executable has a parent directory");
+    validate_filesystem_path(parent, root)?;
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("rclone.af-backup.")
+            && entry.file_type()?.is_dir()
+        {
+            let path = entry.path();
+            let owner = path.join(".af-archive-owner");
+            if fs::symlink_metadata(&owner).is_ok_and(|meta| meta.is_file())
+                && rclone_runtime_owned(&owner)?
+            {
+                fs::remove_dir_all(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rclone_unit_path(vars: &HashMap<String, String>, effective_root: &Path) -> PathBuf {
+    let dir = effective_root.join("etc/systemd/system");
+    let service = dir.join("rclone.service");
+    let web = dir.join("rclone-web.service");
+    match vars
+        .get("SYSTEMD_UNIT")
+        .or_else(|| vars.get("SERVICE_NAME"))
+        .map(|s| s.trim())
+    {
+        Some("rclone-web" | "rclone-web.service") => web,
+        Some("rclone" | "rclone.service") => service,
+        _ if !service.is_file() && web.is_file() => web,
+        _ => service,
+    }
+}
+
+pub fn detect_rclone_exec_start_for_root(effective_root: &Path) -> String {
+    let rclone_bin = effective_root.join(RCLONE_BIN.trim_start_matches('/'));
+    let probe = std::process::Command::new(&rclone_bin)
         .args(["rcd", "--help"])
         .output();
     let supports_rc_web_gui = probe
         .map(|out| {
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            combined.contains("--rc-web-gui")
+            String::from_utf8_lossy(&out.stdout).contains("--rc-web-gui")
+                || String::from_utf8_lossy(&out.stderr).contains("--rc-web-gui")
         })
         .unwrap_or(true);
 
-    if supports_rc_web_gui {
-        "/usr/bin/rclone rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-enable-metrics --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf"
+    let args = if supports_rc_web_gui {
+        "rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-enable-metrics --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf"
     } else {
-        "/usr/bin/rclone gui --addr=127.0.0.1:{{APP_PORT}} --api-addr=127.0.0.1:{{RCLONE_API_PORT}} --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf"
-    }
+        "gui --addr=127.0.0.1:{{APP_PORT}} --api-addr=127.0.0.1:{{RCLONE_API_PORT}} --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf"
+    };
+    format!("{RCLONE_BIN} {args}")
 }
 
-pub fn detect_rclone_exec_start() -> &'static str {
+pub fn detect_rclone_exec_start() -> String {
     detect_rclone_exec_start_for_root(Path::new("/"))
 }
 
@@ -1728,88 +1785,41 @@ pub fn detect_rclone_separate_api_port_for_root(
         return None;
     }
 
-    // 2. Next, determine the target unit name being verified (from variables.get("SYSTEMD_UNIT")
-    // or variables.get("SERVICE_NAME"), defaulting to "rclone.service" when rclone.service exists on disk).
-    let rclone_svc_path =
-        if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
-            PathBuf::from("/etc/systemd/system/rclone.service")
-        } else {
-            effective_root.join("etc/systemd/system/rclone.service")
-        };
-    let rclone_web_svc_path =
-        if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
-            PathBuf::from("/etc/systemd/system/rclone-web.service")
-        } else {
-            effective_root.join("etc/systemd/system/rclone-web.service")
-        };
-
-    let requested_unit = vars
-        .get("SYSTEMD_UNIT")
-        .or_else(|| vars.get("SERVICE_NAME"))
-        .map(|s| s.trim());
-
-    let is_rclone_web_requested =
-        requested_unit.is_some_and(|u| u == "rclone-web" || u == "rclone-web.service");
-    let is_rclone_requested =
-        requested_unit.is_some_and(|u| u == "rclone" || u == "rclone.service");
-
-    let units_to_check: Vec<(&str, PathBuf)> = if is_rclone_web_requested {
-        vec![("rclone-web.service", rclone_web_svc_path)]
-    } else if is_rclone_requested {
-        vec![("rclone.service", rclone_svc_path)]
-    } else if rclone_svc_path.is_file() {
-        // If rclone.service exists on disk, inspect ONLY rclone.service!
-        // Do NOT fall through to a stale rclone-web.service when rclone.service is present without --api-addr!
-        vec![("rclone.service", rclone_svc_path)]
-    } else if rclone_web_svc_path.is_file() {
-        vec![("rclone-web.service", rclone_web_svc_path)]
-    } else {
-        Vec::new()
-    };
-
-    let mut any_unit_found = false;
-    for (_name, service_path) in units_to_check {
-        if let Ok(svc_content) = fs::read_to_string(&service_path) {
-            any_unit_found = true;
-            for line in svc_content.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("ExecStart=") {
-                    if let Some(idx) = trimmed.find("--api-addr=") {
-                        let rest = &trimmed[idx + "--api-addr=".len()..];
-                        let token = rest.split_whitespace().next().unwrap_or("");
-                        if let Some((_, p_str)) = token.rsplit_once(':') {
-                            let cleaned = p_str.trim_matches(['"', '\'', ' ']);
-                            if let Ok(p) = cleaned.parse::<u16>() {
-                                if p != app_port {
-                                    return Some(p);
-                                }
+    let svc_content = fs::read_to_string(rclone_unit_path(vars, effective_root));
+    if let Ok(svc_content) = svc_content {
+        for line in svc_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("ExecStart=") {
+                if let Some(idx) = trimmed.find("--api-addr=") {
+                    let rest = &trimmed[idx + "--api-addr=".len()..];
+                    let token = rest.split_whitespace().next().unwrap_or("");
+                    if let Some((_, p_str)) = token.rsplit_once(':') {
+                        let cleaned = p_str.trim_matches(['"', '\'', ' ']);
+                        if let Ok(p) = cleaned.parse::<u16>() {
+                            if p != app_port {
+                                return Some(p);
                             }
                         }
-                    } else if let Some(idx) = trimmed.find("--api-addr") {
-                        let rest = trimmed[idx + "--api-addr".len()..].trim_start();
-                        let token = rest.split_whitespace().next().unwrap_or("");
-                        let addr = token.strip_prefix('=').unwrap_or(token);
-                        if let Some((_, p_str)) = addr.rsplit_once(':') {
-                            let cleaned = p_str.trim_matches(['"', '\'', ' ']);
-                            if let Ok(p) = cleaned.parse::<u16>() {
-                                if p != app_port {
-                                    return Some(p);
-                                }
+                    }
+                } else if let Some(idx) = trimmed.find("--api-addr") {
+                    let rest = trimmed[idx + "--api-addr".len()..].trim_start();
+                    let token = rest.split_whitespace().next().unwrap_or("");
+                    let addr = token.strip_prefix('=').unwrap_or(token);
+                    if let Some((_, p_str)) = addr.rsplit_once(':') {
+                        let cleaned = p_str.trim_matches(['"', '\'', ' ']);
+                        if let Ok(p) = cleaned.parse::<u16>() {
+                            if p != app_port {
+                                return Some(p);
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    if any_unit_found {
-        // If a unit file exists but does NOT contain --api-addr (e.g. single-port rcd),
-        // return None immediately! Do NOT fall back to variables.get("RCLONE_API_PORT")!
+        // A present unit without --api-addr uses a single listener.
         return None;
     }
 
-    // If no unit file exists on disk (e.g. in a synthetic unit test without unit files),
     // ONLY use variables.get("RCLONE_API_PORT") if variables.get("RCLONE_WEB_MODE") (or RCLONE_MODE) is explicitly "gui"!
     let is_explicit_gui = vars
         .get("RCLONE_WEB_MODE")
@@ -1871,7 +1881,6 @@ pub(super) fn build_rclone_recipe() -> DeclarativePackageRecipe {
                 "/var/lib/rclone".to_string(),
                 "/var/lib/rclone/cache".to_string(),
                 "/etc/rclone".to_string(),
-                "/mnt/remote".to_string(),
             ],
             mode: 0o750,
             owner: Some("rclone".to_string()),
@@ -1904,7 +1913,7 @@ pub(super) fn build_rclone_recipe() -> DeclarativePackageRecipe {
             description: "Ensuring /etc/rclone/rclone.conf exists...".to_string(),
         },
         DeclarativeStep::WriteTemplateFile {
-            path: "/etc/rclone/rclone.env".to_string(),
+            path: RCLONE_ENV.to_string(),
             content_template: "RCLONE_RC_USER=\"{{MASTER_USER}}\"\nRCLONE_RC_PASS=\"{{RCLONE_PASS}}\"\nRCLONE_USER=\"{{MASTER_USER}}\"\nRCLONE_PASS=\"{{RCLONE_PASS}}\"\n".to_string(),
             mode: 0o600,
             overwrite: false,
@@ -1915,13 +1924,13 @@ pub(super) fn build_rclone_recipe() -> DeclarativePackageRecipe {
         },
         DeclarativeStep::WriteSystemdUnit {
             unit_name: "rclone.service".to_string(),
-            content_template: "[Unit]\nDescription=Rclone RC Web GUI Service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=rclone\nGroup=rclone\nWorkingDirectory=/var/lib/rclone\nEnvironmentFile=-/etc/rclone/rclone.env\nExecStart={{RCLONE_EXEC_START}}\nLogFilterPatterns=~.*(pass|password|token|login_token)=.*\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            content_template: "[Unit]\nDescription=Rclone RC Web GUI Service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=rclone\nGroup=rclone\nWorkingDirectory=/var/lib/rclone\nEnvironmentFile=/etc/rclone/rclone.env\nExecStart={{RCLONE_EXEC_START}}\nLogFilterPatterns=~.*(pass|password|token|login_token)=.*\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
             progress_pct: 79,
             description: "Writing rclone.service systemd unit on port {{APP_PORT}}...".to_string(),
         },
         DeclarativeStep::WriteSystemdUnit {
             unit_name: "rclone-vfs.service".to_string(),
-            content_template: "[Unit]\nDescription=Rclone VFS FUSE Mount Daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nExecStartPre=-/bin/mkdir -p /mnt/remote\nExecStart=/usr/bin/rclone mount remote: /mnt/remote --config=/etc/rclone/rclone.conf --vfs-cache-mode=full --allow-other --dir-cache-time=72h\nExecStop=/bin/fusermount -uz /mnt/remote\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            content_template: "[Unit]\nDescription=Rclone VFS FUSE Mount Daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nExecStartPre=-/bin/mkdir -p /mnt/remote\nExecStart={{RCLONE_BIN}} mount remote: /mnt/remote --config=/etc/rclone/rclone.conf --vfs-cache-mode=full --allow-other --dir-cache-time=72h\nExecStop=/bin/fusermount -uz /mnt/remote\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
             progress_pct: 83,
             description: "Writing rclone-vfs.service companion systemd unit...".to_string(),
         },
@@ -1945,6 +1954,13 @@ pub(super) fn build_rclone_recipe() -> DeclarativePackageRecipe {
             ignore_errors: false,
             progress_pct: 96,
             description: "Restarting rclone.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("rclone-vfs.service".to_string()),
+            operation: SystemctlOp::TryRestart,
+            ignore_errors: false,
+            progress_pct: 97,
+            description: "Restarting the Rclone VFS companion if it is active...".to_string(),
         },
         DeclarativeStep::WaitForHttpReady {
             path: "/metrics".to_string(),
@@ -1972,17 +1988,6 @@ pub(super) fn build_rclone_recipe() -> DeclarativePackageRecipe {
                 progress_pct: 30,
                 description: "Stopping and removing rclone.service...".to_string(),
             },
-            DeclarativeStep::RemovePaths {
-                paths: vec![
-                    "/usr/local/bin/rclone".to_string(),
-                    "/usr/bin/rclone".to_string(),
-                    "/var/lib/rclone/.af-version".to_string(),
-                    "/etc/rclone/.af-version".to_string(),
-                ],
-                only_if_delete_data: false,
-                progress_pct: 55,
-                description: "Removing Rclone binaries and version markers...".to_string(),
-            },
             DeclarativeStep::RunCommand {
                 program: "/bin/sh".to_string(),
                 args: vec![
@@ -1994,22 +1999,9 @@ pub(super) fn build_rclone_recipe() -> DeclarativePackageRecipe {
                 progress_pct: 70,
                 description: "Unmounting active Rclone FUSE mountpoint (/mnt/remote) before directory removal...".to_string(),
             },
-            DeclarativeStep::RemovePaths {
-                paths: vec![
-                    "/etc/rclone".to_string(),
-                    "/var/lib/rclone".to_string(),
-                    "/mnt/remote".to_string(),
-                ],
-                only_if_delete_data: true,
+            DeclarativeStep::RemoveRcloneFiles {
                 progress_pct: 78,
-                description: "Removing Rclone state directories (when DELETE_DATA=true)...".to_string(),
-            },
-            DeclarativeStep::AptPurge {
-                packages: vec!["rclone".to_string()],
-                autoremove: true,
-                ignore_errors: true,
-                progress_pct: 82,
-                description: "Purging legacy distribution rclone package...".to_string(),
+                description: "Removing the managed runtime and, when requested, Rclone data...".to_string(),
             },
             DeclarativeStep::PurgeSystemUser {
                 username: "rclone".to_string(),
@@ -2567,71 +2559,15 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         vars.insert("ARCH".to_string(), self.env_cfg.effective_arch());
         vars.insert("LIFECYCLE_ACTION".to_string(), action.as_str().to_string());
         if recipe.package_id == "rclone" {
-            let rclone_pass = {
-                let mut pass = None;
-                if let Ok(env_path) = self.env_cfg.resolve_path("/etc/rclone/rclone.env") {
-                    if let Ok(content) = fs::read_to_string(&env_path) {
-                        for line in content.lines() {
-                            let trimmed = line.trim();
-                            if let Some(rest) = trimmed
-                                .strip_prefix("RCLONE_RC_PASS=")
-                                .or_else(|| trimmed.strip_prefix("RCLONE_PASS="))
-                            {
-                                let cleaned = rest.trim_matches(['"', '\'', ' ']);
-                                if !cleaned.is_empty() {
-                                    pass = Some(cleaned.to_string());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if pass.is_none() && cfg!(test) {
-                    if let Some(root) = &self.env_cfg.fs_root {
-                        if root.to_string_lossy().contains("rclone-escaping") {
-                            if let Ok(mp) = env::var("MASTER_PASS") {
-                                if !mp.is_empty() {
-                                    pass = Some(mp);
-                                }
-                            }
-                        }
-                    }
-                }
-                pass.unwrap_or_else(|| {
-                    format!(
-                        "{}{}",
-                        uuid::Uuid::new_v4().simple(),
-                        uuid::Uuid::new_v4().simple()
-                    )
-                })
-            };
-            vars.insert("RCLONE_PASS".to_string(), rclone_pass);
-            let app_port_num: u16 = vars
-                .get("APP_PORT")
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(recipe.default_port as u16);
-            let effective_root = self.env_cfg.fs_root.as_deref().unwrap_or(Path::new("/"));
-            let is_gui = vars
-                .get("RCLONE_WEB_MODE")
-                .map(|v| v.eq_ignore_ascii_case("gui"))
-                .or_else(|| {
-                    vars.get("RCLONE_MODE")
-                        .map(|v| v.eq_ignore_ascii_case("gui"))
-                })
-                .unwrap_or_else(|| {
-                    detect_rclone_exec_start_for_root(effective_root).contains("rclone gui")
-                });
-            if is_gui {
-                vars.insert("RCLONE_WEB_MODE".to_string(), "gui".to_string());
-                vars.insert("RCLONE_MODE".to_string(), "gui".to_string());
-                vars.insert(
-                    "RCLONE_API_PORT".to_string(),
-                    app_port_num.saturating_add(1).to_string(),
-                );
-            } else {
-                vars.insert("RCLONE_WEB_MODE".to_string(), "rcd".to_string());
-                vars.insert("RCLONE_MODE".to_string(), "rcd".to_string());
-            }
+            vars.insert("RCLONE_BIN".to_string(), RCLONE_BIN.to_string());
+            vars.insert(
+                "RCLONE_PASS".to_string(),
+                format!(
+                    "{}{}",
+                    uuid::Uuid::new_v4().simple(),
+                    uuid::Uuid::new_v4().simple()
+                ),
+            );
         }
         if let Some(target) = self
             .env_cfg
@@ -2734,7 +2670,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                 | SystemctlOp::EnableNow
                                 | SystemctlOp::Enable
                                 | SystemctlOp::Start
-                                | SystemctlOp::Restart,
+                                | SystemctlOp::Restart
+                                | SystemctlOp::TryRestart,
                             ..
                         }
                 )
@@ -3938,22 +3875,14 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     return Err(PackageExecutorError::ExecutionError(e));
                 }
 
-                let dest_bin = if let Some(ref root) = self.env_cfg.fs_root {
-                    root.join("usr/local/bin/rclone")
-                } else {
-                    PathBuf::from("/usr/local/bin/rclone")
-                };
-                if let Some(parent) = dest_bin.parent() {
-                    create_dir_all_0755(parent)?;
-                }
-
-                let symlink_path = if let Some(ref root) = self.env_cfg.fs_root {
-                    root.join("usr/bin/rclone")
-                } else {
-                    PathBuf::from("/usr/bin/rclone")
-                };
-                if let Some(parent) = symlink_path.parent() {
-                    create_dir_all_0755(parent)?;
+                let dest_bin = self.env_cfg.resolve_path(RCLONE_BIN)?;
+                let owner = self.env_cfg.resolve_path(RCLONE_BIN_OWNER)?;
+                let owned = rclone_runtime_owned(&owner)?;
+                if !owned && (owner.exists() || dest_bin.exists()) {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "refusing to replace an unowned Rclone installation at {}",
+                        dest_bin.display()
+                    )));
                 }
 
                 let test_archive_mode = vars.contains_key("RCLONE_ARCHIVE_PATH")
@@ -3964,24 +3893,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     || env::var("AF_TEST_RCLONE_DOWNLOAD").is_ok();
 
                 let is_mock_runner = self.env_cfg.fs_root.is_some() && !test_archive_mode;
-                if is_mock_runner {
-                    let apt_args = vec![
-                        "-o".to_string(),
-                        "DPkg::Lock::Timeout=120".to_string(),
-                        "-o".to_string(),
-                        "DPkg::Options::=--force-confdef".to_string(),
-                        "-o".to_string(),
-                        "DPkg::Options::=--force-confold".to_string(),
-                        "install".to_string(),
-                        "-y".to_string(),
-                        "-qq".to_string(),
-                        "rclone".to_string(),
-                    ];
-                    let _ = self
-                        .runner
-                        .run_command("apt-get", &apt_args, &[], cancel)
-                        .await;
-
+                let bin_bytes = if is_mock_runner {
                     let mut binary_bytes = None;
                     if let Some(ref cache_dir) = self.env_cfg.artifact_cache_dir {
                         let cand = cache_dir.join("rclone");
@@ -3989,7 +3901,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             binary_bytes = fs::read(&cand).ok();
                         }
                     }
-                    let elf = binary_bytes.unwrap_or_else(|| {
+                    binary_bytes.unwrap_or_else(|| {
                         let mut data = vec![0x7f, b'E', b'L', b'F'];
                         data.resize(2048, 0x90);
                         data[4] = 2;
@@ -3997,32 +3909,16 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         data[18] = 62;
                         data[19] = 0;
                         data
-                    });
-                    journal.stage_file_mutation(&dest_bin)?;
-                    journal.stage_symlink_or_file_mutation(&symlink_path)?;
-                    write_file_atomic_with_mode_bounded(
-                        &dest_bin,
-                        &elf,
-                        0o755,
-                        self.env_cfg.fs_root.as_deref(),
-                    )?;
+                    })
                 } else {
-                    let nanos = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                    let staging_dir =
-                        PathBuf::from(format!("/var/tmp/aetherflow-rclone-{}", nanos));
-                    if let Err(e) =
-                        check_filesystem_capacity_and_inodes(&staging_dir, 512 * 1024 * 1024, 1024)
-                    {
-                        return Err(PackageExecutorError::ExecutionError(e));
-                    }
-                    fs::create_dir_all(&staging_dir)?;
-                    struct StagingDirGuard(std::path::PathBuf);
+                    validate_filesystem_path(&tmp_dir, self.env_cfg.fs_root.as_deref())?;
+                    fs::create_dir_all(&tmp_dir)?;
+                    let staging_dir = tmp_dir.join(format!("rclone-{}", uuid::Uuid::new_v4()));
+                    fs::create_dir(&staging_dir)?;
+                    struct StagingDirGuard(PathBuf);
                     impl Drop for StagingDirGuard {
                         fn drop(&mut self) {
-                            let _ = std::fs::remove_dir_all(&self.0);
+                            let _ = fs::remove_dir_all(&self.0);
                         }
                     }
                     let _staging_guard = StagingDirGuard(staging_dir.clone());
@@ -4363,61 +4259,17 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         )));
                     }
 
-                    cancel.check(&recipe.package_id)?;
-                    journal.stage_symlink_or_file_mutation(&dest_bin)?;
-                    journal.stage_symlink_or_file_mutation(&symlink_path)?;
+                    bin_bytes
+                };
 
-                    validate_filesystem_symlink_path(&dest_bin, self.env_cfg.fs_root.as_deref())?;
-                    if let Some(parent) = dest_bin.parent() {
-                        validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
-                        create_dir_all_0755(parent)?;
-                        validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
-                    }
-                    let bin_filename = dest_bin
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .unwrap_or("rclone");
-                    let tmp_dest = dest_bin.with_file_name(format!(
-                        ".{}.af-bin-tmp-{}",
-                        bin_filename,
-                        uuid::Uuid::new_v4()
-                    ));
-                    let write_res = (|| -> Result<(), PackageExecutorError> {
-                        let mut file = open_new_private_file(&tmp_dest, 0o755)?;
-                        file.write_all(&bin_bytes)?;
-                        file.sync_all()?;
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ =
-                                fs::set_permissions(&tmp_dest, fs::Permissions::from_mode(0o755));
-                        }
-                        fs::rename(&tmp_dest, &dest_bin)?;
-                        Ok(())
-                    })();
-                    if write_res.is_err() {
-                        let _ = fs::remove_file(&tmp_dest);
-                    }
-                    write_res?;
-                    let _ = fs::remove_dir_all(&staging_dir);
+                cancel.check(&recipe.package_id)?;
+                let root = self.env_cfg.fs_root.as_deref();
+                if !owned {
+                    journal.stage_file_mutation(&owner)?;
+                    write_file_atomic_with_mode_bounded(&owner, b"rclone\n", 0o644, root)?;
                 }
-
-                #[cfg(unix)]
-                {
-                    let link_target = if self.env_cfg.fs_root.is_some() {
-                        PathBuf::from("../local/bin/rclone")
-                    } else {
-                        PathBuf::from("/usr/local/bin/rclone")
-                    };
-                    let parent = symlink_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("/usr/bin"));
-                    let tmp_symlink =
-                        parent.join(format!(".rclone.af-tmp-{}", uuid::Uuid::new_v4()));
-                    let _ = fs::remove_file(&tmp_symlink);
-                    std::os::unix::fs::symlink(&link_target, &tmp_symlink)?;
-                    fs::rename(&tmp_symlink, &symlink_path)?;
-                }
+                journal.stage_file_mutation(&dest_bin)?;
+                write_file_atomic_with_mode_bounded(&dest_bin, &bin_bytes, 0o755, root)?;
 
                 Ok(format!(
                     "installed rclone binary {} -> {}",
@@ -4856,50 +4708,58 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     return Ok(format!("wrote configuration file {}", path));
                 }
 
-                if !*overwrite && resolved.is_file() {
-                    if path == "/etc/rclone/rclone.env" {
-                        let lifecycle_action = vars
-                            .get("LIFECYCLE_ACTION")
-                            .map(String::as_str)
-                            .unwrap_or("install");
+                if path == RCLONE_ENV {
+                    let existing = read_rclone_env(&resolved)?;
+                    let source = match existing {
+                        Some(ref content) => Some(content.clone()),
+                        None => read_rclone_env(&self.env_cfg.resolve_path(RCLONE_LEGACY_ENV)?)?,
+                    };
+                    let content = if let Some(source) = source {
+                        let lifecycle_action = vars.get("LIFECYCLE_ACTION").map(String::as_str);
                         let keep_secrets = self.env_cfg.keep_existing_secrets
                             || env::var("AF_KEEP_EXISTING_SECRETS")
-                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                .unwrap_or(false)
-                            || (matches!(lifecycle_action, "update" | "reinstall")
+                                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            || (matches!(lifecycle_action, Some("update" | "reinstall"))
                                 && env::var("AF_KEEP_EXISTING_SECRETS")
                                     .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                                     .unwrap_or(true));
-                        if !keep_secrets {
-                            if let Some(explicit_pass) = self.resolve_explicit_password() {
-                                if let Ok(existing) = fs::read_to_string(&resolved) {
-                                    let updated =
-                                        update_preserved_rclone_env_pass(&existing, &explicit_pass);
-                                    if updated != existing {
-                                        journal.stage_file_mutation(&resolved)?;
-                                        write_file_atomic_with_mode_bounded(
-                                            &resolved,
-                                            updated.as_bytes(),
-                                            *mode,
-                                            self.env_cfg.fs_root.as_deref(),
-                                        )?;
-                                        self.apply_file_metadata(
-                                            &resolved,
-                                            *mode,
-                                            owner.as_deref(),
-                                            group.as_deref(),
-                                            cancel,
-                                        )
-                                        .await?;
-                                        return Ok(format!(
-                                            "updated RCLONE_RC_PASS in existing file {}",
-                                            path
-                                        ));
-                                    }
-                                }
-                            }
+                        if let Some(pass) =
+                            self.resolve_explicit_password().filter(|_| !keep_secrets)
+                        {
+                            update_preserved_rclone_env_pass(&source, &pass)
+                        } else {
+                            source
+                        }
+                    } else {
+                        rendered
+                    };
+                    let content = add_missing_rclone_env_aliases(content);
+                    #[cfg(unix)]
+                    if existing.as_ref() == Some(&content) {
+                        use std::os::unix::fs::PermissionsExt;
+                        if fs::metadata(&resolved)?.permissions().mode() & 0o777 == *mode {
+                            return Ok(format!("preserved configuration file {}", path));
                         }
                     }
+                    journal.stage_file_mutation(&resolved)?;
+                    write_file_atomic_with_mode_bounded(
+                        &resolved,
+                        content.as_bytes(),
+                        *mode,
+                        self.env_cfg.fs_root.as_deref(),
+                    )?;
+                    self.apply_file_metadata(
+                        &resolved,
+                        *mode,
+                        owner.as_deref(),
+                        group.as_deref(),
+                        cancel,
+                    )
+                    .await?;
+                    return Ok(format!("wrote configuration file {}", path));
+                }
+
+                if !*overwrite && resolved.is_file() {
                     let port_var = if path == "/etc/default/quasselcore" {
                         vars.get("LISTEN_PORT").or_else(|| vars.get("APP_PORT"))
                     } else {
@@ -4986,7 +4846,20 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 let existed = resolved.is_file();
                 journal.stage_file_mutation(&resolved)?;
                 if existed {
-                    journal.record_restorable_systemd_service(&norm);
+                    if !matches!(norm.as_str(), "rclone.service" | "rclone-vfs.service")
+                        || self
+                            .runner
+                            .run_command(
+                                "systemctl",
+                                &["is-active".into(), "--quiet".into(), norm.clone()],
+                                &[],
+                                cancel,
+                            )
+                            .await?
+                            .success()
+                    {
+                        journal.record_restorable_systemd_service(&norm);
+                    }
                 } else {
                     journal.record_created_systemd_unit(&norm, &resolved);
                 }
@@ -4994,24 +4867,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 if norm == "rclone.service" {
                     let effective_root = self.env_cfg.fs_root.as_deref().unwrap_or(Path::new("/"));
                     let detected_exec = detect_rclone_exec_start_for_root(effective_root);
-                    if content.contains("{{RCLONE_EXEC_START}}") {
-                        content = content.replace("{{RCLONE_EXEC_START}}", detected_exec);
-                    } else if content.contains("--rc-web-gui")
-                        && detected_exec.contains("rclone gui")
-                    {
-                        content = content.replace(
-                            "/usr/bin/rclone rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-enable-metrics --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf",
-                            detected_exec,
-                        );
-                        content = content.replace(
-                            "/usr/bin/rclone rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-addr=127.0.0.1:{{APP_PORT}} --rc-enable-metrics --config=/etc/rclone/rclone.conf",
-                            detected_exec,
-                        );
-                        content = content.replace(
-                            "/usr/bin/rclone rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf",
-                            detected_exec,
-                        );
-                    }
+                    content = content.replace("{{RCLONE_EXEC_START}}", &detected_exec);
                     if !vars.contains_key("RCLONE_API_PORT") {
                         let mut existing_api_port = None;
                         if let Ok(svc_existing) = fs::read_to_string(&resolved) {
@@ -5102,8 +4958,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         "--".to_string(),
                         unit.clone().unwrap_or_default(),
                     ],
-                    SystemctlOp::Restart => vec![
-                        "restart".to_string(),
+                    SystemctlOp::Restart | SystemctlOp::TryRestart => vec![
+                        if *operation == SystemctlOp::TryRestart {
+                            "try-restart"
+                        } else {
+                            "restart"
+                        }
+                        .to_string(),
                         "--".to_string(),
                         unit.clone().unwrap_or_default(),
                     ],
@@ -5143,7 +5004,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 if out.success()
                     && matches!(
                         operation,
-                        SystemctlOp::EnableNow | SystemctlOp::Start | SystemctlOp::Restart
+                        SystemctlOp::EnableNow
+                            | SystemctlOp::Start
+                            | SystemctlOp::Restart
+                            | SystemctlOp::TryRestart
                     )
                 {
                     if let Some(unit_name) = unit.as_ref().filter(|u| !u.is_empty()) {
@@ -5205,6 +5069,48 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     });
                 }
                 Ok(format!("purged systemd unit {}", norm))
+            }
+
+            DeclarativeStep::RemoveRcloneFiles { .. } => {
+                if self.env_cfg.delete_data
+                    && self.is_active_mountpoint(
+                        "/mnt/remote",
+                        &self.env_cfg.resolve_path("/mnt/remote")?,
+                    )
+                {
+                    return Err(PackageExecutorError::SecurityViolation(
+                        "Rclone mount at /mnt/remote is still an active mountpoint".to_string(),
+                    ));
+                }
+                let owner = self.env_cfg.resolve_path(RCLONE_BIN_OWNER)?;
+                if rclone_runtime_owned(&owner)? {
+                    remove_file_if_present(&self.env_cfg.resolve_path(RCLONE_BIN)?)?;
+                    remove_file_if_present(&owner)?;
+                }
+                for marker in ["/var/lib/rclone/.af-version", "/etc/rclone/.af-version"] {
+                    remove_file_if_present(&self.env_cfg.resolve_path(marker)?)?;
+                }
+                if self.env_cfg.delete_data {
+                    for logical in [RCLONE_ENV, RCLONE_LEGACY_ENV, "/etc/rclone/rclone.conf"] {
+                        remove_file_if_present(&self.env_cfg.resolve_path(logical)?)?;
+                    }
+                    let state = self.env_cfg.resolve_path("/var/lib/rclone")?;
+                    if state.exists() {
+                        if self.is_active_mountpoint("/var/lib/rclone", &state) {
+                            return Err(PackageExecutorError::SecurityViolation(
+                                "Rclone state directory is an active mountpoint".to_string(),
+                            ));
+                        }
+                        fs::remove_dir_all(state)?;
+                    }
+                    for binary in [RCLONE_BIN, "/usr/bin/rclone"] {
+                        purge_owned_rclone_archives(
+                            &self.env_cfg.resolve_readonly_path(binary),
+                            self.env_cfg.fs_root.as_deref(),
+                        )?;
+                    }
+                }
+                Ok("removed AetherFlow Rclone files".to_string())
             }
 
             DeclarativeStep::RemovePaths {
@@ -5372,41 +5278,37 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
 
         let mut rclone_creds: Option<(String, String)> = None;
         if is_rclone_check {
+            let effective_root = self.env_cfg.fs_root.as_deref().unwrap_or(Path::new("/"));
+            let unit =
+                fs::read_to_string(rclone_unit_path(vars, effective_root)).unwrap_or_default();
+            let unit_env = unit
+                .lines()
+                .filter_map(|line| {
+                    let value = line.trim().strip_prefix("EnvironmentFile=")?.trim();
+                    let path = value.trim_start_matches('-').trim_matches(['"', '\'']);
+                    path.starts_with('/').then_some(path)
+                })
+                .last();
+            let explicit_env = vars.get("RCLONE_ENV_FILE").map(String::as_str);
+            let candidates: Vec<&str> = explicit_env
+                .or(unit_env)
+                .map_or_else(|| vec![RCLONE_ENV, RCLONE_LEGACY_ENV], |path| vec![path]);
             let mut user = None;
             let mut pass = None;
-            for cand in ["/etc/rclone/rclone.env", "/etc/aetherflow/rclone.env"] {
-                let p = self.env_cfg.resolve_readonly_path(cand);
-                if let Ok(c) = fs::read_to_string(&p) {
-                    for line in c.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((k, v)) = line.split_once('=') {
-                            let mut val = v.trim();
-                            if ((val.starts_with('"') && val.ends_with('"'))
-                                || (val.starts_with('\'') && val.ends_with('\'')))
-                                && val.len() >= 2
-                            {
-                                val = &val[1..val.len() - 1];
-                            }
-                            if (k.trim() == "RCLONE_RC_USER" || k.trim() == "RCLONE_USER")
-                                && !val.is_empty()
-                                && user.is_none()
-                            {
-                                user = Some(val.to_string());
-                            }
-                            if (k.trim() == "RCLONE_RC_PASS" || k.trim() == "RCLONE_PASS")
-                                && !val.is_empty()
-                                && pass.is_none()
-                            {
-                                pass = Some(val.to_string());
-                            }
-                        }
-                    }
-                    if user.is_some() && pass.is_some() {
-                        break;
-                    }
+            for candidate in candidates {
+                let path = self.env_cfg.resolve_readonly_path(candidate);
+                validate_filesystem_path(&path, self.env_cfg.fs_root.as_deref())?;
+                if let Some(content) = read_rclone_env(&path)? {
+                    let settings = af_models::parse_key_value_env_str(&content);
+                    user = settings
+                        .get("RCLONE_RC_USER")
+                        .or_else(|| settings.get("RCLONE_USER"))
+                        .cloned();
+                    pass = settings
+                        .get("RCLONE_RC_PASS")
+                        .or_else(|| settings.get("RCLONE_PASS"))
+                        .cloned();
+                    break;
                 }
             }
             if user.is_none() {

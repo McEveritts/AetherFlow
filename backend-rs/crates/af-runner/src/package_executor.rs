@@ -257,6 +257,11 @@ pub fn validate_package_target_policy(
 /// Default Quassel IRC core listen port when no custom `app_port` is requested.
 pub const QUASSEL_DEFAULT_LISTEN_PORT: i32 = 4242;
 
+pub(crate) const RCLONE_BIN: &str = "/opt/AetherFlow/apps/rclone/rclone";
+pub(crate) const RCLONE_BIN_OWNER: &str = "/opt/AetherFlow/apps/rclone/.af-owner";
+pub(crate) const RCLONE_ENV: &str = "/etc/rclone/rclone.env";
+pub(crate) const RCLONE_LEGACY_ENV: &str = "/etc/aetherflow/rclone.env";
+
 /// Allowed managed prefixes for declarative file writes, creations, and removals.
 const ALLOWED_MANAGED_PREFIXES: &[&str] = &[
     "/etc/",
@@ -266,7 +271,6 @@ const ALLOWED_MANAGED_PREFIXES: &[&str] = &[
     "/run/",
     "/opt/",
     "/usr/local/bin/",
-    "/usr/bin/rclone",
     "/install/",
     "/mnt/",
 ];
@@ -605,6 +609,11 @@ pub enum DeclarativeStep {
         progress_pct: u8,
         description: String,
     },
+    /// Removes AetherFlow's Rclone runtime and, on purge, its credential files and archives.
+    RemoveRcloneFiles {
+        progress_pct: u8,
+        description: String,
+    },
     /// Resolves the latest release tag for a GitHub repository (`owner/repo`) with a deterministic fallback version.
     ResolveGitHubReleaseTag {
         repo: String,
@@ -712,6 +721,7 @@ pub enum SystemctlOp {
     Enable,
     Start,
     Restart,
+    TryRestart,
     Stop,
     Disable,
     ResetFailed,
@@ -1731,7 +1741,8 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecutorError> {
         }
         DeclarativeStep::ProbeSshPort { .. }
         | DeclarativeStep::EnsureThreadfinConfig { .. }
-        | DeclarativeStep::InstallRcloneBinary { .. } => Ok(()),
+        | DeclarativeStep::InstallRcloneBinary { .. }
+        | DeclarativeStep::RemoveRcloneFiles { .. } => Ok(()),
         DeclarativeStep::GenerateSelfSignedTlsCert {
             cert_path,
             key_out_path,
@@ -2170,11 +2181,6 @@ enum RollbackEntry {
         target: PathBuf,
         backup: PathBuf,
         ownership: Option<(u32, u32)>,
-    },
-    /// A symlink that existed before the execution pointing to `link_target`.
-    RestorableSymlink {
-        target: PathBuf,
-        link_target: PathBuf,
     },
     /// A file that did not exist before the execution and should be removed on failure/cancellation.
     CreatedFile { target: PathBuf },
@@ -2660,7 +2666,6 @@ impl RollbackJournal {
 
         let already_staged = self.entries.iter().any(|e| match e {
             RollbackEntry::RestorableFile { target: t, .. } => t == target,
-            RollbackEntry::RestorableSymlink { target: t, .. } => t == target,
             RollbackEntry::CreatedFile { target: t } => t == target,
             _ => false,
         });
@@ -2700,73 +2705,6 @@ impl RollbackJournal {
                 } else {
                     return Err(PackageExecutorError::SecurityViolation(format!(
                         "refusing to stage non-regular file target: {}",
-                        target.display()
-                    )));
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                self.entries.push(RollbackEntry::CreatedFile {
-                    target: target.to_path_buf(),
-                });
-            }
-            Err(err) => return Err(PackageExecutorError::Io(err)),
-        }
-        Ok(())
-    }
-
-    /// Prepares a path (symlink or regular file) for mutation: if `target` exists as a symlink,
-    /// preserves its link target in [`RollbackEntry::RestorableSymlink`]; if it exists as a regular
-    /// file, backs it up to `<target>.bak-af`; otherwise records it as a newly created file.
-    fn stage_symlink_or_file_mutation(
-        &mut self,
-        target: &Path,
-    ) -> Result<(), PackageExecutorError> {
-        validate_filesystem_symlink_path(target, self.fs_root.as_deref())?;
-
-        let already_staged = self.entries.iter().any(|e| match e {
-            RollbackEntry::RestorableFile { target: t, .. } => t == target,
-            RollbackEntry::RestorableSymlink { target: t, .. } => t == target,
-            RollbackEntry::CreatedFile { target: t } => t == target,
-            _ => false,
-        });
-        if already_staged {
-            return Ok(());
-        }
-
-        match fs::symlink_metadata(target) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    let link_target = fs::read_link(target)?;
-                    self.entries.push(RollbackEntry::RestorableSymlink {
-                        target: target.to_path_buf(),
-                        link_target,
-                    });
-                } else if meta.is_file() {
-                    let backup = backup_path_for(target);
-                    validate_filesystem_path(&backup, self.fs_root.as_deref())?;
-                    let mut source = File::open(target)?;
-                    let mut destination = open_new_private_file(&backup, 0o600)?;
-                    std::io::copy(&mut source, &mut destination)?;
-                    destination.set_permissions(meta.permissions())?;
-                    destination.sync_all()?;
-                    self.entries.push(RollbackEntry::RestorableFile {
-                        target: target.to_path_buf(),
-                        backup,
-                        ownership: {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::MetadataExt;
-                                Some((meta.uid(), meta.gid()))
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                None
-                            }
-                        },
-                    });
-                } else {
-                    return Err(PackageExecutorError::SecurityViolation(format!(
-                        "refusing to stage non-regular, non-symlink file target: {}",
                         target.display()
                     )));
                 }
@@ -2891,7 +2829,6 @@ impl RollbackJournal {
         while let Some(entry) = self.entries.pop() {
             let is_receipt = match &entry {
                 RollbackEntry::RestorableFile { target, .. } => is_version_receipt_path(target),
-                RollbackEntry::RestorableSymlink { target, .. } => is_version_receipt_path(target),
                 RollbackEntry::CreatedFile { target } => is_version_receipt_path(target),
                 RollbackEntry::CreatedSystemdUnit { .. } => false,
             };
@@ -2937,58 +2874,6 @@ impl RollbackJournal {
                     } else if unit_path.is_file() {
                         let _ = fs::remove_file(&unit_path);
                         notes.push(format!("rolled back systemd unit {}", unit_name));
-                    }
-                }
-                RollbackEntry::RestorableSymlink {
-                    target,
-                    link_target,
-                } => {
-                    if let Err(err) =
-                        validate_filesystem_symlink_path(&target, self.fs_root.as_deref())
-                    {
-                        let msg = format!(
-                            "skipped unsafe backup restore for symlink {}: {}",
-                            target.display(),
-                            err
-                        );
-                        notes.push(msg.clone());
-                        incomplete_errors.push(msg);
-                        state_restore_failed = true;
-                        continue;
-                    }
-                    #[cfg(unix)]
-                    {
-                        let parent = target.parent().unwrap_or_else(|| Path::new("/"));
-                        let tmp_symlink =
-                            parent.join(format!(".af-restore-link-{}", uuid::Uuid::new_v4()));
-                        let _ = fs::remove_file(&tmp_symlink);
-                        if let Err(e) = std::os::unix::fs::symlink(&link_target, &tmp_symlink) {
-                            let msg = format!(
-                                "failed to restore symlink {} -> {}: {}",
-                                target.display(),
-                                link_target.display(),
-                                e
-                            );
-                            notes.push(msg.clone());
-                            incomplete_errors.push(msg);
-                            state_restore_failed = true;
-                        } else if let Err(e) = fs::rename(&tmp_symlink, &target) {
-                            let _ = fs::remove_file(&tmp_symlink);
-                            let msg = format!(
-                                "failed to rename restored symlink over {}: {}",
-                                target.display(),
-                                e
-                            );
-                            notes.push(msg.clone());
-                            incomplete_errors.push(msg);
-                            state_restore_failed = true;
-                        } else {
-                            notes.push(format!(
-                                "restored symlink backup for {} -> {}",
-                                target.display(),
-                                link_target.display()
-                            ));
-                        }
                     }
                 }
                 RollbackEntry::RestorableFile {
@@ -3226,24 +3111,6 @@ impl RollbackJournal {
                                         incomplete_errors.push(msg);
                                     }
                                 },
-                            }
-                        }
-                    }
-                    RollbackEntry::RestorableSymlink {
-                        target,
-                        link_target,
-                    } => {
-                        if validate_filesystem_symlink_path(&target, self.fs_root.as_deref())
-                            .is_ok()
-                        {
-                            #[cfg(unix)]
-                            {
-                                let _ = fs::remove_file(&target);
-                                let _ = std::os::unix::fs::symlink(&link_target, &target);
-                                notes.push(format!(
-                                    "restored symlink receipt for {}",
-                                    target.display()
-                                ));
                             }
                         }
                     }
@@ -3672,6 +3539,10 @@ fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
             progress_pct,
             description,
         }
+        | DeclarativeStep::RemoveRcloneFiles {
+            progress_pct,
+            description,
+        }
         | DeclarativeStep::ResolveGitHubReleaseTag {
             progress_pct,
             description,
@@ -3754,24 +3625,43 @@ fn format_znc_major_minor(version: &str) -> String {
     }
 }
 
+fn add_missing_rclone_env_aliases(mut content: String) -> String {
+    let settings = af_models::parse_key_value_env_str(&content);
+    for (key, other) in [
+        ("RCLONE_RC_USER", "RCLONE_USER"),
+        ("RCLONE_USER", "RCLONE_RC_USER"),
+        ("RCLONE_RC_PASS", "RCLONE_PASS"),
+        ("RCLONE_PASS", "RCLONE_RC_PASS"),
+    ] {
+        if let Some(value) = settings.get(other).filter(|_| !settings.contains_key(key)) {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            let escaped = escape_systemd_env_quoted(value);
+            content.push_str(&format!("{key}=\"{escaped}\"\n"));
+        }
+    }
+    content
+}
+
 fn update_preserved_rclone_env_pass(existing: &str, raw_pass: &str) -> String {
     let escaped = escape_systemd_env_quoted(raw_pass);
-    let new_line = format!("RCLONE_RC_PASS=\"{}\"", escaped);
     static RCLONE_PASS_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?m)^[ \t]*RCLONE_RC_PASS[ \t]*=.*$").unwrap());
-    if RCLONE_PASS_RE.is_match(existing) {
-        RCLONE_PASS_RE
-            .replace_all(existing, new_line.as_str())
-            .into_owned()
-    } else {
-        let mut out = existing.to_string();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
+        Lazy::new(|| Regex::new(r"(?m)^[ \t]*(RCLONE_RC_PASS|RCLONE_PASS)[ \t]*=.*$").unwrap());
+    let mut out = RCLONE_PASS_RE
+        .replace_all(existing, |caps: &regex::Captures<'_>| {
+            format!("{}=\"{}\"", &caps[1], escaped)
+        })
+        .into_owned();
+    for key in ["RCLONE_RC_PASS", "RCLONE_PASS"] {
+        if !af_models::parse_key_value_env_str(&out).contains_key(key) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("{key}=\"{escaped}\"\n"));
         }
-        out.push_str(&new_line);
-        out.push('\n');
-        out
     }
+    out
 }
 
 fn parse_semver_tuple(raw: &str) -> Option<(u64, u64, u64)> {

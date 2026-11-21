@@ -4177,19 +4177,21 @@ fn test_rclone_both_cli_variants_render_app_port_and_metrics() {
     assert!(!unit_step.contains("127.0.0.1:5572"));
 
     // Simulate modern rcd substitution on unit template
-    let rcd_start = detect_rclone_exec_start();
+    let root = create_isolated_test_dir("rclone-cli-mode");
+    let rcd_start = detect_rclone_exec_start_for_root(&root);
+    fs::remove_dir_all(root).unwrap();
     assert!(rcd_start.contains("{{APP_PORT}}"));
-    let rcd_content = unit_step.replace("{{RCLONE_EXEC_START}}", rcd_start);
+    let rcd_content = unit_step.replace("{{RCLONE_EXEC_START}}", &rcd_start);
     let rendered_rcd = interpolate_template(&rcd_content, &vars);
     assert!(rendered_rcd.contains("127.0.0.1:19572"));
     assert!(!rendered_rcd.contains("{{APP_PORT}}"));
     assert!(!rendered_rcd.contains("5572"));
 
     // Simulate fallback gui substitution on unit template
-    let gui_start = "/usr/bin/rclone gui --addr=127.0.0.1:{{APP_PORT}} --api-addr=127.0.0.1:{{RCLONE_API_PORT}} --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf";
+    let gui_start = "/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:{{APP_PORT}} --api-addr=127.0.0.1:{{RCLONE_API_PORT}} --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf";
     let fallback_content = unit_step.replace("{{RCLONE_EXEC_START}}", gui_start);
     let rendered_fallback = interpolate_template(&fallback_content, &vars);
-    assert!(rendered_fallback.contains("/usr/bin/rclone gui --addr=127.0.0.1:19572 --api-addr=127.0.0.1:19573 --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf"));
+    assert!(rendered_fallback.contains("/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:19572 --api-addr=127.0.0.1:19573 --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf"));
     assert!(!rendered_fallback.contains("--user="));
     assert!(!rendered_fallback.contains("--pass="));
     assert!(!rendered_fallback.contains("5572"));
@@ -4317,16 +4319,18 @@ async fn test_rclone_authenticated_wait_for_http_ready_rcd_and_gui() {
                 (404, "text/plain", "Not Found\n".to_string())
             }).await;
 
-        // 1a: Success with correct credentials
+        // An existing unit can still select the legacy file while both copies are present.
         let root = create_isolated_test_dir("rclone-auth-rcd-live");
         let env_cfg = PackageExecutionEnv::isolated(&root);
-        let env_file = root.join("etc/rclone/rclone.env");
-        fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-        fs::write(
-            &env_file,
-            "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
-        )
-        .unwrap();
+        for (logical, content) in [
+            ("etc/aetherflow/rclone.env", "RCLONE_USER=admin\nRCLONE_PASS=mysecret\n"),
+            ("etc/rclone/rclone.env", "RCLONE_RC_USER=other\nRCLONE_RC_PASS=other\n"),
+            ("etc/systemd/system/rclone.service", "[Service]\nEnvironmentFile=-/etc/aetherflow/rclone.env\n"),
+        ] {
+            let path = root.join(logical);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
 
         let executor = DeclarativePackageExecutor::new(env_cfg);
         let mut vars = HashMap::new();
@@ -4926,13 +4930,10 @@ async fn test_rclone_install_succeeds_with_valid_sha256_and_version() {
         res
     );
 
-    let dest_bin = root.join("usr/local/bin/rclone");
-    assert!(dest_bin.exists(), "Destination binary must be installed");
-    let symlink = root.join("usr/bin/rclone");
-    assert!(
-        symlink.exists() || fs::symlink_metadata(&symlink).is_ok(),
-        "Symlink must exist"
-    );
+    assert!(root.join(RCLONE_BIN.trim_start_matches('/')).is_file());
+    assert!(root.join(RCLONE_BIN_OWNER.trim_start_matches('/')).is_file());
+    assert!(!root.join("usr/bin/rclone").exists());
+    assert!(!root.join("usr/local/bin/rclone").exists());
 
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&work_dir);
@@ -5433,25 +5434,24 @@ async fn test_rclone_rollback_preserves_preexisting_binary_and_symlink_on_failur
 }
 
 #[tokio::test]
-async fn test_rclone_install_over_symlink_destination_and_rollback() {
+async fn test_rclone_upgrade_and_rollback_preserve_distro_and_operator_binaries() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let root = create_isolated_test_dir("rclone-symlink-dest");
     let work_dir = create_isolated_test_dir("rclone-symlink-work");
 
-    // Pre-create a target file and a symlink at /usr/local/bin/rclone pointing to it
-    let old_target = root.join("opt/legacy-rclone/rclone-old");
-    fs::create_dir_all(old_target.parent().unwrap()).unwrap();
-    fs::write(&old_target, b"legacy-rclone-payload").unwrap();
+    let operator = root.join("usr/local/bin/rclone");
+    fs::create_dir_all(operator.parent().unwrap()).unwrap();
+    fs::write(&operator, b"operator payload").unwrap();
 
-    let usr_local_bin = root.join("usr/local/bin/rclone");
-    fs::create_dir_all(usr_local_bin.parent().unwrap()).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&old_target, &usr_local_bin).unwrap();
+    let distro = root.join("usr/bin/rclone");
+    fs::create_dir_all(distro.parent().unwrap()).unwrap();
+    fs::write(&distro, b"distro payload").unwrap();
 
-    let usr_bin = root.join("usr/bin/rclone");
-    fs::create_dir_all(usr_bin.parent().unwrap()).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("/usr/local/bin/rclone", &usr_bin).unwrap();
+    let managed = root.join(RCLONE_BIN.trim_start_matches('/'));
+    let owner = root.join(RCLONE_BIN_OWNER.trim_start_matches('/'));
+    fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    fs::write(&managed, b"prior managed payload").unwrap();
+    fs::write(&owner, b"rclone\n").unwrap();
 
     // Stage zip with matching target version 1.75.2
     let (zip_path, real_sha) = create_test_rclone_zip(&work_dir, "v1.75.2");
@@ -5462,7 +5462,7 @@ async fn test_rclone_install_over_symlink_destination_and_rollback() {
 
     let step = DeclarativeStep::InstallRcloneBinary {
         progress_pct: 60,
-        description: "Installing rclone binary over pre-existing symlink".to_string(),
+        description: "Upgrading the managed Rclone binary".to_string(),
     };
 
     let mut vars = HashMap::new();
@@ -5483,39 +5483,15 @@ async fn test_rclone_install_over_symlink_destination_and_rollback() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(
-        res.is_ok(),
-        "Install over symlink destination must succeed: {:?}",
-        res
-    );
+    res.unwrap();
+    assert_ne!(fs::read(&managed).unwrap(), b"prior managed payload");
+    assert_eq!(fs::read(&distro).unwrap(), b"distro payload");
+    assert_eq!(fs::read(&operator).unwrap(), b"operator payload");
 
-    // usr_local_bin must now be a regular file (not a symlink) containing the new binary
-    let meta = fs::symlink_metadata(&usr_local_bin).unwrap();
-    assert!(
-        !meta.file_type().is_symlink(),
-        "/usr/local/bin/rclone must now be a regular file"
-    );
-    assert!(
-        usr_local_bin.is_file(),
-        "/usr/local/bin/rclone must be an installed file"
-    );
-    let installed_bytes = fs::read(&usr_local_bin).unwrap();
-    assert_ne!(installed_bytes, b"legacy-rclone-payload");
-
-    // Old target must remain intact
-    assert_eq!(fs::read(&old_target).unwrap(), b"legacy-rclone-payload");
-
-    // Now execute rollback on journal to simulate subsequent step failure!
     let _notes = journal.rollback(&executor.runner).await;
-
-    // /usr/local/bin/rclone must be restored as the original symlink!
-    let restored_meta = fs::symlink_metadata(&usr_local_bin).unwrap();
-    assert!(
-        restored_meta.file_type().is_symlink(),
-        "/usr/local/bin/rclone must be restored to a symlink"
-    );
-    #[cfg(unix)]
-    assert_eq!(fs::read_link(&usr_local_bin).unwrap(), old_target);
+    assert_eq!(fs::read(&managed).unwrap(), b"prior managed payload");
+    assert_eq!(fs::read(&distro).unwrap(), b"distro payload");
+    assert_eq!(fs::read(&operator).unwrap(), b"operator payload");
 
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&work_dir);

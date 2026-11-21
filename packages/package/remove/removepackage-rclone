@@ -16,6 +16,8 @@ else
 fi
 
 PACKAGE_NAME="rclone"
+RCLONE_BIN="/opt/AetherFlow/apps/rclone/rclone"
+RCLONE_OWNER="${RCLONE_BIN%/*}/.af-owner"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
     af_prepare_logfile_path "$LOGFILE"
@@ -36,16 +38,24 @@ report_progress 20 "Stopping and unmounting rclone-vfs.service..."
 purge_systemd_unit "rclone-vfs" "rclone"
 if mountpoint -q /mnt/remote 2>/dev/null; then
     af_logged fusermount -uz /mnt/remote || true
+    if [[ "${DELETE_DATA:-false}" == true ]] && mountpoint -q /mnt/remote; then
+        print_error "Rclone mount at /mnt/remote is still active"
+        exit 1
+    fi
 fi
 
-report_progress 50 "Stopping and removing rclone.service..."
-
-report_progress 75 "Removing rclone binary, state directories, and user account..."
-rm -f /usr/bin/rclone
+report_progress 75 "Removing the AetherFlow Rclone runtime..."
+validate_config_paths "$RCLONE_OWNER" /var/lib/rclone/.af-version
+if [[ -f "$RCLONE_OWNER" && "$(cat -- "$RCLONE_OWNER")" == "$PACKAGE_NAME" ]]; then
+    rm -f -- "$RCLONE_BIN" "$RCLONE_OWNER"
+fi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/bin/rclone"
-    safe_rm_rf /etc/rclone /var/lib/rclone
-    purge_system_user "rclone"
+    purge_app_archive_backups "$PACKAGE_NAME" "$RCLONE_BIN" require-owner
+    purge_app_archive_backups "$PACKAGE_NAME" /usr/bin/rclone require-owner
+    validate_config_paths /etc/aetherflow/rclone.env /etc/rclone/rclone.env /etc/rclone/rclone.conf
+    rm -f -- /etc/aetherflow/rclone.env /etc/rclone/rclone.env /etc/rclone/rclone.conf
+    safe_rm_rf /var/lib/rclone
+    purge_system_user "rclone" --keep-home
 fi
 af_logged systemctl daemon-reload
 

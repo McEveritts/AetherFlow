@@ -250,8 +250,10 @@ fn test_direct_runner_extract_version_token_from_rclone_output() {
         "af-test-rclone-version-token-{}",
         uuid::Uuid::new_v4()
     ));
-    let bin_dir = temp_dir.join("usr/local/bin");
+    let bin_dir = temp_dir.join("opt/AetherFlow/apps/rclone");
     std::fs::create_dir_all(&bin_dir).unwrap();
+
+    std::fs::write(bin_dir.join(".af-owner"), b"rclone\n").unwrap();
 
     // Create a mock rclone script that prints prose like "rclone v1.75.2\n- os/version: linux"
     let script_path = bin_dir.join("rclone");
@@ -269,16 +271,11 @@ fn test_direct_runner_extract_version_token_from_rclone_output() {
     let mut env_cfg = crate::PackageExecutionEnv::default();
     env_cfg.fs_root = Some(temp_dir.clone());
 
-    // Keep the production regex, but execute the fixture rather than the
-    // catalog's shell command, which names the host's /usr/bin/rclone.
+    // Exercise the production executable path and regex inside the fixture root.
     let packages_path = temp_dir.join("packages.json");
     std::fs::write(&packages_path, crate::EMBEDDED_PACKAGES_JSON).unwrap();
-    let mut automation: serde_json::Value =
-        serde_json::from_str(crate::EMBEDDED_AUTOMATION_JSON).unwrap();
-    automation["rclone"]["version_command"] =
-        serde_json::json!(["/usr/local/bin/rclone", "version"]);
     let automation_path = temp_dir.join("package_automation.json");
-    std::fs::write(&automation_path, serde_json::to_vec(&automation).unwrap()).unwrap();
+    std::fs::write(&automation_path, crate::EMBEDDED_AUTOMATION_JSON).unwrap();
     let previous_packages = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
     let previous_automation = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
     std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &packages_path);
@@ -5132,4 +5129,55 @@ async fn test_coordinated_operation_orders_socket_timer_and_novnc_quiesce_and_re
         assert!(restart_failures.is_empty(), "{pkg}: {restart_failures:?}");
         assert_eq!(*backend.events.lock().unwrap(), expected, "{pkg}");
     }
+}
+
+#[test]
+fn rclone_legacy_version_probe_and_snapshot_have_distinct_ownership() {
+    let scratch =
+        std::env::temp_dir().join(format!("af-test-rclone-paths-{}", uuid::Uuid::new_v4()));
+    let root = scratch.as_path();
+    let distro = root.join("usr/bin/rclone");
+    let operator = root.join("usr/local/bin/rclone");
+    let managed = root.join("opt/AetherFlow/apps/rclone/rclone");
+    let unit = root.join("etc/systemd/system/rclone.service");
+    for path in [&distro, &operator, &unit] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    std::fs::write(&distro, b"distro").unwrap();
+    std::fs::write(&operator, b"operator").unwrap();
+    assert!(crate::probe_metadata::rclone_version_program(Some(root)).is_err());
+
+    std::fs::write(
+        &unit,
+        b"[Service]\nUser=rclone\nEnvironmentFile=/etc/aetherflow/rclone.env\nExecStart=/usr/bin/rclone rcd --rc-web-gui\n",
+    ).unwrap();
+    assert_eq!(
+        crate::probe_metadata::rclone_version_program(Some(root)).unwrap(),
+        distro
+    );
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, b"managed").unwrap();
+    assert_eq!(
+        crate::probe_metadata::rclone_version_program(Some(root)).unwrap(),
+        distro
+    );
+    std::fs::write(managed.with_file_name(".af-owner"), b"rclone\n").unwrap();
+    assert_eq!(
+        crate::probe_metadata::rclone_version_program(Some(root)).unwrap(),
+        managed
+    );
+
+    let env_cfg = crate::PackageExecutionEnv::isolated(root);
+    let targets = candidate_runtime_targets("rclone", &["rclone.service".into()], &env_cfg);
+    assert!(targets.iter().any(|(path, _)| path == &managed));
+    assert!(targets
+        .iter()
+        .any(|(path, _)| path == &root.join("etc/aetherflow/rclone.env")));
+    assert!(!targets
+        .iter()
+        .any(|(path, _)| path == &distro || path == &operator));
+    assert!(!targets
+        .iter()
+        .any(|(path, _)| path == &root.join("usr/lib/systemd/system/rclone.service")));
+    std::fs::remove_dir_all(scratch).unwrap();
 }

@@ -4772,6 +4772,17 @@ fn candidate_runtime_targets(
         format!("/install/.{pkg_lower}.lock"),
     ];
 
+    if pkg_lower == "rclone" {
+        dir_candidates.retain(|path| matches!(path.as_str(), "/etc/rclone" | "/var/lib/rclone"));
+        // Global executables and vendor units are outside this package's rollback boundary.
+        file_candidates.extend([
+            crate::package_executor::RCLONE_BIN.into(),
+            crate::package_executor::RCLONE_BIN_OWNER.into(),
+            crate::package_executor::RCLONE_ENV.into(),
+            crate::package_executor::RCLONE_LEGACY_ENV.into(),
+        ]);
+    }
+
     for unit in all_units {
         let u = unit.trim();
         if u.is_empty() || u.starts_with("port:") {
@@ -4932,6 +4943,14 @@ fn candidate_runtime_targets(
                 _ => {}
             }
         }
+    }
+
+    if pkg_lower == "rclone" {
+        file_candidates.retain(|path| {
+            !path.starts_with("/usr/")
+                && !path.starts_with("/lib/")
+                && path != "/etc/default/rclone"
+        });
     }
 
     let bp_paths =
@@ -7828,7 +7847,12 @@ pub fn probe_live_runtime_version(
 
         let prog = &pkg.version_command[0];
         let args = &pkg.version_command[1..];
-        let prog_to_run = if let Ok(resolved_prog) = env_cfg.resolve_path(prog) {
+        let prog_to_run = if package_id == "rclone" && prog == crate::package_executor::RCLONE_BIN {
+            match crate::probe_metadata::rclone_version_program(env_cfg.fs_root.as_deref()) {
+                Ok(path) => path.to_string_lossy().into_owned(),
+                Err(err) => return LiveRuntimeProbeOutcome::Failed(err),
+            }
+        } else if let Ok(resolved_prog) = env_cfg.resolve_path(prog) {
             if resolved_prog.exists() {
                 resolved_prog.to_string_lossy().to_string()
             } else {
