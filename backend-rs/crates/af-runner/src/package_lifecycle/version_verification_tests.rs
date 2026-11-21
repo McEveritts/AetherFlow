@@ -4956,10 +4956,7 @@ fn test_librespeed_and_novnc_unit_catalog_sandbox_and_snapshot_capture_restore()
     assert!(!crate::is_exempt_sandbox_unit("novnc.service"));
 
     // 1. Pre-socket LibreSpeed snapshot removes newly created socket unit & wants symlink on rollback
-    let root = std::env::temp_dir().join(format!(
-        "af-test-ls-novnc-snap-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = std::env::temp_dir().join(format!("af-test-ls-novnc-snap-{}", uuid::Uuid::new_v4()));
     let systemd_dir = root.join("etc/systemd/system");
     let sockets_wants = systemd_dir.join("sockets.target.wants");
     let multi_wants = systemd_dir.join("multi-user.target.wants");
@@ -5008,7 +5005,9 @@ fn test_librespeed_and_novnc_unit_catalog_sandbox_and_snapshot_capture_restore()
     );
     assert!(!systemd_dir.join("librespeed.socket").exists());
     assert!(std::fs::symlink_metadata(sockets_wants.join("librespeed.socket")).is_err());
-    assert!(!root.join("etc/aetherflow/librespeed-proxy-token.conf").exists());
+    assert!(!root
+        .join("etc/aetherflow/librespeed-proxy-token.conf")
+        .exists());
     assert!(!systemd_dir.join("novnc-session.service").exists());
     assert!(std::fs::symlink_metadata(multi_wants.join("novnc-session.service")).is_err());
 
@@ -5031,16 +5030,26 @@ async fn test_coordinated_operation_orders_socket_timer_and_novnc_quiesce_and_re
     }
 
     impl LifecycleBackend for RecordingBackend {
-        fn unit_active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
+        fn runtime_port(&self, _: &str) -> i32 {
+            0
+        }
+
+        fn available_port(&self, _: i32) -> bool {
+            true
+        }
+
+        fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
             Box::pin(async { Ok(true) })
         }
-        fn unit_quiescent<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
+
+        fn quiescent<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
             Box::pin(async { Ok(true) })
         }
-        fn control_unit<'a>(
+
+        fn control<'a>(
             &'a self,
-            action: &'a str,
             unit: &'a str,
+            action: &'a str,
             _: &'a str,
         ) -> BoxFuture<'a, Result<()>> {
             self.events.lock().unwrap().push(format!("{action} {unit}"));
@@ -5058,7 +5067,10 @@ async fn test_coordinated_operation_orders_socket_timer_and_novnc_quiesce_and_re
     for (pkg, units, expected) in [
         (
             "librespeed",
-            vec!["librespeed.service".to_string(), "librespeed.socket".to_string()],
+            vec![
+                "librespeed.service".to_string(),
+                "librespeed.socket".to_string(),
+            ],
             vec![
                 "stop librespeed.socket",
                 "stop librespeed.service",
@@ -5084,7 +5096,10 @@ async fn test_coordinated_operation_orders_socket_timer_and_novnc_quiesce_and_re
         ),
         (
             "recyclarr",
-            vec!["recyclarr.service".to_string(), "recyclarr.timer".to_string()],
+            vec![
+                "recyclarr.service".to_string(),
+                "recyclarr.timer".to_string(),
+            ],
             vec![
                 "stop recyclarr.timer",
                 "stop recyclarr.service",

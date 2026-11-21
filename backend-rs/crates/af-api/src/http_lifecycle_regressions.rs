@@ -1046,7 +1046,14 @@ async fn pre_stop_and_restore_order_librespeed_socket_and_novnc_companions_with_
                 rb_recorded.lock().unwrap().push(format!("{act} {unit}"));
                 async { Ok(()) }
             },
-            |_| "stopped".into(),
+            |unit| {
+                let started = format!("start {unit}");
+                if rb_calls.lock().unwrap().contains(&started) {
+                    "running".into()
+                } else {
+                    "stopped".into()
+                }
+            },
         )
         .await;
     assert!(rb_err.is_none(), "{rb_err:?}");

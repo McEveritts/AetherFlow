@@ -442,7 +442,11 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
     let fixture = TeardownFixture::new("");
     let systemd_dir = fixture.root.join("etc/systemd/system");
     fs::create_dir_all(&systemd_dir).unwrap();
-    for unit in ["novnc.service", "novnc-session.service", "novnc-xvnc.service"] {
+    for unit in [
+        "novnc.service",
+        "novnc-session.service",
+        "novnc-xvnc.service",
+    ] {
         fs::write(systemd_dir.join(unit), "[Unit]\nDescription=fixture\n").unwrap();
     }
     fs::write(fixture.root.join("install/.novnc.lock"), "installed").unwrap();
@@ -467,7 +471,9 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|(prog, args)| prog == "systemctl" && args.first().map(String::as_str) == Some("stop"))
+        .filter(|(prog, args)| {
+            prog == "systemctl" && args.first().map(String::as_str) == Some("stop")
+        })
         .filter_map(|(_, args)| args.last().cloned())
         .collect();
     assert!(stops.len() >= 3, "expected pre-teardown stops: {stops:?}");
@@ -493,7 +499,12 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
         fixture2.runner.clone(),
     );
     executor2
-        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     let stops2: Vec<String> = fixture2
@@ -502,10 +513,15 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|(prog, args)| prog == "systemctl" && args.first().map(String::as_str) == Some("stop"))
+        .filter(|(prog, args)| {
+            prog == "systemctl" && args.first().map(String::as_str) == Some("stop")
+        })
         .filter_map(|(_, args)| args.last().cloned())
         .collect();
-    assert!(stops2.len() >= 2, "expected socket-first pre-teardown stops: {stops2:?}");
+    assert!(
+        stops2.len() >= 2,
+        "expected socket-first pre-teardown stops: {stops2:?}"
+    );
     assert_eq!(stops2[0], "syncthing.socket");
     assert_eq!(stops2[1], "syncthing.service");
 }

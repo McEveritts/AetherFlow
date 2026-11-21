@@ -430,7 +430,8 @@ fn unobserved_service_version_remains_unknown_until_measured() {
 
 #[test]
 fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
-    let name = "inventory_regressions::librespeed_and_novnc_catalog_resolution_and_component_policies";
+    let name =
+        "inventory_regressions::librespeed_and_novnc_catalog_resolution_and_component_policies";
     if !isolated(name) {
         return;
     }
@@ -452,7 +453,10 @@ fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
         resolve_service_units("librespeed"),
         vec!["librespeed".to_string(), "librespeed.socket".to_string()]
     );
-    assert_eq!(resolve_canonical_service_id("librespeed.socket"), "librespeed");
+    assert_eq!(
+        resolve_canonical_service_id("librespeed.socket"),
+        "librespeed"
+    );
     assert_eq!(
         resolve_owning_package_id("librespeed.socket").as_deref(),
         Some("librespeed")
@@ -519,11 +523,17 @@ fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
     );
     assert_eq!(
         resolve_controllable_service_units("scrutiny", "stop"),
-        vec!["scrutiny-collector.timer".to_string(), "scrutiny".to_string()]
+        vec![
+            "scrutiny-collector.timer".to_string(),
+            "scrutiny".to_string()
+        ]
     );
     assert_eq!(
         resolve_controllable_service_units("scrutiny", "start"),
-        vec!["scrutiny".to_string(), "scrutiny-collector.timer".to_string()]
+        vec![
+            "scrutiny".to_string(),
+            "scrutiny-collector.timer".to_string()
+        ]
     );
 
     let ls_policies = policies_for_units(resolve_service_units("librespeed"), false);
@@ -572,9 +582,10 @@ fn librespeed_and_novnc_status_handles_modern_legacy_not_found_and_unknown() {
     clear_service_status_cache();
     let (ls_status, _, _, ls_components) = get_service_info_detailed("librespeed");
     assert_eq!(ls_status, "running");
-    assert!(ls_components
-        .iter()
-        .any(|c| c.unit == "librespeed.socket" && c.role == "socket" && c.status == "running" && c.configured));
+    assert!(ls_components.iter().any(|c| c.unit == "librespeed.socket"
+        && c.role == "socket"
+        && c.status == "running"
+        && c.configured));
     let (novnc_status, _, _, novnc_components) = get_service_info_detailed("novnc");
     assert_eq!(novnc_status, "running");
     assert!(novnc_components
@@ -637,7 +648,8 @@ fn librespeed_and_novnc_status_handles_modern_legacy_not_found_and_unknown() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fails_closed_on_unknown() {
+async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fails_closed_on_unknown(
+) {
     let name = "inventory_regressions::librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fails_closed_on_unknown";
     if !isolated(name) {
         return;
@@ -680,7 +692,11 @@ async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fa
         (
             "novnc",
             "stop",
-            vec!["stop -- novnc", "stop -- novnc-session", "stop -- novnc-xvnc"],
+            vec![
+                "stop -- novnc",
+                "stop -- novnc-session",
+                "stop -- novnc-xvnc",
+            ],
         ),
         (
             "novnc",
@@ -746,16 +762,14 @@ async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fa
     );
 
     // Explicit direct systemd-unit target must fail closed even when not-found
-    assert!(
-        super::control_service_with_budget(
-            "librespeed.socket",
-            "stop",
-            "systemd-unit",
-            Duration::from_secs(5),
-        )
-        .await
-        .is_err()
-    );
+    assert!(super::control_service_with_budget(
+        "librespeed.socket",
+        "stop",
+        "systemd-unit",
+        Duration::from_secs(5),
+    )
+    .await
+    .is_err());
 
     // 3. Unknown show state fails closed even if control returned exit 5
     fixture.command(
@@ -766,9 +780,12 @@ async fn librespeed_and_novnc_control_orders_units_skips_confirmed_legacy_and_fa
            *) exit 0;; \
          esac\n",
     );
-    assert!(
-        super::control_service_with_budget("librespeed", "stop", "systemd", Duration::from_secs(5))
-            .await
-            .is_err()
-    );
+    assert!(super::control_service_with_budget(
+        "librespeed",
+        "stop",
+        "systemd",
+        Duration::from_secs(5)
+    )
+    .await
+    .is_err());
 }

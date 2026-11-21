@@ -80,7 +80,7 @@ impl Fixture {
         .unwrap();
         fs::write(root.join("automation.json"), "{}").unwrap();
         let command = root.join("bin/systemctl");
-        fs::write(&command, "#!/usr/bin/python3\nimport os,signal,socket,sys\nwith open(os.environ['AF_READINESS_CALLS'], 'a') as output: output.write(' '.join(sys.argv[1:])+'\\n')\nassert sys.argv[1] == 'show'\nif sys.argv[2] in ('aetherflow-api','aetherflow-frontend','apache2'):\n print('ActiveState=active\\nSubState=running')\nelse:\n probe=socket.socket(socket.AF_UNIX)\n probe.connect(os.environ['AF_READINESS_PROBE_SOCKET'])\n probe.close()\n signal.pause()\n").unwrap();
+        fs::write(&command, "#!/usr/bin/python3\nimport os,signal,socket,sys\nwith open(os.environ['AF_READINESS_CALLS'], 'a') as output: output.write(' '.join(sys.argv[1:])+'\\n')\nassert sys.argv[1] == 'show'\nif sys.argv[2] in ('aetherflow-api','aetherflow-runner','apache2'):\n print('LoadState=loaded\\nActiveState=active\\nSubState=running')\nelse:\n probe=socket.socket(socket.AF_UNIX)\n probe.connect(os.environ['AF_READINESS_PROBE_SOCKET'])\n probe.close()\n signal.pause()\n").unwrap();
         fs::set_permissions(command, fs::Permissions::from_mode(0o755)).unwrap();
         af_db::init_db().unwrap();
         af_services::initialize_package_jobs(rusqlite::Connection::open(database).unwrap())
@@ -178,7 +178,8 @@ async fn authenticated_readiness_is_independent_of_slow_coalesced_inventory() {
         assert_eq!(response.status(), StatusCode::OK);
         let services = payload(response).await;
         assert_eq!(services["AetherFlow API"]["status"], "running");
-        assert_eq!(services["AetherFlow Frontend"]["status"], "running");
+        assert_eq!(services["AetherFlow Runner"]["status"], "running");
+        assert!(services.get("AetherFlow Frontend").is_none());
         assert_eq!(services["Apache2 Web Server"]["status"], "running");
         for index in 0..6 {
             assert_eq!(services[format!("slow-{index}")]["status"], "unknown");

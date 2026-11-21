@@ -4632,11 +4632,17 @@ fn candidate_runtime_targets(
         file_candidates.push(format!("/lib/systemd/system/{unit_file}"));
         file_candidates.push(format!("/usr/lib/systemd/system/{unit_file}"));
         if unit_file.ends_with(".socket") {
-            file_candidates.push(format!("/etc/systemd/system/sockets.target.wants/{unit_file}"));
+            file_candidates.push(format!(
+                "/etc/systemd/system/sockets.target.wants/{unit_file}"
+            ));
         } else if unit_file.ends_with(".timer") {
-            file_candidates.push(format!("/etc/systemd/system/timers.target.wants/{unit_file}"));
+            file_candidates.push(format!(
+                "/etc/systemd/system/timers.target.wants/{unit_file}"
+            ));
         } else {
-            file_candidates.push(format!("/etc/systemd/system/multi-user.target.wants/{unit_file}"));
+            file_candidates.push(format!(
+                "/etc/systemd/system/multi-user.target.wants/{unit_file}"
+            ));
         }
     }
 
@@ -4670,9 +4676,7 @@ fn candidate_runtime_targets(
             "/usr/bin/Xvnc".into(),
             "/usr/bin/vncserver".into(),
         ]),
-        "librespeed" => {
-            file_candidates.push("/etc/aetherflow/librespeed-proxy-token.conf".into())
-        }
+        "librespeed" => file_candidates.push("/etc/aetherflow/librespeed-proxy-token.conf".into()),
         "maintainerr" => file_candidates.push("/usr/local/bin/af-systemd-sandbox".into()),
         "netdata" => {
             file_candidates.extend(["/usr/sbin/netdata".into(), "/usr/local/sbin/netdata".into()])
