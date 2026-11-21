@@ -96,7 +96,7 @@ pub fn install_packaged_unit_if_missing(
     Ok(true)
 }
 
-const RUNNER_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n";
+const RUNNER_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n";
 const API_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n";
 
 /// Atomically installs vendor-managed systemd hardening drop-ins matching `deploy/release-manager.sh`
@@ -798,6 +798,12 @@ mod runtime_identity_tests {
         )
         .unwrap();
 
+        std::fs::write(
+            tmp.join("aetherflow-runner.service.d/10-aetherflow-hardening.conf"),
+            b"[Service]\nLogsDirectoryPreserve=yes\n",
+        )
+        .unwrap();
+
         install_systemd_hardening_dropins(&tmp, true).expect("install dropins");
 
         for unit in [
@@ -826,6 +832,8 @@ mod runtime_identity_tests {
         )
         .expect("runner hardening");
         assert!(runner_hardening.contains("UMask=0077"));
+        assert!(runner_hardening.contains("LogsDirectory=aetherflow\n"));
+        assert!(!runner_hardening.contains("LogsDirectoryPreserve="));
         let api_hardening = std::fs::read_to_string(
             tmp.join("aetherflow-api.service.d/10-aetherflow-hardening.conf"),
         )

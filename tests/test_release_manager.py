@@ -1275,6 +1275,9 @@ os.execvp(inner[0], inner)
         (self.units / "aetherflow-log-retention.service.d/10-aetherflow-hardening.conf").write_text(
             "[Service]\nUMask=0077\n"
         )
+        (self.units / "aetherflow-runner.service.d/10-aetherflow-hardening.conf").write_text(
+            "[Service]\nLogsDirectoryPreserve=yes\n"
+        )
 
         result = self.run_manager("deploy", "--channel", "stable")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1292,6 +1295,8 @@ os.execvp(inner[0], inner)
         runner_hardening = (self.units / "aetherflow-runner.service.d/10-aetherflow-hardening.conf").read_text()
         self.assertIn("UMask=0027", api_hardening)
         self.assertIn("UMask=0077", runner_hardening)
+        self.assertIn("LogsDirectory=aetherflow\n", runner_hardening)
+        self.assertNotIn("LogsDirectoryPreserve=", runner_hardening)
 
 
 class SourceReleaseFrontendTests(unittest.TestCase):

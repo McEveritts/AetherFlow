@@ -1995,7 +1995,7 @@ restart_systemd_units() {
             mkdir -p "${dropin_dir}"
             chmod 0755 "${dropin_dir}"
             if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
-                dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n'
+                dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n'
             else
                 dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n'
             fi
