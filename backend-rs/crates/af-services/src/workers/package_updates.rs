@@ -550,12 +550,25 @@ pub fn sanitize_source_key_for_persistence(raw_key: &str) -> String {
 pub fn canonical_update_source_key(github_api_base: &str, pkg: &Package) -> String {
     let (effective_source, effective_apt_pkg) = effective_update_source_and_apt_package(pkg);
     let src = if effective_source.trim().is_empty() && pkg.name == "threadfin" {
-        "github".to_string()
+        "pinned".to_string()
     } else {
         effective_source.trim().to_ascii_lowercase()
     };
     let api_base = sanitize_api_base_for_source_key(github_api_base);
     let base_key = match src.as_str() {
+        "pinned" => {
+            if pkg.name == "threadfin" {
+                let target_ver = af_runner::resolve_threadfin_target_version();
+                format!("pinned:{}", target_ver.to_ascii_lowercase())
+            } else if !pkg.update_package.trim().is_empty() {
+                format!("pinned:{}", pkg.update_package.trim().to_ascii_lowercase())
+            } else {
+                format!("pinned:{}", pkg.name.trim().to_ascii_lowercase())
+            }
+        }
+        "vendor" => {
+            format!("vendor:{}", pkg.name.trim().to_ascii_lowercase())
+        }
         "github" | "github_release" => {
             let repo = if pkg.name == "threadfin" && pkg.update_repo.trim().is_empty() {
                 "threadfin/threadfin"
@@ -1320,7 +1333,7 @@ pub(super) fn should_track_package(pkg: &Package) -> bool {
                 && (!pkg.update_repo.is_empty() || !pkg.update_repo_url.is_empty())
         }
         "pypi" => !pkg.version_command.is_empty(),
-        "retired" | "legacy" | "pinned" => true,
+        "retired" | "legacy" | "pinned" | "vendor" => true,
         _ => !pkg.version_command.is_empty(),
     }
 }
@@ -2101,7 +2114,13 @@ pub fn is_valid_systemd_service_unit(resolved_unit_path: &Path, pkg: &Package) -
 
             if !secondary_evidence {
                 let (update_source, apt_pkg) = effective_update_source_and_apt_package(pkg);
-                if (update_source == "apt" || !pkg.update_package.is_empty()) && !apt_pkg.is_empty()
+                let non_apt_package_field = matches!(
+                    update_source.trim().to_ascii_lowercase().as_str(),
+                    "pinned" | "retired" | "vendor" | "pypi"
+                );
+                if (update_source == "apt"
+                    || (!non_apt_package_field && !pkg.update_package.is_empty()))
+                    && !apt_pkg.is_empty()
                 {
                     let mut cmd = std::process::Command::new("dpkg-query");
                     if let Some(ref root) = resolve_configured_fs_root() {
@@ -2920,7 +2939,11 @@ pub(super) async fn detect_latest_version(
         return Ok((ver, String::new(), Utc::now().to_rfc3339()));
     }
     if pkg.name == "threadfin" {
-        if af_runner::resolve_threadfin_sha256_override().is_some() {
+        let src = pkg.update_source.trim().to_ascii_lowercase();
+        if src.is_empty()
+            || src == "pinned"
+            || af_runner::resolve_threadfin_sha256_override().is_some()
+        {
             let target_ver = af_runner::resolve_threadfin_target_version();
             let release_url = format!(
                 "https://github.com/Threadfin/Threadfin/releases/tag/{}",
@@ -2950,6 +2973,7 @@ pub(super) async fn detect_latest_version(
     }
     let (update_source, apt_package) = effective_update_source_and_apt_package(pkg);
     match update_source {
+        "vendor" => Ok((String::new(), String::new(), Utc::now().to_rfc3339())),
         "retired" | "legacy" | "pinned" => {
             let ver = if !pkg.update_package.is_empty() {
                 pkg.update_package.clone()
@@ -4266,6 +4290,10 @@ pub fn is_newer_version_scalar(local: &str, remote: &str) -> bool {
 pub fn is_newer_version_scalar_for_source(local: &str, remote: &str, update_source: &str) -> bool {
     let l_trim = local.trim();
     let r_trim = remote.trim();
+
+    if r_trim.is_empty() || update_source.trim().eq_ignore_ascii_case("vendor") {
+        return false;
+    }
 
     if update_source == "apt" {
         return compare_debian_versions_str(l_trim, r_trim) == std::cmp::Ordering::Less;

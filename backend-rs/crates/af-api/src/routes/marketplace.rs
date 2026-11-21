@@ -2923,6 +2923,8 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
 
     let clean_id = pkg.name.clone();
     let is_retired = pkg.update_source == "retired" || pkg.name == "readarr";
+    let is_pinned = pkg.update_source.eq_ignore_ascii_case("pinned");
+    let is_vendor = pkg.update_source.eq_ignore_ascii_case("vendor");
 
     if let Some(ref target) = expected_target_version {
         if !af_runner::af_release::lifecycle::is_valid_target_version_token(target) {
@@ -2933,6 +2935,53 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             );
         }
     }
+
+    if is_vendor && action != "remove" {
+        if let Err(reason) = af_runner::validate_package_target_policy(
+            &pkg.name,
+            &pkg.update_source,
+            &pkg.update_package,
+            action,
+            expected_target_version.as_deref(),
+        ) {
+            return api_error(StatusCode::CONFLICT, "CONFLICT", reason);
+        }
+    }
+
+    let pinned_target = if is_pinned {
+        if pkg.name == "threadfin" {
+            match af_runner::validate_threadfin_target_policy(if action == "remove" {
+                None
+            } else {
+                expected_target_version.as_deref()
+            }) {
+                Ok((resolved_ver, _)) => Some(resolved_ver),
+                Err(err) => {
+                    return api_error(StatusCode::CONFLICT, "CONFLICT", err.to_string());
+                }
+            }
+        } else {
+            let trimmed = pkg.update_package.trim();
+            if action != "remove" {
+                if let Err(reason) = af_runner::validate_package_target_policy(
+                    &pkg.name,
+                    &pkg.update_source,
+                    &pkg.update_package,
+                    action,
+                    expected_target_version.as_deref(),
+                ) {
+                    return api_error(StatusCode::CONFLICT, "CONFLICT", reason);
+                }
+            }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    } else {
+        None
+    };
 
     if is_retired {
         if let Some(ref explicit_target) = expected_target_version {
@@ -2957,6 +3006,10 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
     } else if action == "update" {
         if is_retired && expected_target_version.is_none() {
             expected_target_version = Some("0.4.18.2805".to_string());
+        } else if let Some(ref pinned_ver) = pinned_target {
+            if expected_target_version.is_none() {
+                expected_target_version = Some(pinned_ver.clone());
+            }
         }
 
         af_services::workers::ensure_app_updates_columns();
@@ -3000,6 +3053,20 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 "CONFLICT",
                 "Retired package can only target pinned version 0.4.18.2805",
             );
+        }
+        if let Some(ref pinned_ver) = pinned_target {
+            if af_runner::af_release::lifecycle::strip_version_prefix(db_latest)
+                != af_runner::af_release::lifecycle::strip_version_prefix(pinned_ver)
+            {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "CONFLICT",
+                    format!(
+                        "Pinned package '{}' can only target version {}",
+                        pkg.name, pinned_ver
+                    ),
+                );
+            }
         }
 
         let github_api_base = std::env::var("AETHERFLOW_GITHUB_API_BASE_URL")
@@ -3097,6 +3164,10 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
         // Install or Reinstall: do not block on app_updates errors or missing records
         if is_retired && expected_target_version.is_none() {
             expected_target_version = Some("0.4.18.2805".to_string());
+        } else if let Some(ref pinned_ver) = pinned_target {
+            if expected_target_version.is_none() {
+                expected_target_version = Some(pinned_ver.clone());
+            }
         }
     }
 

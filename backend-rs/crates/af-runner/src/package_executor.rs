@@ -103,7 +103,156 @@ pub const THREADFIN_ARMHF_SHA256: &str =
 
 /// Secondary upstream SHA-256 digest for plain `Threadfin_linux_amd64` 1.2.37.
 pub const THREADFIN_AMD64_PLAIN_SHA256: &str =
-    "19183058cf28b0080df059113e546a8e8cac16cae210d13be51bda42af94dfc2";
+    "19183013ec8da826e556bde3b511d9f93b9269f6d7eddd78a9df128529f45e4e";
+
+pub fn is_valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Validates Threadfin's pinned version and override environment contract before
+/// any state mutation. Returns `(resolved_version, validated_sha256_override)`.
+pub fn validate_threadfin_target_policy(
+    expected_target_version: Option<&str>,
+) -> Result<(String, Option<String>), PackageExecutorError> {
+    let mut sha_override: Option<String> = None;
+    for var_name in [
+        "AETHERFLOW_THREADFIN_SHA256",
+        "THREADFIN_SHA256",
+        "AF_THREADFIN_SHA256",
+        "AETHERFLOW_PACKAGE_SHA256_OVERRIDE",
+    ] {
+        if let Ok(raw) = env::var(var_name) {
+            let trimmed = raw.trim();
+            if !is_valid_sha256_hex(trimmed) {
+                return Err(PackageExecutorError::Validation(format!(
+                    "invalid Threadfin SHA-256 override in {}: expected 64-character hexadecimal SHA-256 digest",
+                    var_name
+                )));
+            }
+            if sha_override.is_none() {
+                sha_override = Some(trimmed.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let mut version_override: Option<String> = None;
+    for var_name in [
+        "AETHERFLOW_THREADFIN_VERSION",
+        "THREADFIN_VERSION",
+        "AF_THREADFIN_VERSION",
+        "AETHERFLOW_PACKAGE_VERSION_OVERRIDE",
+    ] {
+        if let Ok(raw) = env::var(var_name) {
+            let trimmed = raw.trim();
+            let clean = af_release::lifecycle::strip_version_prefix(trimmed);
+            if clean.is_empty()
+                || !SAFE_VERSION_TAG.is_match(clean)
+                || !af_release::lifecycle::validate_target_version(trimmed)
+            {
+                return Err(PackageExecutorError::Validation(format!(
+                    "invalid Threadfin version override in {}: '{}'",
+                    var_name, raw
+                )));
+            }
+            if version_override.is_none() {
+                version_override = Some(clean.to_string());
+            }
+        }
+    }
+
+    if let Some(ref custom_ver) = version_override {
+        if custom_ver != THREADFIN_PINNED_VERSION && sha_override.is_none() {
+            return Err(PackageExecutorError::Validation(format!(
+                "Threadfin is pinned to version {}; overriding to '{}' requires an explicit 64-hex SHA-256 override",
+                THREADFIN_PINNED_VERSION, custom_ver
+            )));
+        }
+    }
+
+    let resolved_version = version_override.unwrap_or_else(|| THREADFIN_PINNED_VERSION.to_string());
+
+    if let Some(raw_target) = expected_target_version
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !af_release::lifecycle::validate_target_version(raw_target) {
+            return Err(PackageExecutorError::Validation(format!(
+                "invalid Threadfin target version '{}'",
+                raw_target
+            )));
+        }
+        let clean_target = af_release::lifecycle::strip_version_prefix(raw_target);
+        if clean_target != resolved_version {
+            return Err(PackageExecutorError::Validation(format!(
+                "Threadfin is pinned to version {}; requested target version '{}' is unsupported without a matching version and SHA-256 override",
+                resolved_version, raw_target
+            )));
+        }
+    }
+
+    Ok((resolved_version, sha_override))
+}
+
+/// Validates exact-version policy for pinned and multi-component vendor packages
+/// before any lifecycle admission, sandbox write, or installer execution.
+pub fn validate_package_target_policy(
+    package_id: &str,
+    update_source: &str,
+    update_package: &str,
+    action: &str,
+    expected_target_version: Option<&str>,
+) -> Result<(), String> {
+    let action_lower = action.trim().to_ascii_lowercase();
+    if action_lower == "remove" || action_lower == "uninstall" {
+        return Ok(());
+    }
+    let src = update_source.trim().to_ascii_lowercase();
+    if src == "vendor" {
+        if action_lower == "update" {
+            return Err(format!(
+                "Package '{}' uses a multi-component vendor installer and does not support exact-version updates; use reinstall or the vendor updater instead.",
+                package_id
+            ));
+        }
+        if let Some(target) = expected_target_version
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Err(format!(
+                "Package '{}' uses a multi-component vendor installer and cannot honor exact target version '{}'; omit the target version to run the official vendor installer.",
+                package_id, target
+            ));
+        }
+        return Ok(());
+    }
+    if package_id.eq_ignore_ascii_case("threadfin") {
+        validate_threadfin_target_policy(expected_target_version)
+            .map(|_| ())
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    if src == "pinned" {
+        let pinned = af_release::lifecycle::strip_version_prefix(update_package.trim());
+        if let Some(target) = expected_target_version
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !af_release::lifecycle::validate_target_version(target) {
+                return Err(format!(
+                    "Invalid target version '{}' for pinned package '{}'",
+                    target, package_id
+                ));
+            }
+            if !pinned.is_empty() && af_release::lifecycle::strip_version_prefix(target) != pinned {
+                return Err(format!(
+                    "Pinned package '{}' can only target version '{}', got '{}'",
+                    package_id, pinned, target
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Default Quassel IRC core listen port when no custom `app_port` is requested.
 pub const QUASSEL_DEFAULT_LISTEN_PORT: i32 = 4242;
@@ -5277,6 +5426,30 @@ pub fn execute_package_request_stream(
             .or_else(|| env::var("AF_TARGET_VERSION").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+
+        if let Some(pkg_def) = crate::get_runner_package_definition(&req.package_id) {
+            if let Err(reason) = validate_package_target_policy(
+                &req.package_id,
+                &pkg_def.update_source,
+                &pkg_def.update_package,
+                &req.action,
+                effective_expected_target.as_deref(),
+            ) {
+                yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", reason));
+                return;
+            }
+        } else if req.package_id.eq_ignore_ascii_case("threadfin") {
+            if let Err(reason) = validate_package_target_policy(
+                &req.package_id,
+                "pinned",
+                THREADFIN_PINNED_VERSION,
+                &req.action,
+                effective_expected_target.as_deref(),
+            ) {
+                yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", reason));
+                return;
+            }
+        }
 
         let mut declarative_recipe =
             if select_package_engine(&req.package_id) == PackageEngineMode::DeclarativeRust {

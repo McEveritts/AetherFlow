@@ -5600,3 +5600,171 @@ async fn google_login_and_callback_share_the_oidc_rate_limit() {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn marketplace_enforces_threadfin_pinned_and_pihole_vendor_target_policies() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, _connection) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    af_services::workers::ensure_app_updates_columns();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/install")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/remove")).unwrap();
+    std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+    std::env::set_var("AETHERFLOW_INSTALL_ROOT", &root);
+    std::env::remove_var("AF_THREADFIN_SHA256");
+    std::env::remove_var("AF_THREADFIN_VERSION");
+
+    let pihole_pkg = af_models::Package {
+        name: "pihole".into(),
+        label: "Pi-hole".into(),
+        service_name: "pihole-FTL".into(),
+        lock_file: "/install/.pihole.lock".into(),
+        status: "installed".into(),
+        update_source: "vendor".into(),
+        ..Default::default()
+    };
+    let threadfin_pkg = af_models::Package {
+        name: "threadfin".into(),
+        label: "Threadfin".into(),
+        service_name: "threadfin".into(),
+        lock_file: "/install/.threadfin.lock".into(),
+        status: "installed".into(),
+        update_source: "pinned".into(),
+        update_package: "1.2.37".into(),
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(
+        &catalog,
+        serde_json::to_vec(&vec![pihole_pkg.clone(), threadfin_pkg.clone()]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &automation,
+        serde_json::json!({
+            "pihole": { "update_source": "vendor", "require_download_sha256": true },
+            "threadfin": { "update_source": "pinned", "update_package": "1.2.37", "require_download_sha256": true }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+    std::env::set_var(
+        "AETHERFLOW_RUNNER_SOCK",
+        short_test_socket_path(&format!(
+            "afr-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )),
+    );
+
+    for id in ["pihole", "threadfin"] {
+        std::fs::write(root.join(format!("install/.{id}.lock")), "installed\n").unwrap();
+        let inst = root.join(format!("packages/package/install/installpackage-{id}"));
+        let rem = root.join(format!("packages/package/remove/removepackage-{id}"));
+        std::fs::write(&inst, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(&rem, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&inst, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&rem, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        af_services::clear_package_job_info(id);
+    }
+
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let admin = progress_test_user("admin", None);
+
+    // 1. Pi-hole update fails closed with 409 CONFLICT (even with stale DB row or explicit target)
+    let res_ph_upd = dispatch_package_lifecycle_with_target(
+        "pihole".into(),
+        "update",
+        "updating",
+        false,
+        Some("6.9".into()),
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_ph_upd.status(), StatusCode::CONFLICT);
+    assert!(af_services::get_package_job_info("pihole").is_none());
+
+    // 2. Pi-hole pinned install/reinstall fails closed with 409 CONFLICT
+    let res_ph_pin = dispatch_package_lifecycle_with_target(
+        "pihole".into(),
+        "reinstall",
+        "reinstalling",
+        false,
+        Some("6.8".into()),
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_ph_pin.status(), StatusCode::CONFLICT);
+    assert!(af_services::get_package_job_info("pihole").is_none());
+
+    // 3. Threadfin mismatched target fails closed on install/reinstall/update with 409 CONFLICT
+    let res_tf_bad = dispatch_package_lifecycle_with_target(
+        "threadfin".into(),
+        "reinstall",
+        "reinstalling",
+        false,
+        Some("1.2.36".into()),
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_tf_bad.status(), StatusCode::CONFLICT);
+    assert!(af_services::get_package_job_info("threadfin").is_none());
+
+    // 4. Threadfin confirmed update to pinned 1.2.37 succeeds and records expected_target_version=1.2.37
+    let tf_source =
+        af_services::workers::canonical_update_source_key("https://api.github.com", &threadfin_pkg);
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_updates (package_name, installed_version, latest_version, update_available, checked_at, last_error, source_key) VALUES ('threadfin', '1.2.36', '1.2.37', 1, '2026-11-21T08:00:00Z', '', ?1)",
+            [&tf_source],
+        )
+        .unwrap();
+    }
+    let res_tf_ok = dispatch_package_lifecycle_with_target(
+        "threadfin".into(),
+        "update",
+        "updating",
+        false,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_tf_ok.status(), StatusCode::OK);
+    let tf_job = af_services::get_package_job_info("threadfin").unwrap();
+    assert_eq!(tf_job.expected_target_version.as_deref(), Some("1.2.37"));
+    af_services::clear_package_job_info("threadfin");
+
+    // 5. Unpinned Pi-hole reinstall is accepted with expected_target_version = None
+    let res_ph_ok = dispatch_package_lifecycle_with_target(
+        "pihole".into(),
+        "reinstall",
+        "reinstalling",
+        false,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_ph_ok.status(), StatusCode::OK);
+    let ph_job = af_services::get_package_job_info("pihole").unwrap();
+    assert_eq!(ph_job.expected_target_version, None);
+    af_services::clear_package_job_info("pihole");
+
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

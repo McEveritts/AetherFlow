@@ -51,7 +51,7 @@ Official Threadfin release `1.2.37` (`https://github.com/Threadfin/Threadfin/rel
 | `amd64` (`x86_64`) | `Threadfin_linux_amd64_glibc_2.31_compat` | `0b80a1bb5dc270c35288531408657189fd27c2e4346686743ebd36f3b6acbe42` | `EM_X86_64` (`62`) |
 | `arm64` (`aarch64`) | `Threadfin_linux_arm64` | `1e5e6f065cf2470d1460fae80c68c9631ca79e67ff76f83d47ab4bcb9ceb6213` | `EM_AARCH64` (`183`) |
 | `armhf` (`armv7l`) | `Threadfin_linux_arm` | `d64e6b7f8a1ab8aebdd37d06bfb0bddb991c68c9fed52e25530b92ead10c8328` | `EM_ARM` (`40`) |
-| `amd64` (plain reference) | `Threadfin_linux_amd64` | `19183058cf28b0080df059113e546a8e8cac16cae210d13be51bda42af94dfc2` | `EM_X86_64` (`62`) |
+| `amd64` (plain legacy cache fallback) | `Threadfin_linux_amd64` | `19183013ec8da826e556bde3b511d9f93b9269f6d7eddd78a9df128529f45e4e` | `EM_X86_64` (`62`) |
 
 ### Verification & Fail-Closed Controls
 1. **HTTPS Fail-Closed**: `validate_step` and `fetch_artifact_to_temp` reject any non-`https://` URL with `PackageExecutorError::SecurityViolation`.

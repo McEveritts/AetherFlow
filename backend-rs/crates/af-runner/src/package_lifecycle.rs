@@ -1591,6 +1591,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admit_enforces_threadfin_pinned_and_pihole_vendor_exact_version_policies() {
+        let _lock = crate::ENV_TEST_MUTEX.lock().await;
+        let (root, db_path, conn, _) = fixture();
+        let prev_fs_root = std::env::var_os("AETHERFLOW_FS_ROOT");
+        std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("AETHERFLOW_FS_ROOT", v),
+                    None => std::env::remove_var("AETHERFLOW_FS_ROOT"),
+                }
+            }
+        }
+        let _restore = Restore(prev_fs_root);
+
+        let pihole_pkg =
+            crate::get_runner_package_definition_in_root("pihole", Some(&root)).unwrap();
+        assert_eq!(pihole_pkg.update_source, "vendor");
+        assert!(pihole_pkg.update_repo.is_empty());
+
+        let err_pihole_upd = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "pihole".into(),
+                action: "update".into(),
+                script_name: "installpackage-pihole".into(),
+                expected_target_version: Some("6.9".into()),
+                ..Default::default()
+            },
+            pihole_pkg.clone(),
+            vec!["pihole-FTL".into()],
+        )
+        .err()
+        .expect("pihole update must fail closed at admission");
+        assert!(
+            err_pihole_upd.to_string().contains("vendor installer"),
+            "{err_pihole_upd}"
+        );
+
+        let err_pihole_pin = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "pihole".into(),
+                action: "install".into(),
+                script_name: "installpackage-pihole".into(),
+                expected_target_version: Some("6.8".into()),
+                ..Default::default()
+            },
+            pihole_pkg.clone(),
+            vec!["pihole-FTL".into()],
+        )
+        .err()
+        .expect("pihole pinned install must fail closed at admission");
+        assert!(
+            err_pihole_pin.to_string().contains("vendor installer"),
+            "{err_pihole_pin}"
+        );
+
+        let ok_pihole_install = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "pihole".into(),
+                action: "install".into(),
+                script_name: "installpackage-pihole".into(),
+                expected_target_version: None,
+                ..Default::default()
+            },
+            pihole_pkg,
+            vec!["pihole-FTL".into()],
+        )
+        .unwrap();
+        drop(ok_pihole_install);
+        conn.execute("DELETE FROM package_lifecycle_jobs", [])
+            .unwrap();
+
+        let threadfin_pkg =
+            crate::get_runner_package_definition_in_root("threadfin", Some(&root)).unwrap();
+        assert_eq!(threadfin_pkg.update_source, "pinned");
+        assert_eq!(
+            threadfin_pkg.update_package,
+            crate::THREADFIN_PINNED_VERSION
+        );
+
+        let err_tf_bad = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "threadfin".into(),
+                action: "update".into(),
+                script_name: "installpackage-threadfin".into(),
+                expected_target_version: Some("1.2.36".into()),
+                ..Default::default()
+            },
+            threadfin_pkg.clone(),
+            vec!["threadfin".into()],
+        )
+        .err()
+        .expect("threadfin mismatched target must fail closed at admission");
+        assert!(
+            err_tf_bad.to_string().contains("pinned to version 1.2.37"),
+            "{err_tf_bad}"
+        );
+
+        let ok_tf_pin = CoordinatedOperation::admit(
+            Connection::open(&db_path).unwrap(),
+            PackageRunnerRequest {
+                package_id: "threadfin".into(),
+                action: "update".into(),
+                script_name: "installpackage-threadfin".into(),
+                expected_target_version: Some("1.2.37".into()),
+                ..Default::default()
+            },
+            threadfin_pkg,
+            vec!["threadfin".into()],
+        )
+        .unwrap();
+        drop(ok_tf_pin);
+    }
+
+    #[tokio::test]
     async fn failed_reinstall_verified_recovery_vs_incomplete_fresh_and_remove_receipts() {
         let (root, path, conn, mut package) = fixture();
         package.lock_file = "/install/.syncthing.lock".into();
@@ -2074,6 +2194,15 @@ impl CoordinatedOperation {
                     target
                 );
             }
+        }
+        if let Err(reason) = crate::validate_package_target_policy(
+            &request.package_id,
+            &package.update_source,
+            &package.update_package,
+            &request.action,
+            request.expected_target_version.as_deref(),
+        ) {
+            anyhow::bail!("Cannot start {}: {}", request.action, reason);
         }
         let owner = lifecycle::admit_job_with_target(
             &mut conn,
@@ -8456,7 +8585,13 @@ pub fn has_independent_runtime_evidence(
 
     // 3. When apt_package is configured, verified dpkg-query "install ok installed" status
     if let Ok(pkg) = package_definition(package_id) {
-        if pkg.update_source.eq_ignore_ascii_case("apt") || !pkg.update_package.is_empty() {
+        let non_apt_package_field = matches!(
+            pkg.update_source.trim().to_ascii_lowercase().as_str(),
+            "pinned" | "retired" | "vendor" | "pypi"
+        );
+        if pkg.update_source.eq_ignore_ascii_case("apt")
+            || (!non_apt_package_field && !pkg.update_package.is_empty())
+        {
             let apt_name = if !pkg.update_package.is_empty() {
                 &pkg.update_package
             } else {

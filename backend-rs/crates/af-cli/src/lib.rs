@@ -964,6 +964,10 @@ fn discover_live_upstream_target_version(
             }
             Err(format!("no apt candidate version available for {apt_pkg}"))
         }
+        "vendor" => Err(format!(
+            "package '{}' uses a multi-component vendor installer and does not support exact-version updates; use reinstall or the vendor updater instead",
+            pkg_id
+        )),
         "pinned" => {
             if let Some(pinned_ver) = spec
                 .get("update_package")
@@ -985,6 +989,35 @@ fn discover_live_upstream_target_version(
     }
 }
 
+fn validate_cli_package_target_policy(
+    global: &GlobalOptions,
+    pkg_id: &str,
+    action: &str,
+    target_version: Option<&str>,
+) -> CliResult<()> {
+    let Ok(spec) = load_package_automation_spec(global, pkg_id) else {
+        return Ok(());
+    };
+    let source = spec
+        .get("update_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let update_package = spec
+        .get("update_package")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    af_runner::validate_package_target_policy(
+        pkg_id,
+        source,
+        update_package,
+        action,
+        target_version,
+    )
+    .map_err(CliError::Validation)
+}
+
 fn resolve_cli_package_target_version(
     global: &GlobalOptions,
     pkg_id: &str,
@@ -999,6 +1032,7 @@ fn resolve_cli_package_target_version(
                 explicit
             )));
         }
+        validate_cli_package_target_policy(global, pkg_id, "update", Some(trimmed))?;
         return Ok(trimmed.to_string());
     }
 
@@ -1011,25 +1045,31 @@ fn resolve_cli_package_target_version(
                     env_target
                 )));
             }
+            validate_cli_package_target_policy(global, pkg_id, "update", Some(trimmed))?;
             return Ok(trimmed.to_string());
         }
     }
+
+    validate_cli_package_target_policy(global, pkg_id, "update", None)?;
 
     let lock_name = resolve_package_lock_name(pkg_id);
     for db_path in candidate_cli_sqlite_dbs(global) {
         if let Some(ver) = query_app_update_target_version_from_sqlite(&db_path, lock_name)
             .or_else(|| query_app_update_target_version_from_sqlite(&db_path, pkg_id))
         {
+            validate_cli_package_target_policy(global, pkg_id, "update", Some(&ver))?;
             return Ok(ver);
         }
     }
 
-    discover_live_upstream_target_version(global, pkg_id).map_err(|reason| {
+    let discovered = discover_live_upstream_target_version(global, pkg_id).map_err(|reason| {
         CliError::PreflightOrIntegrity(format!(
             "unable to resolve upstream target version for package '{}' ({}); run an update check first to populate app_updates.latest_version or pass '--target-version <version>' explicitly when offline",
             pkg_id, reason
         ))
-    })
+    })?;
+    validate_cli_package_target_policy(global, pkg_id, "update", Some(&discovered))?;
+    Ok(discovered)
 }
 
 fn resolve_cli_package_port(
@@ -1104,6 +1144,12 @@ fn execute_package_command(
                     "install"
                 };
                 let mut req = build_package_runner_request(action, pkg, effective_port)?;
+                validate_cli_package_target_policy(
+                    global,
+                    pkg,
+                    action,
+                    req.expected_target_version.as_deref(),
+                )?;
                 if action == "reinstall" {
                     req.delete_data = false;
                 }
@@ -1154,6 +1200,12 @@ fn execute_package_command(
                 let _receipt = inspect_cli_package_receipts(global, pkg)?;
                 let effective_port = resolve_cli_package_port(global, pkg, *port);
                 let mut req = build_package_runner_request("reinstall", pkg, effective_port)?;
+                validate_cli_package_target_policy(
+                    global,
+                    pkg,
+                    "reinstall",
+                    req.expected_target_version.as_deref(),
+                )?;
                 req.delete_data = false;
                 if global.dry_run {
                     requests.push(req);

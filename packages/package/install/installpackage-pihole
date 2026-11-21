@@ -34,6 +34,10 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    print_error "Pi-hole uses the official multi-component vendor installer (Core, Web, and FTL) and cannot honor exact target version pins (AF_TARGET_VERSION=${AF_TARGET_VERSION}). Unset AF_TARGET_VERSION to install or refresh via the official vendor installer."
+    exit 1
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 check_dns_port_53_available "pihole" "adguardhome" "pihole-FTL" 53
 report_progress 10 "Installing prerequisites for Pi-hole..."

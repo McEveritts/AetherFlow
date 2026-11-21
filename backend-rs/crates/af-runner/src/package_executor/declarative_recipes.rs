@@ -383,8 +383,8 @@ pub fn resolve_threadfin_sha256_override() -> Option<String> {
     ] {
         if let Ok(val) = env::var(var_name) {
             let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+            if is_valid_sha256_hex(trimmed) {
+                return Some(trimmed.to_ascii_lowercase());
             }
         }
     }
@@ -398,10 +398,7 @@ pub(super) fn build_threadfin_recipe() -> DeclarativePackageRecipe {
         None
     } else {
         Some(ArchAssetMap {
-            amd64: format!(
-                "{}|{}",
-                THREADFIN_AMD64_COMPAT_SHA256, THREADFIN_AMD64_PLAIN_SHA256
-            ),
+            amd64: THREADFIN_AMD64_COMPAT_SHA256.to_string(),
             arm64: THREADFIN_ARM64_SHA256.to_string(),
             armhf: Some(THREADFIN_ARMHF_SHA256.to_string()),
         })
@@ -2520,7 +2517,14 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             effective_port
         };
         let initial_version = if recipe.package_id == "threadfin" {
-            resolve_threadfin_target_version()
+            if matches!(action, PackageAction::Remove) {
+                resolve_threadfin_target_version()
+            } else {
+                let (resolved_ver, _) = validate_threadfin_target_policy(
+                    self.env_cfg.expected_target_version.as_deref(),
+                )?;
+                resolved_ver
+            }
         } else {
             "unknown".to_string()
         };
@@ -4593,8 +4597,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         resolved_url
                     )));
                 }
-                let tmp_artifact = self
-                    .fetch_artifact_to_temp(
+                let (tmp_artifact, cached_candidate) = self
+                    .fetch_artifact_to_temp_with_source(
                         &recipe.package_id,
                         &resolved_url,
                         arch_asset,
@@ -4605,9 +4609,25 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 cancel.check(&recipe.package_id)?;
                 let mut effective_verification = verification.clone();
                 if recipe.package_id == "threadfin" {
-                    if let Some(sha_override) = resolve_threadfin_sha256_override() {
+                    let (_, sha_override) = validate_threadfin_target_policy(
+                        self.env_cfg.expected_target_version.as_deref(),
+                    )?;
+                    if let Some(sha_override) = sha_override {
                         effective_verification.expected_sha256 = Some(sha_override);
                         effective_verification.arch_sha256 = None;
+                    } else if effective_verification.expected_sha256.is_none()
+                        && arch == "amd64"
+                        && cached_candidate.as_deref() == Some("Threadfin_linux_amd64")
+                        && effective_verification
+                            .arch_sha256
+                            .as_ref()
+                            .is_some_and(|map| map.amd64 == THREADFIN_AMD64_COMPAT_SHA256)
+                    {
+                        // Legacy offline cache bridge: if a cache supplies plain `Threadfin_linux_amd64`,
+                        // bind verification strictly to its verified upstream SHA-256 rather than accepting
+                        // cross-asset digests on remote compat downloads.
+                        effective_verification.expected_sha256 =
+                            Some(THREADFIN_AMD64_PLAIN_SHA256.to_string());
                     }
                 }
                 let sha256 = verify_artifact_file_for_arch(
@@ -5958,6 +5978,20 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         journal: &mut RollbackJournal,
         cancel: &CancellationToken,
     ) -> Result<PathBuf, PackageExecutorError> {
+        let (path, _) = self
+            .fetch_artifact_to_temp_with_source(pkg_id, url, asset_name, journal, cancel)
+            .await?;
+        Ok(path)
+    }
+
+    pub(super) async fn fetch_artifact_to_temp_with_source(
+        &self,
+        pkg_id: &str,
+        url: &str,
+        asset_name: &str,
+        journal: &mut RollbackJournal,
+        cancel: &CancellationToken,
+    ) -> Result<(PathBuf, Option<String>), PackageExecutorError> {
         cancel.check(pkg_id)?;
         validate_filesystem_path(&self.env_cfg.temp_dir, self.env_cfg.fs_root.as_deref())?;
         fs::create_dir_all(&self.env_cfg.temp_dir)?;
@@ -5986,7 +6020,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 validate_filesystem_path(&cached, self.env_cfg.fs_root.as_deref())?;
                 if cached.is_file() {
                     fs::copy(&cached, &tmp_dest)?;
-                    return Ok(tmp_dest);
+                    return Ok((tmp_dest, Some(cand.to_string())));
                 }
             }
         }
@@ -6002,7 +6036,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 )));
             }
             fs::copy(src, &tmp_dest)?;
-            return Ok(tmp_dest);
+            return Ok((tmp_dest, None));
         }
 
         // 3. Enforce HTTPS fail-closed on remote downloads
@@ -6068,6 +6102,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         cancel.check(pkg_id)?;
         f.sync_all()?;
 
-        Ok(tmp_dest)
+        Ok((tmp_dest, None))
     }
 }

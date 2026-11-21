@@ -2366,3 +2366,93 @@ fn legacy_receipt_parity_rejects_unsafe_locks_and_honors_custom_catalog_and_reta
         );
     }
 }
+
+#[test]
+fn cli_enforces_threadfin_pinned_and_pihole_vendor_exact_version_policies() {
+    let tmp = TempTestDir::new("threadfin-pihole-policy");
+    let root = tmp.path();
+    let cfg_dir = root.join("opt/AetherFlow/config");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(
+        cfg_dir.join("package_automation.json"),
+        include_str!("../../../../config/package_automation.json"),
+    )
+    .unwrap();
+    let root_str = root.to_string_lossy().into_owned();
+    let transport = MockRunnerTransport::default();
+
+    // 1. Threadfin update without --target-version discovers pinned 1.2.37 from package_automation.json
+    let inv_tf_default = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "package",
+        "update",
+        "threadfin",
+    ])
+    .unwrap();
+    let env_tf_default = execute_invocation(&inv_tf_default, &transport);
+    assert_eq!(env_tf_default.status, "ok", "{}", env_tf_default.message);
+    {
+        let calls = transport.package_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].package_id, "threadfin");
+        assert_eq!(calls[0].expected_target_version.as_deref(), Some("1.2.37"));
+    }
+
+    // 2. Threadfin update with mismatched --target-version fails closed without calling runner
+    let inv_tf_bad = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "package",
+        "update",
+        "threadfin",
+        "--target-version",
+        "1.2.36",
+    ])
+    .unwrap();
+    let env_tf_bad = execute_invocation(&inv_tf_bad, &transport);
+    assert_eq!(env_tf_bad.status, "error");
+    assert!(
+        env_tf_bad.message.contains("pinned to version 1.2.37"),
+        "{}",
+        env_tf_bad.message
+    );
+    assert_eq!(transport.package_calls.lock().unwrap().len(), 1);
+
+    // 3. Pi-hole update (with or without --target-version) fails closed without calling runner
+    for args in [
+        vec!["--json", "--root", &root_str, "package", "update", "pihole"],
+        vec![
+            "--json",
+            "--root",
+            &root_str,
+            "package",
+            "update",
+            "pihole",
+            "--target-version",
+            "6.9",
+        ],
+    ] {
+        let inv = parse_cli_args(args).unwrap();
+        let res = execute_invocation(&inv, &transport);
+        assert_eq!(res.status, "error");
+        assert!(res.message.contains("vendor installer"), "{}", res.message);
+    }
+    assert_eq!(transport.package_calls.lock().unwrap().len(), 1);
+
+    // 4. Unpinned Pi-hole install succeeds cleanly
+    let inv_ph_install = parse_cli_args([
+        "--json", "--root", &root_str, "package", "install", "pihole",
+    ])
+    .unwrap();
+    let env_ph_install = execute_invocation(&inv_ph_install, &transport);
+    assert_eq!(env_ph_install.status, "ok", "{}", env_ph_install.message);
+    {
+        let calls = transport.package_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].package_id, "pihole");
+        assert_eq!(calls[1].expected_target_version, None);
+    }
+}

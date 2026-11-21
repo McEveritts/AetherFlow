@@ -34,7 +34,97 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
-log_info "Starting installation for ${PACKAGE_NAME}..."
+
+TF_PINNED_VERSION="1.2.37"
+TF_PINNED_AMD64_COMPAT_SHA256="0b80a1bb5dc270c35288531408657189fd27c2e4346686743ebd36f3b6acbe42"
+TF_PINNED_ARM64_SHA256="1e5e6f065cf2470d1460fae80c68c9631ca79e67ff76f83d47ab4bcb9ceb6213"
+TF_PINNED_ARMHF_SHA256="d64e6b7f8a1ab8aebdd37d06bfb0bddb991c68c9fed52e25530b92ead10c8328"
+
+ARCH="$(dpkg --print-architecture)"
+case "$ARCH" in
+    amd64)
+        TF_ASSET="Threadfin_linux_amd64_glibc_2.31_compat"
+        TF_PINNED_SHA256="$TF_PINNED_AMD64_COMPAT_SHA256"
+        ;;
+    arm64)
+        TF_ASSET="Threadfin_linux_arm64"
+        TF_PINNED_SHA256="$TF_PINNED_ARM64_SHA256"
+        ;;
+    armhf)
+        TF_ASSET="Threadfin_linux_arm"
+        TF_PINNED_SHA256="$TF_PINNED_ARMHF_SHA256"
+        ;;
+    *)
+        print_error "Unsupported architecture: $ARCH"
+        exit 1
+        ;;
+esac
+
+TF_SHA256_OVERRIDE=""
+for _tf_sha_var in AETHERFLOW_THREADFIN_SHA256 THREADFIN_SHA256 AF_THREADFIN_SHA256 AETHERFLOW_PACKAGE_SHA256_OVERRIDE; do
+    if [[ -v "$_tf_sha_var" ]]; then
+        _tf_sha_val="${!_tf_sha_var}"
+        _tf_sha_val="${_tf_sha_val#"${_tf_sha_val%%[![:space:]]*}"}"
+        _tf_sha_val="${_tf_sha_val%"${_tf_sha_val##*[![:space:]]}"}"
+        if [[ ! "$_tf_sha_val" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            print_error "Invalid Threadfin SHA-256 override in ${_tf_sha_var}: expected a 64-character hexadecimal SHA-256 digest."
+            exit 1
+        fi
+        if [[ -z "$TF_SHA256_OVERRIDE" ]]; then
+            TF_SHA256_OVERRIDE="${_tf_sha_val,,}"
+        fi
+    fi
+done
+
+TF_VERSION_OVERRIDE=""
+for _tf_ver_var in AETHERFLOW_THREADFIN_VERSION THREADFIN_VERSION AF_THREADFIN_VERSION AETHERFLOW_PACKAGE_VERSION_OVERRIDE; do
+    if [[ -v "$_tf_ver_var" ]]; then
+        _tf_ver_raw="${!_tf_ver_var}"
+        _tf_ver_clean="$(af_strip_version_prefix "$_tf_ver_raw")"
+        if [[ -z "$_tf_ver_clean" || ! "$_tf_ver_clean" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]]; then
+            print_error "Invalid Threadfin version override in ${_tf_ver_var}: ${_tf_ver_raw}"
+            exit 1
+        fi
+        case "${_tf_ver_clean,,}" in
+            latest|next|canary|stable|beta|alpha|rc|nightly|edge|dev|devel|unknown|none|null|undefined|current|installed|pending|default|auto|head|main|master|release|true|false)
+                print_error "Refusing non-concrete Threadfin version override in ${_tf_ver_var}: ${_tf_ver_raw}"
+                exit 1
+                ;;
+        esac
+        if [[ -z "$TF_VERSION_OVERRIDE" ]]; then
+            TF_VERSION_OVERRIDE="$_tf_ver_clean"
+        fi
+    fi
+done
+
+if [[ -n "$TF_VERSION_OVERRIDE" && "$TF_VERSION_OVERRIDE" != "$TF_PINNED_VERSION" && -z "$TF_SHA256_OVERRIDE" ]]; then
+    print_error "Threadfin is pinned to version ${TF_PINNED_VERSION}; overriding to ${TF_VERSION_OVERRIDE} requires an explicit 64-hex SHA-256 override."
+    exit 1
+fi
+
+TF_VERSION="${TF_VERSION_OVERRIDE:-$TF_PINNED_VERSION}"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TF_TARGET_CLEAN="$(af_strip_version_prefix "${AF_TARGET_VERSION}")"
+    if [[ -z "$TF_TARGET_CLEAN" || ! "$TF_TARGET_CLEAN" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]]; then
+        print_error "Invalid Threadfin target version: ${AF_TARGET_VERSION}"
+        exit 1
+    fi
+    case "${TF_TARGET_CLEAN,,}" in
+        latest|next|canary|stable|beta|alpha|rc|nightly|edge|dev|devel|unknown|none|null|undefined|current|installed|pending|default|auto|head|main|master|release|true|false)
+            print_error "Refusing non-concrete Threadfin target version: ${AF_TARGET_VERSION}"
+            exit 1
+            ;;
+    esac
+    if [[ "$TF_TARGET_CLEAN" != "$TF_VERSION" ]]; then
+        print_error "Threadfin is pinned to version ${TF_VERSION}; requested target version '${AF_TARGET_VERSION}' is unsupported without a matching version and SHA-256 override."
+        exit 1
+    fi
+fi
+
+TF_EXPECTED_SHA256="${TF_SHA256_OVERRIDE:-$TF_PINNED_SHA256}"
+TF_URL="https://github.com/Threadfin/Threadfin/releases/download/${TF_VERSION}/${TF_ASSET}"
+
+log_info "Starting installation for ${PACKAGE_NAME} (${TF_VERSION}, ${TF_ASSET})..."
 report_progress 15 "Installing dependencies for Threadfin..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
@@ -46,29 +136,18 @@ fi
 
 mkdir -p /var/lib/threadfin/conf /var/lib/threadfin/temp
 
-ARCH=$(dpkg --print-architecture)
-case "$ARCH" in
-    amd64) TF_ASSET="Threadfin_linux_amd64" ;;
-    arm64) TF_ASSET="Threadfin_linux_arm64" ;;
-    armhf) TF_ASSET="Threadfin_linux_arm" ;;
-    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
-esac
-
-report_progress 40 "Resolving latest Threadfin release (${TF_ASSET})..."
-TF_TAG="$(github_latest_tag "Threadfin/Threadfin" "1.2.37" "false")"
-TF_URL="https://github.com/Threadfin/Threadfin/releases/download/${TF_TAG}/${TF_ASSET}"
-
-report_progress 65 "Downloading and installing Threadfin ${TF_TAG}..."
+report_progress 40 "Preparing pinned Threadfin ${TF_VERSION} release (${TF_ASSET})..."
+report_progress 65 "Downloading and verifying Threadfin ${TF_VERSION}..."
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_BIN=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/threadfin-XXXXXX")
-af_logged download_file "$TF_URL" "$TMP_BIN"
+af_logged download_file "$TF_URL" "$TMP_BIN" "$PACKAGE_NAME" "$TF_EXPECTED_SHA256"
 BUILD_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/threadfin-extract-XXXXXX")"
 trap '[[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_BIN"' EXIT
 mv -- "$TMP_BIN" "$BUILD_DIR/threadfin"
 chmod 755 "$BUILD_DIR/threadfin"
 stage_app_archive "$BUILD_DIR" /usr/local/bin/threadfin threadfin /var/lib/threadfin "$PACKAGE_NAME" "." "" "" binary
 BUILD_DIR=""
-queue_app_version /var/lib/threadfin/.af-version "${TF_TAG#v}"
+queue_app_version /var/lib/threadfin/.af-version "${TF_VERSION}"
 
 chown -hRP threadfin:threadfin /var/lib/threadfin
 

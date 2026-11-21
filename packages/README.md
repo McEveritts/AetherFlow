@@ -10,6 +10,14 @@ rejected. Verified URLs and digests are written to the lifecycle log as
 Pi-hole uses `AF_PIHOLE_BOOTSTRAP_SHA256` and defaults to the reviewed upstream
 Pi-hole v6.6 `basic-install.sh` at commit `f7c0220e63e753c664a1ec08d42d6b647b86005d`
 with SHA-256 digest `4627fc5209064039a3b2ee615119db93b2c9ca8f9d69dea7967b7fdf67df71c8`.
+Because upstream `basic-install.sh` advances Core, Web, and FTL together to their
+latest `master` release tags, Pi-hole is tracked as `update_source: "vendor"` and
+fails closed before state mutation if an exact `AF_TARGET_VERSION` pin is supplied.
+
+Threadfin is pinned to exact release `1.2.37` with per-architecture SHA-256 digests
+(`Threadfin_linux_amd64_glibc_2.31_compat`, `Threadfin_linux_arm64`, and
+`Threadfin_linux_arm`) across both the Bash installer and the Rust declarative
+runner, and fails closed before state mutation on unsupported or mismatched targets.
 
 NodeSource defaults to the scripts for Node 20, 22, and 24 at
 `nodesource/distributions` commit `42da07fa46a3e9649f47416743a5563f9f19028f`.

@@ -349,6 +349,7 @@
   },
   "threadfin": {
     "update_source": "pinned",
+    "update_package": "1.2.37",
     "require_download_sha256": true,
     "version_command": [
       "bash",
@@ -639,9 +640,8 @@
     ]
   },
   "pihole": {
-    "update_source": "github",
+    "update_source": "vendor",
     "require_download_sha256": true,
-    "update_repo": "pi-hole/FTL",
     "version_command": [
       "/usr/bin/pihole-FTL",
       "-v"

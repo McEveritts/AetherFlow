@@ -5698,3 +5698,86 @@ async fn test_mediaflow_inflight_cancellation_stops_ffmpeg_and_preserves_source(
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn test_threadfin_pinned_and_pihole_vendor_discovery_do_not_query_github() {
+    let _env_guard = TEST_ENV_MUTEX.lock().await;
+    let prev_auto = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
+    let prev_pkgs = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    std::env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        repo_root.join("config/package_automation.json"),
+    );
+    std::env::set_var(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        repo_root.join("config/packages.json"),
+    );
+    struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", v),
+                None => std::env::remove_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG"),
+            }
+            match self.1.take() {
+                Some(v) => std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", v),
+                None => std::env::remove_var("AETHERFLOW_PACKAGES_CONFIG"),
+            }
+        }
+    }
+    let _restore = Restore(prev_auto, prev_pkgs);
+
+    let client = build_github_http_client();
+    let catalog = crate::get_package_catalog().unwrap();
+    let threadfin = catalog.iter().find(|p| p.name == "threadfin").unwrap();
+    let pihole = catalog.iter().find(|p| p.name == "pihole").unwrap();
+
+    assert_eq!(threadfin.update_source, "pinned");
+    assert_eq!(threadfin.update_package, "1.2.37");
+    assert_eq!(
+        canonical_update_source_key("https://api.github.com", threadfin),
+        "pinned:1.2.37|stable"
+    );
+
+    let (tf_ver, tf_url, _) = detect_latest_version(
+        &client,
+        "https://invalid-host-unreachable.example.com",
+        threadfin,
+    )
+    .await
+    .expect("pinned threadfin must resolve locally without hitting GitHub");
+    assert_eq!(tf_ver, "1.2.37");
+    assert_eq!(
+        tf_url,
+        "https://github.com/Threadfin/Threadfin/releases/tag/1.2.37"
+    );
+    assert!(is_version_newer_for_source("1.2.36", &tf_ver, "pinned"));
+    assert!(!is_version_newer_for_source("1.2.37", &tf_ver, "pinned"));
+
+    assert_eq!(pihole.update_source, "vendor");
+    assert!(pihole.update_repo.is_empty());
+    assert!(should_track_package(pihole));
+    assert_eq!(
+        canonical_update_source_key("https://api.github.com", pihole),
+        "vendor:pihole|stable"
+    );
+
+    let (ph_ver, ph_url, _) = detect_latest_version(
+        &client,
+        "https://invalid-host-unreachable.example.com",
+        pihole,
+    )
+    .await
+    .expect("vendor-managed pihole must not query GitHub for exact FTL targets");
+    assert!(ph_ver.is_empty());
+    assert!(ph_url.is_empty());
+    assert!(!is_version_newer_for_source("6.8", &ph_ver, "vendor"));
+    assert!(!is_version_newer_for_source("6.8", "6.9", "vendor"));
+}

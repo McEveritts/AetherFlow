@@ -1156,6 +1156,18 @@ youtube_private_port() {
                 shutil.copyfile(archive_path, readarr_archive)
                 variables.setdefault("AF_READARR_VERIFIED_ARCHIVE", str(readarr_archive))
                 variables.setdefault("AF_READARR_SHA256", hashlib.sha256(readarr_archive.read_bytes()).hexdigest())
+        if self.app == "threadfin" and not any(
+            key in environment
+            for key in (
+                "AF_THREADFIN_SHA256",
+                "AETHERFLOW_THREADFIN_SHA256",
+                "THREADFIN_SHA256",
+                "AETHERFLOW_PACKAGE_SHA256_OVERRIDE",
+            )
+        ):
+            host_command = self.root / "host-command"
+            if host_command.is_file():
+                variables["AF_THREADFIN_SHA256"] = hashlib.sha256(host_command.read_bytes()).hexdigest()
         variables = {key: value for key, value in variables.items() if value is not None}
         selected_port = port if port is not None else self.metadata.get("default_port", 0)
         if selected_port:
@@ -1186,11 +1198,18 @@ class CatalogLifecycleMatrix(unittest.TestCase):
 
     def test_pihole_release_target_matches_installed_ftl(self):
         automation = json.loads((ROOT / "config/package_automation.json").read_text())["pihole"]
-        self.assertEqual(automation["update_repo"], "pi-hole/FTL")
+        self.assertEqual(automation["update_source"], "vendor")
+        self.assertNotIn("update_repo", automation)
         self.assertEqual(automation["version_command"], ["/usr/bin/pihole-FTL", "-v"])
         with InstallerFixture("pihole") as fixture:
-            installed = fixture.run(AF_TARGET_VERSION="6.9", AF_FIXTURE_VERSION="6.6",
-                                    AF_FIXTURE_PIHOLE_FTL_VERSION="v6.9")
+            rejected = fixture.run(AF_TARGET_VERSION="6.9", AF_FIXTURE_VERSION="6.6",
+                                   AF_FIXTURE_PIHOLE_FTL_VERSION="v6.9")
+            self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
+            self.assertIn("cannot honor exact target version pins", rejected.stderr)
+            self.assertFalse((fixture.root / "etc/pihole/.af-version").exists())
+            self.assertFalse(fixture.lock.exists())
+
+            installed = fixture.run(AF_FIXTURE_VERSION="6.6", AF_FIXTURE_PIHOLE_FTL_VERSION="v6.9")
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
             self.assertEqual((fixture.root / "etc/pihole/.af-version").read_text().strip(), "6.9")
 

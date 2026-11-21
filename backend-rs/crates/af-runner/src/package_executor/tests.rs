@@ -1983,8 +1983,7 @@ fn test_threadfin_recipe_verifies_pinned_digests_tamper_arch_and_https_fail_clos
                 .arch_sha256
                 .as_ref()
                 .expect("threadfin must pin per-architecture SHA-256 digests");
-            assert!(arch_digests.amd64.contains(THREADFIN_AMD64_COMPAT_SHA256));
-            assert!(arch_digests.amd64.contains(THREADFIN_AMD64_PLAIN_SHA256));
+            assert_eq!(arch_digests.amd64, THREADFIN_AMD64_COMPAT_SHA256);
             assert_eq!(arch_digests.arm64, THREADFIN_ARM64_SHA256);
             assert_eq!(arch_digests.armhf.as_deref(), Some(THREADFIN_ARMHF_SHA256));
             assert!(verification.require_elf_magic);
@@ -1995,7 +1994,7 @@ fn test_threadfin_recipe_verifies_pinned_digests_tamper_arch_and_https_fail_clos
     // Also confirm the plain amd64 upstream digest constant matches official 1.2.37 metadata
     assert_eq!(
         THREADFIN_AMD64_PLAIN_SHA256,
-        "19183058cf28b0080df059113e546a8e8cac16cae210d13be51bda42af94dfc2"
+        "19183013ec8da826e556bde3b511d9f93b9269f6d7eddd78a9df128529f45e4e"
     );
 
     let root = create_isolated_test_dir("threadfin-verify");
@@ -6568,6 +6567,139 @@ async fn test_pc04_snapshot_retains_nofollow_cancellation_and_rollback_restore()
             b"prior-app-data"
         );
     }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn threadfin_and_pihole_exact_version_policy_fails_closed_before_mutation() {
+    use futures::StreamExt;
+
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    let _guard = EnvVarGuard::new(&[
+        ("AETHERFLOW_THREADFIN_SHA256", None),
+        ("THREADFIN_SHA256", None),
+        ("AF_THREADFIN_SHA256", None),
+        ("AETHERFLOW_PACKAGE_SHA256_OVERRIDE", None),
+        ("AETHERFLOW_THREADFIN_VERSION", None),
+        ("THREADFIN_VERSION", None),
+        ("AF_THREADFIN_VERSION", None),
+        ("AETHERFLOW_PACKAGE_VERSION_OVERRIDE", None),
+        ("AF_TARGET_VERSION", None),
+    ]);
+
+    // 1. Threadfin pinned target validation accepts 1.2.37/v1.2.37 and rejects unpinned targets
+    assert_eq!(
+        validate_threadfin_target_policy(None).unwrap().0,
+        THREADFIN_PINNED_VERSION
+    );
+    assert_eq!(
+        validate_threadfin_target_policy(Some("1.2.37")).unwrap().0,
+        THREADFIN_PINNED_VERSION
+    );
+    assert_eq!(
+        validate_threadfin_target_policy(Some("v1.2.37")).unwrap().0,
+        THREADFIN_PINNED_VERSION
+    );
+    assert!(validate_threadfin_target_policy(Some("1.2.36")).is_err());
+    assert!(validate_threadfin_target_policy(Some("latest")).is_err());
+
+    // Malformed / skip SHA-256 override and unpinned version override without SHA-256 fail closed
+    env::set_var("AF_THREADFIN_SHA256", "skip");
+    assert!(validate_threadfin_target_policy(None).is_err());
+    env::remove_var("AF_THREADFIN_SHA256");
+
+    env::set_var("AF_THREADFIN_VERSION", "1.2.36");
+    assert!(validate_threadfin_target_policy(None).is_err());
+    env::set_var("AF_THREADFIN_SHA256", THREADFIN_AMD64_COMPAT_SHA256);
+    assert_eq!(
+        validate_threadfin_target_policy(Some("1.2.36")).unwrap().0,
+        "1.2.36"
+    );
+    assert!(validate_threadfin_target_policy(Some("1.2.37")).is_err());
+    env::remove_var("AF_THREADFIN_VERSION");
+    env::remove_var("AF_THREADFIN_SHA256");
+
+    // 2. Pi-hole vendor policy rejects updates and pinned installs/reinstalls, allows unpinned install/reinstall/remove
+    assert!(validate_package_target_policy("pihole", "vendor", "", "update", Some("6.9")).is_err());
+    assert!(validate_package_target_policy("pihole", "vendor", "", "update", None).is_err());
+    assert!(
+        validate_package_target_policy("pihole", "vendor", "", "install", Some("6.9")).is_err()
+    );
+    assert!(
+        validate_package_target_policy("pihole", "vendor", "", "reinstall", Some("6.8")).is_err()
+    );
+    assert!(validate_package_target_policy("pihole", "vendor", "", "install", None).is_ok());
+    assert!(validate_package_target_policy("pihole", "vendor", "", "reinstall", None).is_ok());
+    assert!(validate_package_target_policy("pihole", "vendor", "", "remove", Some("6.9")).is_ok());
+
+    // 3. Declarative Threadfin rejects mismatched expected_target_version before any command runs
+    let root = create_isolated_test_dir("threadfin-policy-fail-closed");
+    let mut env_cfg = PackageExecutionEnv::isolated(&root);
+    env_cfg.expected_target_version = Some("1.2.36".to_string());
+    let recipe = get_declarative_recipe("threadfin").unwrap();
+    let mock = MockCommandRunner::default();
+    let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
+    let err = executor
+        .execute_recipe(
+            &recipe,
+            PackageAction::Update,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, PackageExecutorError::Validation(_)),
+        "{err:?}"
+    );
+    assert!(
+        mock.recorded_commands().is_empty(),
+        "no host command may run before rejecting mismatched Threadfin target"
+    );
+    assert!(!root.join("install/.threadfin.lock").exists());
+
+    // 4. execute_package_request_stream fails closed before sandbox/script mutation
+    let root_str = root.to_string_lossy().into_owned();
+    let _fs_guard = EnvVarGuard::new(&[
+        ("AETHERFLOW_FS_ROOT", Some(root_str.as_str())),
+        ("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", None),
+        ("AETHERFLOW_PACKAGES_CONFIG", None),
+    ]);
+    let pihole_lines: Vec<String> = execute_package_request_stream(PackageRunnerRequest {
+        action: "update".to_string(),
+        package_id: "pihole".to_string(),
+        script_name: "installpackage-pihole".to_string(),
+        expected_target_version: Some("6.9".to_string()),
+        ..Default::default()
+    })
+    .filter_map(|item| async move { item.ok() })
+    .collect()
+    .await;
+    assert!(
+        pihole_lines
+            .iter()
+            .any(|l| l.starts_with("__RUNNER_EXIT_ERROR__:") && l.contains("vendor installer")),
+        "{pihole_lines:?}"
+    );
+
+    let threadfin_lines: Vec<String> = execute_package_request_stream(PackageRunnerRequest {
+        action: "install".to_string(),
+        package_id: "threadfin".to_string(),
+        script_name: "installpackage-threadfin".to_string(),
+        expected_target_version: Some("1.2.36".to_string()),
+        ..Default::default()
+    })
+    .filter_map(|item| async move { item.ok() })
+    .collect()
+    .await;
+    assert!(
+        threadfin_lines
+            .iter()
+            .any(|l| l.starts_with("__RUNNER_EXIT_ERROR__:")
+                && l.contains("pinned to version 1.2.37")),
+        "{threadfin_lines:?}"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
