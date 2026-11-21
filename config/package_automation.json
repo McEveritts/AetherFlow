@@ -352,9 +352,8 @@
     "update_package": "1.2.37",
     "require_download_sha256": true,
     "version_command": [
-      "bash",
-      "-lc",
-      "/usr/local/bin/threadfin -info 2>/dev/null | grep -oP 'Version:\\s*\\K\\S+'"
+      "cat",
+      "/var/lib/threadfin/.af-version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [

@@ -51,6 +51,7 @@ class RegistryExactVersionMetadataTests(unittest.TestCase):
         self.assertEqual(threadfin["update_package"], THREADFIN_PINNED_VERSION)
         self.assertTrue(threadfin["require_download_sha256"])
         self.assertNotIn("update_repo", threadfin)
+        self.assertEqual(threadfin["version_command"], ["cat", "/var/lib/threadfin/.af-version"])
 
         pihole = automation["pihole"]
         self.assertEqual(pihole["update_source"], "vendor")

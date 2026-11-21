@@ -196,6 +196,7 @@ with ManagedConfig(filename) as config:
 PYEOF
 
 chown -hRP threadfin:threadfin /var/lib/threadfin
+chmod 0755 /var/lib/threadfin
 
 report_progress 85 "Configuring and starting threadfin.service on port ${APP_PORT}..."
 sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${TF_BIND_ADDRESS}/g" <<'EOF' > /etc/systemd/system/threadfin.service
