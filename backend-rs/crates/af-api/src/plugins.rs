@@ -739,13 +739,11 @@ pub fn validate_plugin_manifest(
     })
 }
 
-pub fn resolve_plugins_dir() -> PathBuf {
-    af_models::resolve_plugins_dir()
-}
-
 pub fn discover_plugins() -> (Vec<ValidatedPluginManifest>, Vec<(String, String)>) {
-    let root = resolve_plugins_dir();
-    discover_plugins_in_dir(&root)
+    match af_models::resolve_plugins_dir() {
+        Some(root) => discover_plugins_in_dir(&root),
+        None => (Vec::new(), Vec::new()),
+    }
 }
 
 pub fn discover_plugins_in_dir(

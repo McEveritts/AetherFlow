@@ -156,10 +156,6 @@ pub fn resolve_systemctl_binary() -> Option<PathBuf> {
     .find(|candidate| candidate.is_file())
 }
 
-fn resolve_plugins_dir() -> PathBuf {
-    af_models::resolve_plugins_dir()
-}
-
 fn resolve_plugin_tokens_root() -> Result<PathBuf, PluginRunnerError> {
     let raw = env::var("AETHERFLOW_PLUGIN_TOKENS_ROOT")
         .ok()
@@ -482,7 +478,9 @@ fn validate_relative_plugin_file(
 
 fn load_verified_plugin_spec(plugin_id: &str) -> Result<VerifiedPluginSpec, PluginRunnerError> {
     let plugin_id = validate_plugin_id(plugin_id)?;
-    let plugins_root = resolve_plugins_dir();
+    let plugins_root = af_models::resolve_plugins_dir().ok_or_else(|| {
+        PluginRunnerError::InvalidRequest("Plugins root is unavailable".to_string())
+    })?;
     let canon_root = fs::canonicalize(&plugins_root).map_err(|e| {
         PluginRunnerError::InvalidRequest(format!(
             "Plugins root '{}' is unavailable: {}",

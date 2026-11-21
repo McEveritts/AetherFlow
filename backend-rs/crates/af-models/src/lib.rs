@@ -874,94 +874,54 @@ pub fn plugin_stop_hook_unit_name(plugin_id: &str) -> Option<String> {
     }
 }
 
-/// Resolves the canonical plugins directory shared by `af-api` and `af-runner`.
-///
-/// Precedence:
-/// 1. Explicit `AETHERFLOW_PLUGINS_DIR` override.
-/// 2. Isolated `AETHERFLOW_FS_ROOT` (`<root>/plugins`, `<root>/opt/AetherFlow/current/plugins`,
-///    `<root>/opt/AetherFlow/plugins`).
-/// 3. Release directory adjacent to the running executable (`<exe_dir>/plugins`), matching
-///    packaged and extracted release bundles regardless of working directory.
-/// 4. Working-directory-relative source tree paths (`plugins`, `../plugins`, `../../plugins`).
-/// 5. Standard installed host paths (`/opt/AetherFlow/current/plugins`, `/opt/AetherFlow/plugins`),
-///    omitted when an isolated non-root `AETHERFLOW_FS_ROOT` is active.
+/// Resolves bundled and source plugins for the API and privileged runner.
+/// An isolated filesystem root confines automatic discovery to that root.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_plugins_dir_from(
     plugins_dir_env: Option<&str>,
     fs_root_env: Option<&str>,
     exe_path: Option<&Path>,
     cwd: Option<&Path>,
-) -> PathBuf {
+) -> Option<PathBuf> {
     if let Some(custom) = plugins_dir_env.map(str::trim).filter(|s| !s.is_empty()) {
-        return PathBuf::from(custom);
+        return Some(PathBuf::from(custom));
     }
-
-    let isolated_fs_root = fs_root_env
+    if let Some(root) = fs_root_env
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    if let Some(ref fs_root) = isolated_fs_root {
-        for rel in [
+        .filter(|s| !s.is_empty() && *s != "/")
+    {
+        let root = std::fs::canonicalize(root).ok()?;
+        return [
             "plugins",
             "opt/AetherFlow/current/plugins",
             "opt/AetherFlow/plugins",
-        ] {
-            let candidate = fs_root.join(rel);
-            if candidate.is_dir() {
-                return candidate;
-            }
-        }
+        ]
+        .into_iter()
+        .filter_map(|relative| std::fs::canonicalize(root.join(relative)).ok())
+        .find(|candidate| candidate.starts_with(&root) && candidate.is_dir());
     }
-
-    if let Some(exe_plugins) = exe_path
+    if let Some(candidate) = exe_path
         .and_then(Path::parent)
         .map(|dir| dir.join("plugins"))
     {
-        if exe_plugins.is_dir() {
-            return exe_plugins;
+        if candidate.is_dir() {
+            return Some(candidate);
         }
     }
-
-    if let Some(base) = cwd {
-        for candidate in [
-            base.join("plugins"),
-            base.join("../plugins"),
-            base.join("../../plugins"),
-        ] {
-            if candidate.is_dir() {
-                return candidate;
-            }
-        }
-    } else {
-        for candidate in ["plugins", "../plugins", "../../plugins"] {
-            let path = PathBuf::from(candidate);
-            if path.is_dir() {
-                return path;
-            }
-        }
-    }
-
-    let confinement_active = isolated_fs_root
-        .as_ref()
-        .is_some_and(|root| root != Path::new("/"));
-    if !confinement_active {
-        for candidate in ["/opt/AetherFlow/current/plugins", "/opt/AetherFlow/plugins"] {
-            let path = PathBuf::from(candidate);
-            if path.is_dir() {
-                return path;
-            }
-        }
-    }
-
-    if let Some(fs_root) = isolated_fs_root.filter(|root| root != Path::new("/")) {
-        return fs_root.join("plugins");
-    }
-    PathBuf::from("plugins")
+    let cwd = cwd.unwrap_or_else(|| Path::new("."));
+    [
+        cwd.join("plugins"),
+        cwd.join("../plugins"),
+        cwd.join("../../plugins"),
+        PathBuf::from("/opt/AetherFlow/current/plugins"),
+        PathBuf::from("/opt/AetherFlow/plugins"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_dir())
 }
 
-/// Resolves the canonical plugins directory from the current process environment.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn resolve_plugins_dir() -> PathBuf {
+pub fn resolve_plugins_dir() -> Option<PathBuf> {
     let plugins_dir_env = std::env::var("AETHERFLOW_PLUGINS_DIR").ok();
     let fs_root_env = std::env::var("AETHERFLOW_FS_ROOT").ok();
     let exe_path = std::env::current_exe().ok();
@@ -2419,7 +2379,7 @@ mod tests {
         let explicit = base.join("custom-plugins");
         assert_eq!(
             resolve_plugins_dir_from(Some(explicit.to_str().unwrap()), None, None, None),
-            explicit
+            Some(explicit)
         );
 
         // 2. Packaged release executable resolves sibling plugins/ regardless of CWD.
@@ -2432,7 +2392,7 @@ mod tests {
         std::fs::create_dir_all(&unrelated_cwd).unwrap();
         assert_eq!(
             resolve_plugins_dir_from(None, None, Some(&release_exe), Some(&unrelated_cwd)),
-            release_plugins
+            Some(release_plugins)
         );
 
         // 3. Source build (cargo target exe has no sibling plugins/) resolves CWD-relative plugins/.
@@ -2445,11 +2405,11 @@ mod tests {
         std::fs::write(&dev_exe, b"bin").unwrap();
         assert_eq!(
             resolve_plugins_dir_from(None, None, Some(&dev_exe), Some(&repo)),
-            repo.join("plugins")
+            Some(repo.join("plugins"))
         );
         assert_eq!(
             resolve_plugins_dir_from(None, None, Some(&dev_exe), Some(&repo.join("backend-rs"))),
-            repo.join("backend-rs").join("../plugins")
+            Some(repo.join("backend-rs").join("../plugins"))
         );
 
         // 4. Isolated AETHERFLOW_FS_ROOT checks <root>/plugins, <root>/opt/AetherFlow/current/plugins,
@@ -2464,7 +2424,7 @@ mod tests {
                 Some(&dev_exe),
                 Some(&unrelated_cwd),
             ),
-            fs_current_plugins
+            Some(fs_current_plugins)
         );
 
         let fs_root_flat = base.join("fs-flat");
@@ -2477,21 +2437,29 @@ mod tests {
                 Some(&release_exe),
                 Some(&unrelated_cwd),
             ),
-            fs_flat_plugins
+            Some(fs_flat_plugins)
         );
 
-        // 5. Empty isolated AETHERFLOW_FS_ROOT does not leak host /opt/AetherFlow paths.
         let fs_root_empty = base.join("fs-empty");
         std::fs::create_dir_all(&fs_root_empty).unwrap();
         assert_eq!(
             resolve_plugins_dir_from(
                 None,
                 Some(fs_root_empty.to_str().unwrap()),
-                Some(&dev_exe),
-                Some(&unrelated_cwd),
+                Some(&release_exe),
+                Some(&repo),
             ),
-            fs_root_empty.join("plugins")
+            None
         );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(release_slot.join("plugins"), fs_root_empty.join("plugins"))
+                .unwrap();
+            assert_eq!(
+                resolve_plugins_dir_from(None, Some(fs_root_empty.to_str().unwrap()), None, None),
+                None
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }
