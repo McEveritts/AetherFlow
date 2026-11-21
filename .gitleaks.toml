@@ -9,13 +9,11 @@ id = "generic-api-key"
   [[rules.allowlists]]
   description = "Allow RFC 6455 sample Sec-WebSocket-Key nonce in af-api middleware unit test"
   condition = "AND"
-  regexTarget = "line"
+  regexTarget = "secret"
   paths = [
     '''^backend-rs/crates/af-api/src/middlewares\.rs$''',
   ]
-  regexes = [
-    '''^\s*"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n",\s*$''',
-  ]
+  regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
 
   # Historical git-history allowlist (retired from working tree)
   [[rules.allowlists]]
@@ -45,7 +43,7 @@ id = "generic-api-key"
   description = "Synthetic lifecycle redaction canary in the API persistence regression"
   condition = "AND"
   regexTarget = "secret"
-  paths = ['''^backend-rs/crates/af-api/src/routes\.rs$''']
+  paths = ['''^backend-rs/crates/af-api/src/(?:routes\.rs|routes/tests\.rs)$''']
   regexes = ['''^secret_(?:gh_tok_789|api_key_000)$''']
 
   [[rules.allowlists]]
@@ -257,9 +255,12 @@ id = "curl-auth-user"
   regexTarget = "secret"
   paths = [
     '''^backend-rs/crates/af-api/src/(?:routes|ws)\.rs$''',
+    '''^backend-rs/crates/af-api/src/routes/tests\.rs$''',
     '''^backend-rs/crates/af-release/src/lifecycle\.rs$''',
     '''^backend-rs/crates/af-runner/src/package_lifecycle\.rs$''',
+    '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests\.rs$''',
     '''^backend-rs/crates/af-services/src/(?:package_jobs|workers)\.rs$''',
+    '''^backend-rs/crates/af-services/src/workers/tests\.rs$''',
   ]
   regexes = [
     '''^admin:(?:mysecret123|hunter2|synthetic-secret|secret_pass|secret|supersecret|super_secret_curl|SECRET)$''',
