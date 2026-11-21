@@ -40,6 +40,51 @@ test('shell retains the legacy approval count when the response has no total', a
   await expect(page.locator('#desktop-sidebar-navigation .af-pending-badge')).toHaveText('7');
 });
 
+test('Approval Inbox follows the durable core restart status in history', async ({ page }) => {
+  await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+  const jobUnit = 'aetherflow-self-update-restart-aetherflow-api-0123456789abcdef.service';
+  let status = 'pending';
+  let approvals = 0;
+  const action = () => ({
+    id: 41,
+    action: 'systemctl restart aetherflow-api',
+    classification: 'MEDIUM',
+    source: 'af-heal',
+    reason: 'Fixture restart',
+    status,
+    ...(status === 'pending' ? {} : { job_unit: jobUnit }),
+  });
+  await page.route('**/api/v1/admin/actions/pending?*', async route => {
+    const filter = new URL(route.request().url()).searchParams.get('status');
+    const matches = status === 'pending' ? filter === 'pending' : filter === 'approved_history';
+    const actions = matches ? [action()] : [];
+    await route.fulfill({ json: { actions, total: actions.length } });
+  });
+  await page.route('**/api/v1/admin/actions/41', route => route.fulfill({ json: action() }));
+  await page.route('**/api/v1/admin/actions/41/approve', async route => {
+    expect(route.request().method()).toBe('POST');
+    approvals += 1;
+    status = 'queued';
+    await route.fulfill({ status: 202, json: { status, action: action() } });
+  });
+
+  await page.goto('/?tab=inbox');
+  await page.getByRole('button', { name: 'Inspect action' }).click();
+  const details = page.getByRole('dialog', { name: 'Action details' });
+  await details.getByRole('button', { name: 'Approve & Queue Restart' }).click();
+  await expect(details.getByRole('status').filter({ hasText: jobUnit })).toBeVisible();
+  await details.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(page.getByRole('tab', { name: 'Approved / Executed' })).toHaveAttribute('aria-selected', 'true');
+  const history = page.getByRole('tabpanel');
+  await expect(history.getByText('queued', { exact: true })).toBeVisible();
+  await expect(history.getByText('executed', { exact: true })).toHaveCount(0);
+
+  status = 'executed';
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(history.getByText('executed', { exact: true })).toBeVisible();
+  expect(approvals).toBe(1);
+});
+
 test('Enter sorts a user column without opening a row and grid navigation still activates rows', async ({ page }) => {
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
   await page.route('**/api/v1/admin/users', (route) => route.fulfill({ json: { users: [
