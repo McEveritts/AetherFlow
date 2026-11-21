@@ -780,28 +780,57 @@ fn load_package_automation_spec(
     ))
 }
 
+fn spec_non_empty_str<'a>(spec: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    spec.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_cli_upstream_api_base(spec: &serde_json::Value, env_var: &str, default: &str) -> String {
+    spec_non_empty_str(spec, "api_base_url")
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var(env_var)
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn discover_latest_github_tag(
+    api_base: &str,
+    repo: &str,
+    missing_label: &str,
+    invalid_label: &str,
+) -> Result<String, String> {
+    let tags_url = format!("{api_base}/repos/{repo}/tags?per_page=1");
+    let body = http_get_text(&tags_url)?;
+    let val: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("invalid JSON from {tags_url}: {e}"))?;
+    let tag = val
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("name"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("no {missing_label} found for {repo}"))?;
+    normalize_discovered_target_version(tag)
+        .ok_or_else(|| format!("invalid {invalid_label} {:?} for {repo}", tag))
+}
+
 fn discover_live_upstream_target_version(
     global: &GlobalOptions,
     pkg_id: &str,
 ) -> Result<String, String> {
     let spec = load_package_automation_spec(global, pkg_id)?;
-    let source = spec
-        .get("update_source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let api_base = spec
-        .get("api_base_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("AETHERFLOW_GITHUB_API_BASE")
-                .ok()
-                .map(|s| s.trim().trim_end_matches('/').to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "https://api.github.com".to_string());
+    let source = spec_non_empty_str(&spec, "update_source").unwrap_or("");
+    let api_base = resolve_cli_upstream_api_base(
+        &spec,
+        "AETHERFLOW_GITHUB_API_BASE",
+        "https://api.github.com",
+    );
 
     match source {
         "retired" => Err(format!(
@@ -809,11 +838,7 @@ fn discover_live_upstream_target_version(
             pkg_id
         )),
         "github" | "github_release" => {
-            let repo = spec
-                .get("update_repo")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+            let repo = spec_non_empty_str(&spec, "update_repo")
                 .ok_or_else(|| format!("missing update_repo for '{}'", pkg_id))?;
             let release_url = format!("{api_base}/repos/{repo}/releases/latest");
             if let Ok(body) = http_get_text(&release_url) {
@@ -825,58 +850,22 @@ fn discover_live_upstream_target_version(
                     }
                 }
             }
-            let tags_url = format!("{api_base}/repos/{repo}/tags?per_page=1");
-            let body = http_get_text(&tags_url)?;
-            let val: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| format!("invalid JSON from {tags_url}: {e}"))?;
-            let tag = val
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|item| item.get("name"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("no upstream release or tag found for {repo}"))?;
-            normalize_discovered_target_version(tag)
-                .ok_or_else(|| format!("invalid upstream tag {:?} for {repo}", tag))
+            discover_latest_github_tag(
+                &api_base,
+                repo,
+                "upstream release or tag",
+                "upstream tag",
+            )
         }
         "git_tags" => {
-            let repo = spec
-                .get("update_repo")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+            let repo = spec_non_empty_str(&spec, "update_repo")
                 .ok_or_else(|| format!("missing update_repo for '{}'", pkg_id))?;
-            let tags_url = format!("{api_base}/repos/{repo}/tags?per_page=1");
-            let body = http_get_text(&tags_url)?;
-            let val: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| format!("invalid JSON from {tags_url}: {e}"))?;
-            let tag = val
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|item| item.get("name"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("no upstream git tags found for {repo}"))?;
-            normalize_discovered_target_version(tag)
-                .ok_or_else(|| format!("invalid upstream git tag {:?} for {repo}", tag))
+            discover_latest_github_tag(&api_base, repo, "upstream git tags", "upstream git tag")
         }
         "pypi" => {
-            let pypi_pkg = spec
-                .get("update_package")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(pkg_id);
-            let pypi_base = spec
-                .get("api_base_url")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().trim_end_matches('/').to_string())
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    std::env::var("AETHERFLOW_PYPI_API_BASE")
-                        .ok()
-                        .map(|s| s.trim().trim_end_matches('/').to_string())
-                        .filter(|s| !s.is_empty())
-                })
-                .unwrap_or_else(|| "https://pypi.org".to_string());
+            let pypi_pkg = spec_non_empty_str(&spec, "update_package").unwrap_or(pkg_id);
+            let pypi_base =
+                resolve_cli_upstream_api_base(&spec, "AETHERFLOW_PYPI_API_BASE", "https://pypi.org");
             let url = format!("{pypi_base}/pypi/{pypi_pkg}/json");
             let body = http_get_text(&url)?;
             let val: serde_json::Value =
@@ -890,29 +879,23 @@ fn discover_live_upstream_target_version(
                 .ok_or_else(|| format!("invalid PyPI version {:?} for {pypi_pkg}", ver))
         }
         "git" => {
-            if let Some(repo) = spec
-                .get("update_repo")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
+            let normalize_short_sha =
+                |sha: &str| normalize_discovered_target_version(sha.get(..12).unwrap_or(sha));
+            if let Some(repo) = spec_non_empty_str(&spec, "update_repo") {
                 let url = format!("{api_base}/repos/{repo}/commits/HEAD");
                 if let Ok(body) = http_get_text(&url) {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(sha) = val.get("sha").and_then(|v| v.as_str()) {
-                            let short = if sha.len() > 12 { &sha[..12] } else { sha };
-                            if let Some(ver) = normalize_discovered_target_version(short) {
-                                return Ok(ver);
-                            }
+                        if let Some(ver) = val
+                            .get("sha")
+                            .and_then(|v| v.as_str())
+                            .and_then(normalize_short_sha)
+                        {
+                            return Ok(ver);
                         }
                     }
                 }
             }
-            let repo_url = spec
-                .get("update_repo_url")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+            let repo_url = spec_non_empty_str(&spec, "update_repo_url")
                 .ok_or_else(|| format!("missing update_repo_url for '{}'", pkg_id))?;
             let out = std::process::Command::new("git")
                 .args(["ls-remote", repo_url, "HEAD"])
@@ -927,8 +910,7 @@ fn discover_live_upstream_target_version(
                 .split_whitespace()
                 .next()
                 .ok_or_else(|| format!("empty git ls-remote output for {repo_url}"))?;
-            let short = if sha.len() > 12 { &sha[..12] } else { sha };
-            normalize_discovered_target_version(short)
+            normalize_short_sha(sha)
                 .ok_or_else(|| format!("invalid git commit SHA {:?} for {repo_url}", sha))
         }
         "apt" => {
@@ -938,12 +920,7 @@ fn discover_live_upstream_target_version(
                     pkg_id
                 ));
             }
-            let apt_pkg = spec
-                .get("update_package")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(pkg_id);
+            let apt_pkg = spec_non_empty_str(&spec, "update_package").unwrap_or(pkg_id);
             let out = std::process::Command::new("apt-cache")
                 .args(["policy", apt_pkg])
                 .output()
@@ -952,36 +929,22 @@ fn discover_live_upstream_target_version(
                 return Err(format!("apt-cache policy returned non-zero for {apt_pkg}"));
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                if let Some(cand) = line.trim().strip_prefix("Candidate:") {
-                    let cand = cand.trim();
-                    if !cand.is_empty() && cand != "(none)" {
-                        if let Some(ver) = normalize_discovered_target_version(cand) {
-                            return Ok(ver);
-                        }
-                    }
-                }
-            }
-            Err(format!("no apt candidate version available for {apt_pkg}"))
+            af_release::lifecycle::parse_apt_policy_candidate(&stdout)
+                .and_then(normalize_discovered_target_version)
+                .ok_or_else(|| format!("no apt candidate version available for {apt_pkg}"))
         }
         "vendor" => Err(format!(
             "package '{}' uses a multi-component vendor installer and does not support exact-version updates; use reinstall or the vendor updater instead",
             pkg_id
         )),
-        "pinned" => {
-            if let Some(pinned_ver) = spec
-                .get("update_package")
-                .and_then(|v| v.as_str())
-                .and_then(normalize_discovered_target_version)
-            {
-                Ok(pinned_ver)
-            } else {
-                Err(format!(
+        "pinned" => spec_non_empty_str(&spec, "update_package")
+            .and_then(normalize_discovered_target_version)
+            .ok_or_else(|| {
+                format!(
                     "package '{}' uses a pinned upstream source with no dynamic target version",
                     pkg_id
-                ))
-            }
-        }
+                )
+            }),
         other => Err(format!(
             "unsupported upstream update_source {:?} for '{}'",
             other, pkg_id
@@ -998,16 +961,8 @@ fn validate_cli_package_target_policy(
     let Ok(spec) = load_package_automation_spec(global, pkg_id) else {
         return Ok(());
     };
-    let source = spec
-        .get("update_source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let update_package = spec
-        .get("update_package")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
+    let source = spec_non_empty_str(&spec, "update_source").unwrap_or("");
+    let update_package = spec_non_empty_str(&spec, "update_package").unwrap_or("");
     af_runner::validate_package_target_policy(
         pkg_id,
         source,
@@ -1024,29 +979,25 @@ fn resolve_cli_package_target_version(
     explicit_target: Option<&str>,
     _transport: &dyn RunnerClientTransport,
 ) -> CliResult<String> {
-    if let Some(explicit) = explicit_target {
-        let trimmed = explicit.trim();
+    let validate_explicit = |raw: &str, label: &str| -> CliResult<String> {
+        let trimmed = raw.trim();
         if !af_release::lifecycle::validate_target_version(trimmed) {
             return Err(CliError::Validation(format!(
-                "invalid --target-version {:?} (must be a concrete version, commit SHA, or component manifest)",
-                explicit
+                "invalid {label} {:?} (must be a concrete version, commit SHA, or component manifest)",
+                raw
             )));
         }
         validate_cli_package_target_policy(global, pkg_id, "update", Some(trimmed))?;
-        return Ok(trimmed.to_string());
+        Ok(trimmed.to_string())
+    };
+
+    if let Some(explicit) = explicit_target {
+        return validate_explicit(explicit, "--target-version");
     }
 
     if let Ok(env_target) = std::env::var("AF_TARGET_VERSION") {
-        let trimmed = env_target.trim();
-        if !trimmed.is_empty() {
-            if !af_release::lifecycle::validate_target_version(trimmed) {
-                return Err(CliError::Validation(format!(
-                    "invalid AF_TARGET_VERSION {:?} (must be a concrete version, commit SHA, or component manifest)",
-                    env_target
-                )));
-            }
-            validate_cli_package_target_policy(global, pkg_id, "update", Some(trimmed))?;
-            return Ok(trimmed.to_string());
+        if !env_target.trim().is_empty() {
+            return validate_explicit(&env_target, "AF_TARGET_VERSION");
         }
     }
 

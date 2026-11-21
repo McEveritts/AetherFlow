@@ -1318,6 +1318,16 @@ pub fn normalize_version_str(s: &str) -> &str {
     normalize_version(s)
 }
 
+/// Extracts the raw candidate version token from `apt-cache policy` stdout.
+/// Returns `None` when no `Candidate:` line is present or the first candidate is empty / `(none)`.
+pub fn parse_apt_policy_candidate(stdout: &str) -> Option<&str> {
+    let candidate = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Candidate:"))?
+        .trim();
+    (!candidate.is_empty() && candidate != "(none)").then_some(candidate)
+}
+
 pub fn single_version_matches(achieved: &str, expected: &str) -> bool {
     let exp = expected.trim();
     let ach = achieved.trim();
@@ -4036,5 +4046,25 @@ mod tests {
         assert!(novnc_res.contains("novnc"));
         assert!(novnc_res.contains("novnc-xvnc"));
         assert!(novnc_res.contains("novnc-session"));
+    }
+
+    #[test]
+    fn parse_apt_policy_candidate_handles_revisions_none_and_first_entry() {
+        assert_eq!(
+            parse_apt_policy_candidate(
+                "plexmediaserver:\n  Installed: 1.40.0\n  Candidate: 2:2.53.0+ds-1~deb12u1\n  Version table:\n"
+            ),
+            Some("2:2.53.0+ds-1~deb12u1")
+        );
+        assert_eq!(
+            parse_apt_policy_candidate("pkg:\n  Installed: (none)\n  Candidate: (none)\n"),
+            None
+        );
+        assert_eq!(parse_apt_policy_candidate("pkg:\n  Candidate:   \n"), None);
+        assert_eq!(parse_apt_policy_candidate("pkg:\n  Installed: 1.0\n"), None);
+        assert_eq!(
+            parse_apt_policy_candidate("pkg:\n  Candidate: (none)\n  Candidate: 1.2.3\n"),
+            None
+        );
     }
 }

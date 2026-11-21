@@ -578,16 +578,9 @@ pub fn canonical_update_source_key(github_api_base: &str, pkg: &Package) -> Stri
             format!("github:{}|{}", api_base, repo.to_ascii_lowercase())
         }
         "git" | "git_tag" | "git_tags" | "git_commit" | "git_head" => {
-            let effective_remote = if !pkg.update_repo_url.trim().is_empty() {
-                normalize_git_remote_url_preserve_path_case(pkg.update_repo_url.trim())
-            } else if !pkg.update_repo.trim().is_empty() {
-                normalize_git_remote_url_preserve_path_case(&format!(
-                    "https://github.com/{}.git",
-                    pkg.update_repo.trim()
-                ))
-            } else {
-                String::new()
-            };
+            let effective_remote = resolve_git_remote_url(&pkg.update_repo_url, &pkg.update_repo)
+                .map(|url| normalize_git_remote_url_preserve_path_case(&url))
+                .unwrap_or_default();
             let repo_slug = pkg.update_repo.trim();
             format!("{}:{}|{}|{}", src, api_base, effective_remote, repo_slug)
         }
@@ -626,12 +619,7 @@ pub fn canonical_update_source_key(github_api_base: &str, pkg: &Package) -> Stri
             }
         }
     };
-    let channel = if pkg.update_channel.trim().is_empty() {
-        "stable"
-    } else {
-        pkg.update_channel.trim()
-    }
-    .to_ascii_lowercase();
+    let channel = normalize_update_channel(&pkg.update_channel);
     let full_key = format!("{}|{}", base_key, channel);
     af_release::lifecycle::sanitize_persisted_lifecycle_text(&full_key)
 }
@@ -706,14 +694,7 @@ pub fn get_cached_github_release_stale_for_channel(
     if clean_repo.is_empty() {
         return None;
     }
-    let effective_channel_owned = {
-        let t = channel.trim().to_ascii_lowercase();
-        if t.is_empty() {
-            "stable".to_string()
-        } else {
-            t
-        }
-    };
+    let effective_channel_owned = normalize_update_channel(channel);
     let effective_channel = effective_channel_owned.as_str();
     let cache_key =
         github_release_cache_key_for_channel(github_api_base, &clean_repo, effective_channel);
@@ -2925,6 +2906,119 @@ pub async fn detect_latest_piped_manifest() -> anyhow::Result<(String, String, S
     ))
 }
 
+fn normalize_update_channel(channel: &str) -> String {
+    let trimmed = channel.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        "stable".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn resolve_git_remote_url(repo_url: &str, repo: &str) -> Option<String> {
+    let url = repo_url.trim();
+    if !url.is_empty() {
+        return Some(url.to_string());
+    }
+    let slug = repo.trim();
+    if !slug.is_empty() {
+        return Some(format!("https://github.com/{slug}.git"));
+    }
+    None
+}
+
+fn extract_version_or_normalized(raw: &str) -> String {
+    let version = extract_version(raw, "");
+    if !version.is_empty() {
+        return version;
+    }
+    extract_version(af_release::lifecycle::normalize_version(raw), "")
+}
+
+fn build_github_api_get_request(
+    client: &reqwest::Client,
+    url: &str,
+    github_api_base: &str,
+) -> reqwest::RequestBuilder {
+    let mut req = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "AetherFlow-Updater");
+    if is_trusted_github_api_url(url, github_api_base) {
+        if let Ok(token) = env::var("AF_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")) {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {trimmed}"));
+            }
+        }
+    }
+    req
+}
+
+fn check_github_rate_limit_response(
+    github_api_base: &str,
+    clean_repo: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body_bytes: &[u8],
+) -> anyhow::Result<()> {
+    let rem_zero = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim() == "0")
+        .unwrap_or(false);
+    let ra_hdr = headers.get("retry-after").and_then(|v| v.to_str().ok());
+    let res_hdr = headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok());
+    let rb_hdr = headers
+        .get("x-ratelimit-resource")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let body_lower = String::from_utf8_lossy(body_bytes).to_ascii_lowercase();
+    let has_rate_limit = body_lower.contains("rate limit")
+        || body_lower.contains("secondary rate limit")
+        || body_lower.contains("abuse detection")
+        || body_lower.contains("too many requests");
+
+    let is_rate_limit_resp = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && (rem_zero || ra_hdr.is_some() || has_rate_limit));
+
+    if !is_rate_limit_resp {
+        return Ok(());
+    }
+
+    let mut cooldown = Duration::from_secs(60);
+    if let Some(retry_after) = ra_hdr {
+        if let Ok(secs) = retry_after.trim().parse::<u64>() {
+            cooldown = Duration::from_secs(secs.clamp(1, 3600));
+        }
+    } else if let Some(reset) = res_hdr {
+        if let Ok(reset_epoch) = reset.trim().parse::<i64>() {
+            let now_epoch = Utc::now().timestamp();
+            if reset_epoch > now_epoch {
+                let diff = (reset_epoch - now_epoch) as u64;
+                cooldown = Duration::from_secs(diff.clamp(1, 3600));
+            }
+        }
+    }
+
+    if let Some(res_b) = rb_hdr {
+        record_github_api_rate_limit(github_api_base, res_b, cooldown);
+    }
+    for bucket in ["releases", "tags", "commits", "core", "default"] {
+        record_github_api_rate_limit(github_api_base, bucket, cooldown);
+    }
+
+    anyhow::bail!(
+        "GitHub API rate limit exceeded for {clean_repo} (status {})",
+        status.as_u16()
+    );
+}
+
 pub(super) async fn detect_latest_version(
     client: &reqwest::Client,
     github_api_base: &str,
@@ -2974,16 +3068,11 @@ pub(super) async fn detect_latest_version(
     let (update_source, apt_package) = effective_update_source_and_apt_package(pkg);
     match update_source {
         "vendor" => Ok((String::new(), String::new(), Utc::now().to_rfc3339())),
-        "retired" | "legacy" | "pinned" => {
-            let ver = if !pkg.update_package.is_empty() {
-                pkg.update_package.clone()
-            } else if pkg.name == "readarr" {
-                "0.4.18.2805".to_string()
-            } else {
-                String::new()
-            };
-            Ok((ver, String::new(), Utc::now().to_rfc3339()))
-        }
+        "retired" | "legacy" | "pinned" => Ok((
+            pkg.update_package.clone(),
+            String::new(),
+            Utc::now().to_rfc3339(),
+        )),
         "pypi" => {
             let pypi_pkg = if pkg.name == "pyload" {
                 "pyload-ng"
@@ -3005,13 +3094,8 @@ pub(super) async fn detect_latest_version(
             .await
         }
         "git_tags" | "git" | "git_commit" | "git_head" => {
-            let repo_url = if !pkg.update_repo_url.is_empty() {
-                pkg.update_repo_url.clone()
-            } else if !pkg.update_repo.is_empty() {
-                format!("https://github.com/{}.git", pkg.update_repo)
-            } else {
-                String::new()
-            };
+            let repo_url =
+                resolve_git_remote_url(&pkg.update_repo_url, &pkg.update_repo).unwrap_or_default();
             if update_source == "git"
                 || update_source == "git_commit"
                 || update_source == "git_head"
@@ -3081,13 +3165,8 @@ pub async fn detect_latest_git_head(
     repo_url: &str,
     repo: &str,
 ) -> anyhow::Result<(String, String, String)> {
-    let url = if !repo_url.trim().is_empty() {
-        repo_url.trim().to_string()
-    } else if !repo.trim().is_empty() {
-        format!("https://github.com/{}.git", repo.trim())
-    } else {
-        anyhow::bail!("missing repository URL");
-    };
+    let url = resolve_git_remote_url(repo_url, repo)
+        .ok_or_else(|| anyhow::anyhow!("missing repository URL"))?;
 
     let cache_key = git_head_cache_key(repo_url, repo);
 
@@ -3160,17 +3239,10 @@ pub(super) async fn detect_latest_apt_version(
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Candidate:") {
-            let candidate = rest.trim();
-            if candidate != "(none)" && !candidate.is_empty() {
-                let version = normalize_tag_or_version_prefix(candidate).trim();
-                if !version.is_empty() {
-                    return Ok((version.to_string(), String::new(), Utc::now().to_rfc3339()));
-                }
-            }
-            break;
+    if let Some(candidate) = af_release::lifecycle::parse_apt_policy_candidate(&stdout) {
+        let version = normalize_tag_or_version_prefix(candidate).trim();
+        if !version.is_empty() {
+            return Ok((version.to_string(), String::new(), Utc::now().to_rfc3339()));
         }
     }
 
@@ -3212,14 +3284,7 @@ pub async fn detect_latest_github_release_for_channel(
     }
 
     let clean_repo = repo.trim();
-    let effective_channel_owned = {
-        let t = channel.trim().to_ascii_lowercase();
-        if t.is_empty() {
-            "stable".to_string()
-        } else {
-            t
-        }
-    };
+    let effective_channel_owned = normalize_update_channel(channel);
     let effective_channel = effective_channel_owned.as_str();
     let cache_key =
         github_release_cache_key_for_channel(github_api_base, clean_repo, effective_channel);
@@ -3251,26 +3316,10 @@ pub async fn detect_latest_github_release_for_channel(
 
     while page_count < MAX_RELEASE_PAGES {
         page_count += 1;
-        let mut req = client
-            .get(&current_url)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "AetherFlow-Updater");
-
-        if is_trusted_github_api_url(&current_url, github_api_base) {
-            if let Ok(token) = env::var("AF_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")) {
-                let trimmed = token.trim();
-                if !trimmed.is_empty() {
-                    req = req.header(
-                        reqwest::header::AUTHORIZATION,
-                        format!("Bearer {}", trimmed),
-                    );
-                }
-            }
-        }
-
-        let resp = req.send().await?;
+        let resp = build_github_api_get_request(client, &current_url, github_api_base)
+            .send()
+            .await?;
         let status = resp.status();
-        let status_code = status.as_u16();
 
         if page_count == 1 && status == reqwest::StatusCode::NOT_FOUND {
             let fb_url = format!(
@@ -3278,89 +3327,19 @@ pub async fn detect_latest_github_release_for_channel(
                 github_api_base.trim_end_matches('/'),
                 clean_repo
             );
-            let mut fb_req = client
-                .get(&fb_url)
-                .header("Accept", "application/vnd.github+json")
-                .header("User-Agent", "AetherFlow-Updater");
-            if is_trusted_github_api_url(&fb_url, github_api_base) {
-                if let Ok(token) = env::var("AF_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN"))
-                {
-                    let trimmed = token.trim();
-                    if !trimmed.is_empty() {
-                        fb_req = fb_req.header(
-                            reqwest::header::AUTHORIZATION,
-                            format!("Bearer {}", trimmed),
-                        );
-                    }
-                }
-            }
-            let fb_resp = fb_req.send().await?;
+            let fb_resp = build_github_api_get_request(client, &fb_url, github_api_base)
+                .send()
+                .await?;
             let fb_status = fb_resp.status();
-            let fb_rem_zero = fb_resp
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim() == "0")
-                .unwrap_or(false);
-            let fb_ra_hdr = fb_resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let fb_res_hdr = fb_resp
-                .headers()
-                .get("x-ratelimit-reset")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let fb_rb_hdr = fb_resp
-                .headers()
-                .get("x-ratelimit-resource")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
+            let fb_headers = fb_resp.headers().clone();
             let fb_bytes = fb_resp.bytes().await?;
-            let fb_str = String::from_utf8_lossy(&fb_bytes);
-            let fb_lower = fb_str.to_ascii_lowercase();
-            let fb_has_rate_limit = fb_lower.contains("rate limit")
-                || fb_lower.contains("secondary rate limit")
-                || fb_lower.contains("abuse detection")
-                || fb_lower.contains("too many requests");
-
-            let fb_is_rate_limit_resp = fb_status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || (fb_status == reqwest::StatusCode::FORBIDDEN
-                    && (fb_rem_zero || fb_ra_hdr.is_some() || fb_has_rate_limit));
-
-            if fb_is_rate_limit_resp {
-                let mut cooldown = Duration::from_secs(60);
-                if let Some(retry_after) = fb_ra_hdr.as_deref() {
-                    if let Ok(secs) = retry_after.trim().parse::<u64>() {
-                        cooldown = Duration::from_secs(secs.clamp(1, 3600));
-                    }
-                } else if let Some(reset) = fb_res_hdr.as_deref() {
-                    if let Ok(reset_epoch) = reset.trim().parse::<i64>() {
-                        let now_epoch = Utc::now().timestamp();
-                        if reset_epoch > now_epoch {
-                            let diff = (reset_epoch - now_epoch) as u64;
-                            cooldown = Duration::from_secs(diff.clamp(1, 3600));
-                        }
-                    }
-                }
-
-                if let Some(ref res_b) = fb_rb_hdr {
-                    record_github_api_rate_limit(github_api_base, res_b, cooldown);
-                }
-                record_github_api_rate_limit(github_api_base, "releases", cooldown);
-                record_github_api_rate_limit(github_api_base, "tags", cooldown);
-                record_github_api_rate_limit(github_api_base, "commits", cooldown);
-                record_github_api_rate_limit(github_api_base, "core", cooldown);
-                record_github_api_rate_limit(github_api_base, "default", cooldown);
-
-                anyhow::bail!(
-                    "GitHub API rate limit exceeded for {clean_repo} (status {})",
-                    fb_status.as_u16()
-                );
-            }
+            check_github_rate_limit_response(
+                github_api_base,
+                clean_repo,
+                fb_status,
+                &fb_headers,
+                &fb_bytes,
+            )?;
 
             if !fb_status.is_success() {
                 anyhow::bail!("GitHub API returned {}", fb_status);
@@ -3372,75 +3351,21 @@ pub async fn detect_latest_github_release_for_channel(
             break;
         }
 
-        let rem_zero = resp
-            .headers()
-            .get("x-ratelimit-remaining")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim() == "0")
-            .unwrap_or(false);
-        let ra_hdr = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let res_hdr = resp
-            .headers()
-            .get("x-ratelimit-reset")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let rb_hdr = resp
-            .headers()
-            .get("x-ratelimit-resource")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let link_hdr = resp
-            .headers()
+        let headers = resp.headers().clone();
+        let link_hdr = headers
             .get("link")
-            .or_else(|| resp.headers().get("Link"))
+            .or_else(|| headers.get("Link"))
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
         let body_bytes = resp.bytes().await?;
-        let body_str = String::from_utf8_lossy(&body_bytes);
-        let body_lower = body_str.to_ascii_lowercase();
-
-        let body_has_rate_limit = body_lower.contains("rate limit")
-            || body_lower.contains("secondary rate limit")
-            || body_lower.contains("abuse detection")
-            || body_lower.contains("too many requests");
-
-        let is_rate_limit_resp = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || (status == reqwest::StatusCode::FORBIDDEN
-                && (rem_zero || ra_hdr.is_some() || body_has_rate_limit));
-
-        if is_rate_limit_resp {
-            let mut cooldown = Duration::from_secs(60);
-            if let Some(retry_after) = ra_hdr.as_deref() {
-                if let Ok(secs) = retry_after.trim().parse::<u64>() {
-                    cooldown = Duration::from_secs(secs.clamp(1, 3600));
-                }
-            } else if let Some(reset) = res_hdr.as_deref() {
-                if let Ok(reset_epoch) = reset.trim().parse::<i64>() {
-                    let now_epoch = Utc::now().timestamp();
-                    if reset_epoch > now_epoch {
-                        let diff = (reset_epoch - now_epoch) as u64;
-                        cooldown = Duration::from_secs(diff.clamp(1, 3600));
-                    }
-                }
-            }
-
-            if let Some(ref res_b) = rb_hdr {
-                record_github_api_rate_limit(github_api_base, res_b, cooldown);
-            }
-            record_github_api_rate_limit(github_api_base, "releases", cooldown);
-            record_github_api_rate_limit(github_api_base, "tags", cooldown);
-            record_github_api_rate_limit(github_api_base, "commits", cooldown);
-            record_github_api_rate_limit(github_api_base, "core", cooldown);
-            record_github_api_rate_limit(github_api_base, "default", cooldown);
-
-            anyhow::bail!("GitHub API rate limit exceeded for {clean_repo} (status {status_code})");
-        }
+        check_github_rate_limit_response(
+            github_api_base,
+            clean_repo,
+            status,
+            &headers,
+            &body_bytes,
+        )?;
 
         if !status.is_success() {
             if page_count > 1 {
@@ -3506,11 +3431,7 @@ pub async fn detect_latest_github_release_for_channel(
         if is_stable && rel.prerelease {
             continue;
         }
-        let mut version = extract_version(&rel.tag_name, "");
-        if version.is_empty() {
-            let normalized_tag = af_release::lifecycle::normalize_version(&rel.tag_name);
-            version = extract_version(normalized_tag, "");
-        }
+        let version = extract_version_or_normalized(&rel.tag_name);
         if version.is_empty() {
             continue;
         }
@@ -3599,14 +3520,7 @@ pub fn tag_allowed_by_channel_for_source(
     channel: &str,
     update_source: &str,
 ) -> bool {
-    let effective_channel_owned = {
-        let t = channel.trim().to_ascii_lowercase();
-        if t.is_empty() {
-            "stable".to_string()
-        } else {
-            t
-        }
-    };
+    let effective_channel_owned = normalize_update_channel(channel);
     let effective_channel = effective_channel_owned.as_str();
 
     let is_pre = af_release::lifecycle::is_prerelease_version_for_channel_with_source(
@@ -3644,13 +3558,8 @@ pub async fn detect_latest_git_tag_for_channel(
     repo: &str,
     channel: &str,
 ) -> anyhow::Result<(String, String, String)> {
-    let clean_repo_url = if !repo_url.trim().is_empty() {
-        repo_url.trim().to_string()
-    } else if !repo.trim().is_empty() {
-        format!("https://github.com/{}.git", repo.trim())
-    } else {
-        anyhow::bail!("missing repository URL");
-    };
+    let clean_repo_url = resolve_git_remote_url(repo_url, repo)
+        .ok_or_else(|| anyhow::anyhow!("missing repository URL"))?;
 
     let mut command = Command::new("git");
     command.args(["ls-remote", "--tags", "--refs", clean_repo_url.trim()]);
@@ -3674,11 +3583,7 @@ pub async fn detect_latest_git_tag_for_channel(
             continue;
         };
         let ref_name = line[idx + 1..].trim();
-        let mut version = extract_version(ref_name, "");
-        if version.is_empty() {
-            let normalized = af_release::lifecycle::normalize_version(ref_name);
-            version = extract_version(normalized, "");
-        }
+        let version = extract_version_or_normalized(ref_name);
         if version.is_empty() {
             continue;
         }
