@@ -21,14 +21,18 @@ const FULL_PERMISSIONS = {
 };
 
 async function mountMcBrowserBaseRoutes(page: Page, entries: Array<Record<string, unknown>>) {
-  await page.route('**/api/v1/auth/mcbrowser/policy', (route) =>
-    json(route, {
+  await page.route(/\/api\/v1\/auth\/mcbrowser\/policy(?:\/1)?(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, {
       user_id: 1,
       scope: 'private',
       permissions: FULL_PERMISSIONS,
       rules: [],
-    }),
-  );
+    });
+  });
   await page.route('**/api/v1/auth/mcbrowser/usage', (route) =>
     json(route, { used_bytes: 1024 * 1024, quota_bytes: 10 * 1024 * 1024, status: 'ok' }),
   );

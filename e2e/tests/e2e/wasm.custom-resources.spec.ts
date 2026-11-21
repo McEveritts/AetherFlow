@@ -183,6 +183,10 @@ const networkStatusPath = '/api/v1/admin/network/status';
 const diagnosticsPath = '/api/v1/admin/network/diagnostics';
 
 test('Network replaces held diagnostics on provider and status refresh and cancels on tab exit', async ({ page }) => {
+  // Pause the 10s network status poll so exact diagnostics attempt counts observe
+  // only explicit provider changes, Refresh network clicks, and tab disposal.
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
+  await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installConnectedMocks(page);
   await trackReads(page, [diagnosticsPath]);
   const release = deferred();

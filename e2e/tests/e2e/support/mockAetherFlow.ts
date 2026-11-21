@@ -214,9 +214,11 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     await json(route, []);
   });
 
-  // StreamingTab mounts a live dashboard resource and 5s poll immediately.
-  // Keep it inside the mocked session instead of falling through to the
-  // isolated live server, whose unrelated cookies correctly return 401.
+  // StreamingTab mounts a live dashboard resource and 5s poll immediately, and
+  // CanonicalHistory mounts HistoryAnalytics (patterns + drilldown) as soon as
+  // a snapshot loads. Keep them inside the mocked session instead of falling
+  // through to the isolated live server, whose unrelated cookies return 401 and
+  // trigger session-expiry logout once >10s have elapsed since auth.
   await page.route(/\/api\/v1\/auth\/streaming\/dashboard(?:\?.*)?$/, async (route: Route) => {
     if (route.request().method() !== 'GET') {
       await route.fallback();
@@ -225,16 +227,49 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     await json(route, { servers: [], activeSessions: [], liveSummary: {}, analytics: {} });
   });
 
+  await page.route(/\/api\/v1\/auth\/streaming\/patterns(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, { activity: { timeseries: [] }, concurrency: { buckets: [] } });
+  });
+
+  await page.route(/\/api\/v1\/auth\/streaming\/drilldown(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, { cohortDistinctPlays: 0, cohortDistinctUsers: 0, cohortDistinctItems: 0 });
+  });
+
   // SettingsTab mounts SystemUpdates immediately on the default General subtab,
-  // which probes runner availability for administrators. Keep it inside the
-  // mocked session so it cannot fall through to the isolated live server, get
-  // HTTP 401, and trigger session-expiry revalidation or logout.
+  // and NetworkTab mounts ExternalAccessSettings (polling ingress configs and
+  // admin services every 15s). Keep them inside the mocked session so they
+  // cannot fall through to the isolated live server, get HTTP 401, and trigger
+  // session-expiry revalidation or logout.
   await page.route(/\/api\/v1\/admin\/network\/status(?:\?.*)?$/, async (route: Route) => {
     if (route.request().method() !== 'GET') {
       await route.fallback();
       return;
     }
     await json(route, { platform: 'linux', runner_available: false });
+  });
+
+  await page.route(/\/api\/v1\/admin\/ingress\/configs(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, { configs: [] });
+  });
+
+  await page.route(/\/api\/v1\/admin\/services(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, []);
   });
 
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/(check|status)/, async (route: Route) => {
