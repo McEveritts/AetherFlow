@@ -477,8 +477,8 @@ false || cleanup
             t.start()
             self.assertTrue(locked_evt.wait(timeout=2.0))
             self.assertEqual(mod.retain_logs(str(log_dir), max_bytes=256, keep=2), (1, []))
-            self.assertTrue(done_evt.is_set())
             t.join(timeout=2.0)
+            self.assertTrue(done_evt.is_set())
             archive_bytes = (log_dir / "install-sabnzbd.log.af-retention.1").read_bytes()
             self.assertIn(b"ACTIVE_INSTALL_LINE\n", archive_bytes)
 

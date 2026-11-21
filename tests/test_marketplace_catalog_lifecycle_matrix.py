@@ -933,11 +933,11 @@ stat() {
         command stat "$@"
     fi
 }
-if [[ "$AF_FIXTURE_APP" != prometheus ]]; then
-    github_latest_tag() { [[ "${3:-}" != false ]] || printf v; printf '%s\n' "$AF_FIXTURE_VERSION"; }
-fi
 get_base_domain() { printf 'fixture.example\n'; }
 seed_jellyfin_master_user() { :; }
+'''
+        if self.app != "prometheus":
+            overrides += r'''github_latest_tag() { [[ "${3:-}" != false ]] || printf v; printf '%s\n' "$AF_FIXTURE_VERSION"; }
 '''
         self.file("opt/AetherFlow/packages/common.sh", helpers + overrides)
         self.file("packages/common.sh", helpers + overrides)
@@ -1395,7 +1395,7 @@ restore_postgresql_database "$AF_FIXTURE_ROOT/database-backup" piped
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(plugin.exists())
 
-    def test_moving_release_receipts_use_installed_binary_version(self):
+    def test_release_receipts_verify_installed_versions(self):
         for app in ("lidarr", "jackett"):
             with self.subTest(app=app), InstallerFixture(app) as fixture:
                 for filename in ("release.tar.gz", "release.tar.xz"):
@@ -1407,7 +1407,14 @@ restore_postgresql_database "$AF_FIXTURE_ROOT/database-backup" piped
                                 content = b'#!/bin/sh\nprintf "2.1.0\\n"\n'
                                 entry.size = len(content)
                             archive.addfile(entry, io.BytesIO(content))
-                result = fixture.run(AF_FIXTURE_VERSION="9.9.9")
+                if app == "jackett":
+                    mismatch = fixture.run(AF_FIXTURE_VERSION="9.9.9")
+                    self.assertNotEqual(mismatch.returncode, 0, mismatch.stdout + mismatch.stderr)
+                    self.assertIn("Installed Jackett version does not match", mismatch.stderr)
+                    self.assertFalse(fixture.lock.exists())
+                    result = fixture.run()
+                else:
+                    result = fixture.run(AF_FIXTURE_VERSION="9.9.9")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 version_file = fixture.root / f"opt/{app.capitalize()}/.af-version"
                 self.assertEqual(version_file.read_text(), "2.1.0\n")

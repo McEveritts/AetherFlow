@@ -135,7 +135,7 @@ log_warn() { printf '%s\\n' "$*" >> "$LOGFILE"; }
 print_error() { printf '%s\\n' "$*" >&2; }
 print_warn() { printf '%s\\n' "$*" >&2; }
 report_progress() { printf '%s\\n' "$*" >> "$TEST_ROOT/progress"; }
-github_latest_tag() { printf '%s\\n' "${AF_TARGET_VERSION:-fixture-2.0}"; }
+github_latest_tag() { printf '%s\\n' "${AF_TARGET_VERSION:-$TEST_RELEASE_VERSION}"; }
 seed_servarr_master_user() { printf '%s\\n' "$*" >> "$TEST_ROOT/credentials-seed"; }
 write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
@@ -163,6 +163,8 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         (archive_root / 'release').write_text('new code')
         if package == 'readarr':
             (archive_root / 'Readarr.dll').write_text('0.4.12.2738\n')
+        if package == 'jackett':
+            (archive_root / 'jackett.deps.json').write_text(json.dumps({'libraries': {'jackett/2.1.0': {}}}))
         with tarfile.open(self.root / 'release.tar.gz', 'w:gz') as archive:
             if package in FLAT_ARCHIVES:
                 for entry in archive_root.iterdir():
@@ -221,6 +223,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         environment = {**os.environ, 'PATH': f'{self.root}/bin:{os.environ["PATH"]}',
                        'TEST_ROOT': str(self.root), 'TEST_APP': package,
                        'TEST_TITLE': title, 'TEST_EXECUTABLE': EXECUTABLES.get(package, title),
+                       'TEST_RELEASE_VERSION': '2.1.0' if package == 'jackett' else 'fixture-2.0',
                        'TEST_DATABASE': str(self.database_path(package)),
                        'TEST_EXECUTABLE_PATH': str(self.root / ('usr/local/bin/qui' if package == 'qui' else f'opt/{title}/{EXECUTABLES.get(package, title)}')),
                        'AETHERFLOW_SKIP_PROVENANCE_VERIFY': '1',
