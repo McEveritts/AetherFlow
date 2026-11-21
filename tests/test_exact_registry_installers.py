@@ -1128,6 +1128,8 @@ if sub == "is-active":
     if "--quiet" not in args and "-q" not in args:
         print("active" if active else "inactive")
     sys.exit(0 if active else 3)
+if sub == "is-enabled":
+    sys.exit(0 if all((root / f"enabled-{u}").exists() for u in units) else 1)
 if sub == "show":
     unit = units[0] if units else ""
     active = (root / f"active-{unit}").exists()
@@ -1357,6 +1359,25 @@ sys.exit(0)
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
         retained = root / "var/lib/unmanic/.unmanic/userdata/library.db"
         retained.write_text("active-service-data\n")
+
+        enabled = root / "enabled-unmanic"
+        active = root / "active-unmanic"
+        enabled.unlink()
+        active.unlink()
+        inactive_failure = self.run_sandbox(
+            root,
+            script,
+            AF_TARGET_VERSION="0.4.1",
+            MOCK_HTTP_READY_FAIL="1",
+        )
+        self.assertNotEqual(inactive_failure.returncode, 0)
+        self.assertNotIn("Rollback incomplete", inactive_failure.stderr)
+        self.assertFalse(active.exists())
+        self.assertFalse(enabled.exists())
+        self.assertEqual((root / "opt/unmanic/.af-version").read_text().strip(), "0.4.0.post32")
+        self.assertEqual(retained.read_text(), "active-service-data\n")
+        active.touch()
+        enabled.touch()
 
         mark = len(self.read_commands(root))
         upg_fail = self.run_sandbox(

@@ -76,9 +76,12 @@ RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-runtime-")"
 RUNTIME_PATHS=("/opt/unmanic" "/var/lib/unmanic" "/etc/systemd/system/unmanic.service")
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_WAS_ACTIVE=0
+RUNTIME_WAS_ENABLED=0
 RUNTIME_QUIESCE_STARTED=0
 RUNTIME_MUTATED=0
+RUNTIME_ENABLE_ATTEMPTED=0
 if systemctl is-active --quiet unmanic 2>/dev/null; then RUNTIME_WAS_ACTIVE=1; fi
+if systemctl is-enabled --quiet unmanic 2>/dev/null; then RUNTIME_WAS_ENABLED=1; fi
 if [[ -e "/opt/unmanic" || -f /etc/systemd/system/unmanic.service || "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
     RUNTIME_HAD_PREVIOUS=true
 fi
@@ -88,11 +91,9 @@ rollback_runtime() {
     set +e
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
         quiesce_services_for_rollback unmanic || { restore_failed=true; exit 1; }
-        if [[ "$RUNTIME_HAD_PREVIOUS" != true ]]; then
-            if [[ -e "$SERVICE_FILE" || -L "$SERVICE_FILE" ]] || ! systemd_unit_inactive unmanic true; then
-                if ! af_logged systemctl disable unmanic; then
-                    systemd_unit_inactive unmanic true || restore_failed=true
-                fi
+        if [[ "$RUNTIME_ENABLE_ATTEMPTED" -eq 1 && "$RUNTIME_WAS_ENABLED" -eq 0 ]]; then
+            if ! af_logged systemctl disable unmanic; then
+                systemd_unit_inactive unmanic true || restore_failed=true
             fi
         fi
         for runtime_index in "${!RUNTIME_PATHS[@]}"; do
@@ -279,6 +280,7 @@ EOF
 chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
+RUNTIME_ENABLE_ATTEMPTED=1
 af_logged systemctl enable --now unmanic.service
 
 af_logged systemctl restart unmanic
