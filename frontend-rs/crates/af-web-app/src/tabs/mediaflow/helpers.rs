@@ -1,5 +1,69 @@
 use super::*;
 
+pub(super) const DEFAULT_SCAN_DIRECTORY: &str = "/mnt";
+
+pub(super) fn is_terminal_mediaflow_event(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "complete"
+            | "completed"
+            | "failed"
+            | "error"
+            | "success"
+            | "done"
+            | "cancelled"
+            | "needs_rescan"
+    )
+}
+
+pub(super) fn queue_status_tone(status: &str) -> &'static str {
+    match status {
+        "COMPLETED" => "success",
+        "FAILED" => "danger",
+        "PENDING_APPROVAL" | "NEEDS_RESCAN" | "CANCELLED" => "warning",
+        "APPROVED" | "PROCESSING" => "indigo",
+        _ => "",
+    }
+}
+
+pub(super) fn source_fingerprint(value: &Value) -> Option<String> {
+    value["sourceFingerprint"]
+        .as_str()
+        .or_else(|| value["source_fingerprint"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) fn short_source_fingerprint(value: &Value) -> Option<String> {
+    let raw = source_fingerprint(value)?;
+    let trimmed = raw.strip_prefix("v1:").unwrap_or(&raw);
+    if let Some(hex_part) = trimmed.strip_prefix("sha256:") {
+        let short: String = hex_part.chars().take(12).collect();
+        return Some(format!("sha256:{short}"));
+    }
+    Some(trimmed.chars().take(16).collect())
+}
+
+pub(super) fn approve_payload_for_row(row: &Value) -> Option<Value> {
+    source_fingerprint(row).map(|fp| json!({ "sourceFingerprint": fp }))
+}
+
+pub(super) fn decision_endpoint_and_payload(
+    id: i64,
+    verb: &str,
+    row: &Value,
+) -> (String, Option<Value>) {
+    if verb == "approve" {
+        (
+            format!("/api/v1/admin/mediaflow/approve/{id}"),
+            approve_payload_for_row(row),
+        )
+    } else {
+        (format!("/api/v1/admin/mediaflow/decline/{id}"), None)
+    }
+}
+
 pub(super) fn format_live_transcode_metrics(locale: &str, item: &MediaFlowLiveProgress) -> String {
     af_web_core::i18n::translate_with(
         locale,

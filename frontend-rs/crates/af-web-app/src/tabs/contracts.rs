@@ -594,6 +594,16 @@ pub struct MediaFlowQueueRecord {
     pub original_size: Option<f64>,
     #[serde(rename = "newSize", alias = "new_size", deserialize_with = "number")]
     pub new_size: Option<f64>,
+    #[serde(rename = "sourceFingerprint", alias = "source_fingerprint")]
+    pub source_fingerprint: Option<String>,
+    #[serde(
+        rename = "sourceSize",
+        alias = "source_size",
+        deserialize_with = "number"
+    )]
+    pub source_size: Option<f64>,
+    #[serde(rename = "identityBound", alias = "identity_bound")]
+    pub identity_bound: Option<bool>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

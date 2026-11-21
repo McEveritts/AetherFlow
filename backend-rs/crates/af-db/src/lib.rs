@@ -1500,9 +1500,58 @@ pub fn init_db() -> anyhow::Result<()> {
         "Local AI settings migration v23 failed"
     );
 
+    migrate(
+        &conn,
+        24,
+        "Persist MediaFlow source identity and scope uniqueness to active queue rows",
+        &[
+            r#"CREATE TABLE IF NOT EXISTS mediaflow_queue_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                status TEXT DEFAULT 'PENDING_APPROVAL',
+                original_codec TEXT DEFAULT '',
+                original_size INTEGER DEFAULT 0,
+                new_codec TEXT DEFAULT '',
+                new_size INTEGER DEFAULT 0,
+                error_log TEXT DEFAULT '',
+                source_dev INTEGER,
+                source_ino INTEGER,
+                source_size INTEGER,
+                source_mtime_sec INTEGER,
+                source_mtime_nsec INTEGER,
+                source_fingerprint TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );"#,
+            r#"INSERT INTO mediaflow_queue_v2 (
+                id, file_path, status, original_codec, original_size,
+                new_codec, new_size, error_log, created_at, updated_at
+            )
+            SELECT
+                id, file_path, status, original_codec, original_size,
+                new_codec, new_size, error_log, created_at, updated_at
+            FROM mediaflow_queue;"#,
+            "DROP TABLE mediaflow_queue;",
+            "ALTER TABLE mediaflow_queue_v2 RENAME TO mediaflow_queue;",
+            "CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status);",
+            "CREATE INDEX IF NOT EXISTS idx_mediaflow_file_path ON mediaflow_queue(file_path);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mediaflow_active_file_path ON mediaflow_queue(file_path) WHERE status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING');",
+        ],
+    )?;
+    let mediaflow_identity_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 24",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        mediaflow_identity_migration == 1,
+        "MediaFlow source identity migration v24 failed"
+    );
+
     ensure_security_schema_invariants(&conn)?;
     ensure_notification_schema_invariants(&conn)?;
     ensure_pending_actions_schema_invariants(&conn)?;
+    ensure_mediaflow_schema_invariants(&conn)?;
     ensure_column(
         &conn,
         "base_domain_sync_state",
@@ -1684,6 +1733,168 @@ fn ensure_pending_actions_schema_invariants(conn: &Connection) -> anyhow::Result
     ensure_column(conn, "pending_actions", "job_unit", "TEXT")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_actions_job_unit ON pending_actions(job_unit)",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn ensure_mediaflow_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mediaflow_queue')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !table_exists {
+        conn.execute_batch(
+            r#"CREATE TABLE IF NOT EXISTS mediaflow_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                status TEXT DEFAULT 'PENDING_APPROVAL',
+                original_codec TEXT DEFAULT '',
+                original_size INTEGER DEFAULT 0,
+                new_codec TEXT DEFAULT '',
+                new_size INTEGER DEFAULT 0,
+                error_log TEXT DEFAULT '',
+                source_dev INTEGER,
+                source_ino INTEGER,
+                source_size INTEGER,
+                source_mtime_sec INTEGER,
+                source_mtime_nsec INTEGER,
+                source_fingerprint TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );"#,
+        )?;
+    }
+
+    let has_table_unique: bool = {
+        let mut stmt = conn.prepare("PRAGMA index_list(mediaflow_queue)")?;
+        let mut found = false;
+        let rows = stmt.query_map([], |row| {
+            let unique: i64 = row.get(2)?;
+            let origin: String = row.get(3)?;
+            let partial: i64 = row.get(4)?;
+            Ok((unique, origin, partial))
+        })?;
+        for item in rows.flatten() {
+            if item.0 == 1 && (item.1 == "u" || item.2 == 0) {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+
+    if has_table_unique {
+        run_atomic_migration_tx(conn, |tx_conn| {
+            let existing_cols: std::collections::HashSet<String> = {
+                let mut stmt = tx_conn.prepare("PRAGMA table_info(mediaflow_queue)")?;
+                let cols = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(Result::ok)
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect();
+                cols
+            };
+            let opt_col = |name: &str, fallback: &str| -> String {
+                if existing_cols.contains(name) {
+                    name.to_string()
+                } else {
+                    fallback.to_string()
+                }
+            };
+            let select_sql = format!(
+                "INSERT INTO mediaflow_queue_v2 (
+                    id, file_path, status, original_codec, original_size,
+                    new_codec, new_size, error_log,
+                    source_dev, source_ino, source_size,
+                    source_mtime_sec, source_mtime_nsec, source_fingerprint,
+                    created_at, updated_at
+                )
+                SELECT
+                    id, file_path, status, original_codec, original_size,
+                    new_codec, new_size, error_log,
+                    {}, {}, {}, {}, {}, {},
+                    created_at, updated_at
+                FROM mediaflow_queue;",
+                opt_col("source_dev", "NULL"),
+                opt_col("source_ino", "NULL"),
+                opt_col("source_size", "NULL"),
+                opt_col("source_mtime_sec", "NULL"),
+                opt_col("source_mtime_nsec", "NULL"),
+                opt_col("source_fingerprint", "''"),
+            );
+            tx_conn.execute_batch(
+                r#"DROP TABLE IF EXISTS mediaflow_queue_v2;
+                CREATE TABLE mediaflow_queue_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    status TEXT DEFAULT 'PENDING_APPROVAL',
+                    original_codec TEXT DEFAULT '',
+                    original_size INTEGER DEFAULT 0,
+                    new_codec TEXT DEFAULT '',
+                    new_size INTEGER DEFAULT 0,
+                    error_log TEXT DEFAULT '',
+                    source_dev INTEGER,
+                    source_ino INTEGER,
+                    source_size INTEGER,
+                    source_mtime_sec INTEGER,
+                    source_mtime_nsec INTEGER,
+                    source_fingerprint TEXT NOT NULL DEFAULT '',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );"#,
+            )?;
+            tx_conn.execute_batch(&select_sql)?;
+            tx_conn.execute_batch(
+                "DROP TABLE mediaflow_queue;
+                 ALTER TABLE mediaflow_queue_v2 RENAME TO mediaflow_queue;",
+            )?;
+            Ok(())
+        })?;
+    }
+
+    ensure_column(conn, "mediaflow_queue", "source_dev", "INTEGER")?;
+    ensure_column(conn, "mediaflow_queue", "source_ino", "INTEGER")?;
+    ensure_column(conn, "mediaflow_queue", "source_size", "INTEGER")?;
+    ensure_column(conn, "mediaflow_queue", "source_mtime_sec", "INTEGER")?;
+    ensure_column(conn, "mediaflow_queue", "source_mtime_nsec", "INTEGER")?;
+    ensure_column(
+        conn,
+        "mediaflow_queue",
+        "source_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+
+    // Deduplicate any pre-existing duplicate active rows before creating the partial unique index.
+    conn.execute(
+        "UPDATE mediaflow_queue
+         SET status = 'SUPERSEDED',
+             error_log = CASE
+                 WHEN COALESCE(error_log, '') = '' THEN 'Superseded duplicate active queue entry during schema migration'
+                 ELSE error_log
+             END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING')
+           AND id NOT IN (
+               SELECT MAX(id)
+               FROM mediaflow_queue
+               WHERE status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING')
+               GROUP BY file_path
+           )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mediaflow_file_path ON mediaflow_queue(file_path)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mediaflow_active_file_path ON mediaflow_queue(file_path) WHERE status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING')",
         [],
     )?;
     Ok(())
@@ -4221,5 +4432,63 @@ mod pending_action_query_tests {
             }
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mediaflow_schema_migration_preserves_legacy_rows_and_allows_replaced_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Simulate a legacy v16 database where file_path is globally UNIQUE and no source_* columns exist.
+        conn.execute_batch(
+            r#"CREATE TABLE mediaflow_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT UNIQUE NOT NULL,
+                status TEXT DEFAULT 'PENDING_APPROVAL',
+                original_codec TEXT DEFAULT '',
+                original_size INTEGER DEFAULT 0,
+                new_codec TEXT DEFAULT '',
+                new_size INTEGER DEFAULT 0,
+                error_log TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO mediaflow_queue (id, file_path, status, original_codec, original_size)
+            VALUES
+                (1, '/mnt/media/old_completed.mp4', 'COMPLETED', 'h264', 1000),
+                (2, '/mnt/media/old_declined.mp4', 'DECLINED', 'h264', 2000),
+                (3, '/mnt/media/old_pending.mp4', 'PENDING_APPROVAL', 'h264', 3000);"#,
+        )
+        .unwrap();
+
+        ensure_mediaflow_schema_invariants(&conn).unwrap();
+        // Second invocation must be an idempotent no-op.
+        ensure_mediaflow_schema_invariants(&conn).unwrap();
+
+        // All legacy rows preserved with NULL/empty identity columns.
+        let (path, status, fp): (String, String, String) = conn
+            .query_row(
+                "SELECT file_path, status, source_fingerprint FROM mediaflow_queue WHERE id = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(path, "/mnt/media/old_declined.mp4");
+        assert_eq!(status, "DECLINED");
+        assert!(fp.is_empty());
+
+        // Genuinely new file at an old terminal path (DECLINED) can now be enqueued alongside history.
+        conn.execute(
+            "INSERT INTO mediaflow_queue (file_path, status, original_codec, original_size, source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, source_fingerprint)
+             VALUES ('/mnt/media/old_declined.mp4', 'PENDING_APPROVAL', 'h264', 4096, 1, 99, 4096, 1700000000, 123, 'v1:sha256:newfile')",
+            [],
+        )
+        .unwrap();
+
+        // Duplicate active row for the same path must still be rejected atomically by SQLite.
+        let dup_active = conn.execute(
+            "INSERT INTO mediaflow_queue (file_path, status, original_codec, original_size, source_fingerprint)
+             VALUES ('/mnt/media/old_declined.mp4', 'APPROVED', 'h264', 4096, 'v1:sha256:dup')",
+            [],
+        );
+        assert!(dup_active.is_err());
     }
 }

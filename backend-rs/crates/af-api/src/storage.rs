@@ -3143,7 +3143,14 @@ pub(crate) fn is_terminal_deploy_event(msg: &str) -> bool {
         if let Some(status) = val.get("status").and_then(|v| v.as_str()) {
             return matches!(
                 status.to_ascii_lowercase().as_str(),
-                "complete" | "completed" | "failed" | "error" | "success" | "done"
+                "complete"
+                    | "completed"
+                    | "failed"
+                    | "error"
+                    | "success"
+                    | "done"
+                    | "cancelled"
+                    | "needs_rescan"
             );
         }
     }

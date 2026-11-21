@@ -35,7 +35,15 @@ const EMBEDDED_AUTOMATION_JSON: &str = include_str!("../../../../config/package_
 
 mod package_jobs;
 pub use package_jobs::*;
-pub use workers::{publish_mediaflow_progress, subscribe_mediaflow_progress};
+pub use workers::{
+    cancel_inflight_mediaflow_job, is_path_within_allowed_mediaflow_roots, mediaflow_allowed_roots,
+    mediaflow_allowed_roots_from_raw, open_and_pin_mediaflow_source,
+    open_and_pin_mediaflow_source_in_roots, parse_stored_mediaflow_identity,
+    publish_mediaflow_progress, subscribe_mediaflow_progress, CancelInflightOutcome,
+    MediaflowSourceIdentity, PinnedMediaflowSource, DEFAULT_MEDIAFLOW_ROOTS,
+    MEDIAFLOW_CANCELLED_MSG, MEDIAFLOW_MISSING_IDENTITY_MSG,
+    MEDIAFLOW_SOURCE_CHANGED_BEFORE_EXEC_MSG, MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG,
+};
 
 // Shared with health recovery and API controls. Cross-process exclusion lives
 // in the runner's maintenance lock, since an API mutex cannot survive restart.

@@ -195,6 +195,23 @@ fn mediaflow_contracts_preserve_service_and_queue_extensions() {
     value["future"] = json!("kept");
     let decoded: MediaFlowQueueSummary = serde_json::from_value(value).unwrap();
     assert_eq!(decoded.extra["future"], "kept");
+
+    let record: MediaFlowQueueRecord = serde_json::from_value(json!({
+        "status": "PENDING_APPROVAL",
+        "originalSize": 2048,
+        "sourceFingerprint": "v1:sha256:abcdef012345",
+        "sourceSize": 2048,
+        "identityBound": true,
+        "future": "retained"
+    }))
+    .unwrap();
+    assert_eq!(
+        record.source_fingerprint.as_deref(),
+        Some("v1:sha256:abcdef012345")
+    );
+    assert_eq!(record.source_size, Some(2048.0));
+    assert_eq!(record.identity_bound, Some(true));
+    assert_eq!(record.extra["future"], "retained");
 }
 
 #[test]

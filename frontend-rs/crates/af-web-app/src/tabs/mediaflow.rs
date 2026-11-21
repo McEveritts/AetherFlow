@@ -388,7 +388,7 @@ fn MediaflowQueue(
     let queue = use_api(Signal::derive(|| {
         "/api/v1/admin/mediaflow/queue".to_string()
     }));
-    let directory = RwSignal::new("/home/hdd".to_string());
+    let directory = RwSignal::new(DEFAULT_SCAN_DIRECTORY.to_string());
     let progress = RwSignal::new(Value::Null);
     let connected = RwSignal::new(false);
     let stream_error = RwSignal::new(None::<String>);
@@ -421,14 +421,8 @@ fn MediaflowQueue(
                 .and_then(|e| e.data().as_string())
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             {
-                let terminal = matches!(
-                    data["status"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "complete" | "completed" | "failed" | "error" | "success" | "done"
-                );
+                let terminal =
+                    is_terminal_mediaflow_event(data["status"].as_str().unwrap_or_default());
                 progress.set(data);
                 connected.set(!terminal);
                 stream_error.set(None);
@@ -491,36 +485,39 @@ fn MediaflowQueue(
         if busy.get_untracked() || !context.is_admin() {
             return;
         }
-        let Some((id, verb, _)) = candidate.get_untracked() else {
+        let Some((id, verb, row)) = candidate.get_untracked() else {
             return;
         };
+        let (endpoint, payload) = decision_endpoint_and_payload(id, &verb, &row);
         busy.set(true);
         spawn_local(async move {
-            let result = ApiClient
-                .post(&format!("/api/v1/admin/mediaflow/{verb}/{id}"), None)
-                .await;
+            let result = ApiClient.post(&endpoint, payload.as_ref()).await;
             if busy.try_get_untracked().is_none() {
                 return;
             }
             match result {
-                Ok(_) => {
+                Ok(data) => {
                     if verb == "approve" {
                         stream_requested.set(true);
                     }
-                    context.toast(
-                        tt(
-                            context,
-                            if verb == "approve" {
-                                "Transcode approved and queued."
-                            } else {
-                                "Transcode declined."
-                            },
-                        ),
-                        false,
-                    );
+                    let fallback = if verb == "approve" {
+                        "Transcode approved and queued."
+                    } else if verb == "cancel" {
+                        "Transcode cancelled."
+                    } else {
+                        "Transcode declined."
+                    };
+                    let msg = data["message"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or(fallback);
+                    context.toast(tt(context, msg), false);
                     queue.refresh();
                 }
-                Err(e) => context.toast(tt(context, &e.message), true),
+                Err(e) => {
+                    context.toast(tt(context, &e.message), true);
+                    queue.refresh();
+                }
             }
             busy.set(false);
             confirm.set(false);
@@ -660,14 +657,20 @@ fn MediaflowQueue(
                             .into_iter()
                             .map(|row| {
                                 let id = row["id"].as_i64();
+                                let status = text(&row, "status");
+                                let fp_short = short_source_fingerprint(&row);
                                 let approval = row.clone();
                                 let rejection = row.clone();
+                                let cancellation = row.clone();
                                 view! {
                                     <article class="p-4 border border-white/10 rounded-xl space-y-2">
                                         <p class="text-sm font-semibold break-all">
                                             {text(&row, "filePath")}
                                         </p>
-                                        <Badge label=text(&row, "status") />
+                                        <Badge
+                                            label=status.clone()
+                                            tone=queue_status_tone(&status)
+                                        />
                                         <p class="text-xs text-slate-400">
                                             {format!(
                                                 "{} ({}) → {} ({}) · {}",
@@ -678,10 +681,17 @@ fn MediaflowQueue(
                                                 text(&row, "createdAt"),
                                             )}
                                         </p>
+                                        {fp_short.map(|fp| {
+                                            view! {
+                                                <p class="text-xs text-slate-500 font-mono break-all">
+                                                    {format!("Source: {fp}")}
+                                                </p>
+                                            }
+                                        })}
                                         <p class="text-xs text-rose-300 break-words">
                                             {text(&row, "errorLog")}
                                         </p>
-                                        {(row["status"] == "PENDING_APPROVAL")
+                                        {(status == "PENDING_APPROVAL")
                                             .then(|| {
                                                 view! {
                                                     <div class="flex gap-3">
@@ -712,6 +722,25 @@ fn MediaflowQueue(
                                                     </div>
                                                 }
                                             })}
+                                        {(status == "APPROVED" || status == "PROCESSING")
+                                            .then(|| {
+                                                view! {
+                                                    <div class="flex gap-3">
+                                                        <button
+                                                            class="glass-button px-4 py-2"
+                                                            disabled=move || busy.get() || id.is_none()
+                                                            on:click=move |_| {
+                                                                candidate.set(id.map(|id| {
+                                                                    (id, "cancel".into(), cancellation.clone())
+                                                                }));
+                                                                confirm.set(true);
+                                                            }
+                                                        >
+                                                            {move || tt(context, "Cancel")}
+                                                        </button>
+                                                    </div>
+                                                }
+                                            })}
                                     </article>
                                 }
                             })
@@ -722,7 +751,31 @@ fn MediaflowQueue(
                     let selected = candidate.get();
                     let message = selected
                         .map(|(id, verb, row)| {
-                            tt_with(context, "{verb} job #{id}: {path}. Codec {source} → {target}. Approval queues this file for transcoding; decline rejects this candidate.", &[("verb", &(tt(context, &(verb).to_string())).to_string()), ("id", &(id).to_string()), ("path", &(text(&row, "filePath")).to_string()), ("source", &(tt(context, &(text(&row, "originalCodec")).to_string())).to_string()), ("target", &(text(&row, "newCodec")).to_string())])
+                            if verb == "cancel" {
+                                format!(
+                                    "Cancel job #{id}: {}. In-flight transcodes stop without publishing or modifying the source file.",
+                                    text(&row, "filePath")
+                                )
+                            } else {
+                                let base = tt_with(
+                                    context,
+                                    "{verb} job #{id}: {path}. Codec {source} → {target}. Approval queues this file for transcoding; decline rejects this candidate.",
+                                    &[
+                                        ("verb", &(tt(context, &(verb).to_string())).to_string()),
+                                        ("id", &(id).to_string()),
+                                        ("path", &(text(&row, "filePath")).to_string()),
+                                        (
+                                            "source",
+                                            &(tt(context, &(text(&row, "originalCodec")).to_string())).to_string(),
+                                        ),
+                                        ("target", &(text(&row, "newCodec")).to_string()),
+                                    ],
+                                );
+                                match short_source_fingerprint(&row) {
+                                    Some(fp) => format!("{base} ({fp})"),
+                                    None => base,
+                                }
+                            }
                         })
                         .unwrap_or_default();
                     view! {

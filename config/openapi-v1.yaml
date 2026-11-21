@@ -1130,6 +1130,8 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []
       parameters:
@@ -1150,7 +1152,7 @@ paths:
     post:
       tags:
         - Marketplace
-      summary: Execute mediaflow decline
+      summary: Execute mediaflow decline or cancel
       responses:
         '200':
           description: OK
@@ -1161,6 +1163,8 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
         '403':
+          $ref: '#/components/responses/Error'
+        '409':
           $ref: '#/components/responses/Error'
       security:
         - cookieAuth: []

@@ -4574,11 +4574,7 @@ async fn test_mediaflow_progress_broadcast_and_empty_output_preserves_source() {
 
     {
         let conn = af_db::get_conn().unwrap();
-        conn.execute(
-            "INSERT INTO mediaflow_queue (file_path, original_codec, original_size, status) VALUES (?1, 'h264', 20, 'APPROVED')",
-            params![src_file.to_string_lossy().to_string()],
-        )
-        .unwrap();
+        insert_pinned_mediaflow_approved(&conn, None, &src_file);
     }
 
     let mut rx = subscribe_mediaflow_progress();
@@ -4777,11 +4773,7 @@ async fn test_mediaflow_mid_transcode_source_replacement_preserves_replacement_u
 
     {
         let conn = af_db::get_conn().unwrap();
-        conn.execute(
-            "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (1, ?1, 'h264', 25, 'APPROVED')",
-            params![src_file.to_string_lossy().to_string()],
-        )
-        .unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(1), &src_file);
     }
 
     assert!(process_next_mediaflow_job().await);
@@ -4822,11 +4814,7 @@ async fn test_mediaflow_mid_transcode_source_replacement_preserves_replacement_u
     let orig_ino = fs::symlink_metadata(&src_ok).unwrap().ino();
     {
         let conn = af_db::get_conn().unwrap();
-        conn.execute(
-            "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (2, ?1, 'h264', 25, 'APPROVED')",
-            params![src_ok.to_string_lossy().to_string()],
-        )
-        .unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(2), &src_ok);
     }
     assert!(process_next_mediaflow_job().await);
     assert!(!src_ok.exists());
@@ -4973,11 +4961,7 @@ async fn test_mediaflow_3yr_mtime_retention_sigpipe_large_stderr_0644_perms_and_
 
     {
         let conn = af_db::get_conn().unwrap();
-        conn.execute(
-            "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (10, ?1, 'h264', 28, 'APPROVED')",
-            params![src_vintage.to_string_lossy().to_string()],
-        )
-        .unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(10), &src_vintage);
     }
 
     assert!(process_next_mediaflow_job().await);
@@ -5043,14 +5027,15 @@ async fn test_mediaflow_3yr_mtime_retention_sigpipe_large_stderr_0644_perms_and_
     let intent_file = root.join("media/.mediaflow_trash/.publish_intent_11.json");
     fs::write(&recovered_pub, b"completed-before-sqlite-crash").unwrap();
     fs::write(&recovered_trash, b"original-in-trash").unwrap();
+    // Legacy publish intent JSON without `source_fingerprint` must still recover cleanly.
     fs::write(
         &intent_file,
-        serde_json::to_vec(&MediaflowPublishIntent {
-            job_id: 11,
-            published_path: recovered_pub.to_string_lossy().to_string(),
-            trash_entry_name: "11_crash_window.mp4".to_string(),
-            new_size: 29,
-        })
+        serde_json::to_vec(&serde_json::json!({
+            "job_id": 11,
+            "published_path": recovered_pub.to_string_lossy().to_string(),
+            "trash_entry_name": "11_crash_window.mp4",
+            "new_size": 29
+        }))
         .unwrap(),
     )
     .unwrap();
@@ -5146,4 +5131,436 @@ fn test_smart_backup_optimal_window_telemetry_and_utc_hour_alignment() {
         .with_timezone(&Utc);
     let next_tomorrow = compute_next_optimal_backup_at(now_too_close, 5);
     assert_eq!(next_tomorrow.to_rfc3339(), "2026-11-21T05:00:00+00:00");
+}
+
+fn insert_pinned_mediaflow_approved(
+    conn: &rusqlite::Connection,
+    id: Option<i64>,
+    file_path: &Path,
+) {
+    let pinned = open_and_pin_mediaflow_source(&file_path.to_string_lossy()).unwrap();
+    let ident = &pinned.identity;
+    let size = i64::try_from(ident.size).unwrap();
+    if let Some(job_id) = id {
+        conn.execute(
+            "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status, source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, source_fingerprint)
+             VALUES (?1, ?2, 'h264', ?3, 'APPROVED', ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                job_id,
+                pinned.canon_src.to_string_lossy().to_string(),
+                size,
+                ident.dev as i64,
+                ident.ino as i64,
+                size,
+                ident.mtime_sec,
+                ident.mtime_nsec,
+                ident.fingerprint,
+            ],
+        )
+        .unwrap();
+    } else {
+        conn.execute(
+            "INSERT INTO mediaflow_queue (file_path, original_codec, original_size, status, source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, source_fingerprint)
+             VALUES (?1, 'h264', ?2, 'APPROVED', ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                pinned.canon_src.to_string_lossy().to_string(),
+                size,
+                ident.dev as i64,
+                ident.ino as i64,
+                size,
+                ident.mtime_sec,
+                ident.mtime_nsec,
+                ident.fingerprint,
+            ],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn test_mediaflow_default_roots_align_with_systemd_and_retain_explicit_overrides() {
+    assert_eq!(
+        DEFAULT_MEDIAFLOW_ROOTS,
+        &["/mnt", "/media", "/srv", "/data"]
+    );
+    assert!(!DEFAULT_MEDIAFLOW_ROOTS.contains(&"/home"));
+
+    let default_roots = mediaflow_allowed_roots_from_raw(None);
+    let blank_roots = mediaflow_allowed_roots_from_raw(Some("   "));
+    assert_eq!(default_roots, blank_roots);
+    if let Ok(canon_home) = fs::canonicalize("/home") {
+        assert!(
+            !default_roots.contains(&canon_home),
+            "/home must not be a default MediaFlow candidate root under ProtectHome=read-only"
+        );
+    }
+
+    let tmp = env::temp_dir().join(format!("af-mf-roots-{}", uuid::Uuid::new_v4()));
+    let valid_a = tmp.join("custom-a");
+    let valid_b = tmp.join("custom-b");
+    let file_not_dir = tmp.join("not-a-dir.mp4");
+    fs::create_dir_all(&valid_a).unwrap();
+    fs::create_dir_all(&valid_b).unwrap();
+    fs::write(&file_not_dir, b"fixture").unwrap();
+
+    let raw = format!(
+        "{}, relative/ignored, {}, {}, {}",
+        valid_a.display(),
+        tmp.join("missing").display(),
+        file_not_dir.display(),
+        valid_b.display()
+    );
+    let configured = mediaflow_allowed_roots_from_raw(Some(&raw));
+    assert_eq!(
+        configured,
+        vec![
+            fs::canonicalize(&valid_a).unwrap(),
+            fs::canonicalize(&valid_b).unwrap(),
+        ]
+    );
+
+    // Explicit configuration with no valid directories must fail closed instead of widening to defaults.
+    let closed = mediaflow_allowed_roots_from_raw(Some("/definitely-nonexistent-mediaflow-root"));
+    assert!(closed.is_empty());
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_mediaflow_worker_blocks_source_change_and_legacy_rows_before_execution() {
+    let name =
+        "workers::tests::test_mediaflow_worker_blocks_source_change_and_legacy_rows_before_execution";
+    if std::env::var("AF_MEDIAFLOW_IDENT_CHILD").as_deref() != Ok(name) {
+        assert!(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("AF_MEDIAFLOW_IDENT_CHILD", name)
+            .status()
+            .unwrap()
+            .success());
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = env::temp_dir().join(format!("af-mf-ident-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::create_dir_all(root.join("media")).unwrap();
+    let db_path = root.join("aetherflow.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &db_path);
+    }
+    env::set_var("AF_ALLOWED_FS_ROOTS", root.join("media"));
+    af_db::init_db().unwrap();
+
+    let ffmpeg_called = root.join("ffmpeg_was_invoked");
+    let fake_ffmpeg = root.join("bin/ffmpeg");
+    fs::write(
+        &fake_ffmpeg,
+        format!(
+            "#!/bin/sh\necho invoked > \"{}\"\nexit 0\n",
+            ffmpeg_called.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+    env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            env::var("PATH").unwrap()
+        ),
+    );
+
+    // 1. Atomic file replacement between approval and worker claim -> NEEDS_RESCAN, ffmpeg never spawned.
+    let replaced_src = root.join("media/replaced.mp4");
+    fs::write(&replaced_src, b"original-scanned-fixture-v1").unwrap();
+    {
+        let conn = af_db::get_conn().unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(101), &replaced_src);
+    }
+    let tmp_swap = root.join("media/replaced.mp4.new");
+    fs::write(&tmp_swap, b"new-unreviewed-media-file-v2").unwrap();
+    fs::rename(&tmp_swap, &replaced_src).unwrap();
+
+    assert!(process_next_mediaflow_job().await);
+    assert!(!ffmpeg_called.exists());
+    assert_eq!(
+        fs::read(&replaced_src).unwrap(),
+        b"new-unreviewed-media-file-v2"
+    );
+    let (status1, err1): (String, String) = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status, error_log FROM mediaflow_queue WHERE id = 101",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status1, "NEEDS_RESCAN");
+    assert_eq!(err1, MEDIAFLOW_SOURCE_CHANGED_BEFORE_EXEC_MSG);
+
+    // 2. Same-inode, same-size in-place edit between approval and worker claim -> NEEDS_RESCAN, ffmpeg never spawned.
+    let edited_src = root.join("media/edited_in_place.mp4");
+    fs::write(&edited_src, b"AAAA-1111-fixture-bytes!").unwrap();
+    {
+        let conn = af_db::get_conn().unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(102), &edited_src);
+    }
+    fs::write(&edited_src, b"BBBB-2222-fixture-bytes!").unwrap();
+
+    assert!(process_next_mediaflow_job().await);
+    assert!(!ffmpeg_called.exists());
+    assert_eq!(fs::read(&edited_src).unwrap(), b"BBBB-2222-fixture-bytes!");
+    let status2: String = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM mediaflow_queue WHERE id = 102",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status2, "NEEDS_RESCAN");
+
+    // 3. Legacy APPROVED row missing persisted identity -> NEEDS_RESCAN without running ffmpeg.
+    let legacy_src = root.join("media/legacy_approved.mp4");
+    fs::write(&legacy_src, b"legacy-media-fixture-bytes").unwrap();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (103, ?1, 'h264', 26, 'APPROVED')",
+            params![legacy_src.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+    assert!(process_next_mediaflow_job().await);
+    assert!(!ffmpeg_called.exists());
+    assert_eq!(
+        fs::read(&legacy_src).unwrap(),
+        b"legacy-media-fixture-bytes"
+    );
+    let (status3, err3): (String, String) = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status, error_log FROM mediaflow_queue WHERE id = 103",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status3, "NEEDS_RESCAN");
+    assert_eq!(err3, MEDIAFLOW_MISSING_IDENTITY_MSG);
+
+    // 4. Startup reconciliation also transitions legacy identity-less PENDING_APPROVAL/APPROVED rows to NEEDS_RESCAN.
+    let legacy_pending = root.join("media/legacy_pending.mp4");
+    fs::write(&legacy_pending, b"legacy-pending-bytes").unwrap();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO mediaflow_queue (id, file_path, original_codec, original_size, status) VALUES (104, ?1, 'h264', 20, 'PENDING_APPROVAL')",
+            params![legacy_pending.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+    reconcile_mediaflow_startup();
+    let status4: String = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM mediaflow_queue WHERE id = 104",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status4, "NEEDS_RESCAN");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_mediaflow_mid_transcode_in_place_edit_aborts_publication_safely() {
+    let name =
+        "workers::tests::test_mediaflow_mid_transcode_in_place_edit_aborts_publication_safely";
+    if std::env::var("AF_MEDIAFLOW_INPLACE_CHILD").as_deref() != Ok(name) {
+        assert!(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("AF_MEDIAFLOW_INPLACE_CHILD", name)
+            .status()
+            .unwrap()
+            .success());
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = env::temp_dir().join(format!("af-mf-inplace-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::create_dir_all(root.join("media")).unwrap();
+    let db_path = root.join("aetherflow.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &db_path);
+    }
+    env::set_var("AF_ALLOWED_FS_ROOTS", root.join("media"));
+    af_db::init_db().unwrap();
+
+    let src_file = root.join("media/in_place.mp4");
+    fs::write(&src_file, b"original-1111-same-length!").unwrap();
+
+    // Fake ffmpeg overwrites `src_file` IN PLACE (same inode & exact same byte length) mid-transcode.
+    let fake_ffmpeg = root.join("bin/ffmpeg");
+    fs::write(
+        &fake_ffmpeg,
+        "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\nprintf 'modified-2222-same-length!' > \"$AF_INPLACE_TARGET\"\nout_path=\"${out#file:}\"\nprintf 'transcoded-hevc-output' > \"$out_path\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_ffprobe = root.join("bin/ffprobe");
+    fs::write(&fake_ffprobe, "#!/bin/sh\necho 10.0\n").unwrap();
+    fs::set_permissions(&fake_ffprobe, fs::Permissions::from_mode(0o755)).unwrap();
+    env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            env::var("PATH").unwrap()
+        ),
+    );
+    env::set_var("AF_INPLACE_TARGET", &src_file);
+
+    {
+        let conn = af_db::get_conn().unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(201), &src_file);
+    }
+
+    assert!(process_next_mediaflow_job().await);
+
+    assert_eq!(fs::read(&src_file).unwrap(), b"modified-2222-same-length!");
+    assert!(!root.join("media/in_place_hevc.mkv").exists());
+    let trash_dir = root.join("media/.mediaflow_trash");
+    if trash_dir.exists() {
+        assert_eq!(fs::read_dir(&trash_dir).unwrap().count(), 0);
+    }
+    let (status, err_log): (String, String) = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status, error_log FROM mediaflow_queue WHERE id = 201",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "FAILED");
+    assert_eq!(err_log, MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_mediaflow_inflight_cancellation_stops_ffmpeg_and_preserves_source() {
+    let name =
+        "workers::tests::test_mediaflow_inflight_cancellation_stops_ffmpeg_and_preserves_source";
+    if std::env::var("AF_MEDIAFLOW_CANCEL_CHILD").as_deref() != Ok(name) {
+        assert!(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("AF_MEDIAFLOW_CANCEL_CHILD", name)
+            .status()
+            .unwrap()
+            .success());
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = env::temp_dir().join(format!("af-mf-cancel-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::create_dir_all(root.join("media")).unwrap();
+    let db_path = root.join("aetherflow.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &db_path);
+    }
+    env::set_var("AF_ALLOWED_FS_ROOTS", root.join("media"));
+    af_db::init_db().unwrap();
+
+    let src_file = root.join("media/long_movie.mp4");
+    fs::write(&src_file, b"original-untouched-source-bytes").unwrap();
+    let started_marker = root.join("ffmpeg_started");
+
+    let fake_ffmpeg = root.join("bin/ffmpeg");
+    fs::write(
+        &fake_ffmpeg,
+        format!(
+            "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\nout_path=\"${{out#file:}}\"\nprintf 'partial' > \"$out_path\"\necho started > \"{}\"\nsleep 30\nexit 0\n",
+            started_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_ffprobe = root.join("bin/ffprobe");
+    fs::write(&fake_ffprobe, "#!/bin/sh\necho 30.0\n").unwrap();
+    fs::set_permissions(&fake_ffprobe, fs::Permissions::from_mode(0o755)).unwrap();
+    env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            env::var("PATH").unwrap()
+        ),
+    );
+
+    {
+        let conn = af_db::get_conn().unwrap();
+        insert_pinned_mediaflow_approved(&conn, Some(301), &src_file);
+    }
+
+    let mut rx = subscribe_mediaflow_progress();
+    let worker_handle = tokio::spawn(async { process_next_mediaflow_job().await });
+
+    let mut started = false;
+    for _ in 0..100 {
+        if started_marker.exists() {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(started, "fake ffmpeg should have started");
+
+    assert_eq!(
+        cancel_inflight_mediaflow_job(301),
+        CancelInflightOutcome::CancelSignalled
+    );
+    let processed = tokio::time::timeout(Duration::from_secs(5), worker_handle)
+        .await
+        .expect("worker must terminate promptly after cancellation")
+        .unwrap();
+    assert!(processed);
+
+    // Source bytes untouched, no published output, no temp leftovers, no trash entries.
+    assert_eq!(
+        fs::read(&src_file).unwrap(),
+        b"original-untouched-source-bytes"
+    );
+    assert!(!root.join("media/long_movie_hevc.mkv").exists());
+    let media_entries: Vec<String> = fs::read_dir(root.join("media"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(media_entries, vec!["long_movie.mp4".to_string()]);
+
+    let (status, err_log): (String, String) = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status, error_log FROM mediaflow_queue WHERE id = 301",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "CANCELLED");
+    assert_eq!(err_log, MEDIAFLOW_CANCELLED_MSG);
+
+    let mut events = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        events.push(serde_json::from_str::<serde_json::Value>(&msg).unwrap());
+    }
+    assert!(events.iter().any(|e| e["status"] == "cancelled"));
+
+    let _ = fs::remove_dir_all(&root);
 }

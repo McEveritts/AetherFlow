@@ -169,6 +169,238 @@ mod audit_tests {
     }
 
     #[test]
+    fn mediaflow_library_roots_align_with_systemd_defaults_and_explicit_overrides() {
+        assert_eq!(
+            af_services::DEFAULT_MEDIAFLOW_ROOTS,
+            &["/mnt", "/media", "/srv", "/data"]
+        );
+        let default_roots = af_services::mediaflow_allowed_roots_from_raw(None);
+        if let Ok(canon_home) = std::fs::canonicalize("/home") {
+            assert!(!default_roots.contains(&canon_home));
+        }
+        assert_eq!(
+            mediaflow_library_roots(),
+            af_services::mediaflow_allowed_roots()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mediaflow_scan_approve_rescan_decline_and_legacy_upgrade_end_to_end() {
+        let name =
+            "intelligence::audit_tests::mediaflow_scan_approve_rescan_decline_and_legacy_upgrade_end_to_end";
+        if env::var("AF_MEDIAFLOW_API_E2E_CHILD").as_deref() != Ok(name) {
+            assert!(std::process::Command::new(env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("AF_MEDIAFLOW_API_E2E_CHILD", name)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        use http_body_util::BodyExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        async fn read_json(resp: Response) -> (StatusCode, serde_json::Value) {
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, body)
+        }
+
+        let root = env::temp_dir().join(format!("af-mf-api-e2e-{}", uuid::Uuid::new_v4()));
+        let media = root.join("media");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let canon_media = media.canonicalize().unwrap();
+
+        let db_path = root.join("aetherflow.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        env::set_var("AF_ALLOWED_FS_ROOTS", &canon_media);
+        env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+
+        // Fake ffprobe reads the pinned fd/path and reports h264 JSON.
+        let fake_ffprobe = bin.join("ffprobe");
+        std::fs::write(
+            &fake_ffprobe,
+            "#!/bin/sh\nset -eu\nin=\"\"\nfor arg in \"$@\"; do in=\"$arg\"; done\nin_path=\"${in#file:}\"\nsz=$(wc -c < \"$in_path\" | tr -d ' ')\nprintf '{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\"}],\"format\":{\"size\":\"%s\"}}\\n' \"$sz\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_ffprobe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env::set_var(
+            "PATH",
+            format!("{}:{}", bin.display(), env::var("PATH").unwrap()),
+        );
+
+        // 0. Seed a pre-v24 legacy DB with `file_path TEXT UNIQUE NOT NULL` and a legacy PENDING_APPROVAL row.
+        let legacy_file = canon_media.join("legacy.mp4");
+        std::fs::write(&legacy_file, b"legacy-h264-fixture-01").unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"CREATE TABLE schema_versions (
+                    version INTEGER PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE mediaflow_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT UNIQUE NOT NULL,
+                    status TEXT DEFAULT 'PENDING_APPROVAL',
+                    original_codec TEXT DEFAULT '',
+                    original_size INTEGER DEFAULT 0,
+                    new_codec TEXT DEFAULT '',
+                    new_size INTEGER DEFAULT 0,
+                    error_log TEXT DEFAULT '',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );"#,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mediaflow_queue (id, file_path, status, original_codec, original_size) VALUES (1, ?1, 'PENDING_APPROVAL', 'h264', 22)",
+                params![legacy_file.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+
+        // Upgrade via normal init_db() path.
+        af_db::init_db().unwrap();
+
+        // Approving legacy row without identity must fail closed with 409 and transition to NEEDS_RESCAN.
+        let (legacy_status, legacy_body) = read_json(
+            approve_mediaflow_item(Path("1".to_string()), axum::body::Bytes::new()).await,
+        )
+        .await;
+        assert_eq!(legacy_status, StatusCode::CONFLICT);
+        assert_eq!(legacy_body["code"], "NEEDS_RESCAN");
+
+        // 1. Add a normal media fixture and run scan_directory_for_mediaflow.
+        let episode = canon_media.join("episode.mp4");
+        std::fs::write(&episode, b"episode-v1-bytes-12345").unwrap();
+
+        scan_directory_for_mediaflow(&canon_media, None, true)
+            .await
+            .unwrap();
+
+        let (q_status, q_body) = read_json(get_mediaflow_queue().await).await;
+        assert_eq!(q_status, StatusCode::OK);
+        let items = q_body.as_array().unwrap();
+        let ep_row = items
+            .iter()
+            .find(|item| item["filePath"] == episode.to_string_lossy().as_ref())
+            .expect("episode.mp4 should be enqueued");
+        assert_eq!(ep_row["status"], "PENDING_APPROVAL");
+        assert_eq!(ep_row["identityBound"], true);
+        let fp_v1 = ep_row["sourceFingerprint"].as_str().unwrap().to_string();
+        assert!(fp_v1.starts_with("v1:sha256:"));
+        let ep_id_v1 = ep_row["id"].as_i64().unwrap();
+
+        // Legacy file should also have been recovered into a fresh identity-bound PENDING_APPROVAL row.
+        let legacy_refreshed = items
+            .iter()
+            .find(|item| {
+                item["filePath"] == legacy_file.to_string_lossy().as_ref()
+                    && item["status"] == "PENDING_APPROVAL"
+            })
+            .expect("legacy.mp4 should be recovered by re-scan");
+        assert_eq!(legacy_refreshed["identityBound"], true);
+        assert_ne!(legacy_refreshed["id"].as_i64().unwrap(), 1);
+
+        // 2. Modify episode.mp4 IN PLACE (exact same length, different bytes) before approval -> 409 SOURCE_CHANGED + NEEDS_RESCAN.
+        std::fs::write(&episode, b"episode-v2-bytes-99999").unwrap();
+        let approve_v1_body =
+            axum::body::Bytes::from(serde_json::json!({ "sourceFingerprint": fp_v1 }).to_string());
+        let (drift_status, drift_body) =
+            read_json(approve_mediaflow_item(Path(ep_id_v1.to_string()), approve_v1_body).await)
+                .await;
+        assert_eq!(drift_status, StatusCode::CONFLICT);
+        assert_eq!(drift_body["code"], "SOURCE_CHANGED");
+
+        // 3. Re-scan supersedes stale NEEDS_RESCAN row and creates fresh PENDING_APPROVAL row bound to v2.
+        scan_directory_for_mediaflow(&canon_media, None, true)
+            .await
+            .unwrap();
+        let (_, q_body2) = read_json(get_mediaflow_queue().await).await;
+        let ep_row_v2 = q_body2
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["filePath"] == episode.to_string_lossy().as_ref()
+                    && item["status"] == "PENDING_APPROVAL"
+            })
+            .expect("episode.mp4 v2 should be enqueued after re-scan");
+        let ep_id_v2 = ep_row_v2["id"].as_i64().unwrap();
+        let fp_v2 = ep_row_v2["sourceFingerprint"].as_str().unwrap().to_string();
+        assert_ne!(ep_id_v2, ep_id_v1);
+        assert_ne!(fp_v2, fp_v1);
+
+        // 4. Approving with a mismatched UI fingerprint returns 409 without mutating PENDING_APPROVAL.
+        let wrong_fp_body =
+            axum::body::Bytes::from(serde_json::json!({ "sourceFingerprint": fp_v1 }).to_string());
+        let (mismatch_status, mismatch_body) =
+            read_json(approve_mediaflow_item(Path(ep_id_v2.to_string()), wrong_fp_body).await)
+                .await;
+        assert_eq!(mismatch_status, StatusCode::CONFLICT);
+        assert_eq!(mismatch_body["code"], "IDENTITY_MISMATCH");
+
+        // 5. Approving with matching fingerprint transitions atomically to APPROVED.
+        let ok_fp_body =
+            axum::body::Bytes::from(serde_json::json!({ "sourceFingerprint": fp_v2 }).to_string());
+        let (ok_status, ok_body) =
+            read_json(approve_mediaflow_item(Path(ep_id_v2.to_string()), ok_fp_body).await).await;
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(ok_body["status"], "APPROVED");
+        assert_eq!(ok_body["sourceFingerprint"], fp_v2);
+
+        // 6. Declining an APPROVED job cancels it cleanly to DECLINED.
+        let (dec_status, dec_body) =
+            read_json(decline_mediaflow_item(Path(ep_id_v2.to_string())).await).await;
+        assert_eq!(dec_status, StatusCode::OK);
+        assert_eq!(dec_body["status"], "DECLINED");
+
+        // 7. Re-scanning unchanged episode.mp4 must NOT re-enqueue the declined file.
+        scan_directory_for_mediaflow(&canon_media, None, true)
+            .await
+            .unwrap();
+        let (_, q_body3) = read_json(get_mediaflow_queue().await).await;
+        assert!(
+            !q_body3
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["filePath"] == episode.to_string_lossy().as_ref()),
+            "unchanged declined file must not be re-enqueued"
+        );
+
+        // 8. Replacing episode.mp4 with a genuinely new file at the old path and re-scanning enqueues a new candidate!
+        let swap_path = canon_media.join("episode.mp4.new");
+        std::fs::write(&swap_path, b"genuinely-new-episode-v3-payload").unwrap();
+        std::fs::rename(&swap_path, &episode).unwrap();
+        scan_directory_for_mediaflow(&canon_media, None, true)
+            .await
+            .unwrap();
+        let (_, q_body4) = read_json(get_mediaflow_queue().await).await;
+        let ep_row_v3 = q_body4
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["filePath"] == episode.to_string_lossy().as_ref()
+                    && item["status"] == "PENDING_APPROVAL"
+            })
+            .expect("genuinely new file at old declined path must be enqueued");
+        assert_ne!(ep_row_v3["id"].as_i64().unwrap(), ep_id_v2);
+        assert_ne!(ep_row_v3["sourceFingerprint"].as_str().unwrap(), fp_v2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn wireguard_dump_uses_all_interface_column_offsets_without_secrets() {
         let dump = "wg0\tprivate-secret\tpublic-key\t51820\toff\nwg0\tpeer-key\tpreshared-secret\t192.0.2.1:1234\t10.0.0.2/32\t123\t456\t789\t25\nwg1\tother-private\tother-public\t51821\toff\nwg1\tother-peer\tother-psk\t(none)\t10.1.0.2/32\t0\t0\t0\toff\n";
         let status = parse_wireguard_dump(dump).unwrap();
@@ -4935,10 +5167,26 @@ pub async fn get_mediaflow_queue() -> Response {
     let mut items = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
         "SELECT id, file_path, status, COALESCE(original_codec, ''), COALESCE(original_size, 0), \
-         COALESCE(new_codec, ''), COALESCE(new_size, 0), COALESCE(error_log, ''), COALESCE(created_at, '') \
-         FROM mediaflow_queue WHERE status != 'DECLINED' ORDER BY created_at DESC LIMIT 100",
+         COALESCE(new_codec, ''), COALESCE(new_size, 0), COALESCE(error_log, ''), COALESCE(created_at, ''), \
+         source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, COALESCE(source_fingerprint, '') \
+         FROM mediaflow_queue WHERE status NOT IN ('DECLINED', 'SUPERSEDED') ORDER BY created_at DESC, id DESC LIMIT 100",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| {
+            let source_dev = r.get::<_, Option<i64>>(9)?;
+            let source_ino = r.get::<_, Option<i64>>(10)?;
+            let source_size = r.get::<_, Option<i64>>(11)?;
+            let source_mtime_sec = r.get::<_, Option<i64>>(12)?;
+            let source_mtime_nsec = r.get::<_, Option<i64>>(13)?;
+            let source_fingerprint = r.get::<_, String>(14)?;
+            let identity_bound = af_services::parse_stored_mediaflow_identity(
+                source_dev,
+                source_ino,
+                source_size,
+                source_mtime_sec,
+                source_mtime_nsec,
+                Some(source_fingerprint.as_str()),
+            )
+            .is_some();
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "filePath": r.get::<_, String>(1)?,
@@ -4949,6 +5197,10 @@ pub async fn get_mediaflow_queue() -> Response {
                 "newSize": r.get::<_, i64>(6)?,
                 "errorLog": r.get::<_, String>(7)?,
                 "createdAt": r.get::<_, String>(8)?,
+                "sourceFingerprint": source_fingerprint,
+                "sourceSize": source_size.unwrap_or(0),
+                "sourceMtimeSec": source_mtime_sec.unwrap_or(0),
+                "identityBound": identity_bound,
             }))
         }) {
             for item in rows.flatten() {
@@ -4963,30 +5215,45 @@ static MEDIAFLOW_VIDEO_EXTS: &[&str] = &[".mkv", ".mp4", ".avi", ".mov", ".ts", 
 
 const MEDIAFLOW_FFPROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-async fn run_ffprobe_json_bounded(
+async fn run_ffprobe_json_bounded_uri(
     ffprobe_bin: &str,
-    file_path: &StdPath,
+    input_arg: &std::ffi::OsStr,
+    #[cfg(unix)] pinned_fd: Option<std::os::unix::io::RawFd>,
     timeout: std::time::Duration,
 ) -> Option<Vec<u8>> {
     use tokio::io::AsyncReadExt;
 
-    let mut child = tokio::process::Command::new(ffprobe_bin)
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-        ])
-        .arg(file_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
+    let mut cmd = tokio::process::Command::new(ffprobe_bin);
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+    ])
+    .arg(input_arg)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null())
+    .kill_on_drop(true);
+    #[cfg(unix)]
+    if let Some(raw_fd) = pinned_fd {
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(raw_fd, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(raw_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
+    let mut child = cmd.spawn().ok()?;
     let mut stdout_pipe = child.stdout.take();
     let stdout_task = tokio::spawn(async move {
         let mut buf = Vec::new();
@@ -5007,49 +5274,25 @@ async fn run_ffprobe_json_bounded(
     }
 }
 
-async fn probe_video_codec_and_size_with_timeout(
+#[cfg(test)]
+async fn run_ffprobe_json_bounded(
     ffprobe_bin: &str,
     file_path: &StdPath,
     timeout: std::time::Duration,
-) -> (String, i64) {
-    let fallback_size = std::fs::metadata(file_path)
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
-
-    if let Some(stdout) = run_ffprobe_json_bounded(ffprobe_bin, file_path, timeout).await {
-        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&stdout) {
-            let mut v_codec = String::new();
-            if let Some(streams) = val.get("streams").and_then(|v| v.as_array()) {
-                for s in streams {
-                    if s.get("codec_type").and_then(|v| v.as_str()) == Some("video") {
-                        v_codec = s
-                            .get("codec_name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        break;
-                    }
-                }
-            }
-            let size = val
-                .pointer("/format/size")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<i64>().ok())
-                .filter(|&sz| sz > 0)
-                .unwrap_or(fallback_size);
-            if !v_codec.is_empty() {
-                return (v_codec, size);
-            }
-        }
+) -> Option<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        run_ffprobe_json_bounded_uri(ffprobe_bin, file_path.as_os_str(), None, timeout).await
     }
+    #[cfg(not(unix))]
+    {
+        run_ffprobe_json_bounded_uri(ffprobe_bin, file_path.as_os_str(), timeout).await
+    }
+}
 
-    // Fallback when ffprobe is not installed, fails, or times out: infer from filename
-    let fname_lower = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let codec = if fname_lower.contains("hevc")
+fn infer_video_codec_from_filename(fname: &str) -> String {
+    let fname_lower = fname.to_lowercase();
+    if fname_lower.contains("hevc")
         || fname_lower.contains("x265")
         || fname_lower.contains("h265")
         || fname_lower.contains("h.265")
@@ -5063,34 +5306,103 @@ async fn probe_video_codec_and_size_with_timeout(
         "vp9".to_string()
     } else {
         "h264".to_string()
-    };
-
-    (codec, fallback_size)
+    }
 }
 
-async fn probe_video_codec_and_size(file_path: &StdPath) -> (String, i64) {
-    probe_video_codec_and_size_with_timeout("ffprobe", file_path, MEDIAFLOW_FFPROBE_TIMEOUT).await
+fn parse_ffprobe_video_codec_and_size(stdout: &[u8], fallback_size: i64) -> Option<(String, i64)> {
+    let val = serde_json::from_slice::<serde_json::Value>(stdout).ok()?;
+    let mut v_codec = String::new();
+    if let Some(streams) = val.get("streams").and_then(|v| v.as_array()) {
+        for s in streams {
+            if s.get("codec_type").and_then(|v| v.as_str()) == Some("video") {
+                v_codec = s
+                    .get("codec_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                break;
+            }
+        }
+    }
+    let size = val
+        .pointer("/format/size")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&sz| sz > 0)
+        .unwrap_or(fallback_size);
+    if v_codec.is_empty() {
+        None
+    } else {
+        Some((v_codec, size))
+    }
+}
+
+#[cfg(test)]
+async fn probe_video_codec_and_size_with_timeout(
+    ffprobe_bin: &str,
+    file_path: &StdPath,
+    timeout: std::time::Duration,
+) -> (String, i64) {
+    let fallback_size = std::fs::metadata(file_path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+
+    if let Some(stdout) = run_ffprobe_json_bounded(ffprobe_bin, file_path, timeout).await {
+        if let Some(parsed) = parse_ffprobe_video_codec_and_size(&stdout, fallback_size) {
+            return parsed;
+        }
+    }
+
+    let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    (infer_video_codec_from_filename(fname), fallback_size)
+}
+
+async fn probe_video_codec_and_size_for_pinned(
+    pinned: &af_services::PinnedMediaflowSource,
+) -> (String, i64) {
+    let exact_size = i64::try_from(pinned.identity.size).unwrap_or(i64::MAX);
+    #[cfg(unix)]
+    let (input_uri, child_pinned_fd) = {
+        let raw_fd = pinned.source_raw_fd();
+        if cfg!(target_os = "linux") && StdPath::new("/proc/self/fd").is_dir() {
+            (format!("file:/proc/self/fd/{raw_fd}"), Some(raw_fd))
+        } else {
+            (format!("file:{}", pinned.canon_src.to_string_lossy()), None)
+        }
+    };
+    #[cfg(not(unix))]
+    let input_uri = format!("file:{}", pinned.canon_src.to_string_lossy());
+
+    #[cfg(unix)]
+    let probed = run_ffprobe_json_bounded_uri(
+        "ffprobe",
+        std::ffi::OsStr::new(&input_uri),
+        child_pinned_fd,
+        MEDIAFLOW_FFPROBE_TIMEOUT,
+    )
+    .await;
+    #[cfg(not(unix))]
+    let probed = run_ffprobe_json_bounded_uri(
+        "ffprobe",
+        std::ffi::OsStr::new(&input_uri),
+        MEDIAFLOW_FFPROBE_TIMEOUT,
+    )
+    .await;
+
+    if let Some(stdout) = probed {
+        if let Some((codec, _)) = parse_ffprobe_video_codec_and_size(&stdout, exact_size) {
+            return (codec, exact_size);
+        }
+    }
+
+    (
+        infer_video_codec_from_filename(&pinned.source_fname),
+        exact_size,
+    )
 }
 
 fn mediaflow_library_roots() -> Vec<PathBuf> {
-    let roots: Vec<PathBuf> = match env::var("AF_ALLOWED_FS_ROOTS") {
-        Ok(configured) => configured
-            .split([',', ';'])
-            .map(str::trim)
-            .filter(|root| !root.is_empty())
-            .map(PathBuf::from)
-            .collect(),
-        Err(_) => vec![
-            PathBuf::from("/mnt"),
-            PathBuf::from("/media"),
-            PathBuf::from("/srv"),
-            PathBuf::from("/home"),
-        ],
-    };
-    roots
-        .into_iter()
-        .filter_map(|root| root.canonicalize().ok())
-        .collect()
+    af_services::mediaflow_allowed_roots()
 }
 
 fn validate_mediaflow_directory(
@@ -5162,6 +5474,14 @@ async fn scan_directory_for_mediaflow(
     explicit_cursor: Option<&str>,
     reset_cursor: bool,
 ) -> anyhow::Result<PagedScanOutcome> {
+    use rusqlite::OptionalExtension as _;
+
+    struct ExistingQueueSnapshot {
+        status: String,
+        original_size: i64,
+        identity: Option<af_services::MediaflowSourceIdentity>,
+    }
+
     let root_owned = root_dir.to_path_buf();
     let cursor_owned = explicit_cursor.map(str::to_owned);
     let (prepared, candidates) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -5178,28 +5498,86 @@ async fn scan_directory_for_mediaflow(
         let mut candidates = Vec::new();
         if !prepared.outcome.files.is_empty() {
             let conn = af_db::get_read_conn()?;
-            for files in prepared.outcome.files.chunks(500) {
-                let names: Vec<_> = files.iter().map(|path| path.to_string_lossy()).collect();
-                let placeholders = vec!["?"; names.len()].join(", ");
-                let mut query = conn.prepare(&format!(
-                    "SELECT file_path FROM mediaflow_queue WHERE file_path IN ({placeholders})"
-                ))?;
-                let known = query
-                    .query_map(
-                        rusqlite::params_from_iter(names.iter().map(|name| name.as_ref())),
-                        |row| row.get::<_, String>(0),
-                    )?
-                    .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
-                for (path, name) in files.iter().zip(names) {
-                    if name.contains(".mediaflow_trash") || known.contains(name.as_ref()) {
+            let scan_roots = vec![root_owned.clone()];
+            let mut active_stmt = conn.prepare(
+                "SELECT status, COALESCE(original_size, 0), source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, COALESCE(source_fingerprint, '')
+                 FROM mediaflow_queue
+                 WHERE file_path = ?1 AND status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING')
+                 ORDER BY id DESC LIMIT 1",
+            )?;
+            let mut latest_stmt = conn.prepare(
+                "SELECT status, COALESCE(original_size, 0), source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, COALESCE(source_fingerprint, '')
+                 FROM mediaflow_queue
+                 WHERE file_path = ?1
+                 ORDER BY id DESC LIMIT 1",
+            )?;
+            let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<ExistingQueueSnapshot> {
+                let status = row.get::<_, String>(0)?;
+                let original_size = row.get::<_, i64>(1)?;
+                let identity = af_services::parse_stored_mediaflow_identity(
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?.as_deref(),
+                );
+                Ok(ExistingQueueSnapshot {
+                    status,
+                    original_size,
+                    identity,
+                })
+            };
+
+            for path in &prepared.outcome.files {
+                let raw_name = path.to_string_lossy();
+                if raw_name.contains(".mediaflow_trash") {
+                    continue;
+                }
+                let Ok(pinned) =
+                    af_services::open_and_pin_mediaflow_source_in_roots(raw_name.as_ref(), &scan_roots)
+                else {
+                    continue;
+                };
+                let canon_name = pinned.canon_src.to_string_lossy().into_owned();
+                if let Some(active) = active_stmt.query_row(params![&canon_name], map_row).optional()? {
+                    if active.status == "PROCESSING" {
                         continue;
                     }
-                    let metadata = std::fs::symlink_metadata(path)?;
-                    if metadata.file_type().is_file()
-                        && path.canonicalize()?.starts_with(&root_owned)
-                    {
-                        candidates.push((name.into_owned(), path.clone()));
+                    if active.identity.as_ref() == Some(&pinned.identity) {
+                        continue;
                     }
+                    candidates.push(pinned);
+                    continue;
+                }
+
+                if let Some(latest) = latest_stmt.query_row(params![&canon_name], map_row).optional()? {
+                    match latest.status.as_str() {
+                        "NEEDS_RESCAN" | "SUPERSEDED" => {
+                            candidates.push(pinned);
+                        }
+                        "DECLINED" => {
+                            let same_identity = latest.identity.as_ref() == Some(&pinned.identity);
+                            let legacy_same_size = latest.identity.is_none()
+                                && latest.original_size
+                                    == i64::try_from(pinned.identity.size).unwrap_or(-1);
+                            if !same_identity && !legacy_same_size {
+                                candidates.push(pinned);
+                            }
+                        }
+                        "FAILED" | "CANCELLED" | "COMPLETED" => {
+                            if latest.identity.as_ref() != Some(&pinned.identity) {
+                                candidates.push(pinned);
+                            }
+                        }
+                        _ => {
+                            if latest.identity.as_ref() != Some(&pinned.identity) {
+                                candidates.push(pinned);
+                            }
+                        }
+                    }
+                } else {
+                    candidates.push(pinned);
                 }
             }
         }
@@ -5207,24 +5585,126 @@ async fn scan_directory_for_mediaflow(
     })
     .await??;
 
-    let mut pending = Vec::new();
-    for (name, path) in candidates {
-        let (codec, size) = probe_video_codec_and_size(&path).await;
-        if codec != "hevc" && codec != "av1" {
-            pending.push((name, codec, size));
+    struct ProbedMediaflowCandidate {
+        pinned: af_services::PinnedMediaflowSource,
+        codec: String,
+        size: i64,
+    }
+
+    let mut probed = Vec::new();
+    for pinned in candidates {
+        let (codec, size) = probe_video_codec_and_size_for_pinned(&pinned).await;
+        if pinned.verify_still_matches_live().is_ok() {
+            probed.push(ProbedMediaflowCandidate {
+                pinned,
+                codec,
+                size,
+            });
         }
     }
-    if !pending.is_empty() {
+
+    if !probed.is_empty() {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut conn = af_db::get_conn()?;
-            let tx = conn.transaction()?;
-            let mut insert = tx.prepare(
-                "INSERT INTO mediaflow_queue (file_path, original_codec, original_size, status) SELECT ?1, ?2, ?3, 'PENDING_APPROVAL' WHERE NOT EXISTS (SELECT 1 FROM mediaflow_queue WHERE file_path = ?1)",
-            )?;
-            for (name, codec, size) in pending {
-                insert.execute(params![name, codec, size])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for cand in probed {
+                if cand.pinned.verify_still_matches_live().is_err() {
+                    continue;
+                }
+                let file_path = cand.pinned.canon_src.to_string_lossy().into_owned();
+                let active_row: Option<(i64, String, Option<af_services::MediaflowSourceIdentity>)> =
+                    tx.query_row(
+                        "SELECT id, status, source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, COALESCE(source_fingerprint, '')
+                         FROM mediaflow_queue
+                         WHERE file_path = ?1 AND status IN ('PENDING_APPROVAL', 'APPROVED', 'PROCESSING')
+                         ORDER BY id DESC LIMIT 1",
+                        params![&file_path],
+                        |r| {
+                            let id = r.get::<_, i64>(0)?;
+                            let status = r.get::<_, String>(1)?;
+                            let identity = af_services::parse_stored_mediaflow_identity(
+                                r.get::<_, Option<i64>>(2)?,
+                                r.get::<_, Option<i64>>(3)?,
+                                r.get::<_, Option<i64>>(4)?,
+                                r.get::<_, Option<i64>>(5)?,
+                                r.get::<_, Option<i64>>(6)?,
+                                r.get::<_, Option<String>>(7)?.as_deref(),
+                            );
+                            Ok((id, status, identity))
+                        },
+                    )
+                    .optional()?;
+
+                let is_already_modern = cand.codec == "hevc" || cand.codec == "av1";
+                if let Some((active_id, active_status, active_identity)) = active_row {
+                    if active_status == "PROCESSING" {
+                        continue;
+                    }
+                    if active_identity.as_ref() == Some(&cand.pinned.identity) {
+                        continue;
+                    }
+                    let supersede_msg = if is_already_modern {
+                        format!(
+                            "Source file changed since prior scan and is already encoded as {}; prior candidate invalidated",
+                            cand.codec
+                        )
+                    } else {
+                        "Source file changed since prior scan; superseded by refreshed scan candidate"
+                            .to_string()
+                    };
+                    let updated = tx.execute(
+                        "UPDATE mediaflow_queue
+                         SET status = 'SUPERSEDED',
+                             error_log = ?1,
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?2 AND status IN ('PENDING_APPROVAL', 'APPROVED')",
+                        params![supersede_msg, active_id],
+                    )?;
+                    if updated != 1 {
+                        continue;
+                    }
+                }
+
+                let rescan_note = if is_already_modern {
+                    format!("Re-scanned file is already encoded as {}", cand.codec)
+                } else {
+                    "Superseded by refreshed scan candidate".to_string()
+                };
+                tx.execute(
+                    "UPDATE mediaflow_queue
+                     SET status = 'SUPERSEDED',
+                         error_log = CASE
+                             WHEN COALESCE(error_log, '') = '' THEN ?1
+                             ELSE error_log || ' (superseded by re-scan)'
+                         END,
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE file_path = ?2 AND status = 'NEEDS_RESCAN'",
+                    params![rescan_note, &file_path],
+                )?;
+
+                if !is_already_modern {
+                    let id_rec = &cand.pinned.identity;
+                    let src_size = i64::try_from(id_rec.size).unwrap_or(cand.size);
+                    tx.execute(
+                        "INSERT INTO mediaflow_queue (
+                             file_path, original_codec, original_size, status,
+                             source_dev, source_ino, source_size,
+                             source_mtime_sec, source_mtime_nsec, source_fingerprint
+                         ) VALUES (?1, ?2, ?3, 'PENDING_APPROVAL', ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            file_path,
+                            cand.codec,
+                            cand.size,
+                            id_rec.dev as i64,
+                            id_rec.ino as i64,
+                            src_size,
+                            id_rec.mtime_sec,
+                            id_rec.mtime_nsec,
+                            id_rec.fingerprint,
+                        ],
+                    )?;
+                }
             }
-            drop(insert);
             tx.commit()?;
             Ok(())
         })
@@ -5367,27 +5847,189 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         .into_response()
 }
 
-pub async fn approve_mediaflow_item(Path(id): Path<String>) -> Response {
-    let Ok(conn) = af_db::get_conn() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "Failed to approve" })),
-        )
-            .into_response();
+pub async fn approve_mediaflow_item(Path(id): Path<String>, body: axum::body::Bytes) -> Response {
+    use rusqlite::OptionalExtension as _;
+
+    let Ok(job_id) = id.trim().parse::<i64>() else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_JOB_ID",
+            "Invalid MediaFlow queue item id",
+        );
     };
-    let affected = conn
-        .execute(
-            "UPDATE mediaflow_queue SET status = 'APPROVED', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'PENDING_APPROVAL'",
-            params![id],
-        )
-        .unwrap_or(0);
-    if affected == 0 {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Item not found or already processed" })),
-        )
-            .into_response();
-    }
+    let expected_fingerprint = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        None
+    } else {
+        let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_PAYLOAD",
+                "Invalid JSON approval payload",
+            );
+        };
+        payload
+            .get("sourceFingerprint")
+            .or_else(|| payload.get("source_fingerprint"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+
+    let approval_result: Result<String, (StatusCode, &'static str, String)> =
+        match tokio::task::spawn_blocking(move || {
+            let conn = af_db::get_conn().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to approve".to_string(),
+                )
+            })?;
+            let row = conn
+                .query_row(
+                    "SELECT file_path, status, source_dev, source_ino, source_size, source_mtime_sec, source_mtime_nsec, COALESCE(source_fingerprint, '')
+                     FROM mediaflow_queue
+                     WHERE id = ?1",
+                    params![job_id],
+                    |r| {
+                        let file_path = r.get::<_, String>(0)?;
+                        let status = r.get::<_, String>(1)?;
+                        let identity = af_services::parse_stored_mediaflow_identity(
+                            r.get::<_, Option<i64>>(2)?,
+                            r.get::<_, Option<i64>>(3)?,
+                            r.get::<_, Option<i64>>(4)?,
+                            r.get::<_, Option<i64>>(5)?,
+                            r.get::<_, Option<i64>>(6)?,
+                            r.get::<_, Option<String>>(7)?.as_deref(),
+                        );
+                        Ok((file_path, status, identity))
+                    },
+                )
+                .optional()
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        "Failed to inspect queue item".to_string(),
+                    )
+                })?;
+
+            let Some((file_path, status, stored_identity)) = row else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    "Item not found".to_string(),
+                ));
+            };
+
+            if status != "PENDING_APPROVAL" {
+                let (code, msg) = if status == "NEEDS_RESCAN" {
+                    (
+                        "SOURCE_CHANGED",
+                        "Source file changed or lacks verified scan identity; please re-scan before approving.".to_string(),
+                    )
+                } else {
+                    (
+                        "INVALID_STATE",
+                        format!("Item cannot be approved from status {status}"),
+                    )
+                };
+                return Err((StatusCode::CONFLICT, code, msg));
+            }
+
+            let Some(stored_identity) = stored_identity else {
+                let _ = conn.execute(
+                    "UPDATE mediaflow_queue
+                     SET status = 'NEEDS_RESCAN',
+                         error_log = ?1,
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?2 AND status = 'PENDING_APPROVAL'",
+                    params![af_services::MEDIAFLOW_MISSING_IDENTITY_MSG, job_id],
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    "NEEDS_RESCAN",
+                    af_services::MEDIAFLOW_MISSING_IDENTITY_MSG.to_string(),
+                ));
+            };
+
+            if let Some(ref client_fp) = expected_fingerprint {
+                if client_fp != &stored_identity.fingerprint {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "IDENTITY_MISMATCH",
+                        "Queue item fingerprint no longer matches the reviewed candidate; refresh the queue and re-review before approving.".to_string(),
+                    ));
+                }
+            }
+
+            let pinned = match af_services::open_and_pin_mediaflow_source(&file_path) {
+                Ok(p) => p,
+                Err(reason) => {
+                    let msg = format!(
+                        "Source file is no longer valid for this scanned candidate ({reason}); re-scan before approving."
+                    );
+                    let _ = conn.execute(
+                        "UPDATE mediaflow_queue
+                         SET status = 'NEEDS_RESCAN',
+                             error_log = ?1,
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?2 AND status = 'PENDING_APPROVAL'",
+                        params![&msg, job_id],
+                    );
+                    return Err((StatusCode::CONFLICT, "SOURCE_CHANGED", msg));
+                }
+            };
+
+            if pinned.identity != stored_identity {
+                let msg = "Source file changed since scan; re-scan and review the updated file before approving.".to_string();
+                let _ = conn.execute(
+                    "UPDATE mediaflow_queue
+                     SET status = 'NEEDS_RESCAN',
+                         error_log = ?1,
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?2 AND status = 'PENDING_APPROVAL'",
+                    params![&msg, job_id],
+                );
+                return Err((StatusCode::CONFLICT, "SOURCE_CHANGED", msg));
+            }
+
+            let affected = conn
+                .execute(
+                    "UPDATE mediaflow_queue
+                     SET status = 'APPROVED',
+                         error_log = '',
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?1
+                       AND status = 'PENDING_APPROVAL'
+                       AND source_fingerprint = ?2",
+                    params![job_id, &stored_identity.fingerprint],
+                )
+                .unwrap_or(0);
+            if affected != 1 {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "CONFLICT",
+                    "Queue item state changed concurrently; refresh and try again.".to_string(),
+                ));
+            }
+            Ok(stored_identity.fingerprint)
+        })
+        .await
+        {
+            Ok(res) => res,
+            Err(err) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                err.to_string(),
+            )),
+        };
+
+    let approved_fingerprint = match approval_result {
+        Ok(fp) => fp,
+        Err((status, code, msg)) => return api_error(status, code, msg),
+    };
+
     if let Some(tx) = crate::storage::ensure_or_reuse_deploy_stream("mediaflow_engine") {
         crate::storage::publish_deploy_json_event(
             "mediaflow_engine",
@@ -5395,10 +6037,9 @@ pub async fn approve_mediaflow_item(Path(id): Path<String>) -> Response {
             &serde_json::json!({
                 "status": "running",
                 "progress": 25,
-                "message": format!("Transcode job #{} approved and queued.", id),
+                "message": format!("Transcode job #{} approved and queued.", job_id),
             }),
         );
-        let id_clone = id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             crate::storage::publish_deploy_json_event(
@@ -5407,7 +6048,7 @@ pub async fn approve_mediaflow_item(Path(id): Path<String>) -> Response {
                 &serde_json::json!({
                     "status": "completed",
                     "progress": 100,
-                    "message": format!("Transcode job #{} queued for MediaFlow Engine.", id_clone),
+                    "message": format!("Transcode job #{} queued for MediaFlow Engine.", job_id),
                 }),
             );
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -5415,33 +6056,142 @@ pub async fn approve_mediaflow_item(Path(id): Path<String>) -> Response {
         });
     }
     Json(serde_json::json!({
-        "message": "Transcode queued. MediaFlow Engine assumes control."
+        "message": "Transcode queued. MediaFlow Engine assumes control.",
+        "id": job_id,
+        "status": "APPROVED",
+        "sourceFingerprint": approved_fingerprint,
     }))
     .into_response()
 }
 
 pub async fn decline_mediaflow_item(Path(id): Path<String>) -> Response {
-    let Ok(conn) = af_db::get_conn() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "Failed to decline" })),
-        )
-            .into_response();
+    use rusqlite::OptionalExtension as _;
+
+    let Ok(job_id) = id.trim().parse::<i64>() else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_JOB_ID",
+            "Invalid MediaFlow queue item id",
+        );
     };
-    let affected = conn
-        .execute(
-            "UPDATE mediaflow_queue SET status = 'DECLINED', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'PENDING_APPROVAL'",
-            params![id],
-        )
-        .unwrap_or(0);
-    if affected == 0 {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Item not found or already processed" })),
-        )
-            .into_response();
+
+    let outcome: Result<(&'static str, &'static str), (StatusCode, &'static str, String)> =
+        match tokio::task::spawn_blocking(move || {
+            let conn = af_db::get_conn().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to decline".to_string(),
+                )
+            })?;
+            let declined = conn
+                .execute(
+                    "UPDATE mediaflow_queue
+                     SET status = 'DECLINED',
+                         error_log = CASE
+                             WHEN status = 'APPROVED' THEN 'Cancelled before transcode started'
+                             ELSE ''
+                         END,
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?1 AND status IN ('PENDING_APPROVAL', 'APPROVED')",
+                    params![job_id],
+                )
+                .unwrap_or(0);
+            if declined == 1 {
+                return Ok(("DECLINED", "Transcode job declined."));
+            }
+
+            let status_opt: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM mediaflow_queue WHERE id = ?1",
+                    params![job_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        "Failed to inspect queue item".to_string(),
+                    )
+                })?;
+
+            let Some(current_status) = status_opt else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    "Item not found".to_string(),
+                ));
+            };
+
+            if current_status == "PROCESSING" {
+                match af_services::cancel_inflight_mediaflow_job(job_id) {
+                    af_services::CancelInflightOutcome::AlreadyPublishing => {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            "ALREADY_PUBLISHING",
+                            "Transcode job is finalizing publication and can no longer be cancelled.".to_string(),
+                        ));
+                    }
+                    af_services::CancelInflightOutcome::CancelSignalled => {
+                        let _ = conn.execute(
+                            "UPDATE mediaflow_queue
+                             SET status = 'CANCELLED',
+                                 error_log = ?1,
+                                 updated_at = CURRENT_TIMESTAMP
+                             WHERE id = ?2 AND status = 'PROCESSING'",
+                            params![af_services::MEDIAFLOW_CANCELLED_MSG, job_id],
+                        );
+                        return Ok(("CANCELLED", "In-flight transcode cancelled."));
+                    }
+                    af_services::CancelInflightOutcome::NotRunning => {
+                        let cancelled = conn
+                            .execute(
+                                "UPDATE mediaflow_queue
+                                 SET status = 'CANCELLED',
+                                     error_log = ?1,
+                                     updated_at = CURRENT_TIMESTAMP
+                                 WHERE id = ?2 AND status = 'PROCESSING'",
+                                params![af_services::MEDIAFLOW_CANCELLED_MSG, job_id],
+                            )
+                            .unwrap_or(0);
+                        if cancelled == 1 {
+                            return Ok(("CANCELLED", "Transcode job cancelled."));
+                        }
+                        return Err((
+                            StatusCode::CONFLICT,
+                            "INVALID_STATE",
+                            "Transcode job already finished.".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            Err((
+                StatusCode::CONFLICT,
+                "INVALID_STATE",
+                format!("Item cannot be declined or cancelled from status {current_status}"),
+            ))
+        })
+        .await
+        {
+            Ok(res) => res,
+            Err(err) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                err.to_string(),
+            )),
+        };
+
+    match outcome {
+        Ok((status, message)) => Json(serde_json::json!({
+            "message": message,
+            "id": job_id,
+            "status": status,
+        }))
+        .into_response(),
+        Err((status, code, msg)) => api_error(status, code, msg),
     }
-    Json(serde_json::json!({ "message": "Transcode job declined." })).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
