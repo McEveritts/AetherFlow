@@ -1594,6 +1594,7 @@ curl() {
         config.with_name("custom.conf").write_text("custom")
         canonical = config.with_name("rclone.env")
         managed = self.root / "opt/AetherFlow/apps/rclone/rclone"
+        managed.parent.parent.mkdir(parents=True, mode=0o700)
         legacy_backup = distro.with_name("rclone.af-backup.legacy")
         legacy_backup.mkdir()
         (legacy_backup / ".af-archive-owner").write_text("rclone\n")
@@ -1612,6 +1613,9 @@ curl() {
             self.assertEqual(legacy.read_text(), legacy_content)
             self.assertEqual(config.read_text(), "[remote]\ntype = drive\n")
             self.assertEqual(managed.exists(), action == "install")
+            if action == "install":
+                for directory in (managed.parent.parent, managed.parent):
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
             self.assertEqual(distro.read_text(), "distro-rclone")
             self.assertEqual(operator.read_text(), "operator-rclone")
         for unit, command in (("rclone", "rcd"), ("rclone-vfs", "mount")):

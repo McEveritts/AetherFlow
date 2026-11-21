@@ -17,8 +17,9 @@ else
 fi
 
 PACKAGE_NAME="rclone"
-RCLONE_BIN="/opt/AetherFlow/apps/rclone/rclone"
-RCLONE_OWNER="${RCLONE_BIN%/*}/.af-owner"
+RCLONE_RUNTIME_DIR="/opt/AetherFlow/apps/rclone"
+RCLONE_BIN="${RCLONE_RUNTIME_DIR}/rclone"
+RCLONE_OWNER="${RCLONE_RUNTIME_DIR}/.af-owner"
 RCLONE_CANONICAL_ENV="/etc/rclone/rclone.env"
 RCLONE_LEGACY_ENV="/etc/aetherflow/rclone.env"
 af_prepare_job_scratch "${PACKAGE_NAME}"
@@ -59,7 +60,9 @@ if ! id -u rclone >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/rclone --shell /usr/sbin/nologin rclone
 fi
 
-mkdir -p /etc/rclone /var/lib/rclone/cache /mnt/remote "${RCLONE_BIN%/*}"
+mkdir -p /etc/rclone /var/lib/rclone/cache /mnt/remote
+# The service and API version probes need to traverse the binary path under the runner's private umask.
+install -d -m 0755 "${RCLONE_RUNTIME_DIR%/*}" "$RCLONE_RUNTIME_DIR"
 
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
