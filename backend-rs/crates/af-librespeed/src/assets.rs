@@ -137,7 +137,12 @@ fn read_confined_blocking(
     }
 
     let leaf_name = &segments[segments.len() - 1];
-    let leaf_fd = openat_entry_nofollow(&current_dir, leaf_name)?;
+    let leaf_fd = match openat_entry_nofollow(&current_dir, leaf_name) {
+        Err(AssetError::NotFound) if leaf_name == "index-modern.html" => {
+            return open_index_in_dir(&current_dir);
+        }
+        result => result?,
+    };
     let leaf_file = File::from(leaf_fd);
     let meta = leaf_file
         .metadata()
@@ -330,6 +335,15 @@ mod tests {
             .await
             .expect("index-modern fallback");
         assert_eq!(body, b"<h1>Obsidian</h1>");
+        assert!(mime.starts_with("text/html"));
+
+        fs::remove_file(assets.join("index-modern.html")).unwrap();
+        fs::write(assets.join("index.html"), b"<h1>Current release</h1>").unwrap();
+        let (body, mime) =
+            load_confined_asset(&assets, "speedtest", "/speedtest/index-modern.html")
+                .await
+                .expect("legacy URL for the current index");
+        assert_eq!(body, b"<h1>Current release</h1>");
         assert!(mime.starts_with("text/html"));
 
         let (js_body, js_mime) = load_confined_asset(&assets, "speedtest", "/javascript/app.js")

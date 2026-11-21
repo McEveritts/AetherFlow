@@ -193,39 +193,6 @@ pub fn nzbget_meta(mut read: impl FnMut(&str) -> Option<String>) -> AppRuntimeMe
     meta
 }
 
-pub fn whisparr_meta(mut read: impl FnMut(&str) -> Option<String>) -> AppRuntimeMeta {
-    let mut meta = AppRuntimeMeta::default();
-    for path in [
-        "/var/lib/whisparr/config.xml",
-        "/var/lib/whisparr/config/config.xml",
-        "/var/lib/whisparr/.config/whisparr/config.xml",
-        "/etc/whisparr/config.xml",
-    ] {
-        if let Some(text) = read(path) {
-            let lower = text.to_ascii_lowercase();
-            let tag_value = |open: &str, close: &str| {
-                lower
-                    .find(open)
-                    .and_then(|index| {
-                        let start = index + open.len();
-                        lower[start..]
-                            .find(close)
-                            .map(|end| text[start..start + end].trim())
-                    })
-                    .filter(|value| !value.contains('<'))
-                    .unwrap_or_default()
-            };
-            if meta.api_key.is_empty() {
-                meta.api_key = tag_value("<apikey>", "</apikey>").to_string();
-            }
-            if meta.configured_port == 0 {
-                meta.configured_port = valid_port(tag_value("<port>", "</port>"));
-            }
-        }
-    }
-    meta
-}
-
 #[cfg(test)]
 mod pihole_tests {
     use super::*;
