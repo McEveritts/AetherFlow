@@ -13,7 +13,7 @@ async function settings(page: Page, tab: 'Backups & Restore' | 'Security & 2FA')
 test.describe('WASM restored workflows', () => {
   test('shows persisted backup schedule, toggles it, and preserves the password draft across polling', async ({ page, browserName }) => {
     if (browserName === 'webkit') test.setTimeout(60_000);
-    await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+    await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
     await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
     let mode: 'smart' | 'manual' = 'smart';

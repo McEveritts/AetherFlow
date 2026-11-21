@@ -595,11 +595,13 @@ test.describe('WASM operator parity workflows', () => {
 
     // Remote origin: loopback-only ruTorrent must NOT open remotely or fabricate https://rutorrent.apps.example.com.
     await page.goto('https://panel.example.com/?tab=services');
+    await expect(page.getByRole('heading', { name: 'Sonarr', exact: true })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('link', { name: 'Open App' })).toHaveCount(1);
     await expect(page.locator('article').filter({ hasText: 'ruTorrent' }).getByRole('link', { name: 'Open App' })).toHaveCount(0);
     await expect(page.locator('article').filter({ hasText: 'Sonarr' }).getByRole('link', { name: 'Open App' })).toHaveAttribute('href', 'https://sonarr.apps.example.com');
 
     await page.goto('https://panel.example.com/?tab=marketplace');
+    await expect(page.getByRole('heading', { name: 'Sonarr', exact: true })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('link', { name: 'Open App' })).toHaveCount(1);
     await expect(page.locator('article').filter({ hasText: 'ruTorrent' }).getByRole('link', { name: 'Open App' })).toHaveCount(0);
     await expect(page.locator('article').filter({ hasText: 'Sonarr' }).getByRole('link', { name: 'Open App' })).toHaveAttribute('href', 'https://sonarr.apps.example.com');

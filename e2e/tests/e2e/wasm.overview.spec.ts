@@ -90,8 +90,8 @@ test('draws each returned service link and preserves an isolated service', async
   } }));
   await page.goto('/');
   const graph = page.getByRole('group', { name: 'Service topology graph' });
+  await expect(graph.getByRole('button', { name: 'Isolated', exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(graph.locator('line')).toHaveCount(2);
-  await expect(graph.getByRole('button', { name: 'Isolated', exact: true })).toBeVisible();
   for (const { source, target } of links) {
     const line = graph.locator(`line[data-source="${source}"][data-target="${target}"]`);
     for (const [name, end] of [[source, 1], [target, 2]] as const) {
@@ -175,7 +175,7 @@ test('queries aggregated daily transfer and 30-day capacity history endpoints an
   });
 
   await page.goto('/');
-  await expect(page.getByText('Coverage: 2 of 30 days observed', { exact: false })).toBeVisible();
+  await expect(page.getByText('Coverage: 2 of 30 days observed', { exact: false })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText('1 counter resets detected; only post-reset values are counted.', { exact: false })).toBeVisible();
   await expect(page.getByText('2.0 GiB', {exact:true})).toBeVisible();
   await expect(page.getByText('512.0 MiB', {exact:true})).toBeVisible();

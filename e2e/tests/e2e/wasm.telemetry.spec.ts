@@ -9,7 +9,7 @@ function deferred() {
 
 for (const initialInventory of [true, false]) {
   test(`Services preserves live status over a delayed ${initialInventory ? 'initial inventory' : 'manual refresh'}`, async ({ page }) => {
-    await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+    await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
     await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false, enableWS: true });
     let publish: ((data: object) => void) | undefined;
@@ -74,7 +74,7 @@ for (const initialInventory of [true, false]) {
 
 for (const liveServices of [false, true]) {
   test(`a delayed shell refresh preserves live metrics and ${liveServices ? 'live' : 'HTTP bootstrap'} services`, async ({ page }) => {
-    await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+    await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
     await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false, enableWS: true });
     const metricsReturned = deferred();

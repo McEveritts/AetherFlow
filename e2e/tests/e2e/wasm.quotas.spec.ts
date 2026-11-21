@@ -18,7 +18,7 @@ function quotaRows(count: number, revision = 0) {
 
 test('a thousand tenants stay reachable with bounded editors and keyed drafts through paging, search, and polling reorder', async ({ page }) => {
   test.setTimeout(120_000);
-  await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
   await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
   let revision = 0;
@@ -142,7 +142,7 @@ test('a thousand tenants stay reachable with bounded editors and keyed drafts th
 });
 
 test('a quota save keeps newer edits when its row leaves the page and is filtered out before acknowledgement', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
   await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
   let amount = 1000;
@@ -205,7 +205,7 @@ test('a quota save keeps newer edits when its row leaves the page and is filtere
 });
 
 test('quota pages clamp after shrink and remain clamped if the dataset grows again', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
   await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
   let count = 80;
@@ -254,7 +254,7 @@ test('quota pages clamp after shrink and remain clamped if the dataset grows aga
 });
 
 test('quota reconciliation includes every authoritative tenant while search shows one', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
   await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
   const refreshed: number[] = [];
@@ -275,7 +275,7 @@ test('quota reconciliation includes every authoritative tenant while search show
 });
 
 test('removed tenants and disposed quota views do not retain drafts or accept an old save', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
   await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
   let present = true;

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { installAetherFlowMocks } from './support/mockAetherFlow';
 
 // Test-Priority Matrix Path: Authentication & Authorization Bounds
 test.describe('AetherFlow Auth & Consent Boundary Tests', () => {
@@ -32,15 +33,14 @@ test.describe('AetherFlow Auth & Consent Boundary Tests', () => {
 // Test-Priority Matrix Path: Platform Diagnostics
 test.describe('AetherFlow Operational Visibility Tests', () => {
 
-    test('Navigating Nexus renders Global Banner hooks', async ({ page }) => {
-        // Mount overview (assuming backend mock resolves)
+    test('Nexus shows the reconnecting banner after telemetry disconnects', async ({ page }) => {
+        await installAetherFlowMocks(page, { authenticated: true, enableWS: true });
+        await page.route('**/api/v1/auth/ws/ticket', route => route.fulfill({ json: { ticket: 'core-fixture' } }));
+        await page.routeWebSocket(/\/api\/v1\/auth\/ws(?:\?|$)/, socket => socket.close());
         await page.goto('/');
-        
-        // Validate Nexus sidebar
-        await expect(page.locator('text=AetherFlow')).toBeVisible();
-        
-        // Check for presence of notification hooks
-        await expect(page.locator('header')).toBeVisible();
+
+        await expect(page.getByRole('button', { name: /^AetherFlow:/ })).toBeVisible();
+        await expect(page.getByRole('status').filter({ hasText: /connection lost/i })).toBeVisible();
     });
 
 });

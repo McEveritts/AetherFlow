@@ -100,7 +100,7 @@ test('repeated Services disposal aborts held inventories in the same session', a
 });
 
 test('shell coalesces slow polls through pending actions, then resumes and aborts on session disposal', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-11-17T12:00:00Z') });
+  await page.clock.install({ time: new Date('2026-11-17T11:59:00Z') });
   await page.clock.pauseAt(new Date('2026-11-17T12:00:00Z'));
   await installConnectedMocks(page);
   let identity = 1;
