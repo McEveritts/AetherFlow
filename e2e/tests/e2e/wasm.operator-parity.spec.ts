@@ -519,19 +519,28 @@ test.describe('WASM operator parity workflows', () => {
   test('retained Marketplace data requires the exact package ID before purge', async ({ page }) => {
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
     const app = {
-      id: 'rclone', name: 'Rclone', desc: 'Cloud sync', category: 'Cloud',
+      id: 'rclone', name: 'Rclone', desc: 'Cloud sync', category: 'Cloud', hits: 0, progress: 0,
       status: 'uninstalled', inventory_known: true, inventory_authenticated: true,
       retained_data_present: true,
     };
     let purgeRequests = 0;
+    const jobId = 'purge-retained-fixture';
+    const startedAt = '2026-01-01T12:00:00Z';
     await page.route(/\/api\/v1\/(?:public|auth)\/marketplace$/, route =>
-      json(route, [{ ...app, retained_data_present: purgeRequests === 0 }]),
+      json(route, [purgeRequests === 0 ? app : {
+        ...app,
+        retained_data_present: false,
+        last_job: {
+          job_id: jobId, action: 'remove', status: 'completed',
+          started_at: startedAt, finished_at: '2026-01-01T12:00:01Z',
+        },
+      }]),
     );
-    await page.route('**/api/v1/admin/packages/rclone/uninstall?*', route => {
+    await page.route(/\/api\/v1\/admin\/packages\/rclone\/uninstall(?:\?.*)?$/, route => {
       expect(route.request().method()).toBe('POST');
       expect(new URL(route.request().url()).searchParams.get('purge')).toBe('true');
       purgeRequests += 1;
-      return json(route, { job_id: 'purge-retained-fixture', status: 'uninstalling' }, 202);
+      return json(route, { job_id: jobId, status: 'uninstalling', started_at: startedAt }, 202);
     });
 
     await page.goto('/?tab=marketplace');
@@ -550,6 +559,7 @@ test.describe('WASM operator parity workflows', () => {
     await confirm.click();
     await expect.poll(() => purgeRequests).toBe(1);
     await expect(purge).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Install', exact: true })).toBeEnabled();
   });
 
   test('never fabricates baseDomain Open App links for headless or loopback-only services in Services and Marketplace', async ({ page, baseURL }) => {
