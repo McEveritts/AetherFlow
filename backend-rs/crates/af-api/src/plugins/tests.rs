@@ -1400,3 +1400,186 @@ async fn plugin_registry_db_errors_fail_with_500_instead_of_200_or_silent_defaul
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[tokio::test]
+async fn default_sandboxed_plugin_ui_uses_wildcard_postmessage_target_origin() {
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    let _env_guard = test_env_lock().lock().await;
+    let db = ensure_shared_test_db();
+    let tmp = db
+        .parent()
+        .unwrap()
+        .join(format!("plugin-ui-postmsg-{}", Uuid::new_v4()));
+    let plugins_root = tmp.join("plugins");
+    let plugin_dir = plugins_root.join("ui-demo");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(
+        plugin_dir.join("plugin.manifest.json"),
+        r#"{
+            "id": "ui-demo",
+            "name": "UI Demo",
+            "version": "1.0.0",
+            "runtime_status": "external",
+            "permissions": ["system:metrics:read"],
+            "api_scopes": ["GET /api/v1/auth/system/metrics"],
+            "backend": { "health_path": "/healthz" }
+        }"#,
+    )
+    .unwrap();
+    env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+    update_registry_state("ui-demo", true, 21455, "running", "", false);
+
+    let user = AuthUser {
+        user_id: 1,
+        username: "viewer".into(),
+        role: "user".into(),
+        jti: "op-ui-demo".into(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+    let resp = serve_plugin_ui_handler(Path("ui-demo".into()), Extension(user)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let csp = resp
+        .headers()
+        .get("Content-Security-Policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(csp.contains("sandbox allow-scripts"), "csp={csp}");
+    let body = axum::body::to_bytes(resp.into_body(), 16384).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        !html.contains("window.location.origin"),
+        "sandboxed iframe with opaque null origin must not pass window.location.origin to postMessage"
+    );
+    assert!(html.contains("window.parent.postMessage({ type: 'AF_PLUGIN_READY', pluginId }, '*');"));
+    assert!(html.contains("method: 'GET'\n      }, '*');"));
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_reconciliation_skips_orphan_reaping_on_registry_db_error() {
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+    use hyper_util::service::TowerToHyperService;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = test_env_lock().lock().await;
+    let db = ensure_shared_test_db();
+    let tmp = db
+        .parent()
+        .unwrap()
+        .join(format!("reconcile-db-err-{}", Uuid::new_v4()));
+    let plugins_root = tmp.join("plugins");
+    let tokens_root = tmp.join("tokens");
+    let state_dir = tmp.join("units");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let pdir = plugins_root.join("active-demo");
+    let hdir = pdir.join("backend/hooks");
+    fs::create_dir_all(&hdir).unwrap();
+    fs::set_permissions(&plugins_root, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&pdir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(pdir.join("backend"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&hdir, fs::Permissions::from_mode(0o755)).unwrap();
+    let sh = hdir.join("start.sh");
+    fs::write(&sh, "#!/bin/bash\nexit 0\n").unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    let manifest = serde_json::json!({
+        "id": "active-demo",
+        "name": "Active Demo",
+        "version": "1.0.0",
+        "lifecycle_hooks": { "on_start": "backend/hooks/start.sh" },
+        "backend": { "health_path": "/healthz" }
+    });
+    fs::write(
+        pdir.join("plugin.manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let fake_sdctl = tmp.join("fake-sdctl");
+    fs::write(
+        &fake_sdctl,
+        format!(
+            r#"#!/bin/bash
+set -euo pipefail
+cmd="${{1:-}}"
+unit="${{@: -1}}"
+case "$cmd" in
+  show)
+st="inactive"
+if [[ -f {dir:?}/"$unit" ]]; then st="$(cat {dir:?}/"$unit")"; fi
+echo "ActiveState=$st"
+echo "SubState=running"
+echo "MainPID=0"
+echo "UID=62555"
+echo "GID=62555"
+;;
+  stop)
+echo inactive > {dir:?}/"$unit"
+;;
+  reset-failed)
+;;
+esac
+"#,
+            dir = state_dir
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_sdctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let unit_state_path = state_dir.join("aetherflow-plugin-active-demo.service");
+    fs::write(&unit_state_path, "active\n").unwrap();
+
+    // Break plugins_registry so startup reconciliation cannot read registry state.
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute("DROP TABLE plugins_registry", []).unwrap();
+    }
+
+    let sock_path = env::temp_dir().join(format!(
+        "af-plg-{}.sock",
+        &Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    let runner_app = af_runner::build_runner_router();
+    let runner_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let io = TokioIo::new(stream);
+            let svc = TowerToHyperService::new(runner_app.clone());
+            tokio::spawn(async move {
+                let _ = Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+
+    env::set_var("AETHERFLOW_PLUGINS_DIR", &plugins_root);
+    env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+    env::set_var("AETHERFLOW_PLUGIN_TOKENS_ROOT", &tokens_root);
+    env::set_var("AETHERFLOW_SYSTEMCTL_BIN", &fake_sdctl);
+    env::set_var("PRIVILEGED_RUNNER_ENABLED", "true");
+
+    reconcile_managed_plugins_on_startup().await;
+
+    assert_eq!(
+        fs::read_to_string(&unit_state_path).unwrap().trim(),
+        "active",
+        "DB read error during startup reconciliation must skip orphan reaping rather than stopping an active plugin"
+    );
+
+    runner_task.abort();
+    let _ = fs::remove_file(&sock_path);
+    let _ = fs::remove_dir_all(&tmp);
+}

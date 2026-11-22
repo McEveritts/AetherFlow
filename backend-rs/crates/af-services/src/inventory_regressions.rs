@@ -44,6 +44,7 @@ impl Fixture {
         for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
             env::set_var(key, &journal);
         }
+        af_db::init_db().unwrap();
         crate::initialize_package_jobs(rusqlite::Connection::open(&journal).unwrap()).unwrap();
         let calls = root.join("calls");
         env::set_var("AF_STATUS_CALLS", &calls);

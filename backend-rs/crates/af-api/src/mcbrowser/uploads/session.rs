@@ -1,9 +1,9 @@
 use super::db::{
-    cancel_and_release_session_conn, cleanup_expired_uploads_at, discard_unpublished_session_conn,
-    ensure_session_pending_audit_conn, ensure_uploads_schema, load_session_conn,
-    mark_session_completed_conn, mark_session_skipped_conn, reconcile_publishing_session_at,
-    reconcile_publishing_session_conn_safe, row_to_session, session_published_byte_delta,
-    SESSION_SELECT_COLUMNS,
+    cancel_and_release_session_conn, cleanup_expired_uploads_for_user_at,
+    discard_unpublished_session_conn, ensure_session_pending_audit_conn, ensure_uploads_schema,
+    load_session_conn, mark_session_completed_conn, mark_session_skipped_conn,
+    reconcile_publishing_session_at, reconcile_publishing_session_conn_safe, row_to_session,
+    session_published_byte_delta, SESSION_SELECT_COLUMNS,
 };
 use super::protocol::{
     authorize_conflict_policy_permissions_with_conn, configured_max_upload_bytes,
@@ -111,7 +111,7 @@ pub(crate) fn create_upload_session_at(
     let fingerprint = parsed_meta.fingerprint.unwrap_or_default();
 
     let now = now_unix_secs();
-    let _ = cleanup_expired_uploads_at(conn, base_root, now);
+    let _ = cleanup_expired_uploads_for_user_at(conn, base_root, user_id, now);
 
     // Open the user's verified scoped root directory and inspect whether the target file exists.
     let scoped_root =
@@ -684,7 +684,7 @@ pub(crate) fn discover_uploads_at(
     let fingerprint = validate_fingerprint_value(raw_fp).map_err(map_mcbrowser_err_tus)?;
 
     let now = now_unix_secs();
-    let _ = cleanup_expired_uploads_at(conn, base_root, now);
+    let _ = cleanup_expired_uploads_for_user_at(conn, base_root, user_id, now);
 
     let scoped_root_opt = open_verified_user_root_fd(conn, base_root, user_id).ok();
 
@@ -720,7 +720,24 @@ pub(crate) fn discover_uploads_at(
     drop(stmt);
 
     let mut uploads = Vec::new();
-    for mut rec in rows {
+    for rec in rows {
+        // Callers hold `user_mutation_stripe(user_id)`. Acquire per-session lock strictly via
+        // non-blocking `try_lock()` (NEVER `.lock().await`) to avoid ABBA deadlock with handlers
+        // locking `session_lock -> user_mutation_stripe`, while preventing races with in-flight
+        // PATCH streaming or finalization.
+        let sess_mutex = super::session_lock(&rec.id);
+        let Ok(_sess_guard) = sess_mutex.try_lock() else {
+            continue;
+        };
+        let Ok(Some(mut rec)) = load_session_conn(conn, &rec.id) else {
+            continue;
+        };
+        if rec.user_id != user_id
+            || rec.expires_at <= now
+            || !matches!(rec.status.as_str(), "uploading" | "publishing")
+        {
+            continue;
+        }
         if rec.status == "publishing"
             || (rec.status == "uploading" && rec.offset_bytes == rec.upload_length)
         {
@@ -797,7 +814,7 @@ pub(crate) fn head_upload_at(
     let upload_id = validate_upload_id(raw_id).map_err(map_mcbrowser_err_tus)?;
 
     let now = now_unix_secs();
-    let _ = cleanup_expired_uploads_at(conn, base_root, now);
+    let _ = cleanup_expired_uploads_for_user_at(conn, base_root, user_id, now);
 
     let Some(mut session) = load_session_conn(conn, &upload_id).map_err(map_mcbrowser_err_tus)?
     else {
@@ -926,7 +943,7 @@ pub(crate) fn delete_upload_at(
     let upload_id = validate_upload_id(raw_id).map_err(map_mcbrowser_err_tus)?;
 
     let now = now_unix_secs();
-    let _ = cleanup_expired_uploads_at(conn, base_root, now);
+    let _ = cleanup_expired_uploads_for_user_at(conn, base_root, user_id, now);
 
     // Pre-reconcile if the session is in 'publishing' or at full offset so we NEVER cancel and
     // release quota for a file that was already published to BrowserFs before a crash.
@@ -1036,7 +1053,6 @@ pub(crate) fn prepare_patch_upload_at(
     ensure_uploads_schema(conn).map_err(map_mcbrowser_err_tus)?;
 
     let now = now_unix_secs();
-    let _ = cleanup_expired_uploads_at(conn, base_root, now);
 
     let Some(mut session) = load_session_conn(conn, upload_id).map_err(map_mcbrowser_err_tus)?
     else {

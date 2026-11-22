@@ -14,10 +14,21 @@ pub(super) async fn get_blueprints(Extension(auth_user): Extension<AuthUser>) ->
     if let Err(response) = crate::auth::require_admin(&auth_user) {
         return *response;
     }
-    Json(serde_json::json!({
-        "blueprints": af_services::get_all_blueprints()
-    }))
-    .into_response()
+    crate::auth::blocking_response(|| match af_services::get_all_blueprints() {
+        Ok(blueprints) => Json(serde_json::json!({
+            "blueprints": blueprints
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load application blueprints");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                "Could not load application blueprints",
+            )
+        }
+    })
+    .await
 }
 
 pub(super) async fn get_app_blueprint(
@@ -27,12 +38,24 @@ pub(super) async fn get_app_blueprint(
     if let Err(response) = crate::auth::require_admin(&auth_user) {
         return *response;
     }
-    let all = af_services::get_all_blueprints();
-    if let Some(bp) = all.into_iter().find(|b| b.blueprint.app_name == app_name) {
-        Json(bp).into_response()
-    } else {
-        api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found")
-    }
+    crate::auth::blocking_response(move || match af_services::get_all_blueprints() {
+        Ok(all) => {
+            if let Some(bp) = all.into_iter().find(|b| b.blueprint.app_name == app_name) {
+                Json(bp).into_response()
+            } else {
+                api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found")
+            }
+        }
+        Err(error) => {
+            tracing::warn!(app = %app_name, %error, "Failed to load application blueprint");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                "Could not load application blueprint",
+            )
+        }
+    })
+    .await
 }
 
 pub(super) async fn sync_app_blueprint(

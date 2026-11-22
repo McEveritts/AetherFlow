@@ -2908,3 +2908,225 @@ async fn upload_audit_handles_conflict_deltas_skip_cancel_and_ambiguous_expiry()
     );
     assert_eq!(queried_used_bytes(&conn, 1), 10);
 }
+
+#[tokio::test]
+async fn cleanup_and_discover_skip_locked_sessions_and_preserve_global_cursor_and_proof() {
+    let conn = setup_isolated_db();
+    let tmp = TestTempDir::new();
+    let alice = human_user(1);
+    let bob = human_user(2);
+
+    // 1. Create active upload for Alice and write uncommitted bytes to staging (simulating streaming PATCH).
+    let (alice_rec, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &alice,
+        &tus_post_headers("locked.bin", Some("fp-locked"), 10),
+        None,
+    )
+    .unwrap();
+    let alice_staging = tmp
+        .path()
+        .join(".af-upload-staging/user-1")
+        .join(format!("{}.part", alice_rec.id));
+    fs::write(&alice_staging, b"12345").unwrap();
+
+    // Create an expired upload for Bob to verify per-user cleanup & prepare_patch isolation.
+    let (bob_rec, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &bob,
+        &tus_post_headers("bob-expired.bin", Some("fp-bob"), 8),
+        None,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET expires_at = 1 WHERE id = ?1",
+        params![bob_rec.id],
+    )
+    .unwrap();
+
+    // prepare_patch_upload_at must NOT run global expiry cleanup against Bob's expired upload.
+    let (_, prepared_file) =
+        prepare_patch_upload_at(&conn, tmp.path(), &alice, &alice_rec.id, 0, Some(5)).unwrap();
+    drop(prepared_file);
+    assert!(
+        load_session_conn(&conn, &bob_rec.id).unwrap().is_some(),
+        "prepare_patch_upload_at must not run unlocked global expiry cleanup"
+    );
+    assert_eq!(queried_used_bytes(&conn, 2), 8);
+
+    // Re-write uncommitted tail and hold session_lock(&alice_rec.id):
+    // discover_uploads_at must not deadlock or truncate staging via reconcile_staging_offset_at.
+    fs::write(&alice_staging, b"12345").unwrap();
+    {
+        let _sess_guard = session_lock(&alice_rec.id).lock_owned().await;
+        let discovered = discover_uploads_at(
+            &conn,
+            tmp.path(),
+            &alice,
+            &DiscoverUploadsQuery {
+                path: Some("locked.bin".to_string()),
+                length: Some("10".to_string()),
+                fingerprint: Some("fp-locked".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(discovered.uploads.is_empty());
+        assert_eq!(
+            fs::metadata(&alice_staging).unwrap().len(),
+            5,
+            "discover_uploads_at must skip locked session instead of truncating in-flight staging"
+        );
+
+        // Expire Alice's upload while session_lock is still held:
+        // both global and per-user cleanup must skip it without touching row, quota, or staging files.
+        conn.execute(
+            "UPDATE mcbrowser_uploads SET expires_at = 1 WHERE id = ?1",
+            params![alice_rec.id],
+        )
+        .unwrap();
+        assert_eq!(
+            cleanup_expired_uploads_for_user_at(&conn, tmp.path(), 1, now_unix_secs()).unwrap(),
+            0
+        );
+        assert!(load_session_conn(&conn, &alice_rec.id).unwrap().is_some());
+        assert!(alice_staging.exists());
+        assert_eq!(queried_used_bytes(&conn, 1), 1010);
+
+        // Global cleanup skips Alice's locked session (and cleans Bob's unlocked expired session).
+        assert_eq!(
+            cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
+            1
+        );
+        assert!(load_session_conn(&conn, &alice_rec.id).unwrap().is_some());
+        assert!(load_session_conn(&conn, &bob_rec.id).unwrap().is_none());
+        assert_eq!(queried_used_bytes(&conn, 1), 1010);
+        assert_eq!(queried_used_bytes(&conn, 2), 0);
+    }
+
+    // 2. Per-user opportunistic cleanup must NOT advance global mcbrowser_upload_cleanup_cursor
+    //    and must NOT touch another user's expired upload.
+    conn.execute(
+        "UPDATE mcbrowser_upload_cleanup_cursor SET expires_at = ?1, upload_id = '' WHERE singleton = 1",
+        params![i64::MIN],
+    )
+    .unwrap();
+    let (bob_rec2, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &bob,
+        &tus_post_headers("bob-keep.bin", Some("fp-bob2"), 6),
+        None,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET expires_at = 1 WHERE id = ?1",
+        params![bob_rec2.id],
+    )
+    .unwrap();
+
+    assert_eq!(
+        cleanup_expired_uploads_for_user_at(&conn, tmp.path(), 1, now_unix_secs()).unwrap(),
+        1
+    );
+    assert!(load_session_conn(&conn, &alice_rec.id).unwrap().is_none());
+    assert!(!alice_staging.exists());
+    assert_eq!(queried_used_bytes(&conn, 1), 1000);
+    assert!(
+        load_session_conn(&conn, &bob_rec2.id).unwrap().is_some(),
+        "per-user cleanup for user 1 must not touch user 2's expired uploads"
+    );
+    let cursor: (i64, String) = conn
+        .query_row(
+            "SELECT expires_at, upload_id FROM mcbrowser_upload_cleanup_cursor WHERE singleton = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        cursor,
+        (i64::MIN, String::new()),
+        "per-user cleanup must not advance global cleanup cursor"
+    );
+
+    // 3. Fresh publication-proof re-check inside BEGIN IMMEDIATE refuses to release quota or delete
+    //    an expired uploading row whose on-disk proof already indicates publication or preparation.
+    let (proof_rec, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &alice,
+        &tus_post_headers("proof-race.bin", Some("fp-proof"), 12),
+        None,
+    )
+    .unwrap();
+    write_publication_proof_at(tmp.path(), &proof_rec, &UploadPublicationProof::Published {})
+        .unwrap();
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET offset_bytes = 4, expires_at = 1 WHERE id = ?1",
+        params![proof_rec.id],
+    )
+    .unwrap();
+    assert_eq!(
+        cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
+        1, // Bob's bob_rec2 is cleaned, proof_rec is conservatively retained!
+    );
+    assert!(
+        load_session_conn(&conn, &proof_rec.id).unwrap().is_some(),
+        "fresh publication-proof re-check must retain row when proof shows Published"
+    );
+    assert_eq!(queried_used_bytes(&conn, 1), 1012);
+}
+
+#[tokio::test]
+async fn head_and_patch_handlers_acquire_user_mutation_stripe_after_session_lock() {
+    let user = human_user(8801);
+    let upload_id = Uuid::new_v4().simple().to_string();
+
+    // Hold user_mutation_stripe(8801) while session_lock(&upload_id) is free:
+    // head_upload and patch_upload must acquire session_lock first and then block on
+    // user_mutation_stripe (proving canonical session_lock -> user_mutation_stripe order).
+    let stripe_guard = crate::mcbrowser::user_mutation_stripe(8801)
+        .lock_owned()
+        .await;
+
+    let mut head_fut = Box::pin(handlers::head_upload(
+        axum::Extension(user.clone()),
+        axum::extract::Path(upload_id.clone()),
+        tus_basic_headers(),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut head_fut)
+            .await
+            .is_err(),
+        "head_upload must block on user_mutation_stripe(user_id)"
+    );
+    assert!(
+        session_lock(&upload_id).try_lock().is_err(),
+        "head_upload must hold session_lock(&upload_id) while awaiting user_mutation_stripe"
+    );
+    drop(head_fut);
+    assert!(
+        session_lock(&upload_id).try_lock().is_ok(),
+        "cancelling pending head_upload releases session_lock cleanly"
+    );
+
+    let mut patch_fut = Box::pin(handlers::patch_upload(
+        axum::Extension(user),
+        axum::extract::Path(upload_id.clone()),
+        tus_patch_headers(0, Some(0)),
+        Body::empty(),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut patch_fut)
+            .await
+            .is_err(),
+        "patch_upload preparation must block on user_mutation_stripe(user_id)"
+    );
+    assert!(
+        session_lock(&upload_id).try_lock().is_err(),
+        "patch_upload must hold session_lock(&upload_id) while awaiting user_mutation_stripe"
+    );
+    drop(patch_fut);
+    drop(stripe_guard);
+}

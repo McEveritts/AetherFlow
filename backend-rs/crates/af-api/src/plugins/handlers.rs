@@ -421,9 +421,9 @@ fn render_default_sandboxed_plugin_ui(
         pluginId,
         path: 'status',
         method: 'GET'
-      }}, window.location.origin);
+      }}, '*');
     }});
-    window.parent.postMessage({{ type: 'AF_PLUGIN_READY', pluginId }}, window.location.origin);
+    window.parent.postMessage({{ type: 'AF_PLUGIN_READY', pluginId }}, '*');
   </script>
 </body>
 </html>"#,

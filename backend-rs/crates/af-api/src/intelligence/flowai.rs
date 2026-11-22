@@ -706,6 +706,15 @@ pub async fn ai_support(req: Request) -> Response {
     .await
 }
 
+fn is_openai_model_id(model: &str) -> bool {
+    let m = model.trim();
+    m.starts_with("gpt-") || m == "o3" || m.starts_with("o3-") || m.starts_with("o4-")
+}
+
+fn is_anthropic_model_id(model: &str) -> bool {
+    model.trim().starts_with("claude-")
+}
+
 pub async fn test_ai_connection(
     axum::Extension(user): axum::Extension<AuthUser>,
     Json(req): Json<serde_json::Value>,
@@ -790,33 +799,6 @@ pub async fn test_ai_connection(
         };
         ps.anthropic_endpoint = clean_ep;
     }
-
-    let next_anth_endpoint = if ps.anthropic_endpoint.trim().is_empty() {
-        "https://api.anthropic.com"
-    } else {
-        ps.anthropic_endpoint.trim()
-    };
-    if had_stored_anth_key
-        && !supplied_fresh_anth_key
-        && ai_endpoint_origin_tuple(&stored_anth_endpoint)
-            != ai_endpoint_origin_tuple(next_anth_endpoint)
-    {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "ENDPOINT_KEY_REBIND_DENIED",
-            "Changing anthropic_endpoint while an API key is stored requires supplying a fresh API key",
-        );
-    }
-    if !ps.anthropic_api_key.trim().is_empty()
-        && !next_anth_endpoint.starts_with("https://")
-        && !is_loopback_ai_endpoint(next_anth_endpoint)
-    {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INSECURE_AI_ENDPOINT",
-            "Non-loopback AI endpoints carrying an API key must use https://",
-        );
-    }
     if let Some(ep) = req
         .get("lm_studio_endpoint")
         .and_then(|v| v.as_str())
@@ -848,6 +830,52 @@ pub async fn test_ai_connection(
         ps.ollama_endpoint = clean_ep;
     }
 
+    let is_local_provider = matches!(
+        provider_type,
+        "localai" | "lm-studio" | "ollama" | "anthropic-local"
+    );
+    let explicit_local_rt = req
+        .get("local_provider")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(provider_type);
+    let is_anthropic_local_test =
+        is_local_provider && infer_local_runtime(explicit_local_rt, &ps) == "anthropic-local";
+
+    let next_anth_endpoint = if !ps.anthropic_endpoint.trim().is_empty() {
+        ps.anthropic_endpoint.trim()
+    } else if is_anthropic_local_test {
+        "http://localhost:8080"
+    } else {
+        "https://api.anthropic.com"
+    };
+    let anth_origin_changed =
+        ai_endpoint_origin_tuple(&stored_anth_endpoint) != ai_endpoint_origin_tuple(next_anth_endpoint);
+    if is_anthropic_local_test {
+        if had_stored_anth_key && !supplied_fresh_anth_key && anth_origin_changed {
+            // Testing a local Anthropic-compatible runtime at a different origin must neither
+            // falsely fail with a cloud-key rebind error nor forward the stored cloud API key.
+            ps.anthropic_api_key.clear();
+        }
+    } else if had_stored_anth_key && !supplied_fresh_anth_key && anth_origin_changed {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "ENDPOINT_KEY_REBIND_DENIED",
+            "Changing anthropic_endpoint while an API key is stored requires supplying a fresh API key",
+        );
+    }
+    if !ps.anthropic_api_key.trim().is_empty()
+        && !next_anth_endpoint.starts_with("https://")
+        && !is_loopback_ai_endpoint(next_anth_endpoint)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INSECURE_AI_ENDPOINT",
+            "Non-loopback AI endpoints carrying an API key must use https://",
+        );
+    }
+
     let requested_model = req
         .get("model")
         .and_then(|v| v.as_str())
@@ -867,14 +895,25 @@ pub async fn test_ai_connection(
 
     let res = match provider_type {
         "openai" => {
+            if let Some(m) = requested_model {
+                if !is_openai_model_id(m) {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        format!("Model '{m}' is not compatible with provider 'openai'"),
+                    );
+                }
+            }
             let model = requested_model.unwrap_or_else(|| {
-                if ps.default_model.starts_with("gpt-") {
+                if ALLOWED_AI_MODELS.contains(&ps.default_model.as_str())
+                    && is_openai_model_id(&ps.default_model)
+                {
                     ps.default_model.as_str()
                 } else {
                     "gpt-6.1-sol"
                 }
             });
-            if !ALLOWED_AI_MODELS.contains(&model) {
+            if !ALLOWED_AI_MODELS.contains(&model) || !is_openai_model_id(model) {
                 return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid AI model");
             }
             call_openai_compatible_api(
@@ -888,14 +927,25 @@ pub async fn test_ai_connection(
             .await
         }
         "anthropic" => {
+            if let Some(m) = requested_model {
+                if !is_anthropic_model_id(m) {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        format!("Model '{m}' is not compatible with provider 'anthropic'"),
+                    );
+                }
+            }
             let model = requested_model.unwrap_or_else(|| {
-                if ps.default_model.starts_with("claude-") {
+                if ALLOWED_AI_MODELS.contains(&ps.default_model.as_str())
+                    && is_anthropic_model_id(&ps.default_model)
+                {
                     ps.default_model.as_str()
                 } else {
                     "claude-sonnet-5-5"
                 }
             });
-            if !ALLOWED_AI_MODELS.contains(&model) && !is_valid_local_model_id(model) {
+            if !ALLOWED_AI_MODELS.contains(&model) || !is_anthropic_model_id(model) {
                 return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid AI model");
             }
             call_anthropic_api(
@@ -909,12 +959,6 @@ pub async fn test_ai_connection(
             .await
         }
         "localai" | "lm-studio" | "ollama" | "anthropic-local" => {
-            let explicit_local_rt = req
-                .get("local_provider")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(provider_type);
             let local_runtime = infer_local_runtime(explicit_local_rt, &ps);
             let local_model = if let Some(m) = requested_model {
                 let (_, clean_m) = split_runtime_prefixed_model(m);
@@ -987,6 +1031,15 @@ pub async fn test_ai_connection(
             }
         }
         _ => {
+            if let Some(m) = requested_model {
+                if !is_valid_gemini_model_id(m) {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        format!("Model '{m}' is not compatible with provider 'gemini'"),
+                    );
+                }
+            }
             let model = requested_model.unwrap_or_else(|| {
                 if ALLOWED_AI_MODELS.contains(&ps.default_model.as_str())
                     && is_valid_gemini_model_id(&ps.default_model)

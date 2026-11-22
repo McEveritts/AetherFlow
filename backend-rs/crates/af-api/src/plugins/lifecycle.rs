@@ -567,12 +567,6 @@ pub async fn stop_plugin_instance(
     Ok(build_runtime_view(manifest, &state, false))
 }
 
-pub async fn restart_plugin_instance(
-    manifest: &ValidatedPluginManifest,
-) -> Result<PluginRuntimeView, PluginLifecycleError> {
-    restart_plugin_instance_with_port(manifest, None).await
-}
-
 pub async fn restart_plugin_instance_with_port(
     manifest: &ValidatedPluginManifest,
     preferred_port: Option<u16>,
@@ -593,7 +587,17 @@ pub async fn reconcile_managed_plugins_on_startup() {
         if resolve_plugin_executable(&manifest).is_none() {
             continue;
         }
-        let state = read_registry_state(&manifest.id);
+        let state = match try_read_registry_state(&manifest.id) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(
+                    plugin = %manifest.id,
+                    %error,
+                    "Failed to read plugin registry state during startup reconciliation; skipping reconciliation"
+                );
+                continue;
+            }
+        };
         if state.enabled || state.status == "running" {
             let preferred = (PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END)
                 .contains(&state.allocated_port)

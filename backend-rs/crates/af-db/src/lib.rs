@@ -71,7 +71,7 @@ pub use pending_actions::{
 pub use pool::{
     db_health_check, db_readiness_check, get_conn, get_db_path, get_read_conn,
     has_unexpired_active_session, prune_expired_active_sessions, prune_expired_data,
-    resolve_db_path, try_resolve_db_path, PRUNE_METRICS_HISTORY_SQL,
+    resolve_db_path, try_resolve_db_path, DbConn, PRUNE_METRICS_HISTORY_SQL,
     PRUNE_NOTIFICATION_DELIVERY_LOG_SQL,
 };
 pub use retained_ingress::{

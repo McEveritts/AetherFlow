@@ -415,3 +415,121 @@ async fn test_ai_connection_validates_gemini_model_and_redacts_upstream_secrets(
 
     server.abort();
 }
+
+#[tokio::test]
+async fn test_ai_connection_enforces_provider_model_compatibility_and_allows_anthropic_local() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    init_ai_test_settings();
+
+    let admin = AuthUser {
+        user_id: 1,
+        username: "admin".to_string(),
+        role: "admin".to_string(),
+        jti: String::new(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+
+    // 1. Cross-provider mismatches must return 400 with a clear error message.
+    for (provider, mismatched_model) in [
+        ("openai", "gemini-4-argon"),
+        ("openai", "claude-sonnet-5-5"),
+        ("anthropic", "gemini-4-argon"),
+        ("anthropic", "gpt-6.1-sol"),
+        ("anthropic", "o3"),
+        ("gemini", "gpt-6.1-sol"),
+        ("gemini", "claude-sonnet-5-5"),
+    ] {
+        let resp = test_ai_connection(
+            axum::Extension(admin.clone()),
+            Json(serde_json::json!({
+                "provider": provider,
+                "model": mismatched_model,
+            })),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "provider={provider} model={mismatched_model} must be rejected with 400"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains("not compatible"),
+            "expected clear mismatch error for {provider}/{mismatched_model}, got: {text}"
+        );
+    }
+
+    // 2. Store a cloud Anthropic API key with default cloud endpoint, then test `anthropic-local`
+    //    against a local mock server: must succeed cleanly WITHOUT triggering ENDPOINT_KEY_REBIND_DENIED
+    //    and WITHOUT leaking the stored cloud key to the local URL.
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "UPDATE settings SET anthropic_api_key = 'sk-ant-stored-cloud-key', anthropic_endpoint = '' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+    let app = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post(move |headers: axum::http::HeaderMap| {
+            let tx = tx.clone();
+            async move {
+                let key = headers
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let _ = tx.send(key);
+                axum::Json(serde_json::json!({
+                    "content": [{ "type": "text", "text": "SUCCESS" }]
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let local_resp = test_ai_connection(
+        axum::Extension(admin.clone()),
+        Json(serde_json::json!({
+            "provider": "anthropic-local",
+            "endpoint": local_endpoint,
+            "model": "qwen2.5-coder:7b",
+        })),
+    )
+    .await;
+    assert_eq!(local_resp.status(), StatusCode::OK);
+    let seen_key = rx.recv().await.expect("expected local anthropic probe");
+    assert!(
+        seen_key.is_none(),
+        "stored cloud Anthropic key must never be forwarded to an anthropic-local test endpoint"
+    );
+
+    // 3. Rebinding cloud `anthropic` to a different endpoint while a cloud key is stored and no
+    //    fresh key is supplied must STILL fail with 400 ENDPOINT_KEY_REBIND_DENIED.
+    let rebind_resp = test_ai_connection(
+        axum::Extension(admin),
+        Json(serde_json::json!({
+            "provider": "anthropic",
+            "endpoint": local_endpoint,
+            "model": "claude-sonnet-5-5",
+        })),
+    )
+    .await;
+    assert_eq!(rebind_resp.status(), StatusCode::BAD_REQUEST);
+    let rebind_bytes = axum::body::to_bytes(rebind_resp.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&rebind_bytes).contains("ENDPOINT_KEY_REBIND_DENIED"));
+
+    server.abort();
+}

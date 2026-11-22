@@ -29,6 +29,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(test)]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util_reader_stream::FileRangeStream;
@@ -1049,6 +1050,7 @@ async fn delete_entry(
         Err(_) => McBrowserError::Internal("Delete task failed".to_string()).into_response(),
     }
 }
+#[cfg(test)]
 pub async fn stream_body_to_file(
     body: Body,
     std_file: File,

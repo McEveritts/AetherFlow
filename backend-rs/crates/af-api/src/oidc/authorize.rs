@@ -219,22 +219,28 @@ pub(super) fn oidc_device_family_id(device_code: &str) -> String {
     format!("dc:{}", dc_tag)
 }
 
-pub(super) fn is_oidc_grant_revoked(fam: &str) -> bool {
+pub(super) fn try_is_oidc_grant_revoked(fam: &str) -> anyhow::Result<bool> {
     let trimmed = fam.trim();
     if trimmed.is_empty() {
-        return false;
+        return Ok(false);
     }
-    if af_db::is_token_revoked(&format!("oidc-fam:{}", trimmed)) {
-        return true;
+    if af_db::token_revocation_status(&format!("oidc-fam:{}", trimmed))? {
+        return Ok(true);
     }
     if let Some(rest) = trimmed.strip_prefix("sf:") {
         if let Some((sess_tag, _)) = rest.split_once(':') {
-            if sess_tag.len() == 32 && af_db::is_token_revoked(&format!("oidc-sess:{}", sess_tag)) {
-                return true;
+            if sess_tag.len() == 32
+                && af_db::token_revocation_status(&format!("oidc-sess:{}", sess_tag))?
+            {
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
+}
+
+pub(super) fn is_oidc_grant_revoked(fam: &str) -> bool {
+    try_is_oidc_grant_revoked(fam).unwrap_or(true)
 }
 
 #[derive(Deserialize)]

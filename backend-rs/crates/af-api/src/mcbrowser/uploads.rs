@@ -71,7 +71,7 @@ pub(crate) use session::{
 
 #[cfg(test)]
 #[allow(unused_imports)]
-use db::{discard_unpublished_session_conn, load_session_conn};
+use db::{cleanup_expired_uploads_for_user_at, discard_unpublished_session_conn, load_session_conn};
 #[cfg(test)]
 #[allow(unused_imports)]
 use handlers::{parse_patch_headers, stream_patch_chunk_to_file};

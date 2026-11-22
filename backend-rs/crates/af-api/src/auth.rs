@@ -36,9 +36,10 @@ pub(crate) use revocation::{
     revoke_all_user_credentials_in_tx,
 };
 
+#[cfg(test)]
+pub use sessions::refresh_session;
 pub use sessions::{
-    list_active_sessions, logout, refresh_session, refresh_session_with_peer, revoke_session,
-    verify_proxy_auth,
+    list_active_sessions, logout, refresh_session_with_peer, revoke_session, verify_proxy_auth,
 };
 
 pub(crate) use setup_login::password_too_long;

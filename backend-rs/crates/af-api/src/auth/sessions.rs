@@ -102,6 +102,7 @@ pub async fn refresh_session_with_peer(
     blocking_response(move || refresh_session_for_peer_blocking(headers, peer_ip)).await
 }
 
+#[cfg(test)]
 pub async fn refresh_session(headers: HeaderMap) -> Response {
     blocking_response(move || refresh_session_for_peer_blocking(headers, None)).await
 }

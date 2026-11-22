@@ -703,7 +703,163 @@ pub(crate) fn reconcile_publishing_session_at(
     Ok(PublishingResolution::Completed)
 }
 
-/// Cleans up expired upload sessions (`expires_at <= now`).
+fn cleanup_single_expired_upload_locked(
+    conn: &Connection,
+    base_root: &Path,
+    rec: UploadSessionRecord,
+    now_secs: i64,
+) -> Result<bool, McBrowserError> {
+    let Some(mut rec) = load_session_conn(conn, &rec.id)? else {
+        return Ok(false);
+    };
+    if rec.expires_at > now_secs {
+        return Ok(false);
+    }
+
+    let may_have_published = rec.status == "publishing"
+        || (rec.status == "uploading" && rec.offset_bytes == rec.upload_length);
+
+    let resolution = if may_have_published {
+        reconcile_publishing_session_at(conn, base_root, &mut rec, false, now_secs)
+            .unwrap_or(PublishingResolution::AmbiguousRetainQuota)
+    } else {
+        PublishingResolution::UnpublishedStagingIntact
+    };
+
+    if matches!(resolution, PublishingResolution::AmbiguousRetainQuota) {
+        return Ok(false);
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|_| {
+            McBrowserError::Internal("Failed to start expiry cleanup transaction".to_string())
+        })?;
+
+    let step = (|| -> Result<bool, McBrowserError> {
+        let Some(current) = load_session_conn(conn, &rec.id)? else {
+            return Ok(false);
+        };
+        if current.expires_at > now_secs {
+            return Ok(false);
+        }
+
+        let safe_to_release_quota = match current.status.as_str() {
+            "completed" => false,
+            "publishing" => {
+                // `reconcile_publishing_session_at` transitions proven-unpublished `'publishing'`
+                // sessions back to `'uploading'`. Seeing `'publishing'` here means a publish is
+                // active or ambiguous; retain row and quota.
+                return Ok(false);
+            }
+            "uploading" => {
+                // Fresh publication-proof re-check inside BEGIN IMMEDIATE BEFORE releasing quota
+                // or deleting the row so an in-flight or crashed publication is never undercounted.
+                let proof_confirms_unpublished = match read_publication_proof_at(base_root, &current)
+                {
+                    Ok(Some(UploadPublicationProof::Unpublished {})) => true,
+                    Ok(None) if current.offset_bytes < current.upload_length => true,
+                    _ => false,
+                };
+                if !proof_confirms_unpublished {
+                    return Ok(false);
+                }
+                if current.offset_bytes == current.upload_length
+                    && !matches!(resolution, PublishingResolution::UnpublishedStagingIntact)
+                {
+                    return Ok(false);
+                }
+                true
+            }
+            _ => return Ok(false),
+        };
+
+        if safe_to_release_quota && current.quota_reserved && current.reserved_bytes > 0 {
+            release_user_quota_conn(conn, current.user_id, current.reserved_bytes)?;
+        }
+
+        if safe_to_release_quota && !current.audit_event_id.trim().is_empty() {
+            crate::mcbrowser::events::finalize_event_failed_with_conn(
+                conn,
+                &current.audit_event_id,
+                Some("UPLOAD_EXPIRED"),
+            )?;
+        }
+
+        conn.execute(
+            "DELETE FROM mcbrowser_uploads WHERE id = ?1",
+            params![current.id],
+        )
+        .map_err(|_| {
+            McBrowserError::Internal("Failed to delete expired upload row".to_string())
+        })?;
+        Ok(true)
+    })();
+
+    match step {
+        Ok(removed) => {
+            conn.execute_batch("COMMIT").map_err(|_| {
+                let _ = conn.execute_batch("ROLLBACK");
+                McBrowserError::Internal("Failed to commit expiry cleanup".to_string())
+            })?;
+            if removed {
+                let _ = remove_staging_file_at(base_root, rec.user_id, &rec.id);
+                let _ = remove_publication_proof_at(base_root, rec.user_id, &rec.id);
+            }
+            Ok(removed)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Opportunistically cleans up expired upload sessions for a single user without reading or
+/// advancing the global `mcbrowser_upload_cleanup_cursor`.
+///
+/// Callers must already hold `user_mutation_stripe(user_id)`. Each candidate session acquires
+/// `session_lock(&rec.id).try_lock()` so it never blocks or creates an ABBA deadlock with handlers
+/// locking `session_lock -> user_mutation_stripe`.
+pub(crate) fn cleanup_expired_uploads_for_user_at(
+    conn: &Connection,
+    base_root: &Path,
+    user_id: i64,
+    now_secs: i64,
+) -> Result<usize, McBrowserError> {
+    ensure_uploads_schema(conn)?;
+    let sql = format!(
+        "SELECT {SESSION_SELECT_COLUMNS} FROM mcbrowser_uploads \
+         WHERE user_id = ?1 AND expires_at <= ?2 ORDER BY expires_at, id LIMIT 128"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|_| {
+        McBrowserError::Internal("Failed to prepare user expiry query".to_string())
+    })?;
+    let rows = statement
+        .query_map(params![user_id, now_secs], row_to_session)
+        .map_err(|_| McBrowserError::Internal("Failed to scan user expired uploads".to_string()))?;
+    let expired = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| McBrowserError::Internal("Failed to read user expired upload row".to_string()))?;
+    drop(statement);
+
+    let mut cleaned = 0usize;
+    for rec in expired {
+        let sess_mutex = super::session_lock(&rec.id);
+        let Ok(_sess_guard) = sess_mutex.try_lock() else {
+            continue;
+        };
+        if cleanup_single_expired_upload_locked(conn, base_root, rec, now_secs)? {
+            cleaned += 1;
+        }
+    }
+
+    Ok(cleaned)
+}
+
+/// Cleans up expired upload sessions (`expires_at <= now`) globally using a persistent cursor.
+/// - Acquires non-blocking `session_lock(&rec.id).try_lock()` -> `user_mutation_stripe(rec.user_id).try_lock()`
+///   for every expired session and holds those guards across reconciliation, `BEGIN IMMEDIATE`
+///   (with a fresh publication-proof re-check), and staging/proof file unlinks.
 /// - Before releasing any quota, reconciles `'publishing'` sessions (and `'uploading'` sessions
 ///   at `offset_bytes == upload_length`) against disk:
 ///   - If the file was already published to `BrowserFs`, transitions the session to `'completed'`
@@ -713,6 +869,7 @@ pub(crate) fn reconcile_publishing_session_at(
 ///   - Only when an unfinished upload is proven unpublished (`status == 'uploading'` with
 ///     `offset_bytes < upload_length`, or `UnpublishedStagingIntact`) is its `reserved_bytes` released.
 /// - For expired `'completed'` sessions: deletes the DB tracking row ONLY and NEVER releases quota.
+#[allow(dead_code)]
 pub fn cleanup_expired_uploads_at(
     conn: &Connection,
     base_root: &Path,
@@ -761,94 +918,18 @@ pub fn cleanup_expired_uploads_at(
     ).map_err(|_| McBrowserError::Internal("Failed to advance upload cleanup cursor".to_string()))?;
 
     let mut cleaned = 0usize;
-    let mut staging_to_unlink: Vec<(i64, String)> = Vec::new();
-
-    for mut rec in expired {
-        let may_have_published = rec.status == "publishing"
-            || (rec.status == "uploading" && rec.offset_bytes == rec.upload_length);
-
-        let resolution = if may_have_published {
-            reconcile_publishing_session_at(conn, base_root, &mut rec, false, now_secs)
-                .unwrap_or(PublishingResolution::AmbiguousRetainQuota)
-        } else {
-            PublishingResolution::UnpublishedStagingIntact
-        };
-
-        if matches!(resolution, PublishingResolution::AmbiguousRetainQuota) {
+    for rec in expired {
+        let sess_mutex = super::session_lock(&rec.id);
+        let Ok(_sess_guard) = sess_mutex.try_lock() else {
             continue;
+        };
+        let user_stripe = crate::mcbrowser::user_mutation_stripe(rec.user_id);
+        let Ok(_user_guard) = user_stripe.try_lock() else {
+            continue;
+        };
+        if cleanup_single_expired_upload_locked(conn, base_root, rec, now_secs)? {
+            cleaned += 1;
         }
-
-        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION")
-            .map_err(|_| {
-                McBrowserError::Internal("Failed to start expiry cleanup transaction".to_string())
-            })?;
-
-        let step = (|| -> Result<bool, McBrowserError> {
-            let Some(current) = load_session_conn(conn, &rec.id)? else {
-                return Ok(false);
-            };
-            if current.expires_at > now_secs {
-                return Ok(false);
-            }
-
-            let safe_to_release_quota = match current.status.as_str() {
-                "completed" => false,
-                "publishing" => {
-                    matches!(resolution, PublishingResolution::UnpublishedStagingIntact)
-                }
-                "uploading" => {
-                    if current.offset_bytes == current.upload_length {
-                        matches!(resolution, PublishingResolution::UnpublishedStagingIntact)
-                    } else {
-                        true
-                    }
-                }
-                _ => false,
-            };
-
-            if safe_to_release_quota && current.quota_reserved && current.reserved_bytes > 0 {
-                release_user_quota_conn(conn, current.user_id, current.reserved_bytes)?;
-            }
-
-            if safe_to_release_quota && !current.audit_event_id.trim().is_empty() {
-                crate::mcbrowser::events::finalize_event_failed_with_conn(
-                    conn,
-                    &current.audit_event_id,
-                    Some("UPLOAD_EXPIRED"),
-                )?;
-            }
-
-            conn.execute(
-                "DELETE FROM mcbrowser_uploads WHERE id = ?1",
-                params![current.id],
-            )
-            .map_err(|_| {
-                McBrowserError::Internal("Failed to delete expired upload row".to_string())
-            })?;
-            Ok(true)
-        })();
-
-        match step {
-            Ok(removed) => {
-                conn.execute_batch("COMMIT").map_err(|_| {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    McBrowserError::Internal("Failed to commit expiry cleanup".to_string())
-                })?;
-                if removed {
-                    cleaned += 1;
-                    staging_to_unlink.push((rec.user_id, rec.id));
-                }
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        }
-    }
-
-    for (uid, id) in staging_to_unlink {
-        let _ = remove_staging_file_at(base_root, uid, &id);
-        let _ = remove_publication_proof_at(base_root, uid, &id);
     }
 
     Ok(cleaned)

@@ -266,17 +266,22 @@ pub(super) async fn head_upload(
     if let Err(resp) = validate_tus_version(&headers) {
         return resp;
     }
-    if let Err(e) = validate_mcbrowser_user(&auth_user) {
-        return map_mcbrowser_err_tus(e);
-    }
+    let user_id = match validate_mcbrowser_user(&auth_user) {
+        Ok(id) => id,
+        Err(e) => return map_mcbrowser_err_tus(e),
+    };
     let upload_id = match validate_upload_id(&raw_id) {
         Ok(id) => id,
         Err(e) => return map_mcbrowser_err_tus(e),
     };
 
+    // Canonical lock order: session_lock(&upload_id) -> user_mutation_stripe(user_id).
+    // head_upload_at may finish an interrupted publish or cancel/release quota on missing staging.
     let sess_guard = session_lock(&upload_id).lock_owned().await;
+    let user_guard = user_mutation_stripe(user_id).lock_owned().await;
     let res = tokio::task::spawn_blocking(move || {
         let _sess_guard = sess_guard;
+        let _user_guard = user_guard;
         let base_root = configured_base_root().map_err(map_mcbrowser_err_tus)?;
         let conn = af_db::get_conn().map_err(|_| {
             map_mcbrowser_err_tus(McBrowserError::Internal(
@@ -363,9 +368,14 @@ pub(super) async fn patch_upload(
     // without holding the global per-user mutation stripe during network chunk streaming.
     let sess_guard = session_lock(&upload_id).lock_owned().await;
 
+    // Acquire user mutation stripe strictly AFTER session_lock only for brief preparation
+    // (which may reconcile an interrupted publish or cancel/release quota if staging is missing),
+    // and release it before streaming the chunk body.
+    let prep_user_guard = user_mutation_stripe(user_id).lock_owned().await;
     let id_for_prep = upload_id.clone();
     let auth_for_prep = auth_user.clone();
     let prep_res = tokio::task::spawn_blocking(move || {
+        let _prep_user_guard = prep_user_guard;
         let base_root = configured_base_root().map_err(map_mcbrowser_err_tus)?;
         let conn = af_db::get_conn().map_err(|_| {
             map_mcbrowser_err_tus(McBrowserError::Internal(

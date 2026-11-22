@@ -336,6 +336,7 @@ async fn bulk_update_inventory_errors_are_unavailable_without_success_counts() {
             blocker.execute_batch("ROLLBACK").unwrap();
         }
     }
+    af_db::init_db().unwrap();
     std::fs::write(&catalog, "[]").unwrap();
     let response = check_package_updates().await;
     assert_eq!(response.status(), StatusCode::OK);

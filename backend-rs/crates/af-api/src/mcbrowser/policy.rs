@@ -1145,6 +1145,7 @@ pub(super) fn authorize_with_conn(
     authorize_with_policy(&policy, permission, path)
 }
 
+#[cfg(test)]
 pub(super) fn authorize(
     user: &AuthUser,
     permission: Permission,

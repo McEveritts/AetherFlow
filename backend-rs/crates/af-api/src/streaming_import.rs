@@ -16,24 +16,6 @@ mod validation;
 #[cfg(test)]
 mod tests;
 
-/// `GET /api/v1/admin/streaming/imports/status` — list import checkpoints & upstream capabilities.
-pub const ROUTE_ADMIN_STREAMING_IMPORT_STATUS: &str = "/api/v1/admin/streaming/imports/status";
-/// `POST /api/v1/admin/streaming/imports/events` — bounded real-event JSON batch import.
-pub const ROUTE_ADMIN_STREAMING_IMPORT_EVENTS: &str = "/api/v1/admin/streaming/imports/events";
-/// `POST /api/v1/admin/streaming/imports/upstream-probe` — capability-aware upstream source check.
-pub const ROUTE_ADMIN_STREAMING_IMPORT_UPSTREAM_PROBE: &str =
-    "/api/v1/admin/streaming/imports/upstream-probe";
-/// `GET` / `PUT /api/v1/admin/streaming/policies` — read or update `streaming_tracking_policies`.
-pub const ROUTE_ADMIN_STREAMING_POLICIES: &str = "/api/v1/admin/streaming/policies";
-/// `GET` / `PUT` / `DELETE /api/v1/admin/streaming/user-links` — explicit user identity links.
-pub const ROUTE_ADMIN_STREAMING_USER_LINKS: &str = "/api/v1/admin/streaming/user-links";
-/// `POST /api/v1/admin/streaming/reconciliation/preview` — read-only legacy reconciliation preview.
-pub const ROUTE_ADMIN_STREAMING_RECONCILIATION_PREVIEW: &str =
-    "/api/v1/admin/streaming/reconciliation/preview";
-/// `POST /api/v1/admin/streaming/reconciliation/apply` — verified-backup, token-bound apply.
-pub const ROUTE_ADMIN_STREAMING_RECONCILIATION_APPLY: &str =
-    "/api/v1/admin/streaming/reconciliation/apply";
-
 /// Maximum events accepted in a single bounded JSON import batch.
 pub const MAX_IMPORT_BATCH_EVENTS: usize = 500;
 /// Approval token validity window in seconds (15 minutes).

@@ -339,8 +339,6 @@ pub(crate) struct StoredShareRow {
     pub expires_at_unix: Option<i64>,
     pub revoked: bool,
     pub created_at: String,
-    #[allow(dead_code)]
-    pub created_at_unix: i64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1128,7 +1126,6 @@ fn row_to_stored_share(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredShareRow
         expires_at_unix: r.get(14)?,
         revoked: r.get(15)?,
         created_at: r.get(16)?,
-        created_at_unix: r.get(17)?,
     })
 }
 
@@ -1181,7 +1178,7 @@ fn load_active_share_by_token(
             "SELECT id, token_hash, owner_user_id, owner_scope, scope_root_dev, scope_root_ino, \
                     target_path, target_name, is_directory, target_dev, target_ino, \
                     password_hash, allow_download, expires_at, expires_at_unix, revoked, \
-                    created_at, created_at_unix \
+                    created_at \
              FROM mcbrowser_shares \
              WHERE token_hash = ?1",
             params![token_hash],
@@ -1624,7 +1621,7 @@ pub(crate) fn list_shares_at(
             "SELECT id, token_hash, owner_user_id, owner_scope, scope_root_dev, scope_root_ino, \
                     target_path, target_name, is_directory, target_dev, target_ino, \
                     password_hash, allow_download, expires_at, expires_at_unix, revoked, \
-                    created_at, created_at_unix \
+                    created_at \
              FROM mcbrowser_shares \
              WHERE owner_user_id = ?1 AND revoked = 0 \
              ORDER BY created_at_unix DESC, id DESC",

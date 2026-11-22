@@ -19,8 +19,8 @@ pub use device::{oidc_device_authorize, oidc_device_consent, oidc_device_verify}
 pub use google::{google_callback, google_login};
 pub use introspection::{oidc_introspect, oidc_revoke, oidc_userinfo};
 pub use keys::{
-    get_base_url, get_base_url_for_peer, get_oidc_issuer, get_oidc_issuer_for_peer, oidc_discovery,
-    oidc_jwks, OidcKeyMaterial,
+    get_base_url, get_base_url_for_peer, get_oidc_issuer_for_peer, oidc_discovery, oidc_jwks,
+    OidcKeyMaterial,
 };
 #[allow(unused_imports)]
 pub(crate) use keys::{is_loopback_authority, is_valid_host_authority};

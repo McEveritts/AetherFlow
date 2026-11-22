@@ -392,8 +392,7 @@ fn populate_package_statuses(
     jobs: &PackageJobSnapshot,
 ) -> anyhow::Result<()> {
     let installed_packages = populate_package_core_statuses(pkgs, jobs)?;
-    let ingress: HashMap<_, _> = af_db::get_all_app_ingress_configs()
-        .unwrap_or_default()
+    let ingress: HashMap<_, _> = af_db::get_all_app_ingress_configs()?
         .into_iter()
         .map(|config| (config.app_name.clone(), config))
         .collect();
@@ -618,17 +617,17 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
     })
 }
 
-pub fn get_all_blueprints() -> Vec<BlueprintStatusView> {
-    let pkgs = get_package_catalog().unwrap_or_default();
+pub fn get_all_blueprints() -> anyhow::Result<Vec<BlueprintStatusView>> {
+    let pkgs = get_package_catalog()?;
     let ingress_map: HashMap<String, af_models::AppIngressConfig> =
-        af_db::get_all_app_ingress_configs()
-            .unwrap_or_default()
+        af_db::get_all_app_ingress_configs()?
             .into_iter()
             .map(|c| (c.app_name.clone(), c))
             .collect();
     let base_domain = resolve_base_domain();
 
-    pkgs.into_iter()
+    Ok(pkgs
+        .into_iter()
         .filter_map(|p| get_blueprint(&p.name))
         .map(|bp| {
             let mut active_port = bp.default_port;
@@ -660,7 +659,7 @@ pub fn get_all_blueprints() -> Vec<BlueprintStatusView> {
                 tls_enabled,
             }
         })
-        .collect()
+        .collect())
 }
 
 pub fn resolve_base_domain() -> String {
@@ -1772,8 +1771,7 @@ pub fn get_active_services_with_jobs(
 
     // 2. Installed & Active-Job Packages
     let ingress_map: HashMap<String, af_models::AppIngressConfig> =
-        af_db::get_all_app_ingress_configs()
-            .unwrap_or_default()
+        af_db::get_all_app_ingress_configs()?
             .into_iter()
             .map(|c| (c.app_name.clone(), c))
             .collect();

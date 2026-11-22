@@ -1,4 +1,4 @@
-use super::policy::{authorize, authorize_with_conn, Permission};
+use super::policy::{authorize_with_conn, Permission};
 use super::*;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -1380,20 +1380,6 @@ pub fn discover_subtitles_for_user_with_conn(
 ) -> Result<Vec<SubtitleTrackInfo>, McBrowserError> {
     discover_subtitles_in_fs(bfs, video_path, |candidate| {
         authorize_with_conn(connection, user, Permission::Read, candidate).is_ok()
-    })
-}
-
-#[allow(dead_code)]
-pub fn discover_subtitles_for_user(
-    bfs: &BrowserFs,
-    user: &AuthUser,
-    video_path: &str,
-) -> Result<Vec<SubtitleTrackInfo>, McBrowserError> {
-    if let Ok(connection) = af_db::get_conn() {
-        return discover_subtitles_for_user_with_conn(&connection, bfs, user, video_path);
-    }
-    discover_subtitles_in_fs(bfs, video_path, |candidate| {
-        authorize(user, Permission::Read, candidate).is_ok()
     })
 }
 

@@ -814,3 +814,129 @@ async fn oidc_consent_rolls_back_auth_code_when_consent_persistence_fails() {
         "Auth code insert must roll back cleanly if oidc_consents write fails"
     );
 }
+
+#[tokio::test]
+async fn oidc_introspect_propagates_sqlite_errors_instead_of_returning_active_false() {
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    let db = ensure_shared_test_db();
+    env::set_var("OIDC_KEY_PATH", db.parent().unwrap().join("oidc-intr-err.pem"));
+    let secret_hash = hex::encode(Sha256::digest(b"intr-secret"));
+    let (access_tok, refresh_tok) = {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, email, role) VALUES (793, 'intr-user', 'intr@example.com', 'user')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) \
+             VALUES ('intr-client', ?1, 'IntrClient', '[\"https://intr.example/cb\"]')",
+            params![secret_hash],
+        )
+        .unwrap();
+        let issued = issue_oidc_tokens_in_tx(
+            &conn,
+            &HeaderMap::new(),
+            None,
+            "intr-client",
+            793,
+            "openid profile",
+            None,
+            None,
+        )
+        .expect("issue tokens for introspection error test");
+        (
+            issued["access_token"].as_str().unwrap().to_string(),
+            issued["refresh_token"].as_str().unwrap().to_string(),
+        )
+    };
+
+    let introspect = |token: &str, hint: Option<&str>| {
+        let mut form: HashMap<String, String> = [
+            ("client_id", "intr-client"),
+            ("client_secret", "intr-secret"),
+            ("token", token),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        if let Some(h) = hint {
+            form.insert("token_type_hint".into(), h.into());
+        }
+        oidc_introspect(crate::ws::PeerIp(None), HeaderMap::new(), Form(form))
+    };
+
+    // 1. Healthy DB: live access & refresh tokens report active=true, unknown token reports active=false.
+    for (tok, hint, expected_active) in [
+        (access_tok.as_str(), Some("access_token"), true),
+        (refresh_tok.as_str(), Some("refresh_token"), true),
+        ("nonexistent-opaque-token", None, false),
+    ] {
+        let resp = introspect(tok, hint).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["active"], expected_active);
+    }
+
+    // 2. Dropping `revoked_tokens` must return 500 server_error rather than treating the DB error
+    //    as revoked (which would falsely report 200 active=false).
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE revoked_tokens;")
+            .unwrap();
+    }
+    let rev_at_err = introspect(&access_tok, Some("access_token")).await;
+    assert_eq!(
+        rev_at_err.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "access-token revocation DB failure must return 500 server_error rather than 200 active=false"
+    );
+    let rev_rt_err = introspect(&refresh_tok, Some("refresh_token")).await;
+    assert_eq!(
+        rev_rt_err.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "refresh-token grant revocation DB failure must return 500 server_error rather than 200 active=false"
+    );
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
+        )
+        .unwrap();
+    }
+
+    // 3. Dropping `users` table must return 500 server_error for both access & refresh token introspection.
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE users;")
+            .unwrap();
+    }
+    let at_err = introspect(&access_tok, Some("access_token")).await;
+    assert_eq!(
+        at_err.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "access-token introspection must return 500 on subject DB failure rather than 200 active=false"
+    );
+    let rt_err = introspect(&refresh_tok, Some("refresh_token")).await;
+    assert_eq!(
+        rt_err.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "refresh-token introspection must return 500 on subject DB failure rather than 200 active=false"
+    );
+
+    // 4. Dropping `oidc_refresh_tokens` must return 500 server_error instead of 200 active=false.
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute("DROP TABLE oidc_refresh_tokens", []).unwrap();
+    }
+    let missing_rt_table = introspect("any-refresh-token", Some("refresh_token")).await;
+    assert_eq!(
+        missing_rt_table.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "refresh-token table lookup failure must return 500 server_error rather than 200 active=false"
+    );
+}

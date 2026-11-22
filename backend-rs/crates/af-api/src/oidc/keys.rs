@@ -359,10 +359,6 @@ pub fn get_oidc_issuer_for_peer(headers: &HeaderMap, peer_ip: Option<std::net::I
     get_base_url_for_peer(headers, peer_ip)
 }
 
-pub fn get_oidc_issuer(headers: &HeaderMap) -> String {
-    get_oidc_issuer_for_peer(headers, None)
-}
-
 pub(super) fn is_accepted_oidc_issuer(
     token_iss: &str,
     headers: &HeaderMap,

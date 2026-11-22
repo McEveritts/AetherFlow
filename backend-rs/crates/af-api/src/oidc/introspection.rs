@@ -1,4 +1,4 @@
-use super::authorize::is_oidc_grant_revoked;
+use super::authorize::try_is_oidc_grant_revoked;
 use super::keys::{is_accepted_oidc_issuer, oidc_server_error, OIDC_KEYS};
 use super::token_endpoint::{
     authenticate_oidc_client, extract_oidc_client_credentials, AccessTokenClaims,
@@ -57,10 +57,23 @@ fn oidc_userinfo_blocking(headers: HeaderMap, peer_ip: Option<std::net::IpAddr>)
             .into_response();
     };
     if token_data.claims.jti.is_empty()
-        || af_db::is_token_revoked(&token_data.claims.jti)
-        || is_oidc_grant_revoked(&token_data.claims.fam)
         || !is_accepted_oidc_issuer(&token_data.claims.iss, &headers, peer_ip)
     {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid_token" })),
+        )
+            .into_response();
+    }
+    let jti_revoked = match af_db::token_revocation_status(&token_data.claims.jti) {
+        Ok(revoked) => revoked,
+        Err(_) => return oidc_server_error(),
+    };
+    let grant_revoked = match try_is_oidc_grant_revoked(&token_data.claims.fam) {
+        Ok(revoked) => revoked,
+        Err(_) => return oidc_server_error(),
+    };
+    if jti_revoked || grant_revoked {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_token" })),
@@ -84,9 +97,15 @@ fn oidc_userinfo_blocking(headers: HeaderMap, peer_ip: Option<std::net::IpAddr>)
     let Ok(conn) = af_db::get_read_conn() else {
         return oidc_server_error();
     };
-    if !oidc_client_exists(&conn, &token_data.claims.aud)
-        || !access_token_subject_valid(&conn, &sub, token_data.claims.ver)
-    {
+    let client_ok = match check_oidc_client_exists(&conn, &token_data.claims.aud) {
+        Ok(exists) => exists,
+        Err(_) => return oidc_server_error(),
+    };
+    let subject_ok = match check_access_token_subject_valid(&conn, &sub, token_data.claims.ver) {
+        Ok(valid) => valid,
+        Err(_) => return oidc_server_error(),
+    };
+    if !client_ok || !subject_ok {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_token" })),
@@ -256,40 +275,45 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
     Json(serde_json::json!({})).into_response()
 }
 
-fn oidc_client_exists(conn: &rusqlite::Connection, client_id: &str) -> bool {
+fn check_oidc_client_exists(
+    conn: &rusqlite::Connection,
+    client_id: &str,
+) -> rusqlite::Result<bool> {
     if client_id.trim().is_empty() {
-        return false;
+        return Ok(false);
     }
-    match crate::auth::table_exists(conn, "oidc_clients") {
-        Ok(false) => return true,
-        Err(_) => return false,
-        Ok(true) => {}
+    if !crate::auth::table_exists(conn, "oidc_clients")? {
+        return Ok(true);
     }
-    conn.query_row(
-        "SELECT 1 FROM oidc_clients WHERE id = ?1",
-        params![client_id],
-        |_| Ok(()),
-    )
-    .is_ok()
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM oidc_clients WHERE id = ?1",
+            params![client_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
-fn access_token_subject_valid(
+fn check_access_token_subject_valid(
     connection: &rusqlite::Connection,
     subject: &str,
     token_ver: i64,
-) -> bool {
+) -> Result<bool, crate::auth::SubjectStatusError> {
     let Ok(user_id) = subject.parse::<i64>() else {
-        return false;
+        return Ok(false);
     };
-    if user_id <= 0
-        || connection
-            .query_row("SELECT 1 FROM users WHERE id = ?1", [user_id], |_| Ok(()))
-            .is_err()
-    {
-        return false;
+    if user_id <= 0 {
+        return Ok(false);
     }
-    crate::auth::load_active_human_subject(connection, user_id)
-        .is_ok_and(|subj| token_ver >= subj.sessions_revoked_after)
+    match crate::auth::load_active_human_subject(connection, user_id) {
+        Ok(subj) => Ok(token_ver >= subj.sessions_revoked_after),
+        Err(crate::auth::SubjectStatusError::MissingOrPlugin)
+        | Err(crate::auth::SubjectStatusError::Suspended) => Ok(false),
+        Err(crate::auth::SubjectStatusError::DbError) => {
+            Err(crate::auth::SubjectStatusError::DbError)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,7 +321,7 @@ pub(super) fn access_token_subject_exists(
     connection: &rusqlite::Connection,
     subject: &str,
 ) -> bool {
-    access_token_subject_valid(connection, subject, 0)
+    check_access_token_subject_valid(connection, subject, 0).unwrap_or(false)
 }
 
 pub async fn oidc_introspect(
@@ -352,78 +376,114 @@ fn oidc_introspect_blocking(
             if let Ok(data) =
                 decode::<AccessTokenClaims>(&token_str, &keys.decoding_key, &validation)
             {
-                let token_valid = !data.claims.jti.is_empty()
-                    && !af_db::is_token_revoked(&data.claims.jti)
-                    && !is_oidc_grant_revoked(&data.claims.fam)
-                    && af_db::get_read_conn().ok().is_some_and(|connection| {
-                        oidc_client_exists(&connection, &data.claims.aud)
-                            && access_token_subject_valid(
-                                &connection,
-                                &data.claims.sub,
-                                data.claims.ver,
-                            )
-                    });
                 if data.claims.aud == client_id
                     && is_accepted_oidc_issuer(&data.claims.iss, &headers, peer_ip)
-                    && token_valid
+                    && !data.claims.jti.is_empty()
                 {
-                    return Json(serde_json::json!({
-                        "active": true,
-                        "sub": data.claims.sub,
-                        "client_id": client_id,
-                        "scope": data.claims.scope,
-                        "exp": data.claims.exp,
-                        "iat": data.claims.iat,
-                        "token_type": "Bearer",
-                    }))
-                    .into_response();
+                    let jti_revoked = match af_db::token_revocation_status(&data.claims.jti) {
+                        Ok(revoked) => revoked,
+                        Err(_) => return oidc_server_error(),
+                    };
+                    let grant_revoked = match try_is_oidc_grant_revoked(&data.claims.fam) {
+                        Ok(revoked) => revoked,
+                        Err(_) => return oidc_server_error(),
+                    };
+                    if !jti_revoked && !grant_revoked {
+                        let Ok(connection) = af_db::get_read_conn() else {
+                            return oidc_server_error();
+                        };
+                        let client_ok = match check_oidc_client_exists(&connection, &data.claims.aud)
+                        {
+                            Ok(exists) => exists,
+                            Err(_) => return oidc_server_error(),
+                        };
+                        let subject_ok = match check_access_token_subject_valid(
+                            &connection,
+                            &data.claims.sub,
+                            data.claims.ver,
+                        ) {
+                            Ok(valid) => valid,
+                            Err(_) => return oidc_server_error(),
+                        };
+                        if client_ok && subject_ok {
+                            return Json(serde_json::json!({
+                                "active": true,
+                                "sub": data.claims.sub,
+                                "client_id": client_id,
+                                "scope": data.claims.scope,
+                                "exp": data.claims.exp,
+                                "iat": data.claims.iat,
+                                "token_type": "Bearer",
+                            }))
+                            .into_response();
+                        }
+                    }
                 }
             }
         }
     }
 
     if hint != "access_token" {
-        if let Ok(conn) = af_db::get_read_conn() {
-            if let Ok(has_fam_col) =
-                crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id")
-            {
-                let rt_sql = if has_fam_col {
-                    "SELECT user_id, scope, revoked, expires_at, COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
-                } else {
-                    "SELECT user_id, scope, revoked, expires_at, '' FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
-                };
-                if let Ok((user_id, scope, revoked, expires_at, rt_family)) =
-                    conn.query_row(rt_sql, params![token_str, client_id], |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, bool>(2)?,
-                            r.get::<_, String>(3)?,
-                            r.get::<_, String>(4)?,
-                        ))
-                    })
-                {
-                    let expired = DateTime::parse_from_rfc3339(&expires_at)
-                        .map(|dt| Utc::now() > dt.with_timezone(&Utc))
-                        .unwrap_or(true);
-                    let user_active = oidc_client_exists(&conn, &client_id)
-                        && crate::auth::load_active_human_subject(&conn, user_id).is_ok();
-                    let eff_fam = if rt_family.trim().is_empty() {
-                        token_str.clone()
-                    } else {
-                        rt_family
-                    };
-                    if !revoked && !is_oidc_grant_revoked(&eff_fam) && !expired && user_active {
-                        return Json(serde_json::json!({
-                            "active": true,
-                            "sub": user_id.to_string(),
-                            "client_id": client_id,
-                            "scope": scope,
-                            "token_type": "refresh_token",
-                        }))
-                        .into_response();
-                    }
-                }
+        let Ok(conn) = af_db::get_read_conn() else {
+            return oidc_server_error();
+        };
+        let has_fam_col = match crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id")
+        {
+            Ok(v) => v,
+            Err(_) => return oidc_server_error(),
+        };
+        let rt_sql = if has_fam_col {
+            "SELECT user_id, scope, revoked, expires_at, COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
+        } else {
+            "SELECT user_id, scope, revoked, expires_at, '' FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
+        };
+        let rt_row = match conn
+            .query_row(rt_sql, params![token_str, client_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .optional()
+        {
+            Ok(row) => row,
+            Err(_) => return oidc_server_error(),
+        };
+        if let Some((user_id, scope, revoked, expires_at, rt_family)) = rt_row {
+            let expired = DateTime::parse_from_rfc3339(&expires_at)
+                .map(|dt| Utc::now() > dt.with_timezone(&Utc))
+                .unwrap_or(true);
+            let client_ok = match check_oidc_client_exists(&conn, &client_id) {
+                Ok(exists) => exists,
+                Err(_) => return oidc_server_error(),
+            };
+            let user_active = match crate::auth::load_active_human_subject(&conn, user_id) {
+                Ok(_) => true,
+                Err(crate::auth::SubjectStatusError::MissingOrPlugin)
+                | Err(crate::auth::SubjectStatusError::Suspended) => false,
+                Err(crate::auth::SubjectStatusError::DbError) => return oidc_server_error(),
+            };
+            let eff_fam = if rt_family.trim().is_empty() {
+                token_str.clone()
+            } else {
+                rt_family
+            };
+            let grant_revoked = match try_is_oidc_grant_revoked(&eff_fam) {
+                Ok(revoked) => revoked,
+                Err(_) => return oidc_server_error(),
+            };
+            if !revoked && !grant_revoked && !expired && client_ok && user_active {
+                return Json(serde_json::json!({
+                    "active": true,
+                    "sub": user_id.to_string(),
+                    "client_id": client_id,
+                    "scope": scope,
+                    "token_type": "refresh_token",
+                }))
+                .into_response();
             }
         }
     }

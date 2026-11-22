@@ -139,6 +139,7 @@ impl MetadataCache {
         self.libraries.insert(key, (libs, now + ttl));
     }
 
+    #[cfg(test)]
     fn clear(&mut self) {
         self.entries.clear();
         self.libraries.clear();
@@ -949,6 +950,7 @@ pub fn schedule_provider_item_metadata(
     });
 }
 
+#[cfg(test)]
 pub fn clear_metadata_cache_for_test() {
     METADATA_CACHE.lock().unwrap().clear();
 }

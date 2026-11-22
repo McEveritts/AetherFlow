@@ -75,7 +75,9 @@ pub fn get_db_path() -> String {
     resolve_db_path()
 }
 
-pub fn get_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
+pub type DbConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
+
+pub fn get_conn() -> anyhow::Result<DbConn> {
     let pool = DB_POOL
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -88,7 +90,7 @@ pub fn get_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManag
 
 /// Bounded, read-only WAL connections. The writer remains a pool of one.
 /// Private in-memory test databases must use their original connection.
-pub fn get_read_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
+pub fn get_read_conn() -> anyhow::Result<DbConn> {
     let pool = DB_READ_POOL
         .read()
         .unwrap_or_else(|e| e.into_inner())

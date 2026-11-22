@@ -21,9 +21,9 @@ pub use handlers::{
     serve_plugin_ui_handler, MintPluginTokenRequest, PluginControlRequest,
 };
 pub use lifecycle::{
-    probe_plugin_health, reconcile_managed_plugins_on_startup, restart_plugin_instance,
-    restart_plugin_instance_with_port, shutdown_managed_plugins, start_plugin_instance,
-    start_plugin_instance_with_port, stop_plugin_instance,
+    probe_plugin_health, reconcile_managed_plugins_on_startup, restart_plugin_instance_with_port,
+    shutdown_managed_plugins, start_plugin_instance, start_plugin_instance_with_port,
+    stop_plugin_instance,
 };
 pub use manifest::{
     discover_plugins, discover_plugins_in_dir, is_plugin_request_denied, is_route_default_denied,

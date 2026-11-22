@@ -48,6 +48,16 @@ async fn route_handlers_report_sqlite_failures_instead_of_returning_empty_ok() {
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
+        get_blueprints(Extension(admin.clone())).await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        get_app_blueprint(Extension(admin.clone()), Path("sonarr".into()))
+            .await
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
         handle_streaming_demo(
             Extension(admin.clone()),
             HeaderMap::new(),
@@ -91,6 +101,19 @@ async fn route_handlers_report_sqlite_failures_instead_of_returning_empty_ok() {
     assert_eq!(
         get_ingress_configs(Extension(admin.clone())).await.status(),
         StatusCode::OK
+    );
+    assert_eq!(
+        get_blueprints(Extension(admin.clone())).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_app_blueprint(
+            Extension(admin.clone()),
+            Path("nonexistent-blueprint-fixture".into())
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
     );
     assert_eq!(
         handle_streaming_demo(
@@ -149,6 +172,16 @@ async fn route_handlers_report_sqlite_failures_instead_of_returning_empty_ok() {
     );
     assert_eq!(
         get_ingress_configs(Extension(admin.clone())).await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        get_blueprints(Extension(admin.clone())).await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        get_app_blueprint(Extension(admin.clone()), Path("sonarr".into()))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
@@ -234,7 +267,35 @@ async fn marketplace_catalog_reports_sqlite_ingress_failure_for_authenticated_us
         StatusCode::OK
     );
 
-    // Drop app_ingress_configs and invalidate cache -> must return 500 DATABASE_ERROR, not 200 OK.
+    // Corrupt package_lifecycle_history row so `retained_lifecycle_packages()` errors:
+    // authenticated marketplace must return 500 DATABASE_ERROR instead of swallowing via unwrap_or_default.
+    af_db::get_conn()
+        .unwrap()
+        .execute(
+            "INSERT INTO package_lifecycle_history \
+             (package_id, job_id, action, status, started_at, finished_at) \
+             VALUES (?1, 'corrupt-job', 'uninstall', 'completed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z')",
+            rusqlite::params![vec![0xffu8, 0x00u8, 0xfeu8]],
+        )
+        .unwrap();
+    assert_eq!(
+        get_marketplace_apps_blocking(headers.clone(), true).status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    af_db::get_conn()
+        .unwrap()
+        .execute(
+            "DELETE FROM package_lifecycle_history WHERE job_id = 'corrupt-job'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        get_marketplace_apps_blocking(headers.clone(), true).status(),
+        StatusCode::OK
+    );
+
+    // Drop app_ingress_configs and invalidate cache -> authenticated marketplace must return 500
+    // and get_active_services() must return Err (so get_services returns 503).
     af_db::invalidate_ingress_cache();
     af_db::get_conn()
         .unwrap()
@@ -242,6 +303,7 @@ async fn marketplace_catalog_reports_sqlite_ingress_failure_for_authenticated_us
         .unwrap();
     let response = get_marketplace_apps_blocking(headers, true);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(af_services::get_active_services().is_err());
 
     let _ = std::fs::remove_dir_all(&root);
 }

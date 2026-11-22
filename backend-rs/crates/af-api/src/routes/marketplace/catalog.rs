@@ -208,7 +208,17 @@ pub(in crate::routes) fn get_marketplace_apps_blocking(headers: HeaderMap, requi
             );
         }
     };
-    let retained_packages = af_services::retained_lifecycle_packages().unwrap_or_default();
+    let retained_packages = match af_services::retained_lifecycle_packages() {
+        Ok(packages) => packages,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load retained lifecycle packages for marketplace");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                "Could not load marketplace retained lifecycle state",
+            );
+        }
+    };
     let retained_ingress_keys: std::collections::HashSet<String> =
         match af_db::list_retained_app_ingress_names() {
             Ok(names) => names

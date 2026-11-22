@@ -19,9 +19,7 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 
-fn acquire_pool_conn(
-    user: &AuthUser,
-) -> ImportResult<r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>> {
+fn acquire_pool_conn(user: &AuthUser) -> ImportResult<af_db::DbConn> {
     ensure_admin(user)?;
     af_db::get_conn().map_err(|_| {
         StreamingImportError::unavailable(
