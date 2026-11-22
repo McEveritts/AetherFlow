@@ -334,9 +334,6 @@ jobs:
           (
             cd backend-rs
             export RUSTFLAGS="-C link-arg=-Wl,--as-needed"
-            CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
-              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-              cargo build --release --locked --target aarch64-unknown-linux-gnu -p af-librespeed --bin speedtest-backend
             CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
               CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
               cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p af-librespeed --bin speedtest-backend
@@ -354,7 +351,7 @@ jobs:
             speedtest_archives+=("${archive}")
           }
           package_speedtest "release-dist/linux-amd64/bin/speedtest-backend" amd64
-          package_speedtest "backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend" arm64
+          package_speedtest "release-dist/linux-arm64/bin/speedtest-backend" arm64
           package_speedtest "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" armv7
           if git rev-parse --git-dir >/dev/null 2>&1; then
             # Setup and the source build need deployment files and both Rust workspaces.
@@ -451,6 +448,7 @@ jobs:
           test ! -e "${release_root}/bundle/speedtest-backend"
           test -s "${release_root}/bundle/plugins/telemetry-inspector/plugin.manifest.json"
           test -x "${release_root}/bundle/plugins/telemetry-inspector/backend/hooks/start.sh"
+          cmp "${release_root}/bundle/bin/speedtest-backend" "${release_root}/standalone/speedtest-backend"
           timeout 30s "${release_root}/bundle/bin/af" --version | grep -F '(linux/aarch64)'
           timeout 30s "${release_root}/bundle/bin/speedtest-backend" --version
           timeout 30s "${release_root}/standalone/speedtest-backend" --version

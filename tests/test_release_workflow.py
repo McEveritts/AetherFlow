@@ -300,6 +300,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("sha256sum --strict --check SHA256SUMS", gate)
         self.assertIn("aetherflow-linux-arm64.tar.gz", gate)
         self.assertIn("linux_arm64.tar.gz", gate)
+        self.assertIn('cmp "${release_root}/bundle/bin/speedtest-backend" "${release_root}/standalone/speedtest-backend"', gate)
         for executable in ("bundle/bin/af", "bundle/bin/speedtest-backend", "standalone/speedtest-backend"):
             self.assertIn('${release_root}/' + executable + '" --version', gate)
         self.assertIn('scripts/run_embedded_e2e.sh --binary "${release_root}/bundle/aetherflow-api"', gate)
@@ -409,24 +410,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
         tag = "v4.0.0-nightly.123.1"
         archives = self.release_archives(tag)
         archives[0].write_bytes(b"main release archive")
-        stage = self.root / "release-dist/linux-amd64/bin"
-        stage.mkdir(parents=True)
-        (stage / "speedtest-backend").write_bytes(b"native amd64")
+        for arch in ("amd64", "arm64"):
+            stage = self.root / f"release-dist/linux-{arch}/bin"
+            stage.mkdir(parents=True)
+            (stage / "speedtest-backend").write_bytes(f"staged {arch}".encode())
         (self.root / "backend-rs").mkdir()
         cargo = self.root / "bin/cargo"
         cargo.write_text(
             "#!/bin/sh\nset -eu\n"
             'test "$1 $2 $3 $4 $6 $7 $8 $9" = "build --release --locked --target -p af-librespeed --bin speedtest-backend"\n'
             'test "$AF_BUILD_VERSION" = "4.0.0-nightly.123.1"\n'
-            'case "$5" in\n'
-            '  aarch64-unknown-linux-gnu)\n'
-            '    test "$CC_aarch64_unknown_linux_gnu" = aarch64-linux-gnu-gcc\n'
-            '    test "$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER" = aarch64-linux-gnu-gcc ;;\n'
-            '  armv7-unknown-linux-gnueabihf)\n'
-            '    test "$CC_armv7_unknown_linux_gnueabihf" = arm-linux-gnueabihf-gcc\n'
-            '    test "$CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER" = arm-linux-gnueabihf-gcc ;;\n'
-            '  *) exit 2 ;;\n'
-            'esac\n'
+            'test "$5" = armv7-unknown-linux-gnueabihf\n'
+            'test "$CC_armv7_unknown_linux_gnueabihf" = arm-linux-gnueabihf-gcc\n'
+            'test "$CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER" = arm-linux-gnueabihf-gcc\n'
             'mkdir -p "target/$5/release"\n'
             'printf "%s" "$5" > "target/$5/release/speedtest-backend"\n'
         )
@@ -435,7 +431,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                RELEASE_TAG=tag, SOURCE_DATE_EPOCH="1794706390")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for archive_path, expected in zip(
-            archives[1:], (b"native amd64", b"aarch64-unknown-linux-gnu", b"armv7-unknown-linux-gnueabihf")
+            archives[1:], (b"staged amd64", b"staged arm64", b"armv7-unknown-linux-gnueabihf")
         ):
             with self.subTest(archive=archive_path.name), tarfile.open(archive_path) as archive:
                 self.assertEqual(archive.getnames(), ["speedtest-backend"])
