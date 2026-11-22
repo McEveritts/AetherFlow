@@ -69,10 +69,12 @@ AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/v${AGH_VER
 report_progress 60 "Downloading and extracting AdGuard Home ${AGH_VERSION}..."
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/agh-XXXXXX.tar.gz")"
-if ! af_logged download_file "$AGH_URL" "$TMP_TAR"; then
-    # Fallback to static cdn URL
+trap 'rm -f -- "$TMP_TAR"' EXIT
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    af_logged download_file "$AGH_URL" "$TMP_TAR"
+else
     STATIC_URL="https://static.adguard.com/adguardhome/release/AdGuardHome_${AGH_ARCH}.tar.gz"
-    af_logged download_file "$STATIC_URL" "$TMP_TAR"
+    af_logged download_file "$AGH_URL" "$TMP_TAR" || af_logged download_file "$STATIC_URL" "$TMP_TAR"
 fi
 
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
@@ -80,7 +82,6 @@ stage_app_archive "$TMP_TAR" "/opt/AdGuardHome" "AdGuardHome" "/etc/systemd/reso
 rm -f "$TMP_TAR"
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
 chmod 0755 /opt/AdGuardHome/AdGuardHome
-queue_app_version /opt/AdGuardHome/.af-version "${AGH_VERSION#v}"
 
 if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
     AGH_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}"
@@ -159,6 +160,12 @@ fi
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
 chown -hRP adguardhome:adguardhome /opt/AdGuardHome
 set_config_file_mode 0600 /opt/AdGuardHome/AdGuardHome.yaml
+if ! AGH_VERSION_OUTPUT="$(timeout --kill-after=1s 10s runuser -u adguardhome -- /opt/AdGuardHome/AdGuardHome --version)" ||
+    [[ "$AGH_VERSION_OUTPUT" != "AdGuard Home, version v${AGH_VERSION}" && "$AGH_VERSION_OUTPUT" != "AdGuard Home, version ${AGH_VERSION}" ]]; then
+    print_error "AdGuard Home executable did not report the selected version ${AGH_VERSION}."
+    exit 1
+fi
+queue_app_version /opt/AdGuardHome/.af-version "$AGH_VERSION"
 af_logged setcap 'cap_net_bind_service=+ep' /opt/AdGuardHome/AdGuardHome || true
 
 AGH_DNS_PRE_SNAPSHOT=""

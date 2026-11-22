@@ -85,6 +85,10 @@ elif command == 'tar':
         if not destination.is_relative_to(root.resolve()):
             raise RuntimeError('Extraction destination escaped fixture root')
     sys.exit(subprocess.run(['/usr/bin/tar', *arguments]).returncode)
+elif command == 'runuser':
+    assert arguments[:3] == ['-u', 'adguardhome', '--']
+    assert arguments[3:] == [os.environ['TEST_EXECUTABLE_PATH'], '--version']
+    print('AdGuard Home, version v' + os.environ.get('MOCK_ADGUARD_VERSION', os.environ['TEST_RELEASE_VERSION']))
 elif command == 'htpasswd':
     print('fixture-user:fixture-password-hash')
 elif command not in ('apt-get', 'id', 'chown', 'useradd', 'userdel', 'groupdel', 'sleep', 'setcap'):
@@ -101,7 +105,7 @@ class ArchiveFixture(unittest.TestCase):
                           'etc/systemd/system', 'install', 'tmp', 'opt', 'var/lib'):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         for command in ('dpkg', 'curl', 'systemctl', 'getent', 'apt-get', 'id',
-                        'chown', 'useradd', 'userdel', 'groupdel', 'sleep', 'setcap', 'htpasswd', 'tar', 'mv'):
+                        'chown', 'useradd', 'userdel', 'groupdel', 'sleep', 'setcap', 'htpasswd', 'tar', 'mv', 'runuser'):
             executable = self.root / 'bin' / command
             executable.write_text(HOST_COMMAND.replace('__AF_TESTS_DIR__', str(Path(__file__).resolve().parent)))
             executable.chmod(0o755)
@@ -223,7 +227,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         environment = {**os.environ, 'PATH': f'{self.root}/bin:{os.environ["PATH"]}',
                        'TEST_ROOT': str(self.root), 'TEST_APP': package,
                        'TEST_TITLE': title, 'TEST_EXECUTABLE': EXECUTABLES.get(package, title),
-                       'TEST_RELEASE_VERSION': '2.1.0' if package == 'jackett' else 'fixture-2.0',
+                       'TEST_RELEASE_VERSION': '2.1.0' if package in ('jackett', 'adguardhome') else 'fixture-2.0',
                        'TEST_DATABASE': str(self.database_path(package)),
                        'TEST_EXECUTABLE_PATH': str(self.root / ('usr/local/bin/qui' if package == 'qui' else f'opt/{title}/{EXECUTABLES.get(package, title)}')),
                        'AETHERFLOW_SKIP_PROVENANCE_VERIFY': '1',
@@ -589,6 +593,30 @@ print(os.environ['MOCK_RELEASE_JSON'])
             capture_output=True, text=True,
         )
         self.assertNotEqual(bad.returncode, 0)
+
+    def test_adguardhome_requires_the_exact_release_and_binary_version(self):
+        self.prepare('adguardhome', existing=True)
+        version = self.root / 'opt/AdGuardHome/.af-version'
+        executable = self.root / 'opt/AdGuardHome/AdGuardHome'
+        marker = self.root / 'install/.adguardhome.lock'
+
+        unavailable = self.run_script('adguardhome', AF_TARGET_VERSION='2.1.0', FAIL_STAGE='download')
+        self.assertNotEqual(unavailable.returncode, 0, unavailable.stdout + unavailable.stderr)
+        calls = [json.loads(line) for line in (self.root / 'commands.jsonl').read_text().splitlines()]
+        self.assertTrue(any('releases/download/v2.1.0/' in arg for call in calls for arg in call))
+        self.assertFalse(any('static.adguard.com' in arg for call in calls for arg in call))
+        self.assertFalse(list((self.root / 'var/tmp').glob('agh-*.tar.gz')))
+
+        mismatch = self.run_script('adguardhome', AF_TARGET_VERSION='2.1.0', MOCK_ADGUARD_VERSION='2.2.0')
+        self.assertNotEqual(mismatch.returncode, 0, mismatch.stdout + mismatch.stderr)
+        self.assertIn('executable did not report the selected version 2.1.0', mismatch.stderr)
+        self.assertEqual(executable.read_text(), 'old executable')
+        self.assertEqual(version.read_text(), 'old-version')
+        self.assertEqual(marker.read_text(), 'old marker')
+        self.assertTrue((self.root / 'active-adguardhome').exists())
+
+        self.assert_success(self.run_script('adguardhome', AF_TARGET_VERSION='2.1.0'))
+        self.assertEqual(version.read_text().strip(), '2.1.0')
 
     def test_adguardhome_dns_handoff_and_failed_probe_rollback(self):
         self.prepare('adguardhome')

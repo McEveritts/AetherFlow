@@ -690,6 +690,8 @@ elif command == 'node':
     elif any('thelounge' in entry for entry in arguments) and '-v' in arguments: print(version)
 elif command in ('sudo', 'runuser', 'su'):
     program = sys.stdin.read()
+    if app == 'adguardhome' and arguments[-1:] == ['--version']:
+        print('AdGuard Home, version v' + version)
     if command == 'runuser' and 'psql' in arguments and 'SELECT (SELECT count(*) FROM pg_database' in program:
         print('0')
     if app == 'seedcross' and 'operator_settings = importlib.import_module' in program:
