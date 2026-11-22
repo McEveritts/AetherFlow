@@ -149,11 +149,16 @@ impl MarketplaceOps {
     pub(super) fn start_with_purge(self, package: Value, action: &'static str, purge: bool) {
         let context = self.context;
         let id = field(&package, &["id"]);
+        let was_installed = installed(&package);
+        let retained_purge_blocked = action == "uninstall"
+            && !was_installed
+            && !(purge && can_purge_retained_data(&package));
         if !context.is_admin()
             || id.is_empty()
             || package["inventory_authenticated"] == false
             || package["inventory_known"] == false
             || (action == "install" && retired_uninstalled(&package))
+            || retained_purge_blocked
             || self.submitting.with_untracked(|set| set.contains(&id))
             || self
                 .jobs
@@ -215,6 +220,11 @@ impl MarketplaceOps {
                         "update" => tt_with(
                             context,
                             "Update started for {id}",
+                            &[("id", &(id).to_string())],
+                        ),
+                        _ if purge && !was_installed => tt_with(
+                            context,
+                            "Data purge started for {id}",
                             &[("id", &(id).to_string())],
                         ),
                         _ => tt_with(

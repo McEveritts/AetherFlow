@@ -364,6 +364,11 @@ pub struct MarketplaceApp {
     pub inventory_authenticated: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub inventory_mode: String,
+    /// True only on authenticated inventory when an uninstalled, idle package
+    /// has positive AetherFlow retained-ownership evidence eligible for explicit
+    /// purge via `POST /api/v1/admin/packages/:id/uninstall?purge=true`.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub retained_data_present: bool,
     /// Terminal outcome of the most recent lifecycle job. Deliberately carries
     /// no error text because this catalog is served without authentication;
     /// failure detail is available from the authenticated progress endpoint.
@@ -2269,6 +2274,16 @@ mod tests {
         };
         let val = serde_json::to_value(&app).unwrap();
         assert_eq!(val["inventory_known"], true);
+        assert!(val.get("retained_data_present").is_none());
+
+        let retained_app = MarketplaceApp {
+            inventory_known: true,
+            inventory_authenticated: true,
+            retained_data_present: true,
+            ..Default::default()
+        };
+        let retained_val = serde_json::to_value(&retained_app).unwrap();
+        assert_eq!(retained_val["retained_data_present"], true);
 
         let req = PackageRunnerRequest {
             action: "update".to_string(),

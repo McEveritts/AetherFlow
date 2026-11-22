@@ -57,6 +57,19 @@ pub(super) fn purge_confirmed(id: &str, purge: bool, confirmation: &str) -> bool
     !purge || (!id.is_empty() && confirmation == id)
 }
 
+pub(super) fn requires_purge_confirmation(action: &str, purge_checked: bool) -> bool {
+    action == "purge" || (action == "uninstall" && purge_checked)
+}
+
+pub(super) fn can_purge_retained_data(value: &Value) -> bool {
+    !field(value, &["id"]).is_empty()
+        && value["inventory_authenticated"] == true
+        && value["inventory_known"] == true
+        && value["retained_data_present"] == true
+        && !installed(value)
+        && !lifecycle(value["status"].as_str().unwrap_or_default())
+}
+
 pub(super) fn lifecycle_path(encoded_id: &str, action: &str, purge: bool) -> String {
     format!(
         "/api/v1/admin/packages/{encoded_id}/{action}{}",
@@ -330,7 +343,12 @@ pub(super) fn PackageCard(
                             }
                         />
                     }
-                }} <Show when=move || package.with(installed)>
+                }} <Show when=move || !busy.get() && package.with(can_purge_retained_data)>
+                    <Badge
+                        label=Signal::derive(move || tt(context, "Retained data"))
+                        tone="warning"
+                    />
+                </Show> <Show when=move || package.with(installed)>
                     <span class="text-xs text-slate-400">
                         {move || {
                             package
@@ -470,6 +488,16 @@ pub(super) fn PackageCard(
                             )
                         >
                             {move || tt(context, "Retired upstream (pinned archive required)")}
+                        </button>
+                    </Show>
+                    <Show when=move || !busy.get() && package.with(can_purge_retained_data)>
+                        <button
+                            type="button"
+                            class="glass-button px-3 py-2 min-h-11 text-xs text-rose-300"
+                            disabled=move || busy.get()
+                            on:click=move |_| choose("purge")
+                        >
+                            {move || tt(context, "Purge retained data")}
                         </button>
                     </Show>
                     <Show when=move || package.with(installed)>
@@ -686,6 +714,86 @@ mod tests {
                 "{active_status}"
             );
             assert_eq!(status_label(active_status), "Installed", "{active_status}");
+        }
+    }
+
+    #[test]
+    fn retained_data_purge_policy_requires_authenticated_evidence_and_preserves_installable_and_active_suppression(
+    ) {
+        let retained = catalog_row(json!({
+            "id": "rclone",
+            "name": "Rclone",
+            "desc": "Cloud sync",
+            "hits": 0,
+            "category": "Cloud",
+            "status": "uninstalled",
+            "progress": 0,
+            "inventory_known": true,
+            "inventory_authenticated": true,
+            "retained_data_present": true
+        }));
+        assert_eq!(action_state(&retained), PackageActionState::Installable);
+        assert!(can_purge_retained_data(&retained));
+
+        let retired_retained = catalog_row(json!({
+            "id": "readarr",
+            "name": "Readarr",
+            "desc": "Books",
+            "hits": 0,
+            "category": "Arr Stack",
+            "status": "retired",
+            "progress": 0,
+            "inventory_known": true,
+            "inventory_authenticated": true,
+            "retained_data_present": true
+        }));
+        assert_eq!(
+            action_state(&retired_retained),
+            PackageActionState::RetiredUpstream
+        );
+        assert!(can_purge_retained_data(&retired_retained));
+
+        // Installed app must keep normal Remove + checkbox flow, never the retained-only action.
+        let active_installed = json!({
+            "id": "rclone",
+            "status": "installed",
+            "inventory_known": true,
+            "inventory_authenticated": true,
+            "retained_data_present": true
+        });
+        assert!(!can_purge_retained_data(&active_installed));
+
+        // Active lifecycle jobs must suppress the retained purge action.
+        for active_status in [
+            "installing",
+            "reinstalling",
+            "updating",
+            "uninstalling",
+            "removing",
+            "queued",
+            "running",
+        ] {
+            let busy = json!({
+                "id": "rclone",
+                "status": active_status,
+                "inventory_known": true,
+                "inventory_authenticated": true,
+                "retained_data_present": true
+            });
+            assert!(!can_purge_retained_data(&busy), "{active_status}");
+        }
+
+        // Unauthenticated, unknown, older-server, purged, or non-boolean evidence fails closed.
+        for negative in [
+            json!({"id": "rclone", "status": "uninstalled", "inventory_known": false, "inventory_authenticated": false, "retained_data_present": true}),
+            json!({"id": "rclone", "status": "uninstalled", "inventory_known": true, "retained_data_present": true}),
+            json!({"id": "rclone", "status": "uninstalled", "inventory_authenticated": true, "retained_data_present": true}),
+            json!({"id": "rclone", "status": "uninstalled", "inventory_known": true, "inventory_authenticated": true, "retained_data_present": false}),
+            json!({"id": "rclone", "status": "uninstalled", "inventory_known": true, "inventory_authenticated": true}),
+            json!({"id": "rclone", "status": "uninstalled", "inventory_known": true, "inventory_authenticated": true, "retained_data_present": "true"}),
+            json!({"id": "", "status": "uninstalled", "inventory_known": true, "inventory_authenticated": true, "retained_data_present": true}),
+        ] {
+            assert!(!can_purge_retained_data(&negative), "{negative}");
         }
     }
 }

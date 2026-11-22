@@ -191,6 +191,15 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         .into_iter()
         .map(|c| (c.app_name.clone(), c))
         .collect();
+    let retained_ingress_keys: std::collections::HashSet<String> =
+        af_db::list_retained_app_ingress_names()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| {
+                af_models::resolve_package_lock_name(&name.trim().to_ascii_lowercase()).to_string()
+            })
+            .filter(|name| !name.is_empty())
+            .collect();
     let base_domain = af_services::resolve_base_domain();
 
     let mut apps = Vec::with_capacity(pkgs.len());
@@ -212,6 +221,8 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
             public_domain = af_services::format_app_public_domain(&p.name, &base_domain);
         }
+        let retained_data_present =
+            package_has_retained_purge_evidence(&p, &jobs, &retained_ingress_keys);
 
         let mut app = MarketplaceApp {
             id: p.name.clone(),
@@ -246,6 +257,7 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
             inventory_known: true,
             inventory_authenticated: true,
             inventory_mode: af_models::INVENTORY_MODE_AUTHENTICATED.to_string(),
+            retained_data_present,
             last_job: jobs
                 .outcomes
                 .get(&p.name)
@@ -314,6 +326,35 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         Json(apps),
     )
         .into_response()
+}
+
+fn package_has_retained_purge_evidence(
+    pkg: &af_models::Package,
+    jobs: &af_services::PackageJobSnapshot,
+    retained_ingress_keys: &std::collections::HashSet<String>,
+) -> bool {
+    if jobs.active.contains_key(&pkg.name)
+        || !matches!(
+            pkg.status.as_str(),
+            "uninstalled" | "not_installed" | "retired"
+        )
+    {
+        return false;
+    }
+    let explicit_lock = (!pkg.lock_file.trim().is_empty()).then_some(pkg.lock_file.as_str());
+    let Ok(receipts) = af_models::inspect_package_receipts(&pkg.name, explicit_lock, None) else {
+        return false;
+    };
+    if receipts.has_any_receipt() {
+        return false;
+    }
+    if receipts.has_retained_receipt() {
+        return true;
+    }
+    let lock_key =
+        af_models::resolve_package_lock_name(&pkg.name.trim().to_ascii_lowercase()).to_string();
+    !lock_key.is_empty()
+        && (jobs.retained_packages.contains(&lock_key) || retained_ingress_keys.contains(&lock_key))
 }
 
 fn marketplace_unavailable() -> Response {

@@ -854,6 +854,114 @@ pub fn query_package_retention_history(
     Ok(None)
 }
 
+/// Returns the set of canonical lowercase package lock stems whose most
+/// recently completed lifecycle record across `package_lifecycle_jobs` and
+/// `package_lifecycle_history` is an ordinary retained removal
+/// (`action='remove'`, `status='completed'`, `retention_state='retained'`).
+///
+/// Tolerates older schemas without `retention_state` or
+/// `package_lifecycle_history`, failing closed for records without positive
+/// retained provenance.
+pub fn query_retained_lifecycle_packages(
+    conn: &Connection,
+) -> Result<std::collections::HashSet<String>> {
+    let mut resolved = std::collections::HashSet::new();
+    let mut retained = std::collections::HashSet::new();
+
+    let jobs_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if jobs_exists {
+        let has_retention: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='retention_state')",
+            [],
+            |row| row.get(0),
+        )?;
+        let has_finished: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='finished_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        let sql = format!(
+            "SELECT package_id, action, {} \
+             FROM package_lifecycle_jobs \
+             WHERE status='completed' \
+             ORDER BY {}",
+            if has_retention {
+                "retention_state"
+            } else {
+                "''"
+            },
+            if has_finished {
+                "finished_at DESC, started_at DESC"
+            } else {
+                "started_at DESC"
+            },
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let pkg: String = row.get(0)?;
+            let action: String = row.get(1)?;
+            let retention_state: String = row.get(2)?;
+            let key =
+                af_models::resolve_package_lock_name(&pkg.trim().to_ascii_lowercase()).to_string();
+            if !key.is_empty()
+                && resolved.insert(key.clone())
+                && action == "remove"
+                && retention_state == RETENTION_STATE_RETAINED
+            {
+                retained.insert(key);
+            }
+        }
+    }
+
+    let hist_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_history')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !hist_exists {
+        return Ok(retained);
+    }
+    let has_hist_retention: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='retention_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    let sql = format!(
+        "SELECT package_id, action, {} \
+         FROM package_lifecycle_history \
+         WHERE status='completed' \
+         ORDER BY id DESC",
+        if has_hist_retention {
+            "retention_state"
+        } else {
+            "''"
+        },
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let pkg: String = row.get(0)?;
+        let action: String = row.get(1)?;
+        let retention_state: String = row.get(2)?;
+        let key =
+            af_models::resolve_package_lock_name(&pkg.trim().to_ascii_lowercase()).to_string();
+        if !key.is_empty()
+            && resolved.insert(key.clone())
+            && action == "remove"
+            && retention_state == RETENTION_STATE_RETAINED
+        {
+            retained.insert(key);
+        }
+    }
+
+    Ok(retained)
+}
+
 pub fn record_completed_lifecycle_job(
     conn: &Connection,
     package: &str,
@@ -4398,6 +4506,9 @@ mod tests {
             .expect("retained removal record");
         assert_eq!(rec.action, "remove");
         assert_eq!(rec.retention_state, RETENTION_STATE_RETAINED);
+        assert!(query_retained_lifecycle_packages(&conn)
+            .unwrap()
+            .contains("rclone"));
 
         // 2. A subsequent failed purge overwrites package_lifecycle_jobs with status='failed',
         //    but history query still recovers the prior completed retained removal.
@@ -4430,6 +4541,9 @@ mod tests {
             .expect("prior completed retained removal preserved in history");
         assert_eq!(after_failed.job_id, "job-remove-retained");
         assert_eq!(after_failed.retention_state, RETENTION_STATE_RETAINED);
+        assert!(query_retained_lifecycle_packages(&conn)
+            .unwrap()
+            .contains("rclone"));
 
         // 3. A successful purge records retention_state='purged'.
         let lease3 = admit_job(
@@ -4460,6 +4574,9 @@ mod tests {
             .expect("completed purge record");
         assert_eq!(after_purge.job_id, "job-purge-ok");
         assert_eq!(after_purge.retention_state, RETENTION_STATE_PURGED);
+        assert!(!query_retained_lifecycle_packages(&conn)
+            .unwrap()
+            .contains("rclone"));
 
         // 4. Older schema without retention_state column is tolerated gracefully.
         let legacy_conn = Connection::open_in_memory().unwrap();
@@ -4480,6 +4597,9 @@ mod tests {
             .expect("legacy remove record");
         assert_eq!(legacy_rec.action, "remove");
         assert_eq!(legacy_rec.retention_state, "");
+        assert!(query_retained_lifecycle_packages(&legacy_conn)
+            .unwrap()
+            .is_empty());
 
         drop(conn);
         let _ = std::fs::remove_dir_all(root);

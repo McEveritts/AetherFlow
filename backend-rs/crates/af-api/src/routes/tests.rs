@@ -6350,3 +6350,365 @@ async fn test_api_apt_exact_target_policy_rejects_non_debian_tokens() {
     std::env::remove_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn marketplace_catalog_exposes_retained_purge_only_for_authenticated_proven_idle_items() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    async fn settle_dispatched_job(response: axum::response::Response, package: &str) {
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let job_id = body["job_id"].as_str().unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(5));
+            loop {
+                if let Some(outcome) = af_services::get_package_job_outcome(package) {
+                    if outcome.job_id == job_id {
+                        break outcome;
+                    }
+                }
+                interval.tick().await;
+            }
+        })
+        .await
+        .expect("dispatched lifecycle job did not finish");
+        assert_eq!(outcome.status, "completed", "{outcome:?}");
+    }
+    async fn fetch_catalog_map(
+        headers: HeaderMap,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        let response = get_marketplace_apps_blocking(headers, false);
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        payload
+            .as_array()
+            .expect("marketplace response must be an array")
+            .iter()
+            .map(|item| (item["id"].as_str().unwrap().to_string(), item.clone()))
+            .collect()
+    }
+
+    let (root, _connection) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    af_services::workers::ensure_app_updates_columns();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("etc/Swizzin")).unwrap();
+    std::fs::create_dir_all(root.join("etc/rclone")).unwrap();
+    std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/remove")).unwrap();
+    let hosts_file = root.join("etc/hosts");
+    std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+    std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+    std::env::set_var("AETHERFLOW_INSTALL_ROOT", &root);
+    std::env::set_var("AF_HOSTS_FILE", &hosts_file);
+
+    let make_pkg = |name: &str, label: &str, port: i32| af_models::Package {
+        name: name.into(),
+        label: label.into(),
+        service_name: name.into(),
+        lock_file: format!("/install/.{name}.lock"),
+        default_port: port,
+        ..Default::default()
+    };
+    let catalog_pkgs = vec![
+        make_pkg("rclone", "Rclone", 5572),
+        make_pkg("sonarr", "Sonarr", 8989),
+        make_pkg("radarr", "Radarr", 7878),
+        make_pkg("bazarr", "Bazarr", 6767),
+        make_pkg("lidarr", "Lidarr", 8686),
+        make_pkg("prowlarr", "Prowlarr", 9696),
+        make_pkg("jellyfin", "Jellyfin", 8096),
+        make_pkg("ombi", "Ombi", 3579),
+    ];
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&catalog_pkgs).unwrap()).unwrap();
+    std::fs::write(&automation, "{}").unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+
+    // Seed admin user & auth header
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users(id, username, role) VALUES (1, 'operator', 'admin')",
+            [],
+        )
+        .unwrap();
+        // Pre-fix retained ingress for radarr and jellyfin (jellyfin also gets a tampered receipt below)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+             INSERT INTO retained_app_ingress_configs VALUES ('radarr', '{\"appName\":\"radarr\",\"listenPort\":17878}');
+             INSERT INTO retained_app_ingress_configs VALUES ('jellyfin', '{\"appName\":\"jellyfin\",\"listenPort\":18096}');
+             INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,finished_at,retention_state)
+             VALUES ('ombi','legacy-rm','remove','completed','2026-01-01T00:00:00Z','2026-01-01T00:01:00Z','');",
+        )
+        .unwrap();
+    }
+    let (admin_token, _) = crate::auth::create_standard_jwt(1, &HeaderMap::new()).unwrap();
+    let mut admin_headers = HeaderMap::new();
+    admin_headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {admin_token}").parse().unwrap(),
+    );
+
+    // Seed confined filesystem fixtures:
+    // - rclone & sonarr installed
+    // - prowlarr legacy Swizzin receipt only
+    // - jellyfin tampered .retained claiming wrong package
+    // - lidarr externally managed binary/config only
+    std::fs::write(root.join("install/.rclone.lock"), b"installed\n").unwrap();
+    std::fs::write(root.join("install/.sonarr.lock"), b"installed\n").unwrap();
+    std::fs::write(root.join("etc/Swizzin/.prowlarr.lock"), b"PORT=9696\n").unwrap();
+    std::fs::write(
+        root.join("install/.jellyfin.retained"),
+        af_models::format_retained_package_receipt("sonarr", "2026-11-22T00:00:00Z"),
+    )
+    .unwrap();
+    std::fs::write(root.join("usr/bin/lidarr"), b"distro-binary").unwrap();
+
+    // Fake runner for ordinary remove + explicit purge on rclone
+    let sock_path = short_test_socket_path(&format!(
+        "afm-{}.sock",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let _ = std::fs::remove_file(&sock_path);
+    std::env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    let runner_root = root.clone();
+    let fake_runner = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buffer = [0u8; 8192];
+            let Ok(count) = stream.read(&mut buffer).await else {
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+            let req_text = String::from_utf8_lossy(&buffer[..count]);
+            let path = req_text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("");
+            let body_str = req_text.split("\r\n\r\n").nth(1).unwrap_or("");
+            let body = if path == "/v1/package" {
+                let delete_data = serde_json::from_str::<serde_json::Value>(body_str)
+                    .ok()
+                    .and_then(|v| v.get("delete_data").and_then(|b| b.as_bool()))
+                    .unwrap_or(false);
+                let lock_path = runner_root.join("install/.rclone.lock");
+                let retained_path = runner_root.join("install/.rclone.retained");
+                if delete_data {
+                    let _ = std::fs::remove_file(&retained_path);
+                    let _ = std::fs::remove_file(&lock_path);
+                } else {
+                    let _ = std::fs::write(
+                        &retained_path,
+                        af_models::format_retained_package_receipt(
+                            "rclone",
+                            "2026-11-22T00:00:00Z",
+                        ),
+                    );
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                "[PROGRESS:100] Package removal completed\n".to_string()
+            } else if path.ends_with("/v1/self-update/status") {
+                serde_json::to_string(&af_models::RunnerResponse {
+                    success: true,
+                    output: serde_json::json!({
+                        "status": "succeeded",
+                        "completed": true,
+                        "success": true,
+                        "job_unit": "",
+                        "error": "",
+                        "exit_code": null
+                    })
+                    .to_string(),
+                    error: String::new(),
+                })
+                .unwrap()
+            } else {
+                serde_json::to_string(&af_models::RunnerResponse {
+                    success: true,
+                    output: "ok".to_string(),
+                    error: String::new(),
+                })
+                .unwrap()
+            };
+            let _ = stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+    });
+
+    let remove_script = root.join("packages/package/remove/removepackage-rclone");
+    std::fs::write(&remove_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&remove_script, std::fs::Permissions::from_mode(0o755));
+    }
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let admin = progress_test_user("admin", None);
+
+    // 1. Ordinary uninstall of rclone creates retained ownership evidence.
+    let retained_res = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        false,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(retained_res.status(), StatusCode::OK);
+    settle_dispatched_job(retained_res, "rclone").await;
+
+    // 2. Anonymous catalog omits retained_data_present for every item.
+    let anon = fetch_catalog_map(HeaderMap::new()).await;
+    for (id, app) in &anon {
+        assert_eq!(app["inventory_authenticated"], false, "{id}");
+        assert!(
+            app.get("retained_data_present").is_none(),
+            "anonymous catalog leaked retained_data_present for {id}: {app}"
+        );
+    }
+
+    // 3. Authenticated catalog exposes retained_data_present ONLY for proven uninstalled idle items.
+    let authed = fetch_catalog_map(admin_headers.clone()).await;
+    assert_eq!(authed["rclone"]["status"], "uninstalled");
+    assert_eq!(authed["rclone"]["inventory_authenticated"], true);
+    assert_eq!(authed["rclone"]["inventory_known"], true);
+    assert_eq!(authed["rclone"]["retained_data_present"], true);
+    assert_eq!(authed["radarr"]["status"], "uninstalled");
+    assert_eq!(authed["radarr"]["retained_data_present"], true);
+    assert_eq!(authed["sonarr"]["status"], "installed");
+    for fail_closed_id in ["sonarr", "bazarr", "lidarr", "prowlarr", "jellyfin", "ombi"] {
+        assert!(
+            authed[fail_closed_id]
+                .get("retained_data_present")
+                .is_none(),
+            "{fail_closed_id} must fail closed: {}",
+            authed[fail_closed_id]
+        );
+    }
+
+    // 4. Active-job suppression hides retained_data_present while a job is running.
+    assert!(af_services::try_start_package_job(
+        af_services::PackageJobInfo {
+            job_id: "active-purge-attempt".into(),
+            package_id: "rclone".into(),
+            action: "remove".into(),
+            status: "uninstalling".into(),
+            progress: 10,
+            last_line: "purging".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            expected_target_version: None,
+        }
+    ));
+    let during_active = fetch_catalog_map(admin_headers.clone()).await;
+    assert_eq!(during_active["rclone"]["status"], "uninstalling");
+    assert!(
+        during_active["rclone"]
+            .get("retained_data_present")
+            .is_none(),
+        "active job must suppress retained_data_present: {}",
+        during_active["rclone"]
+    );
+
+    // 5. Failed purge retry still retains batched lifecycle provenance even if .retained is removed.
+    af_services::finish_package_job_with_recovery_and_retention(
+        "rclone",
+        "remove",
+        false,
+        Some(af_services::PackageJobFailure::Installer),
+        "active-purge-attempt",
+        None,
+        Some(1),
+        Some("simulated failure".into()),
+        None,
+        None,
+        None,
+        Some(af_runner::af_release::lifecycle::RETENTION_STATE_PURGED.to_string()),
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(root.join("install/.rclone.retained"));
+    let after_failed_purge = fetch_catalog_map(admin_headers.clone()).await;
+    assert_eq!(after_failed_purge["rclone"]["status"], "uninstalled");
+    assert_eq!(
+        after_failed_purge["rclone"]["retained_data_present"], true,
+        "failed purge must keep prior retained lifecycle provenance"
+    );
+
+    // 6. Explicit purge via POST .../uninstall?purge=true clears retained_data_present,
+    //    and subsequent ambiguous markerless state remains fail-closed.
+    let purge_res = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        true,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(purge_res.status(), StatusCode::OK);
+    settle_dispatched_job(purge_res, "rclone").await;
+
+    let after_purge = fetch_catalog_map(admin_headers.clone()).await;
+    assert_eq!(after_purge["rclone"]["status"], "uninstalled");
+    assert!(
+        after_purge["rclone"].get("retained_data_present").is_none(),
+        "purged item must not advertise retained_data_present: {}",
+        after_purge["rclone"]
+    );
+
+    std::fs::write(
+        root.join("etc/rclone/rclone.conf"),
+        b"[manual]\ntype = s3\n",
+    )
+    .unwrap();
+    let after_ambiguous = fetch_catalog_map(admin_headers).await;
+    assert!(
+        after_ambiguous["rclone"]
+            .get("retained_data_present")
+            .is_none(),
+        "ambiguous markerless state must fail closed: {}",
+        after_ambiguous["rclone"]
+    );
+    let ambiguous_purge = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        true,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(ambiguous_purge.status(), StatusCode::CONFLICT);
+
+    fake_runner.abort();
+    let _ = std::fs::remove_file(&sock_path);
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

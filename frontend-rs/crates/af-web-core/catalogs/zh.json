@@ -2310,5 +2310,10 @@
   "Partial telemetry archive exported: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted to fit the 100,000-record archive limit.": "已导出部分遥测存档：为符合 100,000 条记录的存档限制，已省略 {session} 条较早的会话样本和 {bandwidth} 条较早的带宽样本。",
   "Partial telemetry archive: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted during export. Replacing history will delete destination samples and restore only the retained subset.": "部分遥测存档：导出期间省略了 {session} 条较早的会话样本和 {bandwidth} 条较早的带宽样本。替换历史记录将删除目标样本并仅恢复保留的子集。",
   "Partial telemetry archive: {session} earlier session samples and {bandwidth} earlier bandwidth samples were omitted during export. Merging will not restore those omitted earlier samples.": "部分遥测存档：导出期间省略了 {session} 条较早的会话样本和 {bandwidth} 条较早的带宽样本。合并不会恢复这些已省略的较早样本。",
-  "This partial archive omitted {session} earlier session samples and {bandwidth} earlier bandwidth samples; replacement mode will delete destination samples and restore only the retained subset. Confirm only the exact server-generated plan you reviewed; the signed token and archive are sent unchanged.": "此部分存档省略了 {session} 条较早的会话样本和 {bandwidth} 条较早的带宽样本；替换模式将删除目标样本并仅恢复保留的子集。请仅确认您审查过的由服务器生成的确切计划；已签名的令牌和存档将原样发送。"
+  "This partial archive omitted {session} earlier session samples and {bandwidth} earlier bandwidth samples; replacement mode will delete destination samples and restore only the retained subset. Confirm only the exact server-generated plan you reviewed; the signed token and archive are sent unchanged.": "此部分存档省略了 {session} 条较早的会话样本和 {bandwidth} 条较早的带宽样本；替换模式将删除目标样本并仅恢复保留的子集。请仅确认您审查过的由服务器生成的确切计划；已签名的令牌和存档将原样发送。",
+  "Data purge started for {id}": "已开始清除 {id} 的数据",
+  "Permanently delete retained AetherFlow-managed data, configuration, secrets, and allocated port for this uninstalled application. This cannot be undone.": "永久删除此已卸载应用中由 AetherFlow 管理的保留数据、配置、密钥和已分配端口。此操作无法撤销。",
+  "Purge retained data": "清除保留数据",
+  "Purge retained data for {name}": "清除 {name} 的保留数据",
+  "Retained data": "保留数据"
 }

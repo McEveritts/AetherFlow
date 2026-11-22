@@ -310,6 +310,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                             let name = field(&package, &["name", "id"]);
                             let title = match action.as_str() {
                                 "uninstall" => tt_with(context, "Uninstall {name}", &[("name", &(name).to_string())]),
+                                "purge" => tt_with(context, "Purge retained data for {name}", &[("name", &(name).to_string())]),
                                 "reinstall" => tt_with(context, "Repair {name}", &[("name", &(name).to_string())]),
                                 _ => tt_with(context, "Install {name}", &[("name", &(name).to_string())]),
                             };
@@ -322,6 +323,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                                 .join(", ");
                             let message = match action.as_str() {
                                 "uninstall" => tt(context, "Remove the application and keep its data, configuration, secrets, and allocated port for a later reinstall."),
+                                "purge" => tt(context, "Permanently delete retained AetherFlow-managed data, configuration, secrets, and allocated port for this uninstalled application. This cannot be undone."),
                                 "reinstall" => tt(context, "Reapply the installer using the existing configuration and data. The application may restart."),
                                 _ => {
                                     let details = if requirements.is_empty() {
@@ -334,12 +336,33 @@ pub fn MarketplaceTab() -> impl IntoView {
                             };
                             let action = if action == "uninstall" {
                                 "uninstall"
+                            } else if action == "purge" {
+                                "purge"
                             } else if action == "reinstall" {
                                 "reinstall"
                             } else {
                                 "install"
                             };
                             let package_id = StoredValue::new(field(&package, &["id"]));
+                            let package_snapshot = StoredValue::new(package);
+                            let live_package = move || {
+                                let id = package_id.get_value();
+                                rows.with(|rows| {
+                                    rows.iter()
+                                        .find(|v| v["id"] == id)
+                                        .cloned()
+                                        .unwrap_or_else(|| package_snapshot.get_value())
+                                })
+                            };
+                            let live_package_untracked = move || {
+                                let id = package_id.get_value();
+                                rows.with_untracked(|rows| {
+                                    rows.iter()
+                                        .find(|v| v["id"] == id)
+                                        .cloned()
+                                        .unwrap_or_else(|| package_snapshot.get_value())
+                                })
+                            };
                             view! {
                                 <Modal open=confirm title>
                                     <p class="text-slate-300 mb-5">
@@ -368,27 +391,27 @@ pub fn MarketplaceTab() -> impl IntoView {
                                                 )}
                                             </span>
                                         </label>
-                                        <Show when=move || purge_data.get()>
-                                            <label class="block text-sm space-y-2 mb-5">
-                                                <span>
-                                                    {move || tt_with(context, "Type {id} to confirm permanent deletion", &[("id", &(package_id.get_value()).to_string())])}
-                                                </span>
-                                                <input
-                                                    type="text"
-                                                    class="glass-input w-full px-3 py-2"
-                                                    autocomplete="off"
-                                                    spellcheck="false"
-                                                    aria-label=move || tt(
-                                                        context,
-                                                        "Package ID to confirm data purge",
-                                                    )
-                                                    prop:value=move || purge_confirmation.get()
-                                                    on:input=move |event| {
-                                                        purge_confirmation.set(event_target_value(&event))
-                                                    }
-                                                />
-                                            </label>
-                                        </Show>
+                                    </Show>
+                                    <Show when=move || requires_purge_confirmation(action, purge_data.get())>
+                                        <label class="block text-sm space-y-2 mb-5">
+                                            <span>
+                                                {move || tt_with(context, "Type {id} to confirm permanent deletion", &[("id", &(package_id.get_value()).to_string())])}
+                                            </span>
+                                            <input
+                                                type="text"
+                                                class="glass-input w-full px-3 py-2"
+                                                autocomplete="off"
+                                                spellcheck="false"
+                                                aria-label=move || tt(
+                                                    context,
+                                                    "Package ID to confirm data purge",
+                                                )
+                                                prop:value=move || purge_confirmation.get()
+                                                on:input=move |event| {
+                                                    purge_confirmation.set(event_target_value(&event))
+                                                }
+                                            />
+                                        </label>
                                     </Show>
                                     <div class="flex gap-3 justify-end">
                                         <button
@@ -402,27 +425,43 @@ pub fn MarketplaceTab() -> impl IntoView {
                                             type="button"
                                             class="glass-button-primary px-4 py-2"
                                             disabled=move || {
+                                                let id = package_id.get_value();
+                                                let busy_now = ops.submitting.with(|set| set.contains(&id))
+                                                    || ops.jobs.with(|jobs| jobs.get(&id).is_some_and(|job| job.active));
                                                 !context.is_admin()
+                                                    || busy_now
+                                                    || (action == "purge" && !can_purge_retained_data(&live_package()))
                                                     || !purge_confirmed(
-                                                        &package_id.get_value(),
-                                                        action == "uninstall" && purge_data.get(),
+                                                        &id,
+                                                        requires_purge_confirmation(action, purge_data.get()),
                                                         &purge_confirmation.get(),
                                                     )
                                             }
                                             on:click=move |_| {
-                                                let purge = action == "uninstall"
-                                                    && purge_data.get_untracked();
-                                                if !purge_confirmed(
-                                                    &package_id.get_value(),
-                                                    purge,
-                                                    &purge_confirmation.get_untracked(),
-                                                ) {
+                                                let id = package_id.get_value();
+                                                let purge = requires_purge_confirmation(
+                                                    action,
+                                                    purge_data.get_untracked(),
+                                                );
+                                                let current = live_package_untracked();
+                                                if (action == "purge" && !can_purge_retained_data(&current))
+                                                    || !purge_confirmed(
+                                                        &id,
+                                                        purge,
+                                                        &purge_confirmation.get_untracked(),
+                                                    )
+                                                {
                                                     return;
                                                 }
+                                                let api_action = if action == "purge" {
+                                                    "uninstall"
+                                                } else {
+                                                    action
+                                                };
                                                 confirm.set(false);
                                                 purge_data.set(false);
                                                 purge_confirmation.set(String::new());
-                                                ops.start_with_purge(package.clone(), action, purge);
+                                                ops.start_with_purge(current, api_action, purge);
                                             }
                                         >
                                             {move || tt(context, "Confirm")}
@@ -447,11 +486,27 @@ mod tests {
 
     #[test]
     fn permanent_purge_requires_exact_package_id_and_uninstall_action() {
+        assert!(!requires_purge_confirmation("install", true));
+        assert!(!requires_purge_confirmation("reinstall", true));
+        assert!(!requires_purge_confirmation("uninstall", false));
+        assert!(requires_purge_confirmation("uninstall", true));
+        assert!(requires_purge_confirmation("purge", false));
+        assert!(requires_purge_confirmation("purge", true));
         assert!(purge_confirmed("sonarr", false, ""));
         assert!(!purge_confirmed("sonarr", true, "Sonarr"));
         assert!(!purge_confirmed("sonarr", true, "sonarr "));
         assert!(!purge_confirmed("", true, ""));
         assert!(purge_confirmed("sonarr", true, "sonarr"));
+        assert!(!purge_confirmed(
+            "rclone",
+            requires_purge_confirmation("purge", false),
+            ""
+        ));
+        assert!(purge_confirmed(
+            "rclone",
+            requires_purge_confirmation("purge", false),
+            "rclone"
+        ));
         assert_eq!(
             lifecycle_path("sonarr", "uninstall", false),
             "/api/v1/admin/packages/sonarr/uninstall"
