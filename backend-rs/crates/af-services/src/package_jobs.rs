@@ -514,6 +514,11 @@ pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
     Ok(snapshot)
 }
 
+pub fn retained_lifecycle_packages() -> anyhow::Result<std::collections::HashSet<String>> {
+    let conn = af_db::get_read_conn()?;
+    af_release::lifecycle::query_retained_lifecycle_packages(&conn)
+}
+
 /// Look up an exact terminal receipt after a later job supersedes it in the live registry.
 pub fn get_package_job_history_outcome(
     package_id: &str,

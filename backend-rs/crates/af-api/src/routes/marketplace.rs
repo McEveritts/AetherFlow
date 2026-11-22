@@ -191,9 +191,7 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         .into_iter()
         .map(|c| (c.app_name.clone(), c))
         .collect();
-    let retained_packages = af_db::get_read_conn()
-        .and_then(|conn| af_release::lifecycle::query_retained_lifecycle_packages(&conn))
-        .unwrap_or_default();
+    let retained_packages = af_services::retained_lifecycle_packages().unwrap_or_default();
     let retained_ingress_keys: std::collections::HashSet<String> =
         af_db::list_retained_app_ingress_names()
             .unwrap_or_default()
