@@ -590,12 +590,93 @@ class ListenarrReleasePolicyTests(unittest.TestCase):
             result = fixture.run(
                 "update",
                 AF_FIXTURE_FAILURE="readiness",
+                AF_READINESS_ATTEMPTS="2",
                 AF_FIXTURE_LISTENARR_RELEASES_FILE=str(releases_file),
                 AF_FIXTURE_LISTENARR_ASSET_MAP=str(asset_map_file),
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((fixture.root / "opt/Listenarr/.af-version").read_text(), "0.2.71\n")
             self.assertEqual((fixture.root / "opt/Listenarr/config/database/listenarr.db").read_text(), "PRE-UPGRADE-DB")
+
+    def test_single_service_activation_and_bounded_readiness_attempts(self):
+        # Listenarr.Api runs EF Core 10 Database.Migrate() synchronously before app.Run()
+        # installs graceful SIGTERM handling; enabling with --now and immediately calling
+        # restart terminates the first process mid-migration and orphans __EFMigrationsLock.
+        with self.subTest(case="single-start-on-install"), InstallerFixture("listenarr") as fixture:
+            z_106, sha_106 = _build_listenarr_zip(fixture.root / "listenarr-1.10.6-canary.zip", "1.10.6-canary")
+            releases_file = fixture.file("listenarr-releases.json", json.dumps([
+                _official_release("v1.10.6-canary", digest=f"sha256:{sha_106}"),
+            ]))
+            asset_map_file = fixture.file("listenarr-assets.json", json.dumps({
+                "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip": str(z_106),
+            }))
+
+            result = fixture.run(
+                "install",
+                port=18687,
+                AF_FIXTURE_LISTENARR_RELEASES_FILE=str(releases_file),
+                AF_FIXTURE_LISTENARR_ASSET_MAP=str(asset_map_file),
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((fixture.root / "enabled-listenarr.service").exists())
+            self.assertTrue((fixture.root / "active-listenarr.service").exists())
+            unit_text = (fixture.root / "etc/systemd/system/listenarr.service").read_text()
+            self.assertIn('Environment="ASPNETCORE_URLS=http://127.0.0.1:18687"', unit_text)
+
+            systemctl_cmds = [cmd for cmd in _commands(fixture) if cmd[0] == "systemctl"]
+            self.assertIn(["systemctl", "enable", "listenarr.service"], systemctl_cmds)
+            self.assertIn(["systemctl", "restart", "listenarr.service"], systemctl_cmds)
+            self.assertNotIn(["systemctl", "enable", "--now", "listenarr.service"], systemctl_cmds)
+            self.assertLess(
+                systemctl_cmds.index(["systemctl", "enable", "listenarr.service"]),
+                systemctl_cmds.index(["systemctl", "restart", "listenarr.service"]),
+            )
+            activations = [
+                cmd for cmd in systemctl_cmds
+                if "listenarr.service" in cmd
+                and (
+                    cmd[1] in ("start", "restart")
+                    or (cmd[1] == "enable" and "--now" in cmd)
+                )
+            ]
+            self.assertEqual(
+                activations,
+                [["systemctl", "restart", "listenarr.service"]],
+                f"Listenarr must be activated exactly once to avoid interrupting EF Core migrations: {systemctl_cmds}",
+            )
+
+        with self.subTest(case="bounded-readiness-attempts"), InstallerFixture("listenarr") as fixture:
+            z_106, sha_106 = _build_listenarr_zip(fixture.root / "listenarr-1.10.6-canary.zip", "1.10.6-canary")
+            releases_file = fixture.file("listenarr-releases.json", json.dumps([
+                _official_release("v1.10.6-canary", digest=f"sha256:{sha_106}"),
+            ]))
+            asset_map_file = fixture.file("listenarr-assets.json", json.dumps({
+                "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip": str(z_106),
+            }))
+
+            result = fixture.run(
+                "install",
+                port=18687,
+                AF_FIXTURE_FAILURE="readiness",
+                AF_READINESS_ATTEMPTS="2",
+                AF_FIXTURE_LISTENARR_RELEASES_FILE=str(releases_file),
+                AF_FIXTURE_LISTENARR_ASSET_MAP=str(asset_map_file),
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("did not become ready on port 18687", result.stdout + result.stderr)
+            self.assertFalse(fixture.lock.exists())
+            commands = _commands(fixture)
+            restart_idx = commands.index(["systemctl", "restart", "listenarr.service"])
+            rollback_stop_idx = commands.index(["systemctl", "stop", "--", "listenarr.service"], restart_idx + 1)
+            readiness_probes = [
+                cmd for cmd in commands[restart_idx + 1:rollback_stop_idx]
+                if cmd == ["systemctl", "is-active", "--quiet", "listenarr.service"]
+            ]
+            self.assertEqual(len(readiness_probes), 2, readiness_probes)
+
+        script_text = (ROOT / "packages/package/install/installpackage-listenarr").read_text(encoding="utf-8")
+        self.assertIn('LISTENARR_READY_ATTEMPTS="${AF_READINESS_ATTEMPTS:-120}"', script_text)
+        self.assertNotIn("systemctl enable --now listenarr.service", script_text)
 
 
 if __name__ == "__main__":

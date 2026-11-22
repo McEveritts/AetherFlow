@@ -655,10 +655,17 @@ EOF
 chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
-af_logged systemctl enable --now listenarr.service
+# Enable without --now so Listenarr.Api starts exactly once via restart below.
+# Starting via enable --now and immediately restarting sends SIGTERM during EF Core 10's
+# startup Database.Migrate(), which can orphan SQLite __EFMigrationsLock and wedge startup.
+af_logged systemctl enable listenarr.service
 af_logged systemctl restart listenarr.service
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
-wait_for_service_ready "listenarr.service" "$APP_PORT" "$READY_URL"
+LISTENARR_READY_ATTEMPTS="${AF_READINESS_ATTEMPTS:-120}"
+if [[ ! "$LISTENARR_READY_ATTEMPTS" =~ ^[1-9][0-9]{0,2}$ ]] || (( 10#$LISTENARR_READY_ATTEMPTS > 300 )); then
+    LISTENARR_READY_ATTEMPTS=120
+fi
+wait_for_service_ready "listenarr.service" "$APP_PORT" "$READY_URL" "$LISTENARR_READY_ATTEMPTS"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
