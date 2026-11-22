@@ -5768,3 +5768,68 @@ async fn marketplace_enforces_threadfin_pinned_and_pihole_vendor_target_policies
     std::env::set_current_dir(previous_directory).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn account_endpoints_report_sqlite_failures() {
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    use axum::extract::Extension;
+    use axum::http::StatusCode;
+
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    let admin = super::AuthUser {
+        user_id: 891,
+        username: "account-endpoint-fixture".into(),
+        role: "admin".into(),
+        jti: String::new(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+    assert_eq!(
+        super::get_users(Extension(admin.clone())).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        super::delete_avatar(Extension(admin.clone()))
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    ensure_shared_test_db();
+    af_db::get_conn()
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO users(id, username, role, avatar_url) \
+             VALUES(891, 'account-endpoint-fixture', 'admin', '/avatar.png');
+             CREATE TRIGGER reject_avatar_write BEFORE UPDATE OF avatar_url ON users
+             BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;",
+        )
+        .unwrap();
+    assert_eq!(
+        super::get_users(Extension(admin.clone())).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        super::delete_avatar(Extension(admin.clone()))
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    af_db::get_conn()
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER reject_avatar_write;
+             UPDATE users SET totp_enabled = 'invalid-bool' WHERE id = 891;",
+        )
+        .unwrap();
+    assert_eq!(
+        super::get_users(Extension(admin.clone())).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        super::delete_avatar(Extension(admin)).await.status(),
+        StatusCode::OK
+    );
+}

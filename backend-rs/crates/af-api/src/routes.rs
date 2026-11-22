@@ -3023,11 +3023,23 @@ async fn update_avatar(
 }
 
 async fn delete_avatar(Extension(auth_user): Extension<AuthUser>) -> Response {
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
+    let updated = af_db::get_conn().and_then(|conn| {
+        Ok(conn.execute(
             "UPDATE users SET avatar_url = '' WHERE id = ?1",
             params![auth_user.user_id],
-        );
+        )?)
+    });
+    match updated {
+        Ok(0) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "Failed to remove avatar");
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "DATABASE_UNAVAILABLE",
+                "Failed to remove avatar",
+            );
+        }
     }
     Json(serde_json::json!({
         "status": "success",
@@ -3040,33 +3052,39 @@ async fn get_users(Extension(user): Extension<AuthUser>) -> Response {
     if let Err(response) = crate::auth::require_admin(&user) {
         return *response;
     }
-    let Ok(conn) = af_db::get_read_conn() else {
-        return Json(Vec::<User>::new()).into_response();
-    };
-    let mut users = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
-         COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |r| {
-            let gid: String = r.get(5)?;
-            Ok(User {
-                id: r.get(0)?,
-                username: r.get(1)?,
-                email: r.get(2)?,
-                avatar_url: r.get(3)?,
-                role: r.get(4)?,
-                is_oauth: !gid.is_empty(),
-                google_id: gid,
-                totp_enabled: r.get(6)?,
-            })
-        }) {
-            for u in rows.flatten() {
-                users.push(u);
-            }
+    match read_users() {
+        Ok(users) => Json(users).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to list users");
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "DATABASE_UNAVAILABLE",
+                "Failed to list users",
+            )
         }
     }
-    Json(users).into_response()
+}
+
+fn read_users() -> anyhow::Result<Vec<User>> {
+    let conn = af_db::get_read_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
+         COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let google_id: String = row.get(5)?;
+        Ok(User {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            email: row.get(2)?,
+            avatar_url: row.get(3)?,
+            role: row.get(4)?,
+            is_oauth: !google_id.is_empty(),
+            google_id,
+            totp_enabled: row.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 #[derive(Deserialize)]
