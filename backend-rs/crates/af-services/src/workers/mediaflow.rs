@@ -35,6 +35,55 @@ pub(super) struct MediaflowPublishIntent {
     pub new_size: i64,
     #[serde(default)]
     pub source_fingerprint: String,
+    #[serde(default)]
+    pub output: Option<MediaflowPublishedOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct MediaflowPublishedOutput {
+    temp_name: String,
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+    fingerprint: String,
+}
+
+#[cfg(unix)]
+impl MediaflowPublishedOutput {
+    pub(super) fn capture(file: &fs::File, temp_name: String) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().map_err(|err| err.to_string())?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err("MediaFlow publish output is missing or empty".to_string());
+        }
+        let fingerprint = compute_mediaflow_fingerprint(file, metadata.len(), false)?;
+        let after = file.metadata().map_err(|err| err.to_string())?;
+        if (metadata.ctime(), metadata.ctime_nsec()) != (after.ctime(), after.ctime_nsec()) {
+            return Err("MediaFlow publish output changed during fingerprinting".to_string());
+        }
+        Ok(Self {
+            temp_name,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            size: metadata.len(),
+            mtime_sec: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            fingerprint,
+        })
+    }
+
+    #[allow(clippy::unnecessary_cast)] // libc::stat field widths vary across Linux targets.
+    fn matches_entry(&self, stat: &libc::stat) -> bool {
+        stat.st_mode & libc::S_IFMT == libc::S_IFREG
+            && stat.st_uid == unsafe { libc::geteuid() }
+            && stat.st_dev as u64 == self.dev
+            && stat.st_ino as u64 == self.ino
+            && stat.st_size as u64 == self.size
+            && stat.st_mtime as i64 == self.mtime_sec
+            && stat.st_mtime_nsec as i64 == self.mtime_nsec
+    }
 }
 
 pub(super) fn publish_intent_filename(job_id: i64) -> String {
@@ -426,13 +475,25 @@ fn read_exact_at_file(file: &fs::File, offset: u64, buf: &mut [u8]) -> Result<()
 }
 
 fn compute_pinned_file_fingerprint(file: &fs::File, size: u64) -> Result<String, String> {
+    compute_mediaflow_fingerprint(file, size, true)
+}
+
+fn compute_mediaflow_fingerprint(
+    file: &fs::File,
+    size: u64,
+    source_file: bool,
+) -> Result<String, String> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
-    hasher.update(b"af-mediaflow-source-v1\0");
+    if source_file {
+        hasher.update(b"af-mediaflow-source-v1\0");
+    } else {
+        hasher.update(b"af-mediaflow-output-v1\0");
+    }
     hasher.update(size.to_le_bytes());
     #[cfg(unix)]
-    {
+    if source_file {
         use std::os::unix::fs::MetadataExt;
         let metadata = file
             .metadata()
@@ -975,27 +1036,12 @@ fn cleanup_stranded_mediaflow_temps(dir: &Path, job_id: i64) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let prefix = format!(".tmp_mediaflow_{job_id}");
     for entry in entries.flatten() {
         let basename = entry.file_name();
         let Some(name) = basename.to_str() else {
             continue;
         };
-        let Some(suffix) = name
-            .strip_prefix(prefix.as_str())
-            .and_then(|tail| tail.strip_suffix(".mkv"))
-        else {
-            continue;
-        };
-        // Support the ID-only name and the simple UUID suffix used by the current writer.
-        if !suffix.is_empty()
-            && !suffix.strip_prefix('_').is_some_and(|nonce| {
-                nonce.len() == 32
-                    && nonce
-                        .bytes()
-                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-            })
-        {
+        if !is_mediaflow_temp_name(name, job_id) {
             continue;
         }
 
@@ -1015,6 +1061,22 @@ fn cleanup_stranded_mediaflow_temps(dir: &Path, job_id: i64) {
             let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+fn is_mediaflow_temp_name(name: &str, job_id: i64) -> bool {
+    // Support the ID-only name and the simple UUID suffix used by the current writer.
+    let prefix = format!(".tmp_mediaflow_{job_id}");
+    name.strip_prefix(&prefix)
+        .and_then(|tail| tail.strip_suffix(".mkv"))
+        .is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix.strip_prefix('_').is_some_and(|nonce| {
+                    nonce.len() == 32
+                        && nonce
+                            .bytes()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                })
+        })
 }
 
 pub(super) fn prune_mediaflow_trash_dir(trash_dir: &Path, retention: Duration) {
@@ -1102,6 +1164,92 @@ async fn persist_mediaflow_completion_with_retry(
     Err(last_err)
 }
 
+#[cfg(unix)]
+fn rollback_interrupted_publication(
+    raw_path: &str,
+    roots: &[PathBuf],
+    expected_source: &str,
+    intent: &MediaflowPublishIntent,
+    output: &MediaflowPublishedOutput,
+) -> Result<bool, String> {
+    use std::io::ErrorKind;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    if expected_source.is_empty() || intent.source_fingerprint != expected_source {
+        return Ok(false);
+    }
+    let Ok(source) = open_and_pin_mediaflow_source_in_roots(raw_path, roots) else {
+        return Ok(false);
+    };
+    let output_name = mediaflow_output_name(&source.canon_src);
+    if source.identity.fingerprint != expected_source
+        || Path::new(&intent.published_path) != source.canon_parent.join(&output_name)
+        || !is_mediaflow_temp_name(&output.temp_name, intent.job_id)
+    {
+        return Ok(false);
+    }
+    let dirfd = source.parent_dir.as_raw_fd();
+    let published = match fstatat_nofollow(dirfd, &output_name) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            // A previous recovery may have unlinked the output before persisting it.
+            source
+                .parent_dir
+                .sync_all()
+                .map_err(|err| err.to_string())?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if published.st_nlink != 2
+        || !output.matches_entry(&published)
+        || !fstatat_nofollow(dirfd, &output.temp_name).is_ok_and(|stat| output.matches_entry(&stat))
+    {
+        return Ok(false);
+    }
+
+    let output_c = cstring_from_os_name(&output_name, "published output")?;
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            output_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    if MediaflowPublishedOutput::capture(&file, output.temp_name.clone())? != *output
+        || source.verify_still_matches_live().is_err()
+        || !fstatat_nofollow(dirfd, &output_name)
+            .is_ok_and(|stat| output.matches_entry(&stat) && stat.st_nlink == 2)
+        || !fstatat_nofollow(dirfd, &output.temp_name).is_ok_and(|stat| output.matches_entry(&stat))
+    {
+        return Ok(false);
+    }
+
+    // The still-pinned original and both links prove this file belongs to the
+    // interrupted attempt. Remove the visible link before clearing its intent.
+    if unsafe { libc::unlinkat(dirfd, output_c.as_ptr(), 0) } < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    source
+        .parent_dir
+        .sync_all()
+        .map_err(|err| err.to_string())?;
+    cleanup_stranded_mediaflow_temps(&source.canon_parent, intent.job_id);
+    Ok(true)
+}
+
+fn mediaflow_output_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("output");
+    format!("{stem}_hevc.mkv")
+}
+
 /// Reconciles any `PROCESSING` MediaFlow jobs stranded by a prior crash/restart:
 /// - If a durable `.publish_intent_<job_id>.json` exists and both the published output and
 ///   trashed original exist on disk, finalizes the SQLite row to `COMPLETED` and removes the intent.
@@ -1127,20 +1275,21 @@ pub fn reconcile_mediaflow_startup() {
     }
 
     let roots = mediaflow_allowed_roots();
-    let mut processing_rows: Vec<(i64, String)> = Vec::new();
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT id, file_path FROM mediaflow_queue WHERE status = 'PROCESSING'")
-    {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-        {
-            for pair in rows.flatten() {
-                processing_rows.push(pair);
-            }
+    let mut processing_rows = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT id, file_path, COALESCE(source_fingerprint, '') FROM mediaflow_queue WHERE status = 'PROCESSING'",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }) {
+            processing_rows.extend(rows.flatten());
         }
     }
 
     let now_unix = Utc::now().timestamp();
-    for (job_id, raw_path) in processing_rows {
+    #[allow(unused_mut)]
+    let mut deferred = Vec::<i64>::new();
+    for (job_id, raw_path, _source_fingerprint) in processing_rows {
         let Some(parent) = Path::new(&raw_path).parent() else {
             continue;
         };
@@ -1167,6 +1316,28 @@ pub fn reconcile_mediaflow_startup() {
         {
             let _ = fs::remove_file(&intent_path);
             continue;
+        }
+
+        #[cfg(unix)]
+        if let Some(output) = &intent.output {
+            match rollback_interrupted_publication(
+                &raw_path,
+                &roots,
+                &_source_fingerprint,
+                &intent,
+                output,
+            ) {
+                Ok(true) => {
+                    let _ = fs::remove_file(&intent_path);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(job_id, %error, "MediaFlow publication recovery needs a retry");
+                    deferred.push(job_id);
+                    continue;
+                }
+            }
         }
 
         let pub_path = Path::new(&intent.published_path);
@@ -1240,8 +1411,9 @@ pub fn reconcile_mediaflow_startup() {
 
     let stranded = conn
         .execute(
-            "UPDATE mediaflow_queue SET status = 'FAILED', error_log = 'Interrupted by service restart', updated_at = CURRENT_TIMESTAMP WHERE status = 'PROCESSING'",
-            [],
+            "UPDATE mediaflow_queue SET status = 'FAILED', error_log = 'Interrupted by service restart', updated_at = CURRENT_TIMESTAMP
+             WHERE status = 'PROCESSING' AND id NOT IN (SELECT value FROM json_each(?1))",
+            params![serde_json::json!(deferred).to_string()],
         )
         .unwrap_or(0);
     if stranded > 0 {
@@ -1504,11 +1676,7 @@ pub async fn process_next_mediaflow_job() -> bool {
     let parent_dir = &pinned.canon_parent;
 
     let flags = af_hardware::get_gpu_transcode_flags();
-    let stem = src_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let out_fname = format!("{}_hevc.mkv", stem);
+    let out_fname = mediaflow_output_name(src_path);
     let out_path = parent_dir.join(&out_fname);
     if out_path != *src_path && fs::symlink_metadata(&out_path).is_ok() {
         let msg = format!(
@@ -1902,7 +2070,7 @@ pub async fn process_next_mediaflow_job() -> bool {
                 // Set published permissions (e.g. 0644 / 0664, never suid/sgid/exec) on the
                 // verified temporary output inode before hard-linking it into the media library.
                 let temp_c = std::ffi::CString::new(temp_fname.as_bytes()).unwrap();
-                {
+                let output = {
                     let chmod_fd = unsafe {
                         libc::openat(
                             dirfd,
@@ -1957,8 +2125,20 @@ pub async fn process_next_mediaflow_job() -> bool {
                         }));
                         return true;
                     }
-                    let _ = chmod_file.sync_all();
-                }
+                    match chmod_file
+                        .sync_all()
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| {
+                            MediaflowPublishedOutput::capture(&chmod_file, temp_fname.clone())
+                        }) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            temp_guard.cleanup_now();
+                            record_mediaflow_failure(job_id, &error);
+                            return true;
+                        }
+                    }
+                };
 
                 let trash_cstr = std::ffi::CString::new(".mediaflow_trash").unwrap();
                 unsafe {
@@ -2028,6 +2208,7 @@ pub async fn process_next_mediaflow_job() -> bool {
                     trash_entry_name: trash_entry_name.clone(),
                     new_size,
                     source_fingerprint: pinned.identity.fingerprint.clone(),
+                    output: Some(output),
                 };
                 let intent_bytes = match serde_json::to_vec(&intent) {
                     Ok(b) => b,
@@ -2158,11 +2339,11 @@ pub async fn process_next_mediaflow_job() -> bool {
             }
 
             let trash_dir = parent_dir.join(".mediaflow_trash");
-            prune_mediaflow_trash_dir(&trash_dir, mediaflow_trash_retention());
 
             match persist_mediaflow_completion_with_retry(job_id, &out_str, new_size).await {
                 Ok(()) => {
                     let _ = fs::remove_file(trash_dir.join(&intent_fname));
+                    prune_mediaflow_trash_dir(&trash_dir, mediaflow_trash_retention());
                     tracing::info!(
                         job_id = job_id,
                         output = %out_str,

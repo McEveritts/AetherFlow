@@ -4691,6 +4691,86 @@ fn test_smart_backup_honors_persisted_next_run_and_acquires_lock() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn mediaflow_recovery_unlinks_only_a_proven_interrupted_publication() {
+    use super::mediaflow::{
+        publish_intent_filename, MediaflowPublishIntent, MediaflowPublishedOutput,
+    };
+    let name = "workers::tests::mediaflow_recovery_unlinks_only_a_proven_interrupted_publication";
+    if !crate::inventory_regressions::isolated(name) {
+        return;
+    }
+    let root = env::temp_dir().join(format!("af-mf-reconcile-{}", uuid::Uuid::new_v4()));
+    let media = root.join("media");
+    let trash = media.join(".mediaflow_trash");
+    fs::create_dir_all(&trash).unwrap();
+    let db = root.join("aetherflow.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &db);
+    }
+    env::set_var("AF_ALLOWED_FS_ROOTS", &media);
+    af_db::init_db().unwrap();
+
+    let unrelated = media.join(".other-encoder.tmp.mkv");
+    fs::write(&unrelated, b"unrelated").unwrap();
+    for (id, stem, replace_source) in [(91, "original", false), (92, "replaced", true)] {
+        let src = media.join(format!("{stem}.mp4"));
+        let out = media.join(format!("{stem}_hevc.mkv"));
+        let temp_name = format!(".tmp_mediaflow_{id}_{}.mkv", uuid::Uuid::new_v4().simple());
+        let temp = media.join(&temp_name);
+        fs::write(&src, b"original video").unwrap();
+        fs::write(&temp, b"transcoded bytes").unwrap();
+        let source = open_and_pin_mediaflow_source(src.to_str().unwrap()).unwrap();
+        let output =
+            MediaflowPublishedOutput::capture(&fs::File::open(&temp).unwrap(), temp_name).unwrap();
+        let marker = trash.join(publish_intent_filename(id));
+        let intent = MediaflowPublishIntent {
+            job_id: id,
+            published_path: out.to_string_lossy().into_owned(),
+            trash_entry_name: format!("{id}_{stem}.mp4"),
+            new_size: fs::metadata(&temp).unwrap().len() as i64,
+            source_fingerprint: source.identity.fingerprint.clone(),
+            output: Some(output),
+        };
+        fs::write(&marker, serde_json::to_vec(&intent).unwrap()).unwrap();
+        af_db::get_conn().unwrap().execute(
+            "INSERT INTO mediaflow_queue(id,file_path,status,source_fingerprint) VALUES(?1,?2,'PROCESSING',?3)",
+            params![id, src.to_str().unwrap(), source.identity.fingerprint],
+        ).unwrap();
+        fs::hard_link(&temp, &out).unwrap();
+        if replace_source {
+            let replacement = src.with_extension("new");
+            fs::write(&replacement, b"replacement video").unwrap();
+            fs::rename(replacement, &src).unwrap();
+        }
+        reconcile_mediaflow_startup();
+        reconcile_mediaflow_startup();
+        assert!(!marker.exists());
+        assert_eq!(out.exists(), replace_source);
+        assert_eq!(temp.exists(), replace_source);
+        if replace_source {
+            assert_eq!(fs::read(&src).unwrap(), b"replacement video");
+            assert_eq!(fs::read(&out).unwrap(), b"transcoded bytes");
+        } else {
+            assert_eq!(fs::read(&src).unwrap(), b"original video");
+            // The next encode can publish at this path without clobbering a file.
+            fs::write(&out, b"next attempt").unwrap();
+        }
+        let status: String = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM mediaflow_queue WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "FAILED");
+    }
+    assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps() {
     let name = "workers::tests::test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps";
