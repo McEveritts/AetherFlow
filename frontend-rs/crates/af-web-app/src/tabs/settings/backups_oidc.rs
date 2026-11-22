@@ -25,6 +25,39 @@ fn backup_authorization_error(
     )
 }
 
+fn backup_staging_error(context: crate::state::AppContext, status: u16, text: &str) -> String {
+    if let Ok(body) = serde_json::from_str::<Value>(text) {
+        if let Some(message) = [
+            body["error"]["message"].as_str(),
+            body["message"].as_str(),
+            body["error"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|message| !message.trim().is_empty())
+        {
+            return tt(context, message);
+        }
+    }
+    tt_with(
+        context,
+        "Backup staging failed (HTTP {status})",
+        &[("status", &status.to_string())],
+    )
+}
+
+fn parse_backup_staging_response(
+    context: crate::state::AppContext,
+    ok: bool,
+    status: u16,
+    body: &str,
+) -> Result<Value, String> {
+    if !ok {
+        return Err(backup_staging_error(context, status, body));
+    }
+    serde_json::from_str::<Value>(body).map_err(|_| "Invalid staging response".to_string())
+}
+
 #[component]
 pub(super) fn BackupsSettings() -> impl IntoView {
     let context = app();
@@ -192,13 +225,30 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     let chunk=file.slice_with_f64_and_f64(index as f64*chunk_size,((index+1)as f64*chunk_size).min(file.size()))
                         .map_err(|_|"Could not read backup chunk".to_string())?;
                     let path=format!("/api/v1/admin/backup/upload/{}?chunk={index}&total={chunks}&upload_id={upload_id}",encode(&file.name()));
-                    let response=ApiClient.fetch_raw_body(&path,"POST",Some(chunk.as_ref()),Some("application/octet-stream"),&[]).await.map_err(|e|e.message)?;
-                    let status=response.status();
-                    let ok=response.ok();
-                    let body=response.text().await.map_err(|_|"Could not read staging response")?;
-                    let value:Value=serde_json::from_str(&body).map_err(|_|"Invalid staging response")?;
-                    if !ok{return Err(value["error"].as_str().or_else(||value["message"].as_str()).map(str::to_string).unwrap_or_else(||tt_with(context, "Backup staging failed (HTTP {status})", &[("status", &(tt(context, &(status).to_string())).to_string())])));}
-                    if index+1==chunks && value["complete"]!=true{return Err("Backup verification has not confirmed completion".into());}
+                    let response = ApiClient
+                        .fetch_raw_body(
+                            &path,
+                            "POST",
+                            Some(chunk.as_ref()),
+                            Some("application/octet-stream"),
+                            &[],
+                        )
+                        .await
+                        .map_err(|e| e.message)?;
+                    let status = response.status();
+                    let ok = response.ok();
+                    let body = if ok {
+                        response
+                            .text()
+                            .await
+                            .map_err(|_| "Could not read staging response".to_string())?
+                    } else {
+                        response.text().await.unwrap_or_default()
+                    };
+                    let value = parse_backup_staging_response(context, ok, status, &body)?;
+                    if index + 1 == chunks && value["complete"] != true {
+                        return Err("Backup verification has not confirmed completion".into());
+                    }
                     if progress.try_get_untracked().is_none(){return Ok(());}
                     progress.set((index+1)*100/chunks);
                 }
@@ -407,6 +457,52 @@ mod tests {
                 assert!(message.contains("503"));
                 assert!(!message.contains("Backup authorization failed"));
             }
+        });
+    }
+
+    #[test]
+    fn backup_staging_response_surfaces_non_json_proxy_errors_and_json_messages() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let context = crate::state::AppContext::new();
+            context.locale.set("en".into());
+
+            let html_502 = "<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>";
+            let err_en = parse_backup_staging_response(context, false, 502, html_502).unwrap_err();
+            assert_eq!(err_en, "Backup staging failed (HTTP 502)");
+            assert_ne!(err_en, "Invalid staging response");
+
+            context.locale.set("fr".into());
+            let err_fr = parse_backup_staging_response(context, false, 502, html_502).unwrap_err();
+            assert!(err_fr.contains("502"));
+            assert!(!err_fr.contains("Backup staging failed"));
+            assert_ne!(err_fr, "Invalid staging response");
+
+            for body in [
+                json!({"error": {"message": "Disk full"}}),
+                json!({"message": "Disk full"}),
+                json!({"error": "Disk full"}),
+            ] {
+                assert_eq!(
+                    parse_backup_staging_response(context, false, 507, &body.to_string())
+                        .unwrap_err(),
+                    "Disk full"
+                );
+            }
+
+            let empty_json_err =
+                parse_backup_staging_response(context, false, 504, "{\"error\":\"\"}").unwrap_err();
+            assert!(empty_json_err.contains("504"));
+
+            assert_eq!(
+                parse_backup_staging_response(context, true, 200, "{\"complete\":true}").unwrap(),
+                json!({"complete": true})
+            );
+            assert_eq!(
+                parse_backup_staging_response(context, true, 200, "<html>unexpected</html>")
+                    .unwrap_err(),
+                "Invalid staging response"
+            );
         });
     }
 }

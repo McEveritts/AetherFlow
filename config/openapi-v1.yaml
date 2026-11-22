@@ -1076,6 +1076,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -1202,6 +1208,12 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '202':
+          description: Accepted
           content:
             application/json:
               schema:
@@ -1507,6 +1519,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -1682,6 +1700,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -1787,6 +1811,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -1881,6 +1911,12 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
           content:
             application/json:
               schema:
@@ -2326,6 +2362,12 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '202':
+          description: Accepted
           content:
             application/json:
               schema:
@@ -3215,6 +3257,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -3307,6 +3355,12 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
           content:
             application/json:
               schema:
@@ -3524,6 +3578,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -3711,6 +3771,12 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
           content:
             application/json:
               schema:
@@ -3990,6 +4056,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -4086,6 +4158,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -4125,6 +4203,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -4155,6 +4239,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '204':
+          description: No Content
         '401':
           $ref: '#/components/responses/Error'
       security:
@@ -4187,6 +4273,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
+        '204':
+          description: No Content
         '401':
           $ref: '#/components/responses/Error'
       security:

@@ -543,6 +543,81 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("default: 'nightly'", workflow)
         self.assertIn('VERSION="${VERSION_STAMP}"', step_script("Package Release Tarball & SHA-256 Manifest"))
 
+    def test_bootstrap_archive_excludes_dev_files_and_retains_runtime_build_sources(self):
+        repo_root = WORKFLOW.parents[2]
+        script = step_script("Build and Package Standalone Rust LibreSpeed Archives")
+        match = re.search(
+            r"git archive\b.*?release-dist/aetherflow-bootstrap\.tar\.gz",
+            script,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "Missing git archive bootstrap packaging command in release.yml")
+        archive_path = self.root / "aetherflow-bootstrap.tar.gz"
+        archive_cmd = match.group(0).replace(
+            "release-dist/aetherflow-bootstrap.tar.gz",
+            '"${OUT_ARCHIVE}"',
+        )
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", archive_cmd],
+            cwd=repo_root,
+            env={**os.environ, "OUT_ARCHIVE": str(archive_path)},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(archive_path.is_file())
+        with tarfile.open(archive_path, "r:gz") as archive:
+            names = set(archive.getnames())
+
+        excluded_exact = (
+            "AetherFlow/scripts/run_embedded_e2e.sh",
+            "AetherFlow/scripts/smoke_v4_release_lifecycle.sh",
+            "AetherFlow/scripts/verify_wasm_reproducibility.py",
+            "AetherFlow/scripts/validate-streaming.sh",
+            "AetherFlow/scripts/build_wsl.ps1",
+            "AetherFlow/scripts/setup_wsl_dev.sh",
+            "AetherFlow/scripts/create-plugin-sdk.sh",
+            "AetherFlow/package.json",
+            "AetherFlow/package-lock.json",
+            "AetherFlow/.nvmrc",
+            "AetherFlow/.gitleaks.toml",
+        )
+        for member in excluded_exact:
+            self.assertNotIn(member, names, f"Dev/CI file leaked into bootstrap archive: {member}")
+
+        excluded_prefixes = (
+            "AetherFlow/.github",
+            "AetherFlow/apps",
+            "AetherFlow/docs",
+            "AetherFlow/e2e",
+            "AetherFlow/tests",
+            "AetherFlow/plugins/sdk-template-rust",
+        )
+        for prefix in excluded_prefixes:
+            leaked = [n for n in names if n == prefix or n.startswith(prefix + "/")]
+            self.assertEqual(leaked, [], f"Excluded subtree leaked into bootstrap archive: {leaked}")
+
+        leaked_v4_scripts = [
+            n for n in names if n.startswith("AetherFlow/scripts/v4_") and n.endswith(".py")
+        ]
+        self.assertEqual(leaked_v4_scripts, [], f"Dev v4 scripts leaked: {leaked_v4_scripts}")
+
+        required_members = (
+            "AetherFlow/setup/AetherFlow-Setup",
+            "AetherFlow/config/openapi-v1.yaml",
+            "AetherFlow/scripts/build_gold.sh",
+            "AetherFlow/scripts/build_wasm_frontend.sh",
+            "AetherFlow/scripts/finalize_wasm_assets.py",
+            "AetherFlow/scripts/install_wasm_build_tools.sh",
+            "AetherFlow/plugins/telemetry-inspector/plugin.manifest.json",
+            "AetherFlow/backend-rs/Cargo.toml",
+            "AetherFlow/frontend-rs/Cargo.toml",
+            "AetherFlow/deploy/release-manager.sh",
+            "AetherFlow/packages/common.sh",
+        )
+        for member in required_members:
+            self.assertIn(member, names, f"Required bootstrap member missing: {member}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,74 @@ fn api_key_field_state(baseline: &Value, current: &Value, field: &str) -> ApiKey
     }
 }
 
+fn model_matches_provider(provider: &str, model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    match provider {
+        "openai" => {
+            lower.starts_with("gpt-")
+                || lower == "o3"
+                || lower.starts_with("o3-")
+                || lower == "o4"
+                || lower.starts_with("o4-")
+        }
+        "anthropic" => lower.starts_with("claude-"),
+        "gemini" => lower.starts_with("gemini-"),
+        _ => false,
+    }
+}
+
+fn build_test_ai_payload(provider: &str, value: &Value) -> Value {
+    let mut payload = json!({
+        "provider": provider,
+        "gemini_api_key": value["geminiApiKey"],
+        "openai_api_key": value["openaiApiKey"],
+        "anthropic_api_key": value["anthropicApiKey"],
+    });
+    match provider {
+        "ollama" => {
+            payload["endpoint"] = value["ollamaEndpoint"].clone();
+            let local_model = text(value, "localModel");
+            let local_model = local_model.trim();
+            if !local_model.is_empty() {
+                payload["model"] = json!(local_model);
+            }
+        }
+        "lm-studio" => {
+            payload["endpoint"] = value["lmStudioEndpoint"].clone();
+            let local_model = text(value, "localModel");
+            let local_model = local_model.trim();
+            if !local_model.is_empty() {
+                payload["model"] = json!(local_model);
+            }
+        }
+        "anthropic-local" => {
+            payload["endpoint"] = value["anthropicEndpoint"].clone();
+            payload["anthropic_endpoint"] = value["anthropicEndpoint"].clone();
+            let local_model = text(value, "localModel");
+            let local_model = local_model.trim();
+            if !local_model.is_empty() {
+                payload["model"] = json!(local_model);
+            }
+        }
+        "anthropic" => {
+            payload["anthropic_endpoint"] = value["anthropicEndpoint"].clone();
+            let ai_model = text(value, "aiModel");
+            let ai_model = ai_model.trim();
+            if model_matches_provider(provider, ai_model) {
+                payload["model"] = json!(ai_model);
+            }
+        }
+        _ => {
+            let ai_model = text(value, "aiModel");
+            let ai_model = ai_model.trim();
+            if model_matches_provider(provider, ai_model) {
+                payload["model"] = json!(ai_model);
+            }
+        }
+    }
+    payload
+}
+
 #[component]
 pub(super) fn ProviderSettings(
     draft: JsonDraft,
@@ -45,25 +113,7 @@ pub(super) fn ProviderSettings(
         }
         let value = draft_value(draft);
         let provider = test_provider.get_untracked();
-        let mut payload = json!({
-            "provider":provider, "model":value["aiModel"],
-            "gemini_api_key":value["geminiApiKey"], "openai_api_key":value["openaiApiKey"],
-            "anthropic_api_key":value["anthropicApiKey"]
-        });
-        match provider.as_str() {
-            "ollama" => {
-                payload["endpoint"] = value["ollamaEndpoint"].clone();
-                payload["model"] = value["localModel"].clone();
-            }
-            "lm-studio" => {
-                payload["endpoint"] = value["lmStudioEndpoint"].clone();
-                payload["model"] = value["localModel"].clone();
-            }
-            "anthropic" => {
-                payload["anthropic_endpoint"] = value["anthropicEndpoint"].clone();
-            }
-            _ => {}
-        }
+        let payload = build_test_ai_payload(&provider, &value);
         testing.set(true);
         let mut busy_guard = crate::tabs::busy::BusyGuard::new(testing);
         spawn_local(async move {
@@ -284,6 +334,9 @@ pub(super) fn ProviderSettings(
                         <option value="openai">{move || tt(context, "OpenAI")}</option>
                         <option value="ollama">{move || tt(context, "Ollama")}</option>
                         <option value="lm-studio">{move || tt(context, "LM Studio")}</option>
+                        <option value="anthropic-local">
+                            {move || tt(context, "Claude-compatible local")}
+                        </option>
                     </select>
                 </label>
                 <button
@@ -375,5 +428,102 @@ mod tests {
             api_key_field_state(draft.baseline(), &draft.value().unwrap(), "anthropicApiKey"),
             ApiKeyFieldState::ReplacementEntered
         );
+    }
+
+    #[test]
+    fn test_ai_payload_strips_mismatched_cloud_models_and_keeps_matching_ones() {
+        let base_settings = |ai_model: &str| {
+            json!({
+                "aiModel": ai_model,
+                "localModel": "qwen2.5-coder:7b",
+                "geminiApiKey": "gem-key",
+                "openaiApiKey": "oai-key",
+                "anthropicApiKey": "ant-key",
+                "ollamaEndpoint": "http://127.0.0.1:11434",
+                "lmStudioEndpoint": "http://127.0.0.1:1234",
+                "anthropicEndpoint": "https://api.anthropic.com",
+            })
+        };
+
+        for matching_openai in ["gpt-6.1-sol", "gpt-4o", "o3", "o3-mini", "o4", "o4-mini"] {
+            let payload = build_test_ai_payload("openai", &base_settings(matching_openai));
+            assert_eq!(payload["provider"], "openai");
+            assert_eq!(payload["model"], matching_openai);
+        }
+        for mismatched_openai in [
+            "gemini-4-argon",
+            "claude-sonnet-5-5",
+            "llama3.2:latest",
+            "o300",
+            "",
+        ] {
+            let payload = build_test_ai_payload("openai", &base_settings(mismatched_openai));
+            assert_eq!(payload["provider"], "openai");
+            assert!(
+                payload.get("model").is_none(),
+                "expected OpenAI test payload to omit mismatched model {mismatched_openai:?}"
+            );
+        }
+
+        let matching_anthropic =
+            build_test_ai_payload("anthropic", &base_settings("claude-sonnet-5-5"));
+        assert_eq!(matching_anthropic["model"], "claude-sonnet-5-5");
+        assert_eq!(
+            matching_anthropic["anthropic_endpoint"],
+            "https://api.anthropic.com"
+        );
+        for mismatched_anthropic in ["gemini-4-argon", "gpt-6.1-sol", "o3", "o4-mini", ""] {
+            let payload = build_test_ai_payload("anthropic", &base_settings(mismatched_anthropic));
+            assert_eq!(payload["anthropic_endpoint"], "https://api.anthropic.com");
+            assert!(
+                payload.get("model").is_none(),
+                "expected Anthropic test payload to omit mismatched model {mismatched_anthropic:?}"
+            );
+        }
+
+        let matching_gemini = build_test_ai_payload("gemini", &base_settings("gemini-4-argon"));
+        assert_eq!(matching_gemini["model"], "gemini-4-argon");
+        for mismatched_gemini in ["gpt-6.1-sol", "o3", "o4-mini", "claude-opus-5-6", ""] {
+            let payload = build_test_ai_payload("gemini", &base_settings(mismatched_gemini));
+            assert!(
+                payload.get("model").is_none(),
+                "expected Gemini test payload to omit mismatched model {mismatched_gemini:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ai_payload_builds_anthropic_local_and_other_local_runtimes() {
+        let settings = json!({
+            "aiModel": "gemini-4-argon",
+            "localModel": "claude-local-7b",
+            "geminiApiKey": "",
+            "openaiApiKey": "",
+            "anthropicApiKey": "local-token",
+            "ollamaEndpoint": "http://127.0.0.1:11434",
+            "lmStudioEndpoint": "http://127.0.0.1:1234",
+            "anthropicEndpoint": "http://127.0.0.1:8080",
+        });
+
+        let anth_local = build_test_ai_payload("anthropic-local", &settings);
+        assert_eq!(anth_local["provider"], "anthropic-local");
+        assert_eq!(anth_local["model"], "claude-local-7b");
+        assert_eq!(anth_local["endpoint"], "http://127.0.0.1:8080");
+        assert_eq!(anth_local["anthropic_endpoint"], "http://127.0.0.1:8080");
+        assert_eq!(anth_local["anthropic_api_key"], "local-token");
+
+        let mut empty_local_model = settings.clone();
+        empty_local_model["localModel"] = json!("   ");
+        let anth_local_default = build_test_ai_payload("anthropic-local", &empty_local_model);
+        assert_eq!(anth_local_default["endpoint"], "http://127.0.0.1:8080");
+        assert!(anth_local_default.get("model").is_none());
+
+        let ollama = build_test_ai_payload("ollama", &settings);
+        assert_eq!(ollama["endpoint"], "http://127.0.0.1:11434");
+        assert_eq!(ollama["model"], "claude-local-7b");
+
+        let lm_studio = build_test_ai_payload("lm-studio", &settings);
+        assert_eq!(lm_studio["endpoint"], "http://127.0.0.1:1234");
+        assert_eq!(lm_studio["model"], "claude-local-7b");
     }
 }

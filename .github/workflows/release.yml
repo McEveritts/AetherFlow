@@ -355,6 +355,11 @@ jobs:
             # Setup and the source build need deployment files and both Rust workspaces.
             git archive --format=tar.gz --prefix=AetherFlow/ HEAD -- \
               . ':!.github' ':!apps' ':!docs' ':!e2e' ':!tests' \
+              ':!scripts/v4_*.py' ':!scripts/run_embedded_e2e.sh' ':!scripts/smoke_v4_release_lifecycle.sh' \
+              ':!scripts/verify_wasm_reproducibility.py' ':!scripts/validate-streaming.sh' \
+              ':!scripts/build_wsl.ps1' ':!scripts/setup_wsl_dev.sh' ':!scripts/create-plugin-sdk.sh' \
+              ':!package.json' ':!package-lock.json' ':!.nvmrc' ':!.gitleaks.toml' \
+              ':!plugins/sdk-template-rust' \
               > release-dist/aetherflow-bootstrap.tar.gz
           fi
           release_archives=(aetherflow-linux-amd64.tar.gz)

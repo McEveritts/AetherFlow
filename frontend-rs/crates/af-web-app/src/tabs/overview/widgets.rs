@@ -1322,10 +1322,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                     return;
                                 }
                                 match result {
-                                    Ok(value) => {
-                                        report.data.set(value);
-                                        report.error.set(None);
-                                    }
+                                    Ok(value) => report.commit(value),
                                     Err(e) => context.toast(tt(context, &e.message), true),
                                 }
                                 busy.set(false);

@@ -551,19 +551,6 @@ pub fn apply_theme_dom(pref: &str) {
     }
 }
 
-pub fn apply_reduced_motion_dom(enabled: bool) {
-    if let Some(root) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.document_element())
-    {
-        if enabled {
-            let _ = root.set_attribute("data-reduced-motion", "true");
-        } else {
-            let _ = root.remove_attribute("data-reduced-motion");
-        }
-    }
-}
-
 pub fn apply_display_preferences_dom(context: AppContext) {
     let reduced_user = context.reduced_motion.get();
     let motion_suppressed = reduced_user || context.system_reduced_motion.get();
