@@ -758,9 +758,14 @@ async fn broadcast_notifications_dismiss_per_user_without_mutating_shared_row() 
     let resp = mark_notification_read(Path(broadcast_id), Extension(u1.clone())).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let u1_list = get_notifications(Extension(u1.clone()), Query(query_default()))
-        .await
-        .0;
+    let u1_resp = get_notifications(Extension(u1.clone()), Query(query_default())).await;
+    assert_eq!(u1_resp.status(), StatusCode::OK);
+    let u1_list: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(u1_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(u1_list["unread_count"], 1);
     let u1_ids: Vec<i64> = u1_list["notifications"]
         .as_array()
@@ -771,9 +776,14 @@ async fn broadcast_notifications_dismiss_per_user_without_mutating_shared_row() 
     assert_eq!(u1_ids, vec![u1_notif_id]);
 
     // User 2 STILL sees both the broadcast and their own notification unread
-    let u2_list = get_notifications(Extension(u2.clone()), Query(query_default()))
-        .await
-        .0;
+    let u2_resp = get_notifications(Extension(u2.clone()), Query(query_default())).await;
+    assert_eq!(u2_resp.status(), StatusCode::OK);
+    let u2_list: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(u2_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(u2_list["unread_count"], 2);
     let u2_ids: Vec<i64> = u2_list["notifications"]
         .as_array()
@@ -798,9 +808,14 @@ async fn broadcast_notifications_dismiss_per_user_without_mutating_shared_row() 
     // User 2 dismisses all -> User 2 unread_count = 0, broadcast row still read = 0
     let dismiss_resp = dismiss_all_notifications(Extension(u2.clone())).await;
     assert_eq!(dismiss_resp.status(), StatusCode::OK);
-    let u2_after = get_notifications(Extension(u2.clone()), Query(query_default()))
-        .await
-        .0;
+    let u2_after_resp = get_notifications(Extension(u2.clone()), Query(query_default())).await;
+    assert_eq!(u2_after_resp.status(), StatusCode::OK);
+    let u2_after: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(u2_after_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(u2_after["unread_count"], 0);
     assert!(u2_after["notifications"]
         .as_array()
