@@ -120,7 +120,7 @@ af_logged download_file "$BAZARR_URL" "$TMP_ZIP"
 report_progress 55 "Extracting Bazarr and creating isolated Python virtualenv..."
 BUILD_DIR="$(mktemp -d /opt/.bazarr-build.XXXXXX)"
 chmod 755 "$BUILD_DIR"
-af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
+af_logged af_extract_zip_archive "$TMP_ZIP" "$BUILD_DIR"
 rm -f "$TMP_ZIP"
 test -s "$BUILD_DIR/bazarr.py"
 

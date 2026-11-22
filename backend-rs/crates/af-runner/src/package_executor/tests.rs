@@ -4187,14 +4187,37 @@ fn test_rclone_both_cli_variants_render_app_port_and_metrics() {
     assert!(!rendered_rcd.contains("{{APP_PORT}}"));
     assert!(!rendered_rcd.contains("5572"));
 
-    // Simulate fallback gui substitution on unit template
-    let gui_start = "/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:{{APP_PORT}} --api-addr=127.0.0.1:{{RCLONE_API_PORT}} --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf";
-    let fallback_content = unit_step.replace("{{RCLONE_EXEC_START}}", gui_start);
-    let rendered_fallback = interpolate_template(&fallback_content, &vars);
-    assert!(rendered_fallback.contains("/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:19572 --api-addr=127.0.0.1:19573 --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf"));
-    assert!(!rendered_fallback.contains("--user="));
-    assert!(!rendered_fallback.contains("--pass="));
-    assert!(!rendered_fallback.contains("5572"));
+    let root = create_isolated_test_dir("rclone-gui-mode");
+    let binary = root.join("opt/AetherFlow/apps/rclone/rclone");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    for (help, expected_metrics) in [
+        (
+            "--addr --api-addr --rc-enable-metrics --enable-metrics --no-open-browser",
+            "--rc-enable-metrics",
+        ),
+        (
+            "--addr --api-addr --enable-metrics --no-open-browser",
+            "--enable-metrics",
+        ),
+    ] {
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\n[ \"$1\" = gui ] && printf '%s\\n' '{help}'\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let detected = detect_rclone_exec_start_for_root(&root);
+        let rendered = interpolate_template(
+            &unit_step.replace("{{RCLONE_EXEC_START}}", &detected),
+            &vars,
+        );
+        assert!(rendered.contains("/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:19572 --api-addr=127.0.0.1:19573 "));
+        assert!(rendered.contains(&format!(" {expected_metrics} ")));
+        assert!(rendered.contains("--cache-dir=/var/lib/rclone/cache"));
+        assert!(!rendered.contains("--user="));
+        assert!(!rendered.contains("--pass="));
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 struct LocalHttpServer {
@@ -4903,6 +4926,13 @@ async fn test_rclone_install_rejects_wrong_version() {
 async fn test_rclone_install_succeeds_with_valid_sha256_and_version() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let root = create_isolated_test_dir("rclone-install-ok");
+    use std::os::unix::fs::PermissionsExt;
+    let runtime_dir = root.join("opt/AetherFlow/apps/rclone");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let apps_dir = runtime_dir.parent().unwrap();
+    for path in [apps_dir, runtime_dir.as_path()] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let work_dir = create_isolated_test_dir("rclone-work-ok");
     // Binary reports v1.75.2 matching target 1.75.2
     let (zip_path, real_sha) = create_test_rclone_zip(&work_dir, "v1.75.2");
@@ -4945,6 +4975,13 @@ async fn test_rclone_install_succeeds_with_valid_sha256_and_version() {
         .is_file());
     assert!(!root.join("usr/bin/rclone").exists());
     assert!(!root.join("usr/local/bin/rclone").exists());
+
+    for path in [apps_dir, runtime_dir.as_path()] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o711
+        );
+    }
 
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&work_dir);

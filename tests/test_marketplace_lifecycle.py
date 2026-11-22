@@ -123,7 +123,8 @@ class MarketplaceLifecycleTests(unittest.TestCase):
         source = (ROOT / 'packages/common.sh').read_text()
         helpers = source[source.index('command_exists()'):source.index('lock_path()')]
         helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit', 'verify_systemd_service_active',
-                                    'wait_for_service_ready', 'af_write_failure_receipt')
+                                    'wait_for_service_ready', 'af_write_failure_receipt',
+                                    'af_extract_zip_archive')
         helpers = self.rebase(helpers)
         user_helper = source[source.index('purge_system_user()'):source.index('load_master_credentials()')]
         user_helper = user_helper.replace('/home/', str(self.root) + '/home/')

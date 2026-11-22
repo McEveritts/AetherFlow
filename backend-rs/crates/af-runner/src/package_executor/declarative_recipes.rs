@@ -1744,22 +1744,83 @@ fn rclone_unit_path(vars: &HashMap<String, String>, effective_root: &Path) -> Pa
 
 pub fn detect_rclone_exec_start_for_root(effective_root: &Path) -> String {
     let rclone_bin = effective_root.join(RCLONE_BIN.trim_start_matches('/'));
-    let probe = std::process::Command::new(&rclone_bin)
-        .args(["rcd", "--help"])
-        .output();
-    let supports_rc_web_gui = probe
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout).contains("--rc-web-gui")
-                || String::from_utf8_lossy(&out.stderr).contains("--rc-web-gui")
-        })
-        .unwrap_or(true);
-
-    let args = if supports_rc_web_gui {
-        "rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-enable-metrics --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf"
-    } else {
-        "gui --addr=127.0.0.1:{{APP_PORT}} --api-addr=127.0.0.1:{{RCLONE_API_PORT}} --enable-metrics --no-open-browser --config=/etc/rclone/rclone.conf"
+    let help = |command: &str| {
+        std::process::Command::new(&rclone_bin)
+            .args([command, "--help"])
+            .output()
+            .ok()
+            .map(|output| {
+                format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
     };
-    format!("{RCLONE_BIN} {args}")
+    let rcd_help = help("rcd");
+    let mut args = if rcd_help
+        .as_deref()
+        .is_none_or(|output| output.contains("--rc-web-gui"))
+    {
+        let mut flags = vec!["rcd", "--rc-web-gui", "--rc-addr=127.0.0.1:{{APP_PORT}}"];
+        for option in ["--rc-web-gui-no-open-browser", "--rc-enable-metrics"] {
+            if rcd_help
+                .as_deref()
+                .is_none_or(|output| output.contains(option))
+            {
+                flags.push(option);
+            }
+        }
+        flags
+    } else {
+        let gui_help = help("gui").unwrap_or_default();
+        let address_flag = if gui_help.contains("--addr") {
+            "--addr=127.0.0.1:{{APP_PORT}}"
+        } else {
+            "--rc-addr=127.0.0.1:{{APP_PORT}}"
+        };
+        let mut flags = vec!["gui", address_flag];
+        if gui_help.contains("--api-addr") {
+            flags.push("--api-addr=127.0.0.1:{{RCLONE_API_PORT}}");
+        }
+        if gui_help.contains("--rc-enable-metrics") {
+            flags.push("--rc-enable-metrics");
+        } else if gui_help.contains("--enable-metrics") {
+            flags.push("--enable-metrics");
+        }
+        if gui_help.contains("--no-open-browser") {
+            flags.push("--no-open-browser");
+        }
+        flags
+    };
+    args.extend([
+        "--config=/etc/rclone/rclone.conf",
+        "--cache-dir=/var/lib/rclone/cache",
+    ]);
+    format!("{RCLONE_BIN} {}", args.join(" "))
+}
+
+fn rclone_unit_api_port(unit: &str) -> Option<u16> {
+    for line in unit
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+    {
+        let mut args = line.split_whitespace();
+        while let Some(argument) = args.next() {
+            let address = match argument {
+                "--api-addr" => args.next(),
+                _ => argument.strip_prefix("--api-addr="),
+            };
+            if let Some(port) = address
+                .and_then(|value| value.rsplit_once(':'))
+                .and_then(|(_, port)| port.trim_matches(['"', '\'']).parse::<u16>().ok())
+                .filter(|port| *port != 0)
+            {
+                return Some(port);
+            }
+        }
+    }
+    None
 }
 
 pub fn detect_rclone_exec_start() -> String {
@@ -1785,39 +1846,8 @@ pub fn detect_rclone_separate_api_port_for_root(
         return None;
     }
 
-    let svc_content = fs::read_to_string(rclone_unit_path(vars, effective_root));
-    if let Ok(svc_content) = svc_content {
-        for line in svc_content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("ExecStart=") {
-                if let Some(idx) = trimmed.find("--api-addr=") {
-                    let rest = &trimmed[idx + "--api-addr=".len()..];
-                    let token = rest.split_whitespace().next().unwrap_or("");
-                    if let Some((_, p_str)) = token.rsplit_once(':') {
-                        let cleaned = p_str.trim_matches(['"', '\'', ' ']);
-                        if let Ok(p) = cleaned.parse::<u16>() {
-                            if p != app_port {
-                                return Some(p);
-                            }
-                        }
-                    }
-                } else if let Some(idx) = trimmed.find("--api-addr") {
-                    let rest = trimmed[idx + "--api-addr".len()..].trim_start();
-                    let token = rest.split_whitespace().next().unwrap_or("");
-                    let addr = token.strip_prefix('=').unwrap_or(token);
-                    if let Some((_, p_str)) = addr.rsplit_once(':') {
-                        let cleaned = p_str.trim_matches(['"', '\'', ' ']);
-                        if let Ok(p) = cleaned.parse::<u16>() {
-                            if p != app_port {
-                                return Some(p);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // A present unit without --api-addr uses a single listener.
-        return None;
+    if let Ok(unit) = fs::read_to_string(rclone_unit_path(vars, effective_root)) {
+        return rclone_unit_api_port(&unit).filter(|port| *port != app_port);
     }
 
     // ONLY use variables.get("RCLONE_API_PORT") if variables.get("RCLONE_WEB_MODE") (or RCLONE_MODE) is explicitly "gui"!
@@ -4264,6 +4294,26 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
 
                 cancel.check(&recipe.package_id)?;
                 let root = self.env_cfg.fs_root.as_deref();
+                // An earlier install under a private umask may have left the
+                // managed runtime directories unsearchable by the service user.
+                {
+                    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                    let runtime_dir = dest_bin.parent().expect("managed Rclone binary parent");
+                    let apps_dir = runtime_dir.parent().expect("managed application directory");
+                    create_dir_all_0755(runtime_dir)?;
+                    for path in [apps_dir, runtime_dir] {
+                        let directory = OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                            .open(path)?;
+                        let mut permissions = directory.metadata()?.permissions();
+                        let mode = permissions.mode();
+                        if mode & 0o111 != 0o111 {
+                            permissions.set_mode(mode | 0o111);
+                            directory.set_permissions(permissions)?;
+                        }
+                    }
+                }
                 if !owned {
                     journal.stage_file_mutation(&owner)?;
                     write_file_atomic_with_mode_bounded(&owner, b"rclone\n", 0o644, root)?;
@@ -4868,33 +4918,29 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     let effective_root = self.env_cfg.fs_root.as_deref().unwrap_or(Path::new("/"));
                     let detected_exec = detect_rclone_exec_start_for_root(effective_root);
                     content = content.replace("{{RCLONE_EXEC_START}}", &detected_exec);
-                    if !vars.contains_key("RCLONE_API_PORT") {
-                        let mut existing_api_port = None;
-                        if let Ok(svc_existing) = fs::read_to_string(&resolved) {
-                            for line in svc_existing.lines() {
-                                let trimmed = line.trim();
-                                if trimmed.starts_with("ExecStart=") {
-                                    if let Some(idx) = trimmed.find("--api-addr=") {
-                                        let rest = &trimmed[idx + "--api-addr=".len()..];
-                                        let token = rest.split_whitespace().next().unwrap_or("");
-                                        if let Some((_, p_str)) = token.rsplit_once(':') {
-                                            let cleaned = p_str.trim_matches(['"', '\'', ' ']);
-                                            if let Ok(p) = cleaned.parse::<u16>() {
-                                                existing_api_port = Some(p);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let app_port_num: u16 = vars
+                    if detected_exec.contains("{{RCLONE_API_PORT}}") {
+                        let app_port = vars
                             .get("APP_PORT")
-                            .and_then(|p| p.parse::<u16>().ok())
+                            .and_then(|value| value.parse::<u16>().ok())
                             .unwrap_or(5572);
-                        let final_api_port =
-                            existing_api_port.unwrap_or_else(|| app_port_num.saturating_add(1));
-                        vars.insert("RCLONE_API_PORT".to_string(), final_api_port.to_string());
+                        let api_port = if let Some(value) = vars.get("RCLONE_API_PORT") {
+                            value
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|port| *port != 0 && *port != app_port)
+                                .ok_or_else(|| {
+                                    PackageExecutorError::Validation(format!(
+                                        "Rclone RC API port must be valid and differ from GUI port {app_port}"
+                                    ))
+                                })?
+                        } else {
+                            fs::read_to_string(&resolved)
+                                .ok()
+                                .and_then(|unit| rclone_unit_api_port(&unit))
+                                .filter(|port| *port != app_port)
+                                .unwrap_or_else(|| app_port.checked_add(1).unwrap_or(u16::MAX - 1))
+                        };
+                        vars.insert("RCLONE_API_PORT".to_string(), api_port.to_string());
                     }
                 }
                 let rendered = interpolate_template(&content, vars);

@@ -27,7 +27,6 @@ check_disk_space "${AF_JOB_SCRATCH_DIR}" 512
 check_disk_space "/opt" 512
 
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5572}}"
-export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p /install
 if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
@@ -43,6 +42,12 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
+if [[ ! "$APP_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    print_error "Rclone GUI port must be between 1 and 65535."
+    exit 1
+fi
+APP_PORT=$((10#$APP_PORT))
+export AF_APP_PORT="$APP_PORT"
 validate_config_paths "$RCLONE_BIN" "$RCLONE_OWNER" "$RCLONE_CANONICAL_ENV" "$RCLONE_LEGACY_ENV" \
     /etc/rclone/rclone.conf /var/lib/rclone/cache/.af-rclone-check
 if [[ -e "$RCLONE_OWNER" && "$(cat -- "$RCLONE_OWNER")" != "$PACKAGE_NAME" ]] ||
@@ -93,7 +98,7 @@ RCLONE_RELEASE="${AF_TARGET_VERSION:-$(github_latest_tag rclone/rclone)}"
 RCLONE_RELEASE="${RCLONE_RELEASE#v}"
 RCLONE_URL="https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-${RCLONE_ARCH}.zip"
 af_logged download_file "$RCLONE_URL" "$TMP_ZIP"
-af_logged unzip -qo "$TMP_ZIP" -d "$TMP_DIR"
+af_logged af_extract_zip_archive "$TMP_ZIP" "$TMP_DIR"
 RCLONE_BINARY="$(find "$TMP_DIR" -type f -name rclone -print -quit)"
 VFS_WAS_ACTIVE=0
 if systemctl is-active --quiet rclone-vfs; then VFS_WAS_ACTIVE=1; fi
@@ -338,7 +343,7 @@ RCLONE_BIND_HOST="${RCLONE_BIND_HOST:-${AF_BIND_ADDRESS:-127.0.0.1}}"
 RCLONE_RCD_HELP="$("$RCLONE_BIN" rcd --help 2>&1 || true)"
 if [[ "$RCLONE_RCD_HELP" == *--rc-web-gui* ]]; then
     RCLONE_MODE="rcd"
-    RCLONE_API_PORT="${RCLONE_API_PORT:-$APP_PORT}"
+    RCLONE_API_PORT="$APP_PORT"
     RCLONE_RCD_FLAGS="--rc-web-gui --rc-addr=${RCLONE_BIND_HOST}:${APP_PORT} --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache"
     if [[ "$RCLONE_RCD_HELP" == *--rc-enable-metrics* ]]; then
         RCLONE_RCD_FLAGS="${RCLONE_RCD_FLAGS} --rc-enable-metrics"
@@ -362,10 +367,19 @@ else
         RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --rc-addr=${RCLONE_BIND_HOST}:${APP_PORT}"
     fi
     if [[ "$RCLONE_GUI_HELP" == *--api-addr* ]]; then
-        RCLONE_API_PORT="${RCLONE_API_PORT:-5573}"
+        if [[ -z "${RCLONE_API_PORT:-}" ]]; then
+            RCLONE_API_PORT=5573
+            [[ "$APP_PORT" != 5573 ]] || RCLONE_API_PORT=5574
+        fi
+        if [[ ! "$RCLONE_API_PORT" =~ ^[0-9]{1,5}$ ]] ||
+            (( 10#$RCLONE_API_PORT < 1 || 10#$RCLONE_API_PORT > 65535 || 10#$RCLONE_API_PORT == APP_PORT )); then
+            print_error "Rclone RC API port must be between 1 and 65535 and differ from GUI port ${APP_PORT}."
+            exit 1
+        fi
+        RCLONE_API_PORT=$((10#$RCLONE_API_PORT))
         RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --api-addr=${RCLONE_BIND_HOST}:${RCLONE_API_PORT}"
     else
-        RCLONE_API_PORT="${RCLONE_API_PORT:-$APP_PORT}"
+        RCLONE_API_PORT="$APP_PORT"
     fi
     if [[ "$RCLONE_GUI_HELP" == *--no-open-browser* ]]; then
         RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --no-open-browser"

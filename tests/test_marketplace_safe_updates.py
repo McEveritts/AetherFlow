@@ -1534,7 +1534,8 @@ esac
         common = self.root / "opt/AetherFlow/packages/common.sh"
         with common.open("a") as script:
             script.write(self.rebase(common_functions(
-                "quiesce_services_for_rollback", "purge_systemd_unit", "purge_app_archive_backups"
+                "quiesce_services_for_rollback", "purge_systemd_unit", "purge_app_archive_backups",
+                "af_extract_zip_archive",
             )))
             script.write(r"""
 download_file() { cp "$TEST_ROOT/rclone.zip" "$2"; }
@@ -1632,6 +1633,26 @@ curl() {
         self.assertIn(" gui ", start)
         self.assertIn(" --rc-enable-metrics ", start)
         self.assertIn("--api-addr=127.0.0.1:25473", start)
+
+    def test_rclone_gui_default_api_port_does_not_collide(self):
+        self.prepare_rclone_fixture()
+        env = {
+            "AF_TARGET_VERSION": "1.75.2", "AF_APP_PORT": "05573",
+            "RCLONE_FIXTURE_GUI_ONLY": "1",
+        }
+        installed = self.run_script("rclone", **env)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        unit = self.root / "etc/systemd/system/rclone.service"
+        before = unit.read_bytes()
+        start = next(line for line in before.decode().splitlines() if line.startswith("ExecStart="))
+        self.assertIn("--addr=127.0.0.1:5573", start)
+        self.assertIn("--api-addr=127.0.0.1:5574", start)
+
+        rejected = self.run_script("rclone", **env, RCLONE_API_PORT="5573")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("differ from GUI port 5573", rejected.stderr)
+        self.assertEqual(unit.read_bytes(), before)
+        self.assertTrue((self.root / "install/.rclone.lock").exists())
 
     def test_rclone_failed_migration_rolls_back_legacy_units_and_keeps_global_files(self):
         distro, operator = self.prepare_rclone_fixture()

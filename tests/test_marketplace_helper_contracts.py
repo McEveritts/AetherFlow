@@ -2,9 +2,11 @@ import ast
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility (ubuntu-22.04)
@@ -47,6 +49,44 @@ FORBIDDEN_HELPERS = [
 
 
 class MarketplaceHelperContractsTest(unittest.TestCase):
+
+    def test_zip_members_are_checked_before_staging(self):
+        helper = common_functions("af_extract_zip_archive") + '\naf_extract_zip_archive "$@"'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "fixture.zip"
+            destination = root / "staged"
+            destination.mkdir()
+            valid = zipfile.ZipInfo("app/tool")
+            valid.create_system = 3
+            valid.external_attr = (stat.S_IFREG | 0o4755) << 16
+            linked = zipfile.ZipInfo("app/link")
+            linked.create_system = 3
+            linked.external_attr = (stat.S_IFLNK | 0o777) << 16
+            for invalid in (linked, "../unmanaged.txt"):
+                with self.subTest(member=invalid):
+                    with zipfile.ZipFile(archive_path, "w") as bundle:
+                        bundle.writestr(valid, b"fixture")
+                        bundle.writestr(invalid, b"fixture")
+                    result = subprocess.run(
+                        ["bash", "-c", helper, "extract", archive_path, destination],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("disallowed ZIP entry", result.stderr)
+                    self.assertEqual(list(destination.iterdir()), [])
+                    self.assertFalse((root / "unmanaged.txt").exists())
+
+            with zipfile.ZipFile(archive_path, "w") as bundle:
+                bundle.writestr(valid, b"fixture")
+            result = subprocess.run(
+                ["bash", "-c", helper, "extract", archive_path, destination],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = destination / "app/tool"
+            self.assertEqual(installed.read_bytes(), b"fixture")
+            self.assertEqual(stat.S_IMODE(installed.stat().st_mode) & 0o4111, 0o111)
 
     def test_marketplace_version_probes_use_package_fallback_and_native_scrutiny(self):
         automation = json.loads((ROOT / "config/package_automation.json").read_text())

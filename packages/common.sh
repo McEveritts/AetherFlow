@@ -365,6 +365,55 @@ except Exception as exc:
 PYEOF
 }
 
+# Validate all member names and types before extracting into a private staging directory.
+af_extract_zip_archive() {
+    local archive_path="$1" destination="$2"
+    [[ -f "$archive_path" && ! -L "$archive_path" && -d "$destination" && ! -L "$destination" ]] || {
+        print_error "Unsafe ZIP archive or staging directory"
+        return 1
+    }
+    python3 - "$archive_path" "$destination" <<'PYEOF'
+from pathlib import Path
+import shutil, stat, sys, zipfile
+
+archive_path, destination = map(Path, sys.argv[1:])
+try:
+    with zipfile.ZipFile(archive_path) as archive:
+        entries = {}
+        for member in archive.infolist():
+            is_dir = member.is_dir()
+            name = member.filename.removesuffix("/") if is_dir else member.filename
+            parts = name.split("/")
+            mode = member.external_attr >> 16
+            expected_type = stat.S_IFDIR if is_dir else stat.S_IFREG
+            if (
+                member.orig_filename != member.filename
+                or any(part in ("", ".", "..") for part in parts)
+                or any(ord(char) < 32 or char in "\\:" for char in name)
+                or stat.S_IFMT(mode) not in (0, expected_type)
+                or name in entries
+            ):
+                raise ValueError(f"disallowed ZIP entry: {member.orig_filename!r}")
+            entries[name] = (member, is_dir, parts, mode)
+
+        if not entries:
+            raise ValueError("empty ZIP archive")
+        for member, is_dir, parts, mode in entries.values():
+            target = destination.joinpath(*parts)
+            if is_dir:
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as src, target.open("xb") as dst:
+                    shutil.copyfileobj(src, dst)
+                if mode & 0o111:
+                    target.chmod(stat.S_IMODE(target.stat().st_mode) | (mode & 0o111))
+except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+    sys.stderr.write(f"ZIP archive extraction failed: {exc}\n")
+    raise SystemExit(1)
+PYEOF
+}
+
 log_info() {
     log "[INFO] $*"
 }

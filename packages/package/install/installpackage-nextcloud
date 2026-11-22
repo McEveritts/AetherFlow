@@ -175,7 +175,7 @@ if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
 fi
 af_logged download_file "$NEXTCLOUD_URL" "$TMP_ZIP"
 mkdir -p /var/www
-af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
+af_logged af_extract_zip_archive "$TMP_ZIP" "$BUILD_DIR"
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
     runtime_path="${RUNTIME_PATHS[$runtime_index]}"
     case "$runtime_path" in
