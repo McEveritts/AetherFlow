@@ -6082,10 +6082,18 @@ async fn listenarr_prerelease_channel_discovery_and_unsupported_arch_fail_early(
         latest_url,
         "https://github.com/Listenarrs/Listenarr/releases/tag/v1.10.6-canary"
     );
-    assert!(is_version_newer_for_source("1.10.5-canary", &latest_ver, "github"));
+    assert!(is_version_newer_for_source(
+        "1.10.5-canary",
+        &latest_ver,
+        "github"
+    ));
     assert!(is_version_newer_for_source("0.2.71", &latest_ver, "github"));
     assert!(is_version_newer_for_source(&latest_ver, "1.10.6", "github"));
-    assert!(!is_version_newer_for_source("1.10.6-canary", &latest_ver, "github"));
+    assert!(!is_version_newer_for_source(
+        "1.10.6-canary",
+        &latest_ver,
+        "github"
+    ));
 
     // 2. Stable-channel packages still reject prerelease-only feeds
     let stable_err = detect_latest_github_release_for_channel(
@@ -6097,7 +6105,9 @@ async fn listenarr_prerelease_channel_discovery_and_unsupported_arch_fail_early(
     .await
     .unwrap_err();
     assert!(
-        stable_err.to_string().contains("No eligible GitHub release"),
+        stable_err
+            .to_string()
+            .contains("No eligible GitHub release"),
         "{stable_err}"
     );
 

@@ -1831,7 +1831,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_retained_ingress() {
+    async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_retained_ingress(
+    ) {
         let (root, path, conn, mut package) = fixture();
         package.name = "rclone".into();
         package.service_name = "rclone".into();
@@ -1863,11 +1864,13 @@ mod tests {
         .unwrap();
         let rec_retain = op_retain.execute(&backend, &sender).await.unwrap();
         assert_eq!(rec_retain.status, "completed");
-        let after_retain =
-            lifecycle::query_package_retention_history(&op_retain.conn, "rclone")
-                .unwrap()
-                .expect("retained remove record");
-        assert_eq!(after_retain.retention_state, lifecycle::RETENTION_STATE_RETAINED);
+        let after_retain = lifecycle::query_package_retention_history(&op_retain.conn, "rclone")
+            .unwrap()
+            .expect("retained remove record");
+        assert_eq!(
+            after_retain.retention_state,
+            lifecycle::RETENTION_STATE_RETAINED
+        );
         let retained_count: i64 = op_retain
             .conn
             .query_row(
@@ -1885,7 +1888,10 @@ mod tests {
             Some(&op_retain.conn),
         )
         .unwrap();
-        assert_eq!(insp.eligibility, crate::PackagePurgeEligibility::RetainedProven);
+        assert_eq!(
+            insp.eligibility,
+            crate::PackagePurgeEligibility::RetainedProven
+        );
         drop(op_retain);
 
         // 2. Explicit purge (delete_data=true) persists retention_state='purged' and clears
@@ -1905,11 +1911,13 @@ mod tests {
         .unwrap();
         let rec_purge = op_purge.execute(&backend, &sender).await.unwrap();
         assert_eq!(rec_purge.status, "completed");
-        let after_purge =
-            lifecycle::query_package_retention_history(&op_purge.conn, "rclone")
-                .unwrap()
-                .expect("purged remove record");
-        assert_eq!(after_purge.retention_state, lifecycle::RETENTION_STATE_PURGED);
+        let after_purge = lifecycle::query_package_retention_history(&op_purge.conn, "rclone")
+            .unwrap()
+            .expect("purged remove record");
+        assert_eq!(
+            after_purge.retention_state,
+            lifecycle::RETENTION_STATE_PURGED
+        );
         let retained_count_after: i64 = op_purge
             .conn
             .query_row(
@@ -1927,7 +1935,10 @@ mod tests {
             Some(&op_purge.conn),
         )
         .unwrap();
-        assert_eq!(insp_after.eligibility, crate::PackagePurgeEligibility::NotPresent);
+        assert_eq!(
+            insp_after.eligibility,
+            crate::PackagePurgeEligibility::NotPresent
+        );
         drop(op_purge);
 
         let _ = std::fs::remove_dir_all(root);

@@ -222,7 +222,9 @@ pub fn listenarr_is_official_download_url(
     if clean_tag.is_empty()
         || clean_name.is_empty()
         || clean_url.is_empty()
-        || clean_url.chars().any(|c| c.is_whitespace() || c.is_control())
+        || clean_url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
     {
         return false;
     }
@@ -273,9 +275,7 @@ pub fn listenarr_release_asset_is_eligible(
         return false;
     }
     match digest.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(raw) => raw
-            .strip_prefix("sha256:")
-            .is_some_and(is_valid_sha256_hex),
+        Some(raw) => raw.strip_prefix("sha256:").is_some_and(is_valid_sha256_hex),
         None => has_checksum_companion,
     }
 }

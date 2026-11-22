@@ -5186,8 +5186,10 @@ fn rclone_legacy_version_probe_and_snapshot_have_distinct_ownership() {
 fn listenarr_receipt_paths_and_runtime_evidence_recognize_capitalized_opt_dir() {
     use std::os::unix::fs::PermissionsExt;
 
-    let scratch =
-        std::env::temp_dir().join(format!("af-test-listenarr-receipt-{}", uuid::Uuid::new_v4()));
+    let scratch = std::env::temp_dir().join(format!(
+        "af-test-listenarr-receipt-{}",
+        uuid::Uuid::new_v4()
+    ));
     let root = scratch.as_path();
     let opt_dir = root.join("opt/Listenarr");
     std::fs::create_dir_all(&opt_dir).unwrap();

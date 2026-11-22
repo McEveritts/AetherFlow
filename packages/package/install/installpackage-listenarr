@@ -458,7 +458,7 @@ report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
 RELEASE_JSON="${SELECTED_RELEASE_JSON}" af_logged download_file "${ASSET_URL}" "${TMP_ZIP}" "${PACKAGE_NAME}" "${ASSET_SHA256}"
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
-af_logged unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}"
+af_logged af_extract_zip_archive "${TMP_ZIP}" "${TMP_EXTRACT}"
 rm -f "${TMP_ZIP}"
 
 STAGE_SRC="$TMP_EXTRACT"

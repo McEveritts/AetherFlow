@@ -2548,7 +2548,10 @@ fn listenarr_cli_discovery_exact_target_and_early_arch_failure() {
         "aarch64",
     )
     .unwrap_err();
-    assert!(arm_err.contains("arm64") && arm_err.contains("Linux x64"), "{arm_err}");
+    assert!(
+        arm_err.contains("arm64") && arm_err.contains("Linux x64"),
+        "{arm_err}"
+    );
 
     // 3. Zero linux-x64.zip assets fails cleanly without falling back to /tags
     let empty_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2720,7 +2723,10 @@ fn cli_retained_remove_then_explicit_purge_dry_run_and_live() {
     let ordinary_env = execute_invocation(&ordinary_dry, &transport);
     assert_eq!(ordinary_env.status, "ok", "{}", ordinary_env.message);
     let ordinary_data = ordinary_env.data.as_ref().unwrap();
-    assert_eq!(ordinary_data["planned_requests"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        ordinary_data["planned_requests"].as_array().unwrap().len(),
+        0
+    );
     assert_eq!(
         ordinary_data["skipped_not_installed"],
         serde_json::json!(["rclone"])
@@ -2764,7 +2770,8 @@ fn cli_retained_remove_then_explicit_purge_dry_run_and_live() {
     assert!(root.join("etc/rclone/rclone.conf").is_file());
 
     // 3. `package info rclone` and `package list` surface retained state non-breakingly.
-    let info_inv = parse_cli_args(["--json", "--root", &root_str, "package", "info", "rclone"]).unwrap();
+    let info_inv =
+        parse_cli_args(["--json", "--root", &root_str, "package", "info", "rclone"]).unwrap();
     let info_env = execute_invocation(&info_inv, &transport);
     assert_eq!(info_env.status, "ok");
     let info_data = info_env.data.as_ref().unwrap();
@@ -2774,13 +2781,7 @@ fn cli_retained_remove_then_explicit_purge_dry_run_and_live() {
 
     // 4. Live explicit purge dispatches PackageRunnerRequest with delete_data=true.
     let purge_live = parse_cli_args([
-        "--json",
-        "--root",
-        &root_str,
-        "package",
-        "remove",
-        "rclone",
-        "--purge",
+        "--json", "--root", &root_str, "package", "remove", "rclone", "--purge",
     ])
     .unwrap();
     let purge_live_env = execute_invocation(&purge_live, &transport);
@@ -2820,10 +2821,22 @@ fn cli_retained_remove_then_explicit_purge_dry_run_and_live() {
         post_data["skipped_not_installed"],
         serde_json::json!(["rclone"])
     );
-    assert_eq!(fs::read(root.join("usr/bin/rclone")).unwrap(), b"distro-rclone");
-    assert_eq!(fs::read(root.join("etc/rclone/custom.conf")).unwrap(), b"[custom]\n");
-    assert_eq!(fs::read(root.join("etc/aetherflow/aetherflow.env")).unwrap(), b"KEEP=1\n");
-    assert_eq!(fs::read(root.join("mnt/remote/sentinel")).unwrap(), b"keep-mount-data");
+    assert_eq!(
+        fs::read(root.join("usr/bin/rclone")).unwrap(),
+        b"distro-rclone"
+    );
+    assert_eq!(
+        fs::read(root.join("etc/rclone/custom.conf")).unwrap(),
+        b"[custom]\n"
+    );
+    assert_eq!(
+        fs::read(root.join("etc/aetherflow/aetherflow.env")).unwrap(),
+        b"KEEP=1\n"
+    );
+    assert_eq!(
+        fs::read(root.join("mnt/remote/sentinel")).unwrap(),
+        b"keep-mount-data"
+    );
     assert!(root.join("install/.sonarr.retained").is_file());
 }
 
@@ -2927,14 +2940,7 @@ fn cli_purge_handles_pre_fix_compatibility_ambiguous_markerless_and_never_manage
         // Batch containing an installed package (`sonarr`) + ambiguous (`rclone`) MUST fail
         // closed during preflight BEFORE dispatching `sonarr`.
         let batch_inv = parse_cli_args([
-            "--json",
-            "--root",
-            &root_str,
-            "package",
-            "remove",
-            "sonarr",
-            "rclone",
-            "--purge",
+            "--json", "--root", &root_str, "package", "remove", "sonarr", "rclone", "--purge",
         ])
         .unwrap();
         let batch_env = execute_invocation(&batch_inv, &transport);
@@ -3011,10 +3017,7 @@ fn cli_purge_handles_pre_fix_compatibility_ambiguous_markerless_and_never_manage
             let env = execute_invocation(&inv, &transport);
             assert_eq!(env.status, "ok", "{}", env.message);
             let data = env.data.as_ref().unwrap();
-            assert_eq!(
-                data["skipped_not_installed"],
-                serde_json::json!(["rclone"])
-            );
+            assert_eq!(data["skipped_not_installed"], serde_json::json!(["rclone"]));
             if dry {
                 assert_eq!(data["planned_requests"].as_array().unwrap().len(), 0);
             } else {
@@ -3023,7 +3026,10 @@ fn cli_purge_handles_pre_fix_compatibility_ambiguous_markerless_and_never_manage
         }
         assert_eq!(transport.package_calls.lock().unwrap().len(), 0);
         assert_eq!(fs::read(root.join("usr/bin/rclone")).unwrap(), b"distro");
-        assert_eq!(fs::read(root.join("etc/rclone/custom.conf")).unwrap(), b"unrelated");
+        assert_eq!(
+            fs::read(root.join("etc/rclone/custom.conf")).unwrap(),
+            b"unrelated"
+        );
         assert!(root.join("install/.sonarr.retained").is_file());
     }
 

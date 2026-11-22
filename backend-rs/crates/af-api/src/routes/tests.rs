@@ -5869,7 +5869,11 @@ async fn marketplace_supports_listenarr_prerelease_updates_and_capitalized_recei
     };
     let catalog = root.join("catalog.json");
     let automation = root.join("automation.json");
-    std::fs::write(&catalog, serde_json::to_vec(&vec![listenarr_pkg.clone()]).unwrap()).unwrap();
+    std::fs::write(
+        &catalog,
+        serde_json::to_vec(&vec![listenarr_pkg.clone()]).unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         &automation,
         serde_json::json!({
@@ -5951,7 +5955,10 @@ async fn marketplace_supports_listenarr_prerelease_updates_and_capitalized_recei
     // 4. Confirmed prerelease-channel update dispatches with expected_target_version = 1.10.6-canary
     let expected_source =
         af_services::workers::canonical_update_source_key("https://api.github.com", &listenarr_pkg);
-    assert!(expected_source.ends_with("|prerelease"), "{expected_source}");
+    assert!(
+        expected_source.ends_with("|prerelease"),
+        "{expected_source}"
+    );
     {
         let conn = af_db::get_conn().unwrap();
         conn.execute(
@@ -5972,7 +5979,10 @@ async fn marketplace_supports_listenarr_prerelease_updates_and_capitalized_recei
     .await;
     assert_eq!(res_ok.status(), StatusCode::OK);
     let job = af_services::get_package_job_info("listenarr").unwrap();
-    assert_eq!(job.expected_target_version.as_deref(), Some("1.10.6-canary"));
+    assert_eq!(
+        job.expected_target_version.as_deref(),
+        Some("1.10.6-canary")
+    );
     af_services::clear_package_job_info("listenarr");
 
     std::env::set_current_dir(previous_directory).unwrap();
@@ -6168,9 +6178,10 @@ async fn uninstall_purge_addresses_retained_installation_and_refuses_ambiguous_o
     assert!(root.join("install/.rclone.retained").is_file());
     {
         let conn = af_db::get_read_conn().unwrap();
-        let rec = af_runner::af_release::lifecycle::query_package_retention_history(&conn, "rclone")
-            .unwrap()
-            .expect("retained remove record");
+        let rec =
+            af_runner::af_release::lifecycle::query_package_retention_history(&conn, "rclone")
+                .unwrap()
+                .expect("retained remove record");
         assert_eq!(
             rec.retention_state,
             af_runner::af_release::lifecycle::RETENTION_STATE_RETAINED
@@ -6194,9 +6205,10 @@ async fn uninstall_purge_addresses_retained_installation_and_refuses_ambiguous_o
     assert!(!root.join("install/.rclone.retained").exists());
     {
         let conn = af_db::get_read_conn().unwrap();
-        let rec = af_runner::af_release::lifecycle::query_package_retention_history(&conn, "rclone")
-            .unwrap()
-            .expect("purged remove record");
+        let rec =
+            af_runner::af_release::lifecycle::query_package_retention_history(&conn, "rclone")
+                .unwrap()
+                .expect("purged remove record");
         assert_eq!(
             rec.retention_state,
             af_runner::af_release::lifecycle::RETENTION_STATE_PURGED
@@ -6219,7 +6231,10 @@ async fn uninstall_purge_addresses_retained_installation_and_refuses_ambiguous_o
         .await
         .unwrap();
     let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
-    assert_eq!(second_json["code"], "PACKAGE_NOT_INSTALLED", "{second_json}");
+    assert_eq!(
+        second_json["code"], "PACKAGE_NOT_INSTALLED",
+        "{second_json}"
+    );
 
     // 4. Ambiguous markerless config on disk MUST fail closed with 409 AMBIGUOUS_RETAINED_OWNERSHIP
     //    and preserve the unmanaged file.
@@ -6244,7 +6259,10 @@ async fn uninstall_purge_addresses_retained_installation_and_refuses_ambiguous_o
         .await
         .unwrap();
     let amb_json: serde_json::Value = serde_json::from_slice(&amb_body).unwrap();
-    assert_eq!(amb_json["code"], "AMBIGUOUS_RETAINED_OWNERSHIP", "{amb_json}");
+    assert_eq!(
+        amb_json["code"], "AMBIGUOUS_RETAINED_OWNERSHIP",
+        "{amb_json}"
+    );
     assert!(
         amb_json["message"]
             .as_str()

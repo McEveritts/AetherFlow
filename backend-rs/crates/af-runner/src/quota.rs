@@ -14,7 +14,7 @@ pub struct Usage {
 }
 
 pub(crate) fn valid_username(username: &str) -> bool {
-    (SAFE_USERNAME.is_match(username) || SAFE_USERNAME_REGEX.is_match(username))
+    SAFE_USERNAME_REGEX.is_match(username)
         && !username.starts_with(['-', '.'])
         && !username.contains("..")
 }

@@ -1351,8 +1351,7 @@ fn execute_package_command(
                     .filter(|s| !s.trim().is_empty());
 
                 if !*purge {
-                    let receipt =
-                        inspect_cli_package_receipts_for_def(global, pkg, def.as_ref())?;
+                    let receipt = inspect_cli_package_receipts_for_def(global, pkg, def.as_ref())?;
                     // If an isolated root was explicitly supplied or a lock directory
                     // exists on disk and neither canonical nor legacy receipt is present,
                     // report `skipped_not_installed`.
@@ -1642,7 +1641,8 @@ fn execute_package_command(
         PackageCommand::Info { package } => {
             let def = resolve_cli_package_definition(global, package)
                 .ok_or_else(|| CliError::Validation(format!("unknown package {:?}", package)))?;
-            let explicit_lock = (!def.lock_file.trim().is_empty()).then_some(def.lock_file.as_str());
+            let explicit_lock =
+                (!def.lock_file.trim().is_empty()).then_some(def.lock_file.as_str());
             let inspection = af_runner::inspect_package_purge_state(
                 package,
                 explicit_lock,

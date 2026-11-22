@@ -2227,49 +2227,22 @@ pub(super) fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Ve
         }
     }
 
-    match recipe.package_id.as_str() {
-        "syncthing" => {
-            push_unique("/var/lib/syncthing");
-            push_unique("/etc/syncthing");
-        }
-        "quassel" => {
-            push_unique("/var/lib/quassel");
-            push_unique("/etc/quassel");
-        }
-        "znc" => {
-            push_unique("/var/lib/znc");
-            push_unique("/etc/znc");
-        }
-        "thelounge" => {
-            push_unique("/var/lib/thelounge");
-            push_unique("/etc/thelounge");
-        }
-        "weechat" => {
-            push_unique("/var/lib/weechat");
-            push_unique("/etc/weechat");
-        }
-        "jellyfin" => {
-            push_unique("/var/lib/jellyfin");
-            push_unique("/etc/jellyfin");
-        }
-        "plex" => {
-            push_unique("/var/lib/plexmediaserver");
-        }
-        "prometheus" => {
-            push_unique("/var/lib/prometheus");
-            push_unique("/etc/prometheus");
-        }
-        "tailscale" => {
-            push_unique("/var/lib/tailscale");
-        }
-        "wireguard" => {
-            push_unique("/etc/wireguard");
-        }
-        "rclone" => {
-            push_unique("/var/lib/rclone");
-            push_unique("/etc/rclone");
-        }
-        _ => {}
+    let extra_dirs: &[&str] = match recipe.package_id.as_str() {
+        "syncthing" => &["/var/lib/syncthing", "/etc/syncthing"],
+        "quassel" => &["/var/lib/quassel", "/etc/quassel"],
+        "znc" => &["/var/lib/znc", "/etc/znc"],
+        "thelounge" => &["/var/lib/thelounge", "/etc/thelounge"],
+        "weechat" => &["/var/lib/weechat", "/etc/weechat"],
+        "jellyfin" => &["/var/lib/jellyfin", "/etc/jellyfin"],
+        "plex" => &["/var/lib/plexmediaserver"],
+        "prometheus" => &["/var/lib/prometheus", "/etc/prometheus"],
+        "tailscale" => &["/var/lib/tailscale"],
+        "wireguard" => &["/etc/wireguard"],
+        "rclone" => &["/var/lib/rclone", "/etc/rclone"],
+        _ => &[],
+    };
+    for path in extra_dirs {
+        push_unique(path);
     }
 
     dirs

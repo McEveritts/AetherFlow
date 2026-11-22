@@ -782,7 +782,11 @@ pub fn query_package_retention_history(
              WHERE (LOWER(package_id)=LOWER(?1) OR LOWER(package_id)=LOWER(?2)) \
                AND status='completed' \
              LIMIT 1",
-            if has_retention { "retention_state" } else { "''" },
+            if has_retention {
+                "retention_state"
+            } else {
+                "''"
+            },
             if has_finished { "finished_at" } else { "''" },
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -4275,10 +4279,8 @@ mod tests {
 
     #[test]
     fn retention_state_persists_survives_failed_purge_and_clears_on_purge_or_reinstall() {
-        let root = std::env::temp_dir().join(format!(
-            "af-lifecycle-retention-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("af-lifecycle-retention-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let db = root.join("aetherflow.db");
         let mut conn = Connection::open(&db).unwrap();

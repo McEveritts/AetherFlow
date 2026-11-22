@@ -99,13 +99,10 @@ pub static SAFE_SERVICE_NAME: Lazy<Regex> =
 pub static SAFE_USERNAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z_][a-z0-9_-]{0,31}$").unwrap());
 pub static SAFE_USERNAME_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(?:[a-z_][a-z0-9_-]{0,31}|[a-zA-Z0-9_.-]{1,64})$").unwrap());
-pub static SAFE_QUOTA_SIZE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:[0-9]+[KMGTPkmgtp]?[Bb]?|[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$")
-        .unwrap()
-});
-pub static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(?:[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
+    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.-]{1,64}$").unwrap());
+pub static SAFE_QUOTA_SIZE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?$").unwrap());
+pub use SAFE_QUOTA_SIZE as SAFE_QUOTA_SIZE_REGEX;
 
 static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
@@ -5325,7 +5322,7 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
     if !quota::valid_username(username) {
         anyhow::bail!("invalid username format");
     }
-    if !SAFE_QUOTA_SIZE.is_match(size) && !SAFE_QUOTA_SIZE_REGEX.is_match(size) {
+    if !SAFE_QUOTA_SIZE.is_match(size) {
         anyhow::bail!("invalid size format");
     }
 
@@ -5427,7 +5424,7 @@ async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (StatusCode, Json<
             }),
         );
     }
-    if !SAFE_QUOTA_SIZE.is_match(&req.size) && !SAFE_QUOTA_SIZE_REGEX.is_match(&req.size) {
+    if !SAFE_QUOTA_SIZE.is_match(&req.size) {
         return (
             StatusCode::BAD_REQUEST,
             Json(RunnerResponse {

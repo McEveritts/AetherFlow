@@ -233,7 +233,9 @@ pub fn inspect_package_purge_state_with_conn(
     }
 
     // 3. Package-specific AetherFlow ownership markers & owned backup archives on disk
-    collect_disk_ownership_evidence(trimmed_pkg, fs_root.as_deref(), &mut evidence)?;
+    if evidence.is_empty() {
+        collect_disk_ownership_evidence(trimmed_pkg, fs_root.as_deref(), &mut evidence)?;
+    }
 
     dedup_preserve_order(&mut evidence);
     if !evidence.is_empty() {
@@ -501,7 +503,10 @@ fn inspect_dispatcharr_data_owner(fs_root: Option<&Path>) -> Option<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if file_meta.nlink() != 1 || (file_meta.mode() & 0o022) != 0 || (dir_meta.mode() & 0o022) != 0 {
+        if file_meta.nlink() != 1
+            || (file_meta.mode() & 0o022) != 0
+            || (dir_meta.mode() & 0o022) != 0
+        {
             return None;
         }
     }
@@ -540,8 +545,7 @@ fn collect_disk_ownership_evidence(
             let conf_path = resolve_path_for_fs_root("/etc/rclone/rclone.conf", fs_root);
             if let Some(raw) = confined_regular_file_read(&conf_path, fs_root)? {
                 let first_non_empty = raw.lines().map(str::trim).find(|line| !line.is_empty());
-                if first_non_empty
-                    .is_some_and(|line| line.starts_with(RCLONE_MANAGED_CONF_HEADER))
+                if first_non_empty.is_some_and(|line| line.starts_with(RCLONE_MANAGED_CONF_HEADER))
                 {
                     evidence.push(format!("aetherflow_rclone_conf:{}", conf_path.display()));
                 }
@@ -588,37 +592,6 @@ fn collect_disk_ownership_evidence(
             }
         }
         _ => {}
-    }
-
-    // Owned /var/backups/aetherflow-<alias> or /var/backups/aetherflow-<alias>.*
-    let backups_dir = resolve_path_for_fs_root("/var/backups", fs_root);
-    if matches!(check_confined_ancestors_exist(&backups_dir, fs_root), Ok(true)) {
-        if let Ok(meta) = fs::symlink_metadata(&backups_dir) {
-            if !meta.file_type().is_symlink() && meta.is_dir() {
-                if let Ok(entries) = fs::read_dir(&backups_dir) {
-                    for entry in entries.flatten() {
-                        let Ok(ft) = entry.file_type() else {
-                            continue;
-                        };
-                        if ft.is_symlink() {
-                            continue;
-                        }
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        for alias in &aliases {
-                            let exact = format!("aetherflow-{alias}");
-                            let prefix = format!("aetherflow-{alias}.");
-                            if name == exact || name.starts_with(&prefix) {
-                                evidence.push(format!(
-                                    "aetherflow_backup:{}",
-                                    entry.path().display()
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // Owned <target>.af-backup.*/.af-archive-owner directories for common package runtime paths
@@ -701,7 +674,8 @@ fn collect_ambiguous_markerless_paths(
                     home_dir: Some(home),
                     ..
                 } => {
-                    if !is_shared_or_excluded_root(home) && !candidate_logical_paths.contains(home) {
+                    if !is_shared_or_excluded_root(home) && !candidate_logical_paths.contains(home)
+                    {
                         candidate_logical_paths.push(home.clone());
                     }
                 }
@@ -756,6 +730,13 @@ mod tests {
         fs::create_dir_all(root.join("mnt/remote")).unwrap();
         fs::create_dir_all(root.join("install")).unwrap();
         fs::create_dir_all(root.join("usr/bin/rclone.af-backup.foreign")).unwrap();
+        // A filename alone is insufficient to authorize purge of unrelated state.
+        fs::create_dir_all(root.join("var/backups/aetherflow-rclone.operator")).unwrap();
+        fs::write(
+            root.join("var/backups/aetherflow-rclone.operator/sentinel"),
+            b"keep",
+        )
+        .unwrap();
 
         fs::write(root.join("usr/bin/rclone"), b"distro-rclone").unwrap();
         fs::write(root.join("usr/local/bin/rclone"), b"manual-rclone").unwrap();
@@ -789,7 +770,11 @@ mod tests {
     fn rclone_markerless_state_is_refused_as_ambiguous() {
         let root = temp_root("ambiguous-rclone");
         fs::create_dir_all(root.join("etc/rclone")).unwrap();
-        fs::write(root.join("etc/rclone/rclone.conf"), b"[gdrive]\ntype = drive\n").unwrap();
+        fs::write(
+            root.join("etc/rclone/rclone.conf"),
+            b"[gdrive]\ntype = drive\n",
+        )
+        .unwrap();
         fs::write(root.join("etc/rclone/rclone.env"), b"RCLONE_USER=u\n").unwrap();
 
         let inspection =
