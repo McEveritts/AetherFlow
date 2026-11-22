@@ -437,3 +437,74 @@ fn replace_file_by_rename_atomically_replaces_verified_target_and_returns_replac
         ErrorKind::PermissionDenied
     );
 }
+
+#[test]
+fn remove_tree_and_empty_dir_clean_orphaned_upload_temp_files_and_subtrees_without_byte_credit() {
+    let tmp = TempDir::new();
+    let bfs = BrowserFs::open(tmp.path()).unwrap();
+
+    // 1. Recursive delete with real files, an orphaned `.af-upload-tmp.*` file,
+    // and a nested orphaned `.af-upload-tmp.*` directory subtree (as left by a crashed copy).
+    bfs.create_directory_all("victim/nested").unwrap();
+    fs::write(tmp.path().join("victim/real.txt"), b"hello").unwrap(); // 5 bytes
+    fs::write(tmp.path().join("victim/nested/kept.bin"), b"0123456789").unwrap(); // 10 bytes
+    fs::write(
+        tmp.path()
+            .join(format!("victim/{UPLOAD_TEMP_PREFIX}orphaned-file")),
+        b"unstaged-upload-bytes-must-not-be-credited",
+    )
+    .unwrap();
+    let orphan_dir = tmp
+        .path()
+        .join(format!("victim/nested/{UPLOAD_TEMP_PREFIX}orphaned-dir"));
+    fs::create_dir_all(orphan_dir.join("deep/sub")).unwrap();
+    fs::write(
+        orphan_dir.join("part.bin"),
+        b"unstaged-copy-dir-file-payload",
+    )
+    .unwrap();
+    fs::write(
+        orphan_dir.join("deep/sub/nested-part.bin"),
+        b"deeper-unstaged-copy-payload",
+    )
+    .unwrap();
+
+    let removed = bfs.remove_tree_with_size("victim").unwrap();
+    assert_eq!(
+        removed, 15,
+        "only accounted user files (5 + 10 bytes) may be credited to removed_bytes"
+    );
+    assert!(!tmp.path().join("victim").exists());
+
+    // 2. Non-recursive empty-directory removal succeeds with 0 byte credit when only orphaned
+    // `.af-upload-tmp.*` files and temp subtrees remain inside the directory.
+    bfs.create_directory("appears_empty").unwrap();
+    fs::write(
+        tmp.path()
+            .join(format!("appears_empty/{UPLOAD_TEMP_PREFIX}stale-upload")),
+        b"stale-temp-file",
+    )
+    .unwrap();
+    let empty_orphan_sub = tmp
+        .path()
+        .join(format!("appears_empty/{UPLOAD_TEMP_PREFIX}stale-dir"));
+    fs::create_dir_all(empty_orphan_sub.join("inner")).unwrap();
+    fs::write(empty_orphan_sub.join("inner/data.bin"), b"stale-temp-tree").unwrap();
+
+    assert!(bfs.list("appears_empty").unwrap().is_empty());
+    assert_eq!(bfs.remove_with_size("appears_empty").unwrap(), 0);
+    assert!(!tmp.path().join("appears_empty").exists());
+
+    // 3. Non-recursive removal MUST still reject genuinely non-empty directories without
+    // deleting sibling orphaned temp entries.
+    bfs.create_directory("not_empty").unwrap();
+    fs::write(tmp.path().join("not_empty/real.txt"), b"stay").unwrap();
+    let sibling_temp = tmp
+        .path()
+        .join(format!("not_empty/{UPLOAD_TEMP_PREFIX}sibling"));
+    fs::write(&sibling_temp, b"leave-untouched").unwrap();
+
+    assert!(bfs.remove_with_size("not_empty").is_err());
+    assert!(tmp.path().join("not_empty/real.txt").exists());
+    assert!(sibling_temp.exists());
+}

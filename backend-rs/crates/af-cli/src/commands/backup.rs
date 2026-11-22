@@ -13,7 +13,7 @@ use af_host::{
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-fn resolve_backup_config(
+pub(crate) fn resolve_backup_config(
     global: &GlobalOptions,
     explicit_backup_dir: Option<&Path>,
     explicit_db_path: Option<&Path>,
@@ -90,6 +90,111 @@ fn require_backup_write_privilege(
     Ok(())
 }
 
+fn is_system_scoped_backup_path(path: &Path) -> bool {
+    path == Path::new("/")
+        || path.starts_with("/var/lib/aetherflow")
+        || path.starts_with("/run/aetherflow")
+        || path.starts_with("/etc")
+        || path.starts_with("/opt")
+}
+
+pub(crate) fn resolve_backup_maintenance_lock_path(
+    global: &GlobalOptions,
+    cmd: &BackupCliCommand,
+    cfg: &HostBackupConfig,
+) -> CliResult<PathBuf> {
+    let (
+        explicit_backup_dir,
+        explicit_db_path,
+        explicit_target_root,
+        targets_db,
+        defaults_target_to_root,
+    ) = match cmd {
+        BackupCliCommand::Create {
+            backup_dir,
+            db_path,
+            ..
+        } => (backup_dir.as_deref(), db_path.as_deref(), None, true, false),
+        BackupCliCommand::RestoreDestructive {
+            backup_dir,
+            target_root,
+            ..
+        } => (
+            backup_dir.as_deref(),
+            None,
+            target_root.as_deref(),
+            false,
+            false,
+        ),
+        BackupCliCommand::RecoverInterrupted {
+            backup_dir,
+            target_root,
+            ..
+        } => (
+            backup_dir.as_deref(),
+            None,
+            target_root.as_deref(),
+            false,
+            true,
+        ),
+        BackupCliCommand::Delete { backup_dir, .. }
+        | BackupCliCommand::Prune { backup_dir, .. }
+        | BackupCliCommand::Chunk { backup_dir, .. }
+        | BackupCliCommand::Assemble { backup_dir, .. } => {
+            (backup_dir.as_deref(), None, None, false, false)
+        }
+        _ => (None, None, None, false, false),
+    };
+
+    let resolved_target = explicit_target_root
+        .or(global.root.as_deref())
+        .or_else(|| defaults_target_to_root.then_some(Path::new("/")));
+    let target_contains_active_db = resolved_target.is_some_and(|target| {
+        af_models::resolve_contained_sqlite_restore_override(target, cfg.sqlite_db_path.as_deref())
+            .is_some()
+    });
+    let target_is_system_scoped =
+        resolved_target.is_some_and(is_system_scoped_backup_path) || target_contains_active_db;
+    let backup_dir_is_system_scoped =
+        explicit_backup_dir.is_none() || is_system_scoped_backup_path(&cfg.backup_dir);
+    let db_is_system_scoped = targets_db
+        && (explicit_db_path.is_none()
+            || cfg
+                .sqlite_db_path
+                .as_deref()
+                .is_some_and(is_system_scoped_backup_path));
+
+    let use_canonical_lock = global.root.is_some()
+        || backup_dir_is_system_scoped
+        || db_is_system_scoped
+        || target_is_system_scoped;
+
+    if use_canonical_lock {
+        let canonical_db_arg = if global.root.is_some()
+            || cfg
+                .sqlite_db_path
+                .as_deref()
+                .is_some_and(is_system_scoped_backup_path)
+            || (targets_db && explicit_db_path.is_none())
+            || target_contains_active_db
+        {
+            cfg.sqlite_db_path.as_deref()
+        } else {
+            None
+        };
+        af_models::try_resolve_canonical_maintenance_lock_path_from_env(
+            global.root.as_deref(),
+            canonical_db_arg,
+            Some(&cfg.backup_dir),
+        )
+        .map_err(CliError::Validation)
+    } else {
+        Ok(af_host::resolve_maintenance_lock_path(Some(
+            &cfg.backup_dir,
+        )))
+    }
+}
+
 pub(crate) fn execute_backup_command(
     global: &GlobalOptions,
     cmd: &BackupCliCommand,
@@ -97,17 +202,22 @@ pub(crate) fn execute_backup_command(
     let (env_trusted_uid, env_trusted_gid) =
         af_models::try_resolve_trusted_sqlite_ids_from_env(global.root.as_deref())
             .map_err(CliError::Validation)?;
-    let mutating_backup_dir = match cmd {
+    let mutating_backup_target = match cmd {
         BackupCliCommand::RestoreDestructive {
             confirm_destructive_restore: false,
             ..
         } => None,
         BackupCliCommand::Create {
             backup_dir,
+            db_path,
             operator_privileged,
             ..
-        }
-        | BackupCliCommand::RestoreDestructive {
+        } => Some((
+            backup_dir.as_deref(),
+            db_path.as_deref(),
+            *operator_privileged,
+        )),
+        BackupCliCommand::RestoreDestructive {
             backup_dir,
             operator_privileged,
             ..
@@ -136,13 +246,14 @@ pub(crate) fn execute_backup_command(
             backup_dir,
             operator_privileged,
             ..
-        } => Some((backup_dir.as_deref(), *operator_privileged)),
+        } => Some((backup_dir.as_deref(), None, *operator_privileged)),
         _ => None,
     };
     let _maintenance_lock = if global.dry_run {
         None
-    } else if let Some((backup_dir, operator_privileged)) = mutating_backup_dir {
-        let cfg = resolve_backup_config(global, backup_dir, None, "v4.0.0")?;
+    } else if let Some((backup_dir, explicit_db_path, operator_privileged)) = mutating_backup_target
+    {
+        let cfg = resolve_backup_config(global, backup_dir, explicit_db_path, "v4.0.0")?;
         require_backup_write_privilege(
             global,
             &cfg.backup_dir,
@@ -150,17 +261,10 @@ pub(crate) fn execute_backup_command(
             cmd.action_name(),
         )?;
         let timeout = std::time::Duration::from_secs(30);
-        Some(if backup_dir.is_none() {
-            let lock_path = af_models::try_resolve_canonical_maintenance_lock_path_from_env(
-                global.root.as_deref(),
-                cfg.sqlite_db_path.as_deref(),
-                Some(&cfg.backup_dir),
-            )
-            .map_err(CliError::Validation)?;
-            af_host::HostMaintenanceLockGuard::acquire(lock_path, timeout)?
-        } else {
-            af_host::HostMaintenanceLockGuard::acquire_default(Some(&cfg.backup_dir), timeout)?
-        })
+        let lock_path = resolve_backup_maintenance_lock_path(global, cmd, &cfg)?;
+        Some(af_host::HostMaintenanceLockGuard::acquire(
+            lock_path, timeout,
+        )?)
     } else {
         None
     };
@@ -382,6 +486,56 @@ pub(crate) fn execute_backup_command(
             trusted_sqlite_gid,
         } => {
             let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            if global.dry_run {
+                let artifact_path = safe_backup_file_path(&cfg.backup_dir, filename)?;
+                if !std::fs::symlink_metadata(&artifact_path)
+                    .map(|meta| meta.file_type().is_file())
+                    .unwrap_or(false)
+                {
+                    return Err(CliError::PreflightOrIntegrity(format!(
+                        "missing backup artifact '{}' at '{}'",
+                        filename,
+                        artifact_path.display()
+                    )));
+                }
+                let manifest_path = cfg.backup_dir.join(format!("{}.manifest.json", filename));
+                af_host::reject_symlink_chain(&cfg.backup_dir, &manifest_path)?;
+                if !std::fs::symlink_metadata(&manifest_path)
+                    .map(|meta| meta.file_type().is_file())
+                    .unwrap_or(false)
+                {
+                    return Err(CliError::PreflightOrIntegrity(format!(
+                        "missing required backup manifest '{}'",
+                        manifest_path.display()
+                    )));
+                }
+                let resolved_target = target_root
+                    .clone()
+                    .or_else(|| global.root.clone())
+                    .ok_or_else(|| {
+                        CliError::Usage(
+                            "restore requires '--target-root <dir>' or '--root <dir>'".to_string(),
+                        )
+                    })?;
+                return Ok(CliResponseEnvelope::success(
+                    "backup",
+                    "restore",
+                    format!(
+                        "[DRY-RUN] Would execute staged restore of '{}' into '{}'",
+                        filename,
+                        resolved_target.display()
+                    ),
+                    Some(json!({
+                        "dry_run": true,
+                        "filename": filename,
+                        "artifact_path": artifact_path,
+                        "manifest_path": manifest_path,
+                        "backup_dir": cfg.backup_dir,
+                        "target_root": resolved_target,
+                        "confirm_destructive_restore": confirm_destructive_restore,
+                    })),
+                ));
+            }
             if !*confirm_destructive_restore {
                 let dummy_manifest =
                     BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
@@ -426,24 +580,6 @@ pub(crate) fn execute_backup_command(
                 *operator_privileged,
                 "backup restore",
             )?;
-
-            if global.dry_run {
-                return Ok(CliResponseEnvelope::success(
-                    "backup",
-                    "restore",
-                    format!(
-                        "[DRY-RUN] Would execute confirmed staged restore of '{}' into '{}'",
-                        filename,
-                        resolved_target.display()
-                    ),
-                    Some(json!({
-                        "dry_run": true,
-                        "filename": filename,
-                        "backup_dir": cfg.backup_dir,
-                        "target_root": resolved_target,
-                    })),
-                ));
-            }
 
             let trusted_sqlite_db_path = if global.root.is_none()
                 || global.root.as_deref() == Some(resolved_target.as_path())

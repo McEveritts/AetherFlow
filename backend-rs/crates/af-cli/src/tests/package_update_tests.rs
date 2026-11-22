@@ -1,4 +1,4 @@
-use super::{MockRunnerTransport, TempTestDir};
+use super::{MockRunnerTransport, TempTestDir, ENV_TEST_LOCK};
 use crate::commands::package_discovery::{
     candidate_cli_sqlite_dbs, discover_listenarr_github_target_for_arch,
     query_persisted_ingress_port_from_sqlite, validate_cli_package_target_policy,
@@ -10,7 +10,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::sync::Mutex;
 
 #[test]
 fn package_list_matches_the_resolved_catalog_in_id_order() {
@@ -166,8 +165,6 @@ fn package_update_target_version_parsing_probing_and_admit_fallback() {
 
 #[test]
 fn query_persisted_ingress_port_reads_retained_config_json_and_aligns_db_precedence() {
-    static ENV_TEST_LOCK: once_cell::sync::Lazy<Mutex<()>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(()));
     let tmp = TempTestDir::new("h05-ingress");
     let db_path = tmp.path().join("aetherflow.sqlite");
     let conn = Connection::open(&db_path).unwrap();

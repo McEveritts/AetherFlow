@@ -213,18 +213,17 @@ impl RecoveryState {
         !matches!(self.phase, ReleasePhase::Complete | ReleasePhase::Failed)
     }
 
-    /// Returns `true` if this recovery state indicates a previous deployment already swapped `current`
-    /// (or entered Stage 3 / Stage 4) without completing cleanly, meaning `current` may point to an
-    /// unhealthy candidate release while `.previous_release` holds the last known-good release.
+    /// Returns `true` if this recovery state indicates a previous deployment or rollback already
+    /// swapped `current` (or entered Stage 3 / Stage 4) without completing cleanly, meaning `current`
+    /// may point to an unhealthy release while `.previous_release` holds the last known-good release.
     pub fn has_unhealthy_or_interrupted_post_swap_deploy(&self) -> bool {
-        self.command == ReleaseCommand::Deploy
-            && !self.dry_run
-            && matches!(
-                self.phase,
-                ReleasePhase::Stage2SymlinkSwap
-                    | ReleasePhase::Stage3HealthProbe
-                    | ReleasePhase::Stage4Rollback
-            )
+        !self.dry_run
+            && (self.phase == ReleasePhase::Stage4Rollback
+                || (self.command == ReleaseCommand::Deploy
+                    && matches!(
+                        self.phase,
+                        ReleasePhase::Stage2SymlinkSwap | ReleasePhase::Stage3HealthProbe
+                    )))
     }
 
     /// Atomically persists the recovery state to `${RELEASES_DIR}/.recovery_state.json`

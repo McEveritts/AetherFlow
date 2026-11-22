@@ -389,7 +389,23 @@ impl BrowserFs {
         };
         let rc = unsafe { libc::unlinkat(parent_fd.as_raw_fd(), leaf.as_ptr(), flags) };
         if rc < 0 {
-            return Err(Error::last_os_error());
+            let err = Error::last_os_error();
+            if mode_type == libc::S_IFDIR
+                && matches!(err.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST))
+                && remove_orphaned_upload_temps_if_only_children(
+                    parent_fd.as_raw_fd(),
+                    leaf.as_c_str(),
+                )?
+            {
+                let retry_rc = unsafe {
+                    libc::unlinkat(parent_fd.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR)
+                };
+                if retry_rc < 0 {
+                    return Err(Error::last_os_error());
+                }
+                return Ok(0);
+            }
+            return Err(err);
         }
         Ok(if mode_type == libc::S_IFREG {
             st.st_size.max(0) as u64
@@ -609,6 +625,102 @@ fn cleanup_staging_tree(parent_fd: libc::c_int, staging_name: &CStr) {
     let _ = remove_entry_recursive(parent_fd, staging_name, &mut ignored, 0, false);
 }
 
+fn remove_orphaned_upload_temps_if_only_children(
+    parent_fd: libc::c_int,
+    name: &CStr,
+) -> io::Result<bool> {
+    let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+    let dir_fd = openat_no_symlinks(parent_fd, name, dir_flags, 0)?;
+    let (guard, dir_raw_fd) = open_dir_stream(dir_fd.as_raw_fd())?;
+
+    let mut temp_regular_files: Vec<CString> = Vec::new();
+    let mut temp_subdirs: Vec<CString> = Vec::new();
+    let mut invalid_temp_entries: Vec<CString> = Vec::new();
+
+    loop {
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        let ent = unsafe { libc::readdir(guard.0) };
+        if ent.is_null() {
+            let errno = unsafe { *libc::__errno_location() };
+            if errno != 0 {
+                return Err(Error::from_raw_os_error(errno));
+            }
+            break;
+        }
+        let c_child = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+        let child_bytes = c_child.to_bytes();
+        if child_bytes == b"." || child_bytes == b".." {
+            continue;
+        }
+        let is_temp = std::str::from_utf8(child_bytes).is_ok_and(is_internal_upload_temp);
+        if !is_temp {
+            return Ok(false);
+        }
+        let child_st = match fstatat_nofollow(dir_raw_fd, c_child) {
+            Ok(st) => st,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        match child_st.st_mode & libc::S_IFMT {
+            libc::S_IFREG if child_st.st_nlink == 1 => {
+                temp_regular_files.push(c_child.to_owned());
+            }
+            libc::S_IFDIR => {
+                temp_subdirs.push(c_child.to_owned());
+            }
+            _ => {
+                invalid_temp_entries.push(c_child.to_owned());
+            }
+        }
+    }
+    drop(guard);
+
+    temp_regular_files.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    temp_subdirs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    invalid_temp_entries.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+
+    let mut discarded_bytes = 0u64;
+    if let Some(invalid_name) = invalid_temp_entries.first() {
+        remove_entry_recursive(
+            dir_fd.as_raw_fd(),
+            invalid_name.as_c_str(),
+            &mut discarded_bytes,
+            1,
+            false,
+        )?;
+    }
+
+    for temp_file in temp_regular_files {
+        let rc = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), temp_file.as_ptr(), 0) };
+        if rc < 0 {
+            let err = Error::last_os_error();
+            if err.kind() == ErrorKind::NotFound {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+
+    for temp_subdir in temp_subdirs {
+        if let Err(err) = remove_entry_recursive(
+            dir_fd.as_raw_fd(),
+            temp_subdir.as_c_str(),
+            &mut discarded_bytes,
+            1,
+            false,
+        ) {
+            if err.kind() == ErrorKind::NotFound {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+
+    Ok(true)
+}
+
 fn remove_entry_recursive(
     parent_fd: libc::c_int,
     name: &CStr,
@@ -647,8 +759,10 @@ fn remove_entry_recursive(
             let (guard, dir_raw_fd) = open_dir_stream(dir_fd.as_raw_fd())?;
 
             let mut regular_files: Vec<(CString, u64)> = Vec::new();
+            let mut temp_regular_files: Vec<CString> = Vec::new();
             let mut symlinks: Vec<CString> = Vec::new();
             let mut subdirs: Vec<CString> = Vec::new();
+            let mut temp_subdirs: Vec<CString> = Vec::new();
             let mut invalid_entries: Vec<CString> = Vec::new();
 
             loop {
@@ -668,11 +782,7 @@ fn remove_entry_recursive(
                 if child_bytes == b"." || child_bytes == b".." {
                     continue;
                 }
-                if let Ok(s) = std::str::from_utf8(child_bytes) {
-                    if is_internal_upload_temp(s) {
-                        continue;
-                    }
-                }
+                let is_temp = std::str::from_utf8(child_bytes).is_ok_and(is_internal_upload_temp);
                 let child_st = match fstatat_nofollow(dir_raw_fd, c_child) {
                     Ok(st) => st,
                     Err(err) if err.kind() == ErrorKind::NotFound => continue,
@@ -680,13 +790,22 @@ fn remove_entry_recursive(
                 };
                 match child_st.st_mode & libc::S_IFMT {
                     libc::S_IFREG if child_st.st_nlink == 1 => {
-                        regular_files.push((c_child.to_owned(), child_st.st_size.max(0) as u64));
+                        if is_temp {
+                            temp_regular_files.push(c_child.to_owned());
+                        } else {
+                            regular_files
+                                .push((c_child.to_owned(), child_st.st_size.max(0) as u64));
+                        }
                     }
                     libc::S_IFLNK if allow_symlinks => {
                         symlinks.push(c_child.to_owned());
                     }
                     libc::S_IFDIR => {
-                        subdirs.push(c_child.to_owned());
+                        if is_temp {
+                            temp_subdirs.push(c_child.to_owned());
+                        } else {
+                            subdirs.push(c_child.to_owned());
+                        }
                     }
                     _ => {
                         invalid_entries.push(c_child.to_owned());
@@ -696,8 +815,10 @@ fn remove_entry_recursive(
             drop(guard);
 
             regular_files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+            temp_regular_files.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
             symlinks.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
             subdirs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            temp_subdirs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
             invalid_entries.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
 
             for (child_name, size) in regular_files {
@@ -710,6 +831,17 @@ fn remove_entry_recursive(
                     return Err(err);
                 }
                 *removed_bytes = removed_bytes.saturating_add(size);
+            }
+
+            for temp_name in temp_regular_files {
+                let rc = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+                if rc < 0 {
+                    let err = Error::last_os_error();
+                    if err.kind() == ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(err);
+                }
             }
 
             for link_name in symlinks {
@@ -731,6 +863,22 @@ fn remove_entry_recursive(
                     depth + 1,
                     allow_symlinks,
                 )?;
+            }
+
+            let mut discarded_temp_bytes = 0u64;
+            for temp_subdir in temp_subdirs {
+                if let Err(err) = remove_entry_recursive(
+                    dir_fd.as_raw_fd(),
+                    temp_subdir.as_c_str(),
+                    &mut discarded_temp_bytes,
+                    depth + 1,
+                    allow_symlinks,
+                ) {
+                    if err.kind() == ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(err);
+                }
             }
 
             for invalid_name in invalid_entries {

@@ -96,9 +96,6 @@ macro_rules! define_package_diagnostic_redaction {
         });
         static URL_CRED_RE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+(?::[^/\s@]+)?@").unwrap());
-        pub static SENSITIVE_JSON_RE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r#"(?i)((?:\\?['"])?(?:[A-Za-z0-9_.-]*?(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth(?:orization|[_-]?token|[_-]?key|[_-]?secret)?|credential(?:s)?|passphrase|rclone[_-]?(?:rc[_-]?)?pass|jwt[_-]?secret|master[_-]?pass)[A-Za-z0-9_.-]*|\b(?:[A-Za-z0-9]*[_.\-])?pass(?:[_.\-][A-Za-z0-9]*)*\b|\b(?:[A-Za-z0-9]*[_.\-])?cookies?(?:[_.\-][A-Za-z0-9]*)*\b|\b(?:[A-Za-z0-9]*[_.\-])?session(?:[_.\-]?(?:id|key|token|secret))?(?:[_.\-][A-Za-z0-9]*)*\b|\b(?:[A-Za-z0-9]*[_.\-])?webhook(?:[_.\-]?(?:url|secret|token|key))?(?:[_.\-][A-Za-z0-9]*)*\b)(?:\\?['"])?)(\s*:\s*)(?:\\"(?:\\\\\\"|\\\\\\\\|\\\\[^"]|[^"\\])*\\"?|"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|\{(?:[^{}\r\n]|\{[^{}\r\n]*\})*\}|\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\]|[^\s,;{}\x5b\x5d]+(?:,[^\s,;\"{}\x5b\x5d]+)*)"#).unwrap()
-        });
         static SENSITIVE_CONTAINER_KEY_RE: Lazy<Regex> = Lazy::new(|| {
             Regex::new(
                 &[

@@ -1034,9 +1034,12 @@ where
         );
 
         let existing_recovery = RecoveryState::load(&cfg.releases_dir)?;
-        let mut recovery = existing_recovery.clone().unwrap_or_else(|| {
-            RecoveryState::new(ReleaseCommand::Rollback, cfg.release_channel, dry_run)
-        });
+        let mut recovery = match existing_recovery.clone() {
+            Some(existing) if failed_deploy_release.is_some() || existing.is_unfinished() => {
+                existing
+            }
+            _ => RecoveryState::new(ReleaseCommand::Rollback, cfg.release_channel, dry_run),
+        };
         if failed_deploy_release.is_none() {
             if let Some(operation_id) = std::env::var("AETHERFLOW_UPDATE_OPERATION_ID")
                 .ok()
@@ -1051,7 +1054,12 @@ where
         let previous_target = match read_previous_release(&cfg.releases_dir) {
             Ok(p) => p,
             Err(e) => {
-                if let Some(ref rec_prev) = recovery.previous_release {
+                let fallback_previous = recovery.previous_release.as_ref().or_else(|| {
+                    existing_recovery
+                        .as_ref()
+                        .and_then(|rec| rec.previous_release.as_ref())
+                });
+                if let Some(rec_prev) = fallback_previous {
                     if rec_prev.is_dir() {
                         write_previous_release(&cfg.releases_dir, rec_prev)?;
                         rec_prev.clone()
@@ -1078,6 +1086,17 @@ where
             &previous_target,
             &format!("rollback.{}", epoch_id),
         )?;
+        recovery.previous_release = Some(previous_target.clone());
+        if recovery.candidate_release.is_none() {
+            if let Some(ref cur) = current_before_rollback {
+                if canonicalize_preserve_normal(cur)
+                    != canonicalize_preserve_normal(&previous_target)
+                {
+                    recovery.candidate_release = Some(cur.clone());
+                }
+            }
+        }
+        recovery.save(&cfg.releases_dir)?;
         let cli_sync_res = sync_cli_entrypoints(cfg, &epoch_id);
         if let Err(ref cli_err) = cli_sync_res {
             append_jsonl_log(
@@ -1180,7 +1199,7 @@ where
                     ),
                 };
                 append_jsonl_log(&cfg.log_file, "ERROR", &failure);
-                recovery.phase = ReleasePhase::Failed;
+                recovery.phase = ReleasePhase::Stage4Rollback;
                 recovery.last_error = Some(failure.clone());
                 recovery.save(&cfg.releases_dir)?;
                 return Err(ReleaseError::Rollback(failure));
@@ -1189,7 +1208,7 @@ where
 
         if !dry_run {
             if let Err(err) = self.lifecycle.restart_systemd_units(cfg) {
-                recovery.phase = ReleasePhase::Failed;
+                recovery.phase = ReleasePhase::Stage4Rollback;
                 recovery.last_error = Some(err.to_string());
                 let _ = recovery.save(&cfg.releases_dir);
                 return Err(err);
@@ -1207,7 +1226,7 @@ where
                 }
                 Ok(())
             }) {
-                recovery.phase = ReleasePhase::Failed;
+                recovery.phase = ReleasePhase::Stage4Rollback;
                 recovery.last_error = Some(err.to_string());
                 let _ = recovery.save(&cfg.releases_dir);
                 return Err(err);
@@ -1215,7 +1234,7 @@ where
         }
 
         if let Err(cli_err) = cli_sync_res {
-            recovery.phase = ReleasePhase::Failed;
+            recovery.phase = ReleasePhase::Stage4Rollback;
             recovery.last_error = Some(cli_err.to_string());
             let _ = recovery.save(&cfg.releases_dir);
             return Err(cli_err);

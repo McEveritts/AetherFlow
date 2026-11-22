@@ -274,7 +274,7 @@ fn test_rollback_database_failure_remains_failed_without_readmitting_writers() {
             .any(|call| call.starts_with("stop_db_services:")));
         assert!(!calls.iter().any(|call| call == "restart_units"));
         let recovery = RecoveryState::load(&config.releases_dir).unwrap().unwrap();
-        assert_eq!(recovery.phase, ReleasePhase::Failed);
+        assert_eq!(recovery.phase, ReleasePhase::Stage4Rollback);
         assert!(recovery
             .last_error
             .unwrap()
@@ -630,7 +630,124 @@ fn test_rollback_probe_failure_marks_recovery_failed() {
         .unwrap_err();
     assert!(err.to_string().contains("failed"));
     let recovery = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
-    assert_eq!(recovery.phase, ReleasePhase::Failed);
+    assert_eq!(recovery.phase, ReleasePhase::Stage4Rollback);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_failed_standalone_post_swap_rollback_blocks_deploy_and_cleanup_until_retry_succeeds() {
+    let sandbox = TempSandbox::new("standalone-rollback-guard");
+    let mut cfg = ReleaseConfig::for_root(sandbox.path());
+    cfg.health_retries = 1;
+    cfg.health_interval = Duration::ZERO;
+    seed_valid_sqlite_db(&cfg.data_dir.join("aetherflow.sqlite"), "rollback-guard");
+
+    let previous = cfg.releases_dir.join("1111111111");
+    let broken = cfg.releases_dir.join("2222222222");
+    fs::create_dir_all(previous.join("web/dist")).unwrap();
+    fs::create_dir_all(broken.join("web/dist")).unwrap();
+    fs::write(previous.join("aetherflow-api"), b"old").unwrap();
+    fs::write(previous.join(".version"), b"v4.0.0-old\n").unwrap();
+    fs::write(previous.join("web/dist/index.html"), b"old index").unwrap();
+    fs::write(previous.join("web/dist/app.wasm"), b"old wasm").unwrap();
+    fs::write(broken.join("aetherflow-api"), b"broken").unwrap();
+    fs::write(broken.join(".version"), b"v4.0.0-broken\n").unwrap();
+    fs::write(broken.join("web/dist/index.html"), b"broken index").unwrap();
+    fs::write(broken.join("web/dist/app.wasm"), b"broken wasm").unwrap();
+    std::os::unix::fs::symlink(&broken, &cfg.current_link).unwrap();
+    write_previous_release(&cfg.releases_dir, &previous).unwrap();
+
+    let tar_path = sandbox.path().join("release.tar.gz");
+    let (_, manifest) = build_synthetic_release_tarball(
+        &tar_path,
+        &cfg.artifact_name,
+        &[
+            ("aetherflow-api", b"new", EntryType::Regular),
+            (".version", b"v4.0.1\n", EntryType::Regular),
+            ("web/dist/index.html", b"new index", EntryType::Regular),
+            ("web/dist/app.wasm", b"new wasm", EntryType::Regular),
+        ],
+    );
+    let provider = MockArtifactProvider {
+        resolved_tag: Ok("v4.0.1".to_string()),
+        archive_source: tar_path,
+        manifest_content: manifest,
+    };
+
+    // 1. Standalone post-swap rollback fails readiness probe -> must stay in Stage4Rollback.
+    let failing_engine = ReleaseEngine::new(
+        cfg.clone(),
+        provider.clone(),
+        MockLifecycle::default(),
+        MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 500,
+            body: r#"{"status":"degraded"}"#.to_string(),
+        })]),
+    );
+    let first_err = failing_engine
+        .execute(&ReleaseOptions {
+            command: ReleaseCommand::Rollback,
+            ..ReleaseOptions::default()
+        })
+        .unwrap_err();
+    assert!(first_err.to_string().contains("failed"));
+
+    let recovery = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
+    assert_eq!(recovery.command, ReleaseCommand::Rollback);
+    assert_eq!(recovery.phase, ReleasePhase::Stage4Rollback);
+    assert!(recovery.has_unhealthy_or_interrupted_post_swap_deploy());
+
+    // 2. Subsequent `deploy` and `cleanup` MUST be blocked while Stage4Rollback is unfinished.
+    let retry_engine = ReleaseEngine::new(
+        cfg.clone(),
+        provider,
+        MockLifecycle::default(),
+        MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 200,
+            body: r#"{"status":"ready"}"#.to_string(),
+        })]),
+    );
+    let deploy_err = retry_engine
+        .execute(&ReleaseOptions {
+            command: ReleaseCommand::Deploy,
+            ..ReleaseOptions::default()
+        })
+        .unwrap_err();
+    assert_eq!(deploy_err.exit_code(), ExitCode::RollbackFailed);
+    assert!(deploy_err
+        .to_string()
+        .contains("unfinished after symlink swap"));
+
+    let cleanup_err = retry_engine
+        .execute(&ReleaseOptions {
+            command: ReleaseCommand::Cleanup,
+            ..ReleaseOptions::default()
+        })
+        .unwrap_err();
+    assert_eq!(cleanup_err.exit_code(), ExitCode::RollbackFailed);
+    assert!(cleanup_err
+        .to_string()
+        .contains("unfinished after symlink swap"));
+
+    // 3. Retry `rollback` IS permitted, completes cleanly, and unblocks `cleanup`.
+    let rollback_ok = retry_engine
+        .execute(&ReleaseOptions {
+            command: ReleaseCommand::Rollback,
+            ..ReleaseOptions::default()
+        })
+        .expect("retry rollback must be permitted");
+    assert!(matches!(rollback_ok, ReleaseOutcome::Rollback(_)));
+    let completed = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
+    assert_eq!(completed.phase, ReleasePhase::Complete);
+    assert!(!completed.has_unhealthy_or_interrupted_post_swap_deploy());
+
+    let cleanup_ok = retry_engine
+        .execute(&ReleaseOptions {
+            command: ReleaseCommand::Cleanup,
+            ..ReleaseOptions::default()
+        })
+        .expect("cleanup must succeed after rollback retry completes");
+    assert!(matches!(cleanup_ok, ReleaseOutcome::Cleanup(_)));
 }
 
 #[cfg(unix)]

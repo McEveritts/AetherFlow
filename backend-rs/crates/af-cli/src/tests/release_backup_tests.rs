@@ -599,3 +599,343 @@ fn release_deploy_omitting_channel_honors_configured_channel_from_release_manage
         assert_eq!(rb_env.status, "ok", "{}", rb_env.message);
     }
 }
+
+#[test]
+fn backup_maintenance_lock_resolution_prevents_split_brain_and_preserves_unprivileged_local_ops() {
+    let _env_guard = super::ENV_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let sandbox = TempTestDir::new("backup-lock-resolution");
+    let iso_root = sandbox.path().join("iso-root");
+    let iso_db = iso_root.join("var/lib/aetherflow/aetherflow.sqlite");
+    let iso_custom_backups = iso_root.join("custom-backups");
+    create_sample_sqlite_db(&iso_db);
+    fs::create_dir_all(&iso_custom_backups).unwrap();
+
+    // 1. Live host `af backup restore --backup-dir /mnt/usb --target-root /` MUST resolve the
+    // canonical host maintenance lock (not `/mnt/usb/.snapshot.lock`).
+    let live_global = GlobalOptions::default();
+    let live_restore_cmd = BackupCliCommand::RestoreDestructive {
+        filename: "aetherflow-backup.tar.gz".to_string(),
+        backup_dir: Some(PathBuf::from("/mnt/usb")),
+        target_root: Some(PathBuf::from("/")),
+        confirm_destructive_restore: true,
+        allow_overwrite: true,
+        operator_privileged: true,
+        trusted_sqlite_uid: None,
+        trusted_sqlite_gid: None,
+    };
+    let live_restore_cfg = crate::commands::backup::resolve_backup_config(
+        &live_global,
+        Some(Path::new("/mnt/usb")),
+        None,
+        "v4.0.0",
+    )
+    .unwrap();
+    let expected_live_lock = af_models::try_resolve_canonical_maintenance_lock_path_from_env(
+        None,
+        live_restore_cfg.sqlite_db_path.as_deref(),
+        Some(&live_restore_cfg.backup_dir),
+    )
+    .unwrap();
+    let resolved_live_restore_lock = crate::commands::backup::resolve_backup_maintenance_lock_path(
+        &live_global,
+        &live_restore_cmd,
+        &live_restore_cfg,
+    )
+    .unwrap();
+    assert_eq!(resolved_live_restore_lock, expected_live_lock);
+    assert_ne!(
+        resolved_live_restore_lock,
+        PathBuf::from("/mnt/usb/.snapshot.lock")
+    );
+
+    // 2. Live host `backup create --backup-dir /mnt/usb` (default live DB) and system-scoped
+    // `backup prune --backup-dir /var/lib/aetherflow/backups` also acquire the canonical host lock.
+    let live_create_cmd = BackupCliCommand::Create {
+        kind: BackupCreateKind::Sqlite,
+        backup_dir: Some(PathBuf::from("/mnt/usb")),
+        db_path: None,
+        app_version: "v4.0.0".to_string(),
+        chunk_size_bytes: None,
+        timestamp_slug: None,
+        operator_privileged: true,
+        trusted_sqlite_uid: None,
+        trusted_sqlite_gid: None,
+    };
+    assert_eq!(
+        crate::commands::backup::resolve_backup_maintenance_lock_path(
+            &live_global,
+            &live_create_cmd,
+            &live_restore_cfg,
+        )
+        .unwrap(),
+        expected_live_lock
+    );
+    let system_prune_cmd = BackupCliCommand::Prune {
+        backup_dir: Some(PathBuf::from("/var/lib/aetherflow/backups")),
+        max_retained: 5,
+        retention_days: 30,
+        operator_privileged: true,
+    };
+    let system_prune_cfg = crate::commands::backup::resolve_backup_config(
+        &live_global,
+        Some(Path::new("/var/lib/aetherflow/backups")),
+        None,
+        "v4.0.0",
+    )
+    .unwrap();
+    assert_eq!(
+        crate::commands::backup::resolve_backup_maintenance_lock_path(
+            &live_global,
+            &system_prune_cmd,
+            &system_prune_cfg,
+        )
+        .unwrap(),
+        expected_live_lock
+    );
+
+    // 3. Isolated `--root` mutation with explicit `--backup-dir` MUST acquire the root's canonical
+    // lock (`<root>/var/lib/aetherflow/.snapshot.lock`), NOT `<custom-backups>/.snapshot.lock`.
+    let create_iso_inv = parse_cli_args([
+        "--json",
+        "--root",
+        iso_root.to_str().unwrap(),
+        "backup",
+        "create",
+        "--sqlite-only",
+        "--backup-dir",
+        iso_custom_backups.to_str().unwrap(),
+        "--timestamp",
+        "2026-11-22-080000",
+    ])
+    .unwrap();
+    let create_iso_env = execute_invocation(&create_iso_inv, &MockRunnerTransport::default());
+    assert_eq!(create_iso_env.status, "ok", "{}", create_iso_env.message);
+    assert!(
+        iso_root.join("var/lib/aetherflow/.snapshot.lock").is_file(),
+        "isolated --root backup create with --backup-dir must acquire canonical root lock"
+    );
+    assert!(
+        !iso_custom_backups.join(".snapshot.lock").exists(),
+        "must not split-brain onto custom --backup-dir lock under --root"
+    );
+
+    // 4. Isolated `--root` with out-of-root `--db-path` is rejected before executing backup.
+    let outside_db = sandbox.path().join("outside.sqlite");
+    create_sample_sqlite_db(&outside_db);
+    let bad_db_inv = parse_cli_args([
+        "--json",
+        "--root",
+        iso_root.to_str().unwrap(),
+        "backup",
+        "create",
+        "--sqlite-only",
+        "--db-path",
+        outside_db.to_str().unwrap(),
+    ])
+    .unwrap();
+    let bad_db_env = execute_invocation(&bad_db_inv, &MockRunnerTransport::default());
+    assert_eq!(bad_db_env.status, "error");
+    assert_eq!(
+        bad_db_env.exit_code,
+        CliExitCode::UsageOrValidation.as_i32()
+    );
+    assert!(bad_db_env.message.contains("outside active isolated root"));
+
+    // 5. Unprivileged non-root local operations (`global.root = None`) with non-system `--backup-dir`
+    // and `--db-path` must use `<local>/.snapshot.lock` and succeed without PermissionDenied on `/run`.
+    let local_dir = sandbox.path().join("local-only");
+    let local_db = local_dir.join("test.sqlite");
+    create_sample_sqlite_db(&local_db);
+    let local_create_inv = parse_cli_args([
+        "--json",
+        "backup",
+        "create",
+        "--sqlite-only",
+        "--backup-dir",
+        local_dir.to_str().unwrap(),
+        "--db-path",
+        local_db.to_str().unwrap(),
+        "--timestamp",
+        "2026-11-22-080100",
+    ])
+    .unwrap();
+    let local_create_env = execute_invocation(&local_create_inv, &MockRunnerTransport::default());
+    assert_eq!(
+        local_create_env.status, "ok",
+        "unprivileged local backup create must succeed: {}",
+        local_create_env.message
+    );
+    assert!(local_dir.join(".snapshot.lock").is_file());
+    let created_filename = Path::new(
+        local_create_env.data.as_ref().unwrap()["primary_artifact_path"]
+            .as_str()
+            .unwrap(),
+    )
+    .file_name()
+    .unwrap()
+    .to_str()
+    .unwrap()
+    .to_string();
+
+    let local_prune_inv = parse_cli_args([
+        "--json",
+        "backup",
+        "prune",
+        "--backup-dir",
+        local_dir.to_str().unwrap(),
+        "--max-retained",
+        "5",
+    ])
+    .unwrap();
+    let local_prune_env = execute_invocation(&local_prune_inv, &MockRunnerTransport::default());
+    assert_eq!(
+        local_prune_env.status, "ok",
+        "unprivileged local backup prune must succeed: {}",
+        local_prune_env.message
+    );
+
+    let local_delete_inv = parse_cli_args([
+        "--json",
+        "backup",
+        "delete",
+        &created_filename,
+        "--backup-dir",
+        local_dir.to_str().unwrap(),
+    ])
+    .unwrap();
+    let local_delete_env = execute_invocation(&local_delete_inv, &MockRunnerTransport::default());
+    assert_eq!(
+        local_delete_env.status, "ok",
+        "unprivileged local backup delete must succeed: {}",
+        local_delete_env.message
+    );
+}
+
+#[test]
+fn backup_restore_dry_run_validates_traversal_and_missing_artifact_or_manifest() {
+    let sandbox = TempTestDir::new("backup-restore-dry-run");
+    let root_dir = sandbox.path().join("host");
+    let db_path = root_dir.join("var/lib/aetherflow/aetherflow.sqlite");
+    create_sample_sqlite_db(&db_path);
+    let root_str = root_dir.to_string_lossy().to_string();
+    let transport = MockRunnerTransport::default();
+
+    // Create a valid backup artifact + manifest inside isolated root
+    let create_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "backup",
+        "create",
+        "--sqlite-only",
+        "--timestamp",
+        "2026-11-22-080200",
+    ])
+    .unwrap();
+    let create_env = execute_invocation(&create_inv, &transport);
+    assert_eq!(create_env.status, "ok", "{}", create_env.message);
+    let valid_filename = Path::new(
+        create_env.data.as_ref().unwrap()["primary_artifact_path"]
+            .as_str()
+            .unwrap(),
+    )
+    .file_name()
+    .unwrap()
+    .to_str()
+    .unwrap()
+    .to_string();
+
+    // 1. Valid backup artifact + manifest succeeds under --dry-run WITHOUT --confirm-destructive-restore.
+    let dry_ok_inv = parse_cli_args([
+        "--json",
+        "--dry-run",
+        "--root",
+        &root_str,
+        "backup",
+        "restore",
+        &valid_filename,
+    ])
+    .unwrap();
+    let dry_ok_env = execute_invocation(&dry_ok_inv, &transport);
+    assert_eq!(dry_ok_env.status, "ok", "{}", dry_ok_env.message);
+
+    // 2. Path traversal fails dry-run cleanly (both via CLI parser and direct command execution).
+    assert!(parse_cli_args([
+        "--json",
+        "--dry-run",
+        "--root",
+        &root_str,
+        "backup",
+        "restore",
+        "../../etc/passwd",
+    ])
+    .is_err());
+    let direct_traversal_inv = ParsedInvocation {
+        global: GlobalOptions {
+            json: true,
+            dry_run: true,
+            root: Some(root_dir.clone()),
+            ..GlobalOptions::default()
+        },
+        command: AfCommand::Backup(BackupCliCommand::RestoreDestructive {
+            filename: "../../etc/passwd".to_string(),
+            backup_dir: None,
+            target_root: None,
+            confirm_destructive_restore: false,
+            allow_overwrite: false,
+            operator_privileged: false,
+            trusted_sqlite_uid: None,
+            trusted_sqlite_gid: None,
+        }),
+    };
+    let traversal_env = execute_invocation(&direct_traversal_inv, &transport);
+    assert_eq!(traversal_env.status, "error");
+    assert_eq!(
+        traversal_env.exit_code,
+        CliExitCode::UsageOrValidation.as_i32()
+    );
+
+    // 3. Missing artifact fails dry-run cleanly.
+    let missing_inv = parse_cli_args([
+        "--json",
+        "--dry-run",
+        "--root",
+        &root_str,
+        "backup",
+        "restore",
+        "does-not-exist.sqlite",
+    ])
+    .unwrap();
+    let missing_env = execute_invocation(&missing_inv, &transport);
+    assert_eq!(missing_env.status, "error");
+    assert_eq!(
+        missing_env.exit_code,
+        CliExitCode::PreflightOrIntegrityFailure.as_i32()
+    );
+    assert!(missing_env.message.contains("missing backup artifact"));
+
+    // 4. Artifact present without required `.manifest.json` fails dry-run cleanly.
+    let backup_dir = root_dir.join("var/lib/aetherflow/backups");
+    fs::write(backup_dir.join("orphan.sqlite"), b"not-a-manifested-backup").unwrap();
+    let missing_manifest_inv = parse_cli_args([
+        "--json",
+        "--dry-run",
+        "--root",
+        &root_str,
+        "backup",
+        "restore",
+        "orphan.sqlite",
+    ])
+    .unwrap();
+    let missing_manifest_env = execute_invocation(&missing_manifest_inv, &transport);
+    assert_eq!(missing_manifest_env.status, "error");
+    assert_eq!(
+        missing_manifest_env.exit_code,
+        CliExitCode::PreflightOrIntegrityFailure.as_i32()
+    );
+    assert!(missing_manifest_env
+        .message
+        .contains("missing required backup manifest"));
+}

@@ -30,6 +30,9 @@ mod package_update_tests;
 mod provision_maintenance_tests;
 mod release_backup_tests;
 
+pub(super) static ENV_TEST_LOCK: once_cell::sync::Lazy<Mutex<()>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(()));
+
 /// RAII temporary directory guard under `std::env::temp_dir()` so tests never touch real system paths.
 pub(super) struct TempTestDir {
     path: PathBuf,
