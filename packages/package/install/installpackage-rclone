@@ -265,8 +265,9 @@ set_config_file_mode 0600 /etc/rclone/rclone.conf "$RCLONE_CANONICAL_ENV"
 chown -h rclone:rclone /etc/rclone /etc/rclone/rclone.conf "$RCLONE_CANONICAL_ENV" /var/lib/rclone /var/lib/rclone/cache
 
 resolve_standalone_api_port() {
-    local gui_port="$1" unit_file="${RCLONE_UNIT_FILE:-/etc/systemd/system/rclone.service}"
+    local gui_port="$1" unit_file="/etc/systemd/system/rclone.service"
     local unit_api="" unit_src line
+    unit_file="${RCLONE_UNIT_FILE:-$unit_file}"
     [[ "$gui_port" =~ ^[0-9]{1,5}$ ]] || return 1
     for unit_src in "$unit_file" "${unit_file}.d"/*.conf; do
         [[ -f "$unit_src" && ! -L "$unit_src" ]] || continue
