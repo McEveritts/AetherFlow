@@ -406,13 +406,12 @@ EOF
 
 chmod 0644 /etc/systemd/system/paperless-webserver.service /etc/systemd/system/paperless-worker.service /etc/systemd/system/paperless-scheduler.service
 
-PAPERLESS_READY_META="$(safe_config_python /etc/paperless.conf "$PAPERLESS_BIND_HOST" "$APP_PORT" <<'PYEOF'
+PAPERLESS_READY_META="$(af_local_readiness_python /etc/paperless.conf "$PAPERLESS_BIND_HOST" "$APP_PORT" <<'PYEOF'
 import ipaddress
 import os
 import pathlib
 import re
 import shlex
-import socket
 import sys
 import urllib.parse
 
@@ -420,63 +419,10 @@ conf_path, bind_host, port = sys.argv[1], sys.argv[2].strip().strip('"').strip("
 unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
 
 
-def emit(mode, url="", scheme="http", host_header="", emit_record="0", tls_insecure="0", reason=""):
-    for val in (mode, url, scheme, host_header, emit_record, tls_insecure, reason):
+def emit(mode, url="", host_header="", emit_record="0", tls_insecure="0", reason=""):
+    for val in (mode, url, host_header, emit_record, tls_insecure, reason):
         print(val)
     sys.exit(0)
-
-
-def is_local_interface_ip(target_ip):
-    proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
-    if target_ip.version == 4:
-        fib = proc_root / "net" / "fib_trie"
-        if not fib.is_file():
-            return False
-        try:
-            lines = fib.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
-            return False
-        in_local = False
-        prev_ip = None
-        for line in lines:
-            if line.startswith("Local:"):
-                in_local = True
-                prev_ip = None
-                continue
-            if line and not line[0].isspace():
-                in_local = False
-                prev_ip = None
-                continue
-            if not in_local:
-                continue
-            stripped = line.strip()
-            if stripped.startswith("|-- "):
-                try:
-                    prev_ip = ipaddress.IPv4Address(stripped[4:].strip())
-                except ValueError:
-                    prev_ip = None
-            elif stripped.startswith("+-- "):
-                prev_ip = None
-            elif prev_ip is not None and "/32 host LOCAL" in stripped and prev_ip == target_ip:
-                return True
-        return False
-
-    if6 = proc_root / "net" / "if_inet6"
-    if not if6.is_file():
-        return False
-    try:
-        lines = if6.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
-        return False
-    for line in lines:
-        parts = line.split()
-        if parts and len(parts[0]) == 32:
-            try:
-                if ipaddress.IPv6Address(bytes.fromhex(parts[0])) == target_ip:
-                    return True
-            except ValueError:
-                continue
-    return False
 
 
 def parse_env(text):
@@ -503,25 +449,6 @@ def parse_env(text):
             val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
         values[key] = val
     return values
-
-
-def resolve_localhost_loopback_ips():
-    try:
-        infos = socket.getaddrinfo("localhost", int(port), type=socket.SOCK_STREAM)
-    except OSError:
-        return None
-    ips = set()
-    for info in infos:
-        addr = info[4][0].split("%", 1)[0]
-        try:
-            ip_obj = ipaddress.ip_address(addr)
-        except ValueError:
-            return None
-        mapped = getattr(ip_obj, "ipv4_mapped", None) or ip_obj
-        if not mapped.is_loopback:
-            return None
-        ips.add(mapped)
-    return ips if ips else None
 
 
 def host_allowed(candidate, allowed):
@@ -612,7 +539,7 @@ elif bind_host in ("::", "[::]"):
     strict_loopback = True
     localhost_need = "v6_dual"
 elif bind_host.lower() == "localhost":
-    lb_ips = resolve_localhost_loopback_ips()
+    lb_ips = resolve_localhost_loopback_ips(port)
     if not lb_ips:
         emit("skip", reason="retained PAPERLESS_BIND_ADDR 'localhost' did not resolve strictly to loopback addresses")
     connect_host = "localhost"
@@ -679,12 +606,12 @@ if paperless_url:
 tls_insecure = "1" if (scheme == "https" and strict_loopback) else "0"
 
 if host_allowed(connect_host, allowed_hosts):
-    emit("probe", f"{scheme}://{connect_host}:{port}{probe_path}", scheme, "", "1", tls_insecure, "")
+    emit("probe", f"{scheme}://{connect_host}:{port}{probe_path}", "", "1", tls_insecure, "")
 
 # Paperless-ngx always appends "localhost" to ALLOWED_HOSTS. Prefer http(s)://localhost:<port>
 # when localhost strictly resolves to the bound loopback address so runner replay works too.
 if localhost_need is not None:
-    lb_ips = resolve_localhost_loopback_ips()
+    lb_ips = resolve_localhost_loopback_ips(port)
     if lb_ips:
         can_use_localhost = False
         if localhost_need == "any":
@@ -707,7 +634,6 @@ if localhost_need is not None:
             emit(
                 "probe",
                 f"{scheme}://localhost:{port}{probe_path}",
-                scheme,
                 "",
                 "1",
                 "1" if scheme == "https" else "0",
@@ -717,7 +643,6 @@ if localhost_need is not None:
 emit(
     "probe",
     f"{scheme}://{connect_host}:{port}{probe_path}",
-    scheme,
     "localhost",
     "0",
     tls_insecure,
@@ -728,29 +653,16 @@ PYEOF
 mapfile -t PAPERLESS_READY_FIELDS <<< "$PAPERLESS_READY_META"
 PAPERLESS_READY_MODE="${PAPERLESS_READY_FIELDS[0]:-skip}"
 PAPERLESS_READY_URL="${PAPERLESS_READY_FIELDS[1]:-}"
-PAPERLESS_READY_SCHEME="${PAPERLESS_READY_FIELDS[2]:-http}"
-PAPERLESS_HOST_HEADER="${PAPERLESS_READY_FIELDS[3]:-}"
-PAPERLESS_EMIT_RECORD="${PAPERLESS_READY_FIELDS[4]:-0}"
-PAPERLESS_TLS_INSECURE="${PAPERLESS_READY_FIELDS[5]:-0}"
-PAPERLESS_READY_REASON="${PAPERLESS_READY_FIELDS[6]:-}"
-
-PAPERLESS_CURL_ARGS=(--proto "=${PAPERLESS_READY_SCHEME}")
-if [[ "$PAPERLESS_TLS_INSECURE" == "1" ]]; then
-    PAPERLESS_CURL_ARGS+=(-k)
-fi
-if [[ -n "$PAPERLESS_HOST_HEADER" ]]; then
-    PAPERLESS_CURL_ARGS+=(-H "Host: ${PAPERLESS_HOST_HEADER}")
-fi
+PAPERLESS_HOST_HEADER="${PAPERLESS_READY_FIELDS[2]:-}"
+PAPERLESS_EMIT_RECORD="${PAPERLESS_READY_FIELDS[3]:-0}"
+PAPERLESS_TLS_INSECURE="${PAPERLESS_READY_FIELDS[4]:-0}"
+PAPERLESS_READY_REASON="${PAPERLESS_READY_FIELDS[5]:-}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now paperless-webserver
 af_logged systemctl enable --now paperless-worker
 af_logged systemctl enable --now paperless-scheduler
 
-PAPERLESS_READY_ATTEMPTS="${AF_READINESS_ATTEMPTS:-30}"
-if [[ ! "$PAPERLESS_READY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || (( 10#$PAPERLESS_READY_ATTEMPTS > 300 )); then
-    PAPERLESS_READY_ATTEMPTS=30
-fi
 if [[ "$PAPERLESS_READY_MODE" != "probe" ]]; then
     if declare -F print_warn >/dev/null 2>&1; then
         print_warn "Skipping direct HTTP readiness probe for paperless-webserver.service: ${PAPERLESS_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
@@ -759,23 +671,8 @@ if [[ "$PAPERLESS_READY_MODE" != "probe" ]]; then
     fi
 fi
 
-HEALTHY=0
-for ((attempt = 1; attempt <= PAPERLESS_READY_ATTEMPTS; attempt++)); do
-    if systemctl is-active --quiet paperless-webserver && systemctl is-active --quiet paperless-worker && systemctl is-active --quiet paperless-scheduler; then
-        if [[ "$PAPERLESS_READY_MODE" != "probe" ]]; then
-            HEALTHY=1
-            break
-        fi
-        if curl --disable --noproxy '*' "${PAPERLESS_CURL_ARGS[@]}" -fsS --connect-timeout 2 --max-time 5 "$PAPERLESS_READY_URL" >/dev/null 2>&1; then
-            HEALTHY=1
-            break
-        fi
-    fi
-    if (( attempt < PAPERLESS_READY_ATTEMPTS )); then
-        sleep 1
-    fi
-done
-if [[ "$HEALTHY" -ne 1 ]]; then
+if ! af_wait_local_web_services "$PAPERLESS_READY_URL" "" "$PAPERLESS_TLS_INSECURE" \
+    "$PAPERLESS_HOST_HEADER" paperless-webserver paperless-worker paperless-scheduler >/dev/null; then
     if [[ "$PAPERLESS_READY_MODE" == "probe" ]]; then
         log_error "Paperless-ngx web service did not become HTTP-ready at ${PAPERLESS_READY_URL} or companion units were not active; rolling back."
     else

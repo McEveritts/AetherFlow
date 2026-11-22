@@ -46,6 +46,9 @@ def common_functions(*names):
         names = tuple(dict.fromkeys((*names, 'af_prepare_logfile_path', 'af_validate_tar_archive')))
     if 'git_checkout_version' in names:
         names = tuple(dict.fromkeys((*names, 'git_stage_exact_revision')))
+    if 'af_emit_readiness_record' in names or 'safe_config_python' in names:
+        names = tuple(dict.fromkeys((*names, 'safe_config_python', 'af_local_readiness_python',
+                                     'af_wait_local_web_services')))
     source = (ROOT / "packages/common.sh").read_text()
     functions = []
     for name in names:

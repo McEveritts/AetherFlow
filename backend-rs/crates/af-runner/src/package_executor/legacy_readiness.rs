@@ -198,7 +198,7 @@ pub(crate) struct RecordedReadinessProbe {
     pub accept_invalid_certs: bool,
 }
 
-/// Returns `true` only when `url` targets a strict loopback host (`127.0.0.0/8`, `::1`, or `localhost`).
+/// Returns `true` for `localhost` and loopback IPs, including IPv4-mapped loopback.
 fn is_strict_loopback_url(url: &reqwest::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
@@ -211,7 +211,10 @@ fn is_strict_loopback_url(url: &reqwest::Url) -> bool {
     }
     if let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         if let Ok(v6) = inner.parse::<Ipv6Addr>() {
-            return v6.is_loopback();
+            return v6.is_loopback()
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| address.is_loopback());
         }
     }
     false
@@ -1010,6 +1013,21 @@ mod tests {
         )
         .expect("lan https should parse");
         assert!(!lan_https.accept_invalid_certs);
+
+        for (host, loopback) in [
+            ("[::ffff:127.0.0.2]", true),
+            ("[::ffff:192.168.1.50]", false),
+        ] {
+            let record = format!(
+                r#"__AF_READINESS_PROBE__={{"unit":"filebot.service","url":"https://{host}:5452/"}}"#,
+            );
+            assert_eq!(
+                parse_readiness_probe_record(&record, &managed)
+                    .unwrap()
+                    .accept_invalid_certs,
+                loopback,
+            );
+        }
 
         // Rejects foreign/unmanaged unit identity
         assert!(parse_readiness_probe_record(

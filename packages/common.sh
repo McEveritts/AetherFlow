@@ -7502,6 +7502,133 @@ print(f'http://{host}:{port}{base}{endpoint}')
 PYEOF
 }
 
+af_local_readiness_python() {
+    {
+        cat <<'PYEOF'
+import ipaddress
+import socket
+
+
+def is_local_interface_ip(target_ip):
+    proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
+    if target_ip.version == 4:
+        fib = proc_root / "net" / "fib_trie"
+        if not fib.is_file():
+            return False
+        try:
+            lines = fib.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return False
+        in_local = False
+        prev_ip = None
+        for line in lines:
+            if line.startswith("Local:"):
+                in_local = True
+                prev_ip = None
+                continue
+            if line and not line[0].isspace():
+                in_local = False
+                prev_ip = None
+                continue
+            if not in_local:
+                continue
+            stripped = line.strip()
+            if stripped.startswith("|-- "):
+                try:
+                    prev_ip = ipaddress.IPv4Address(stripped[4:].strip())
+                except ValueError:
+                    prev_ip = None
+            elif stripped.startswith("+-- "):
+                prev_ip = None
+            elif prev_ip is not None and "/32 host LOCAL" in stripped and prev_ip == target_ip:
+                return True
+        return False
+
+    if6 = proc_root / "net" / "if_inet6"
+    if not if6.is_file():
+        return False
+    try:
+        lines = if6.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        parts = line.split()
+        if parts and len(parts[0]) == 32:
+            try:
+                if ipaddress.IPv6Address(bytes.fromhex(parts[0])) == target_ip:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def resolve_localhost_loopback_ips(port):
+    try:
+        infos = socket.getaddrinfo("localhost", int(port), type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    ips = set()
+    for info in infos:
+        addr = info[4][0].split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(addr)
+        except ValueError:
+            return None
+        mapped = getattr(ip_obj, "ipv4_mapped", None) or ip_obj
+        if not mapped.is_loopback:
+            return None
+        ips.add(mapped)
+    return ips if ips else None
+PYEOF
+        cat
+    } | safe_config_python "$@"
+}
+
+# The caller has proved the listener is local. Emit only the URL that answered.
+af_wait_local_web_services() {
+    local url="$1" fallback="$2" insecure_tls="$3" host_header="$4"
+    shift 4
+    local attempts="${AF_READINESS_ATTEMPTS:-30}" attempt unit active rc
+    local -a curl_args=(--disable --noproxy '*' -fsS --connect-timeout 2 --max-time 5)
+    if [[ ! "$attempts" =~ ^[1-9][0-9]{0,2}$ ]] || (( attempts > 300 )); then
+        attempts=30
+    fi
+    if [[ -n "$url" ]]; then
+        [[ "$url" == http://* || "$url" == https://* ]] || return 1
+        [[ -z "$fallback" || "${fallback%%:*}" == "${url%%:*}" ]] || return 1
+        curl_args+=(--proto "=${url%%:*}")
+        [[ "$insecure_tls" != 1 ]] || curl_args+=(-k)
+        [[ -z "$host_header" ]] || curl_args+=(-H "Host: $host_header")
+    fi
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        active=true
+        for unit in "$@"; do
+            if ! systemctl is-active --quiet "$unit"; then
+                active=false
+                break
+            fi
+        done
+        if [[ "$active" == true ]]; then
+            [[ -n "$url" ]] || return 0
+            rc=0
+            curl "${curl_args[@]}" "$url" >/dev/null 2>&1 || rc=$?
+            if (( rc == 0 )); then
+                printf '%s\n' "$url"
+                return 0
+            fi
+            if (( rc == 7 )) && [[ -n "$fallback" ]] &&
+                curl "${curl_args[@]}" "$fallback" >/dev/null 2>&1; then
+                printf '%s\n' "$fallback"
+                return 0
+            fi
+        fi
+        if (( attempt < attempts )); then
+            sleep 1
+        fi
+    done
+    return 1
+}
+
 af_emit_readiness_record() {
     [[ "${AF_EMIT_READINESS_RECORD:-0}" == "1" ]] || return 0
     local raw_unit="${1:-}" probe_url="${2:-}" accept_auth="${3:-false}" accept_409="${4:-false}"

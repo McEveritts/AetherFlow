@@ -191,7 +191,7 @@ class DispatcharrManagedReadinessTests(unittest.TestCase):
             _make_curl_sentinel(bin_dir, block_curl_with_log)
         block = _extract_block(
             INSTALL_DIR / "installpackage-dispatcharr",
-            'DISPATCHARR_READY_META="$(python3 -',
+            'DISPATCHARR_READY_META="$(af_local_readiness_python ',
         )
         helpers = common_functions("af_emit_readiness_record")
         script = (
@@ -507,7 +507,7 @@ class PaperlessManagedReadinessTests(unittest.TestCase):
 
         raw_block = _extract_block(
             INSTALL_DIR / "installpackage-paperless-ngx",
-            'PAPERLESS_READY_META="$(safe_config_python /etc/paperless.conf',
+            'PAPERLESS_READY_META="$(af_local_readiness_python /etc/paperless.conf',
         )
         block = replace_paths_once(raw_block, [("/etc/paperless.conf", str(conf_file))])
         helpers = common_functions("safe_config_python", "af_emit_readiness_record")
@@ -1087,6 +1087,30 @@ class CalibreWebManagedReadinessTests(unittest.TestCase):
             self.assertIn("not assigned to a local interface", res.stderr)
             self.assertEqual(_parse_probe_records(res.stdout + res.stderr), [])
             self.assertTrue((tmp_path / "committed").exists())
+
+    def test_retained_localhost_is_probed_and_other_hostnames_are_preserved(self):
+        server, port, hits = _start_local_server(status_fn=lambda req: 200 if req.path == "/login" else 404)
+        unit = "[Service]\nExecStart=/opt/calibre-web/.venv/bin/python /opt/calibre-web/cps.py -i {}\n"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                result = self._run_readiness_block(root, app_port=port, prior_unit_text=unit.format("localhost"))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(hits), 1)
+                self.assertEqual(_parse_probe_records(result.stderr)[0]["url"], f"http://localhost:{port}/login")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                sent = root / "curl.log"
+                result = self._run_readiness_block(root, app_port=port, prior_unit_text=unit.format("app.example.invalid"),
+                                                   block_curl_with_log=sent)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("-i app.example.invalid", (root / "etc/systemd/system/calibreweb.service").read_text())
+                self.assertFalse(sent.exists())
+                self.assertEqual(_parse_probe_records(result.stderr), [])
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_hard_http_failure_with_active_unit_aborts_commit_without_emitting(self):
         fail_srv, fail_port, _ = _start_local_server(status_fn=lambda _req: 503)
