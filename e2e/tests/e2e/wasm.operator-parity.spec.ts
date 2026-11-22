@@ -815,6 +815,41 @@ test.describe('WASM operator parity workflows', () => {
     ]);
   });
 
+  test('syncs Jellyfin summaries with a different import server selected', async ({ page }) => {
+    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+    const syncRequests: string[] = [];
+
+    await page.route('**/api/v1/auth/streaming/dashboard?*', route =>
+      json(route, {
+        servers: [
+          { provider: 'jellyfin', name: 'Jellyfin', status: 'connected', serverId: 'srv-jf' },
+          { provider: 'emby', name: 'Emby', status: 'connected', serverId: 'srv-emby' },
+        ],
+        liveSummary: { activeStreams: 0, isDemoMode: false },
+        activeSessions: [],
+        analytics: { recentHistory: [], historicalEstimates: [] },
+      }),
+    );
+    await page.route('**/api/v1/admin/streaming/imports/status', route =>
+      json(route, { maxBatchEvents: 500, checkpoints: [], capabilities: [] }),
+    );
+    await page.route('**/api/v1/admin/streaming/servers/*/sync', route => {
+      syncRequests.push(new URL(route.request().url()).pathname);
+      return json(route, { imported: 2, complete: true });
+    });
+
+    await page.goto('/?tab=streaming');
+    await page.getByRole('tab', { name: 'History administration', exact: true }).click();
+    await page.getByText('Jellystat / Tautulli / JSON event import', { exact: true }).click();
+    const importServer = page.getByLabel('Bind to verified server');
+    await importServer.selectOption('emby:srv-emby');
+    await page.getByRole('button', { name: 'Sync Jellyfin item summaries & metadata' }).click();
+
+    await expect(page.getByText(/Synchronized 2 item summaries/)).toBeVisible();
+    expect(syncRequests).toEqual(['/api/v1/admin/streaming/servers/jellyfin/sync']);
+    await expect(importServer).toHaveValue('emby:srv-emby');
+  });
+
   test('renders Audit KPI counters and contextual pending_action / service log drilldowns', async ({ page }) => {
     await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
 
