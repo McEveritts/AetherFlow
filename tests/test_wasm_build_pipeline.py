@@ -381,10 +381,11 @@ printf 'locale' > dist/locales/en.json.gz
 import os, pathlib, sys
 args = sys.argv[1:]
 target = args[args.index('--target') + 1]
-binary = args[args.index('--bin') + 1]
+bins = [args[i + 1] for i, arg in enumerate(args) if arg == '--bin' and i + 1 < len(args)]
 directory = pathlib.Path(os.environ['CARGO_TARGET_DIR']) / target / 'release'
 directory.mkdir(parents=True, exist_ok=True)
-(directory / binary).write_bytes(('binary:' + binary).encode())
+for binary in bins:
+    (directory / binary).write_bytes(('binary:' + binary).encode())
 ''')
         # Use the real checksum program, not the installer fixture's checksum stub.
         (self.bin / "sha256sum").unlink()
@@ -466,7 +467,6 @@ directory.mkdir(parents=True, exist_ok=True)
         self.assertLess(bootstrap, source.index('scripts/build_wasm_frontend.sh" --stage'))
         self.assertIn('return 1', source[bootstrap:source.index('scripts/build_wasm_frontend.sh" --stage')])
         self.assertIn("--exclude='target/'", source)
-        self.assertIn("--exclude='/packages/ui/'", source)
         self.assertGreater(source.index('"${RELEASE_DIR}/frontend-rs"'),
                            source.index('scripts/build_wasm_frontend.sh" --stage'))
 
@@ -476,7 +476,7 @@ directory.mkdir(parents=True, exist_ok=True)
         release = self.root / "release"
         for relative in (
             "scripts", "deploy/.pytest_cache", "frontend-rs/target", "backend-rs/target",
-            "packages/ui/src", "packages/package", "docs", "tests", "e2e", "apps/website",
+            "packages/package", "docs", "tests", "e2e", "apps/website",
             "setup", "plugins/sdk-template-rust/backend",
             "plugins/telemetry-inspector/backend/hooks",
             "plugins/telemetry-inspector/frontend/dist", ".github",
@@ -484,7 +484,7 @@ directory.mkdir(parents=True, exist_ok=True)
             (repo / relative).mkdir(parents=True)
         (release).mkdir()
         for relative in (
-            "frontend-rs/target/cache", "backend-rs/target/cache", "packages/ui/src/unused",
+            "frontend-rs/target/cache", "backend-rs/target/cache",
             "docs/guide.md", "tests/test_sample.py", "e2e/spec.ts", "apps/website/page.tsx",
             "setup/AetherFlow-Setup", "plugins/sample.json", "plugins/README.md",
             "plugins/sdk-template-rust/backend/Cargo.toml",
@@ -507,7 +507,6 @@ directory.mkdir(parents=True, exist_ok=True)
         (repo / "scripts/build_wasm_frontend.sh").write_text('''set -eu
 test ! -e "$RELEASE_DIR/frontend-rs/target"
 test ! -e "$RELEASE_DIR/backend-rs/target"
-test ! -e "$RELEASE_DIR/packages/ui"
 mkdir -p "$RELEASE_DIR/frontend-rs/target" "$FRONTEND_DIST_DIR/locales"
 printf index > "$FRONTEND_DIST_DIR/index.html"
 printf wasm > "$FRONTEND_DIST_DIR/app.wasm"

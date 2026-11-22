@@ -37,7 +37,14 @@ purge_systemd_unit "thelounge"
 
 report_progress 65 "Uninstalling npm package and removing state directories..."
 af_logged npm uninstall -g thelounge || true
-rm -f /usr/bin/thelounge /usr/local/bin/thelounge
+if [[ -L /usr/bin/thelounge ]]; then
+    THELOUNGE_BIN_LINK="$(readlink -- /usr/bin/thelounge 2>/dev/null || true)"
+    THELOUNGE_BIN_REAL="$(readlink -m -- /usr/bin/thelounge 2>/dev/null || true)"
+    if [[ "$THELOUNGE_BIN_LINK" == /usr/local/bin/thelounge || "$THELOUNGE_BIN_LINK" == /usr/local/nodejs/bin/thelounge || "$THELOUNGE_BIN_LINK" == /opt/thelounge/* || "$THELOUNGE_BIN_REAL" == /usr/local/bin/thelounge || "$THELOUNGE_BIN_REAL" == /usr/local/nodejs/bin/thelounge || "$THELOUNGE_BIN_REAL" == /opt/thelounge/* ]]; then
+        rm -f /usr/bin/thelounge
+    fi
+fi
+rm -f /usr/local/bin/thelounge
 safe_rm_rf /opt/thelounge
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     purge_app_archive_backups "${PACKAGE_NAME}" "/opt/thelounge"

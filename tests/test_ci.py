@@ -82,7 +82,7 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertNotIn("continue-on-error: true", fmt_block)
         self.assertIn("Verify Zero-Go Repository Hygiene", ci_text)
         self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", ci_text)
-        self.assertIn("-p af-librespeed", ci_text)
+        self.assertIn("cargo clippy --workspace --all-targets --locked -- -D warnings", ci_text)
         self.assertIn("cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend", ci_text)
         self.assertIn("backend-rs/target/release/speedtest-backend", ci_text)
         for forbidden in ("actions/setup-go", "go vet ./...", "backend/go.mod", "backend/web/dist"):

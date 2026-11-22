@@ -39,7 +39,7 @@ report_progress 65 "Removing Audiobookshelf package, state directories, and user
 DPKG_REMOVE_ACTION=--remove
 if [[ "${DELETE_DATA:-false}" == true ]]; then DPKG_REMOVE_ACTION=--purge; fi
 DEBIAN_FRONTEND=noninteractive af_logged dpkg "$DPKG_REMOVE_ACTION" audiobookshelf
-rm -f /usr/share/keyrings/audiobookshelf-keyring.gpg /etc/apt/sources.list.d/audiobookshelf.list
+rm -f /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg /usr/share/keyrings/audiobookshelf-keyring.gpg /etc/apt/sources.list.d/audiobookshelf.list
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     safe_rm_rf /opt/audiobookshelf /var/lib/audiobookshelf /etc/audiobookshelf /var/cache/audiobookshelf
     purge_system_user "audiobookshelf"

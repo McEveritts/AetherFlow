@@ -333,7 +333,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         cargo = self.root / "bin/cargo"
         cargo.write_text("#!/bin/sh\nexit 0\n")
         cargo.chmod(0o755)
-        for name in ("deploy/__pycache__/host.pyc", "packages/ui/src/unused.tsx",
+        for name in ("deploy/__pycache__/host.pyc",
                      "packages/tool/tsconfig.tsbuildinfo", "packages/tool/node_modules/cache.js",
                      "plugins/telemetry-inspector/backend/__pycache__/runtime.cpython-311.pyc",
                      "web/dist/.pytest_cache/state", "web/dist/.mypy_cache/state"):
@@ -387,7 +387,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertEqual(names, sorted(names))
             self.assertNotIn("./af", names)
             self.assertNotIn("./speedtest-backend", names)
-            self.assertFalse(any(name.startswith("./packages/ui") or name.startswith("./plugins/sdk-template-rust")
+            self.assertFalse(any(name.startswith("./plugins/sdk-template-rust")
                                  or name == "./plugins/README.md" or "__pycache__" in name
                                  or ".pytest_cache" in name or ".mypy_cache" in name
                                  or "node_modules" in name or name.endswith(".tsbuildinfo") for name in names))

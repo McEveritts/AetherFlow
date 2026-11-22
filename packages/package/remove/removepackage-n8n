@@ -37,7 +37,14 @@ purge_systemd_unit "n8n"
 
 report_progress 65 "Uninstalling npm package and removing state directories..."
 af_logged npm uninstall -g n8n || true
-rm -f /usr/bin/n8n /usr/local/bin/n8n
+if [[ -L /usr/bin/n8n ]]; then
+    N8N_BIN_LINK="$(readlink -- /usr/bin/n8n 2>/dev/null || true)"
+    N8N_BIN_REAL="$(readlink -m -- /usr/bin/n8n 2>/dev/null || true)"
+    if [[ "$N8N_BIN_LINK" == /usr/local/bin/n8n || "$N8N_BIN_LINK" == /usr/local/nodejs/bin/n8n || "$N8N_BIN_LINK" == /opt/n8n/* || "$N8N_BIN_REAL" == /usr/local/bin/n8n || "$N8N_BIN_REAL" == /usr/local/nodejs/bin/n8n || "$N8N_BIN_REAL" == /opt/n8n/* ]]; then
+        rm -f /usr/bin/n8n
+    fi
+fi
+rm -f /usr/local/bin/n8n
 safe_rm_rf /opt/n8n
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     purge_app_archive_backups "${PACKAGE_NAME}" "/opt/n8n"

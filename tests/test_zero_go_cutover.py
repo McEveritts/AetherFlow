@@ -327,7 +327,9 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             for token in banned:
                 self.assertNotIn(token, text, f"{name} must not reference legacy token {token!r}")
             self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", text)
-            self.assertIn("-p af-librespeed", text)
+            self.assertIn("cargo clippy --workspace --all-targets --locked -- -D warnings", text)
+            if name in ("release.yml", "security.yml"):
+                self.assertIn("-p af-librespeed", text)
             if name in ("ci.yml", "release.yml"):
                 self.assertIn("speedtest-backend", text)
                 self.assertIn("plugins/sdk-template-rust/backend/Cargo.toml", text)

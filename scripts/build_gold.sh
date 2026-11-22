@@ -176,6 +176,14 @@ build_target() {
 
   mkdir -p "${target_dir}"
 
+  local -a cargo_bin_args=(--bin "${CARGO_BIN_NAME}")
+  if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
+    cargo_bin_args+=(--bin "${CARGO_CLI_BIN_NAME}")
+  fi
+  if [[ "${BUILD_SPEEDTEST}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-librespeed/Cargo.toml" ]]; then
+    cargo_bin_args+=(--bin "${CARGO_SPEEDTEST_BIN_NAME}")
+  fi
+
   echo "==> Building ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
   (
     cd "${BACKEND_RS_DIR}"
@@ -207,13 +215,7 @@ build_target() {
           ;;
       esac
     fi
-    cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_BIN_NAME}"
-    if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
-      cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_CLI_BIN_NAME}"
-    fi
-    if [[ "${BUILD_SPEEDTEST}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-librespeed/Cargo.toml" ]]; then
-      cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_SPEEDTEST_BIN_NAME}"
-    fi
+    cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" "${cargo_bin_args[@]}"
   )
 
   local cargo_target_dir="${CARGO_TARGET_DIR:-${BACKEND_RS_DIR}/target}"
@@ -261,7 +263,7 @@ build_target() {
   # The API embeds the source OpenAPI document.
   tar -C "${cfg_src}" "${runtime_excludes[@]}" --exclude='./openapi-v1.yaml' -cf - . \
     | tar -C "${target_dir}/config" -xpf -
-  tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" --exclude='packages/ui' --exclude='packages/plugin' \
+  tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" \
     --exclude='packages/README.md' -cf - packages deploy | tar -C "${target_dir}" -xpf -
   if managed_plugin_assets_present "${PLUGINS_DIR}/telemetry-inspector"; then
     mkdir -p "${target_dir}/plugins/telemetry-inspector"

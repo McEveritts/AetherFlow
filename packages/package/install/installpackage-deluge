@@ -35,6 +35,65 @@ fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-deluge}"
+if [[ ! "$APP_PORT" =~ ^[0-9]+$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid Deluge WebUI port: ${APP_PORT}"
+    exit 1
+fi
+APP_PORT="$((10#$APP_PORT))"
+export AF_APP_PORT="$APP_PORT"
+
+DELUGE_DAEMON_PORT="58846"
+if [[ -f /var/lib/deluge/.config/deluge/core.conf && ! -L /var/lib/deluge/.config/deluge/core.conf ]]; then
+    DELUGE_DAEMON_PORT="$(python3 - <<'PYEOF'
+import json
+import os
+
+deluge_root = "/var/lib/deluge"
+default_port = 58846
+
+def safe_read_core_conf(root):
+    cur = root
+    if os.path.islink(cur):
+        return None
+    for part in (".config", "deluge", "core.conf"):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return None
+    if not os.path.isfile(cur):
+        return None
+    fd = os.open(cur, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except Exception:
+        return None
+
+try:
+    raw = safe_read_core_conf(deluge_root)
+    if raw:
+        decoder = json.JSONDecoder()
+        body = {}
+        rest = raw
+        while rest.strip():
+            body, offset = decoder.raw_decode(rest.lstrip())
+            rest = rest.lstrip()[offset:]
+        port = body.get("daemon_port")
+        if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
+            print(port)
+            raise SystemExit(0)
+except SystemExit:
+    raise
+except Exception:
+    pass
+print(default_port)
+PYEOF
+)"
+fi
+if (( APP_PORT == DELUGE_DAEMON_PORT )); then
+    print_error "Deluge WebUI port (${APP_PORT}) collides with deluged daemon port (${DELUGE_DAEMON_PORT}); choose a different AF_APP_PORT."
+    exit 1
+fi
+
 begin_state_transaction "deluged deluge-web" "$APP_PORT" "/" "/var/lib/deluge" "/etc/deluge" "/etc/systemd/system/deluged.service" "/etc/systemd/system/deluge-web.service" "/usr/bin/deluged" "/usr/bin/deluge-web" "/usr/bin/deluge-console" "/usr/lib/python3/dist-packages/deluge" "/usr/share/deluge"
 
 prepare_apt_package_transaction --lockstep /var/lib/deluge/.af-version deluged deluge-web deluge-console deluge-common

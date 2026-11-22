@@ -247,10 +247,6 @@ jobs:
           test -f Cargo.lock
           cargo test --workspace --locked -- --test-threads=1
 
-      - name: Enforce Strict Clippy on Restore & Release Core Crates
-        run: |
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
-
       - name: Enforce Workspace Clippy Lints
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

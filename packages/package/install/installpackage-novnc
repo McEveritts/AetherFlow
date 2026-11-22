@@ -47,9 +47,66 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 PACKAGE_NAME="${PACKAGE_NAME:-novnc}"
-begin_state_transaction "novnc-xvnc.service novnc-session.service novnc.service" "$APP_PORT" "/" "/var/lib/novnc" "/etc/novnc" "/usr/local/bin/af-novnc-start" "/usr/local/bin/af-novnc-xvnc-start" "$XVNC_SERVICE_FILE" "$SESSION_SERVICE_FILE" "$SERVICE_FILE" "/usr/bin/Xtigervnc" "/usr/bin/tigervncserver" "/usr/bin/x11vnc" "/usr/bin/websockify" "/usr/share/novnc" "/usr/lib/python3/dist-packages/websockify"
+if [[ ! "$APP_PORT" =~ ^[0-9]+$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid noVNC port: ${APP_PORT}"
+    exit 1
+fi
+APP_PORT="$((10#$APP_PORT))"
+export AF_APP_PORT="$APP_PORT"
 
-prepare_apt_package_transaction /etc/novnc/.af-version novnc websockify tigervnc-standalone-server x11vnc
+VNC_PORT_EXPLICIT=false
+if [[ -n "${AF_NOVNC_VNC_PORT:-}" ]]; then
+    VNC_PORT_EXPLICIT=true
+    VNC_PORT="${AF_NOVNC_VNC_PORT}"
+fi
+if [[ ! "$VNC_PORT" =~ ^[0-9]+$ ]] || (( 10#$VNC_PORT < 1 || 10#$VNC_PORT > 65535 )); then
+    print_error "Invalid noVNC RFB port: ${VNC_PORT}"
+    exit 1
+fi
+VNC_PORT="$((10#$VNC_PORT))"
+
+if (( VNC_PORT == APP_PORT )); then
+    if [[ "$VNC_PORT_EXPLICIT" == true ]]; then
+        print_error "noVNC WebSocket port (${APP_PORT}) collides with configured AF_NOVNC_VNC_PORT (${VNC_PORT})."
+        exit 1
+    fi
+    EXISTING_VNC_PORT=""
+    if [[ -f "${XVNC_SERVICE_FILE}" && ! -L "${XVNC_SERVICE_FILE}" ]]; then
+        EXISTING_VNC_PORT="$(sed -nE 's/.*-rfbport[[:space:]]+([0-9]+).*/\1/p' "${XVNC_SERVICE_FILE}" | head -n1 || true)"
+    fi
+    if [[ "$EXISTING_VNC_PORT" =~ ^[0-9]+$ ]] && (( 10#$EXISTING_VNC_PORT >= 1024 && 10#$EXISTING_VNC_PORT <= 65535 && 10#$EXISTING_VNC_PORT != APP_PORT )); then
+        VNC_PORT="$((10#$EXISTING_VNC_PORT))"
+    else
+        VNC_PORT="$(python3 - "$APP_PORT" <<'PYEOF'
+import socket
+import sys
+
+app_port = int(sys.argv[1])
+for candidate in range(5902, 6000):
+    if candidate == app_port:
+        continue
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", candidate))
+        print(candidate)
+        sys.exit(0)
+    except OSError:
+        continue
+    finally:
+        sock.close()
+sys.exit(1)
+PYEOF
+)" || {
+            print_error "noVNC WebSocket port (${APP_PORT}) collides with default VNC RFB port 5901 and no free loopback port was found in 5902-5999."
+            exit 1
+        }
+    fi
+    log_warn "noVNC WebSocket port ${APP_PORT} collides with default VNC RFB port 5901; shifting Xtigervnc -rfbport to ${VNC_PORT}."
+fi
+
+begin_state_transaction "novnc-xvnc.service novnc-session.service novnc.service" "$APP_PORT" "/" "/var/lib/novnc" "/etc/novnc" "$XVNC_SERVICE_FILE" "$SESSION_SERVICE_FILE" "$SERVICE_FILE" "/usr/bin/Xtigervnc" "/usr/bin/tigervncserver" "/usr/bin/websockify" "/usr/share/novnc" "/usr/lib/python3/dist-packages/websockify"
+
+prepare_apt_package_transaction /etc/novnc/.af-version novnc python3-websockify tigervnc-standalone-server tigervnc-common
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 

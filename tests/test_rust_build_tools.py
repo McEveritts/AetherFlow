@@ -38,7 +38,7 @@ class RustBuildToolsTests(unittest.TestCase):
             path.write_text("#!/bin/sh\n")
             path.chmod(0o755)
         (self.root / "packages/system/af-tune").chmod(0o775)
-        for name in ("packages/ui/src/App.tsx", "packages/ui/tsconfig.tsbuildinfo",
+        for name in ("packages/tool/tsconfig.tsbuildinfo",
                      "packages/README.md",
                      "packages/node_modules/unused/index.js", "deploy/__pycache__/unused.pyc",
                      "packages/system/target/cache", "deploy/.pytest_cache/unused",
@@ -173,7 +173,7 @@ for binary in bins:
                 self.assertEqual(bundle.getmember("./plugins/telemetry-inspector/backend/hooks/start.sh").mode, 0o755)
                 self.assertEqual(members, sorted(members))
                 self.assertFalse(any(part in name for name in members for part in
-                                     ("/ui/", "node_modules", "__pycache__", ".pytest_cache", ".pyc", ".pyo", "tsbuildinfo", "/target/")))
+                                     ("node_modules", "__pycache__", ".pytest_cache", ".pyc", ".pyo", "tsbuildinfo", "/target/")))
                 self.assertNotIn("./packages/README.md", members)
                 for nested in ("./config/config", "./packages/packages", "./deploy/deploy", "./plugins/plugins"):
                     self.assertFalse(any(name == nested or name.startswith(nested + "/") for name in members))

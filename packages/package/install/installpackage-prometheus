@@ -34,6 +34,73 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
+if [[ ! "$APP_PORT" =~ ^[0-9]+$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid Prometheus port: ${APP_PORT}"
+    exit 1
+fi
+APP_PORT="$((10#$APP_PORT))"
+export AF_APP_PORT="$APP_PORT"
+
+PROM_BIND_ADDRESS="${AF_BIND_ADDRESS:-127.0.0.1}"
+if [[ ! "$PROM_BIND_ADDRESS" =~ ^[a-zA-Z0-9_.:-]+$ && ! "$PROM_BIND_ADDRESS" =~ ^\[[0-9a-fA-F:]+\]$ ]]; then
+    print_error "Invalid bind address for Prometheus/Node Exporter: ${PROM_BIND_ADDRESS}"
+    exit 1
+fi
+if [[ "$PROM_BIND_ADDRESS" == *:* && "$PROM_BIND_ADDRESS" != \[*\] ]]; then
+    PROM_BIND_ADDRESS="[${PROM_BIND_ADDRESS}]"
+fi
+
+NODE_EXPORTER_PORT_EXPLICIT=false
+if [[ -n "${AF_NODE_EXPORTER_PORT:-}" ]]; then
+    NODE_EXPORTER_PORT_EXPLICIT=true
+    NODE_EXPORTER_PORT="${AF_NODE_EXPORTER_PORT}"
+else
+    NODE_EXPORTER_PORT="9100"
+fi
+if [[ ! "$NODE_EXPORTER_PORT" =~ ^[0-9]+$ ]] || (( 10#$NODE_EXPORTER_PORT < 1 || 10#$NODE_EXPORTER_PORT > 65535 )); then
+    print_error "Invalid Node Exporter port: ${NODE_EXPORTER_PORT}"
+    exit 1
+fi
+NODE_EXPORTER_PORT="$((10#$NODE_EXPORTER_PORT))"
+
+if (( NODE_EXPORTER_PORT == APP_PORT )); then
+    if [[ "$NODE_EXPORTER_PORT_EXPLICIT" == true ]]; then
+        print_error "Prometheus port (${APP_PORT}) collides with configured AF_NODE_EXPORTER_PORT (${NODE_EXPORTER_PORT})."
+        exit 1
+    fi
+    EXISTING_NE_PORT=""
+    if [[ -f /etc/systemd/system/node_exporter.service && ! -L /etc/systemd/system/node_exporter.service ]]; then
+        EXISTING_NE_PORT="$(sed -nE 's/.*--web\.listen-address=[^[:space:]]*:([0-9]+).*/\1/p' /etc/systemd/system/node_exporter.service | head -n1 || true)"
+    fi
+    if [[ "$EXISTING_NE_PORT" =~ ^[0-9]+$ ]] && (( 10#$EXISTING_NE_PORT >= 1024 && 10#$EXISTING_NE_PORT <= 65535 && 10#$EXISTING_NE_PORT != APP_PORT )); then
+        NODE_EXPORTER_PORT="$((10#$EXISTING_NE_PORT))"
+    else
+        NODE_EXPORTER_PORT="$(python3 - "$APP_PORT" <<'PYEOF'
+import socket
+import sys
+
+app_port = int(sys.argv[1])
+for candidate in range(9101, 9200):
+    if candidate == app_port:
+        continue
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", candidate))
+        print(candidate)
+        sys.exit(0)
+    except OSError:
+        continue
+    finally:
+        sock.close()
+sys.exit(1)
+PYEOF
+)" || {
+            print_error "Prometheus port (${APP_PORT}) collides with default Node Exporter port 9100 and no free loopback port was found in 9101-9199."
+            exit 1
+        }
+    fi
+    log_warn "Prometheus port ${APP_PORT} collides with default Node Exporter port 9100; shifting Node Exporter to ${PROM_BIND_ADDRESS}:${NODE_EXPORTER_PORT}."
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Prometheus..."
 
@@ -151,7 +218,7 @@ rm -rf "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}"
 chmod 0755 /usr/local/bin/node_exporter
 
 if [[ ! -f /etc/prometheus/prometheus.yml ]]; then
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/prometheus/prometheus.yml
+sed -e "s|@AF_APP_PORT@|${APP_PORT}|g" -e "s|@AF_NODE_EXPORTER_PORT@|${NODE_EXPORTER_PORT}|g" <<'EOF' > /etc/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -163,14 +230,35 @@ scrape_configs:
 
   - job_name: 'node_exporter'
     static_configs:
-      - targets: ['localhost:9100']
+      - targets: ['localhost:@AF_NODE_EXPORTER_PORT@']
 EOF
+elif [[ ! -L /etc/prometheus/prometheus.yml ]]; then
+    safe_config_python "$NODE_EXPORTER_PORT" <<'PYEOF'
+import re
+import sys
+
+ne_port = sys.argv[1]
+with ManagedConfig('/etc/prometheus/prometheus.yml', create_parents=False) as cfg:
+    text = cfg.read_text()
+
+    def repl_job(match):
+        block = match.group(0)
+        return re.sub(r"((?:localhost|127\.0\.0\.1):)\d+", rf"\g<1>{ne_port}", block)
+
+    updated = re.sub(
+        r"(?ms)(^[ \t]*-[ \t]*job_name:[ \t]*['\"]?node_exporter['\"]?.*?)(?=^[ \t]*-[ \t]*job_name:|\Z)",
+        repl_job,
+        text,
+    )
+    if updated != text:
+        cfg.write_text(updated, 0o644)
+PYEOF
 fi
 
 chown -hRP prometheus:prometheus /etc/prometheus /var/lib/prometheus
 
 report_progress 85 "Configuring and starting prometheus.service and node_exporter.service..."
-sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/prometheus.service
+sed -e "s|@AF_APP_PORT@|${APP_PORT}|g" -e "s|@AF_BIND_ADDRESS@|${PROM_BIND_ADDRESS}|g" <<'EOF' > /etc/systemd/system/prometheus.service
 [Unit]
 Description=Prometheus Monitoring Time-Series Database
 Wants=network-online.target
@@ -192,7 +280,7 @@ WantedBy=multi-user.target
 EOF
 chmod 0644 /etc/systemd/system/prometheus.service
 
-cat <<'EOF' > /etc/systemd/system/node_exporter.service
+sed -e "s|@AF_NODE_EXPORTER_PORT@|${NODE_EXPORTER_PORT}|g" -e "s|@AF_BIND_ADDRESS@|${PROM_BIND_ADDRESS}|g" <<'EOF' > /etc/systemd/system/node_exporter.service
 [Unit]
 Description=Prometheus Node Exporter
 Wants=network-online.target
@@ -202,7 +290,7 @@ After=network-online.target
 User=node_exporter
 Group=node_exporter
 Type=simple
-ExecStart=/usr/local/bin/node_exporter
+ExecStart=/usr/local/bin/node_exporter --web.listen-address=@AF_BIND_ADDRESS@:@AF_NODE_EXPORTER_PORT@
 Restart=on-failure
 RestartSec=5
 
@@ -219,12 +307,12 @@ af_logged systemctl restart prometheus
 
 report_progress 95 "Verifying HTTP readiness and running versions for Prometheus and Node Exporter..."
 no_proxy=127.0.0.1 wait_for_service_ready prometheus "$APP_PORT" /-/ready
-no_proxy=127.0.0.1 wait_for_service_ready node_exporter 9100 /metrics
+no_proxy=127.0.0.1 wait_for_service_ready node_exporter "$NODE_EXPORTER_PORT" /metrics
 PROM_LIVE_VERSION="$(curl --noproxy '*' --proto '=http' -fsS --connect-timeout 2 --max-time 5 \
     --max-filesize 65536 "http://127.0.0.1:${APP_PORT}/api/v1/status/buildinfo" |
     jq -er 'select(.status == "success") | .data.version')"
 NE_LIVE_VERSION="$(curl --noproxy '*' --proto '=http' -fsS --connect-timeout 2 --max-time 5 \
-    --max-filesize 4194304 "http://127.0.0.1:9100/metrics" |
+    --max-filesize 4194304 "http://127.0.0.1:${NODE_EXPORTER_PORT}/metrics" |
     sed -nE '/^node_exporter_build_info\{/s/.*[{,]version="([^"]+)".*/\1/p')"
 if [[ "$PROM_LIVE_VERSION" != "$PROM_VERSION" || "$NE_LIVE_VERSION" != "$NE_VERSION" ]]; then
     print_error "Running Prometheus or Node Exporter version does not match the release downloaded."
@@ -234,5 +322,5 @@ queue_app_version /etc/prometheus/.af-version "$PROM_LIVE_VERSION"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Prometheus installed on port ${APP_PORT} (with Node Exporter on port 9100)."
+report_progress 100 "Prometheus installed on port ${APP_PORT} (with Node Exporter on port ${NODE_EXPORTER_PORT})."
 log_info "${PACKAGE_NAME} installed successfully"

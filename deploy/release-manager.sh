@@ -1527,7 +1527,7 @@ build_from_source() {
         --exclude='target/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.pyo' \
         --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.mypy_cache/' \
         --exclude='.ruff_cache/' --exclude='.tox/' --exclude='.venv/' --exclude='.turbo/' \
-        --exclude='*.tsbuildinfo' --exclude='/packages/ui/' --exclude='/packages/plugin/' \
+        --exclude='*.tsbuildinfo' \
         --exclude='/packages/README.md' --exclude='/web/dist/' --exclude='/frontend-rs/dist/' \
         --exclude='/.github/' --exclude='/apps/' --exclude='/docs/' --exclude='/e2e/' \
         --exclude='/plugins/' --exclude='/setup/' --exclude='/tests/' \

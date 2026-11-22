@@ -237,13 +237,11 @@ _depends
         self.assertIn("cargo deny --locked check advisories bans licenses sources", sec_job)
         self.assertIn("cargo audit --file Cargo.lock", sec_job)
         self.assertIn(WORKSPACE_CLIPPY, sec_job)
-        self.assertIn(STRICT_CORE_CLIPPY, sec_job)
         self.assertIn("cargo test --workspace --locked", sec_job)
 
         # 4. Inside release-build, locked clippy and tests precede packaging and runtime verification.
         # inside release-publish, SHA-pinned attest-build-provenance must precede Publish
         clippy_idx = build_job.index(WORKSPACE_CLIPPY)
-        strict_clippy_idx = build_job.index(STRICT_CORE_CLIPPY)
         test_idx = build_job.index("cargo test --workspace --locked")
         stage_idx = build_job.index("bash scripts/build_wasm_frontend.sh --stage")
         build_idx = build_job.index("bash scripts/build_gold.sh")
@@ -251,7 +249,6 @@ _depends
         upload_idx = build_job.index("- name: Upload Release Bundle Artifact")
 
         self.assertLess(clippy_idx, test_idx)
-        self.assertLess(strict_clippy_idx, test_idx)
         self.assertLess(test_idx, stage_idx)
         self.assertLess(stage_idx, build_idx)
         self.assertLess(build_idx, live_idx)

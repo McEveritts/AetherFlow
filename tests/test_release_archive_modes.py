@@ -124,7 +124,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                         if packager == "gold":
                             self.assertEqual(
                                 link_flags.read_text().splitlines(),
-                                ["-C link-arg=-fuse-ld=bfd -C debuginfo=1"] * 2,
+                                ["-C link-arg=-fuse-ld=bfd -C debuginfo=1"],
                             )
                         hashes.add(hashlib.sha256(archive_path.read_bytes()).hexdigest())
                         with tarfile.open(archive_path) as archive:

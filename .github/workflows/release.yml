@@ -189,11 +189,10 @@ jobs:
           cargo audit --file Cargo.lock
           cargo audit --file ../plugins/sdk-template-rust/backend/Cargo.lock
 
-      - name: Rust Static Analysis (workspace + strict restore/release core)
+      - name: Rust Static Analysis (workspace)
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
 
       - name: Verify Pure-Rust Plugin SDK & Generated Scaffold (--locked)
         working-directory: .
@@ -300,7 +299,6 @@ jobs:
         run: |
           test -f Cargo.lock
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
           cargo test --workspace --locked -- --test-threads=1
 
       - name: Verify Updater Survives Its Caller Restart
@@ -393,6 +391,7 @@ jobs:
             test -s "${RELEASE_E2E_DIR}/config/${asset}"
           done
           test ! -e "${RELEASE_E2E_DIR}/config/openapi-v1.yaml"
+          test ! -e "${RELEASE_E2E_DIR}/web/dist/.keep"
           for plugin_asset in plugin.manifest.json backend/hooks/start.sh backend/runtime.py frontend/dist/index.html; do
             test -f "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/${plugin_asset}"
             test -s "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/${plugin_asset}"

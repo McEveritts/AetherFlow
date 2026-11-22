@@ -50,7 +50,14 @@ fi
 report_progress 60 "Uninstalling Flood npm package and removing data directories..."
 af_logged npm uninstall -g @jesec/flood || true
 af_logged npm uninstall -g flood || true
-rm -f /usr/bin/flood /usr/local/bin/flood /var/lib/flood/.af-version
+if [[ -L /usr/bin/flood ]]; then
+    FLOOD_BIN_LINK="$(readlink -- /usr/bin/flood 2>/dev/null || true)"
+    FLOOD_BIN_REAL="$(readlink -m -- /usr/bin/flood 2>/dev/null || true)"
+    if [[ "$FLOOD_BIN_LINK" == /usr/local/bin/flood || "$FLOOD_BIN_LINK" == /usr/local/nodejs/bin/flood || "$FLOOD_BIN_LINK" == /opt/flood/* || "$FLOOD_BIN_REAL" == /usr/local/bin/flood || "$FLOOD_BIN_REAL" == /usr/local/nodejs/bin/flood || "$FLOOD_BIN_REAL" == /opt/flood/* ]]; then
+        rm -f /usr/bin/flood
+    fi
+fi
+rm -f /usr/local/bin/flood /var/lib/flood/.af-version
 safe_rm_rf /opt/flood
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     purge_app_archive_backups "${PACKAGE_NAME}" "/opt/flood"

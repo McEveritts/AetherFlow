@@ -43,7 +43,9 @@ purge_systemd_unit "novnc" "novnc-session" "novnc-xvnc"
 af_logged systemctl daemon-reload
 
 report_progress 60 "Removing ${APP_NAME} packages..."
-DEBIAN_FRONTEND=noninteractive af_logged apt-get remove -y novnc python3-websockify
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
+DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y novnc python3-websockify
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR} and ${DATA_DIR}..."

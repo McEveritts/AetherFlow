@@ -32,7 +32,9 @@ purge_systemd_unit af-kasmvnc.service
 rm -f -- /usr/local/bin/af-kasmvnc-start
 systemctl daemon-reload
 report_progress 60 "Removing KasmVNC; keeping shared desktop dependencies..."
-DEBIAN_FRONTEND=noninteractive af_logged apt-get remove -y kasmvncserver
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
+DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y kasmvncserver
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     safe_rm_rf /var/lib/kasmvnc /etc/kasmvnc
     purge_system_user "af-kasmvnc"
