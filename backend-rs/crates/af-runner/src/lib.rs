@@ -145,20 +145,27 @@ pub enum ReleaseEngineMode {
     LegacyBashRelease,
 }
 
-/// Evaluates release engine selection given explicit rollout flags (`rust_enabled`, `force_bash`).
+/// Evaluates release engine selection given rollout flags (`_rust_enabled`, `force_bash`).
+///
+/// Certified `af-release` (`NativeRustRelease`) is the default engine unless an explicit Bash
+/// escape hatch (`force_bash`) is requested.
 pub fn select_release_engine_with_flags(rust_enabled: bool, force_bash: bool) -> ReleaseEngineMode {
-    if rust_enabled && !force_bash {
-        ReleaseEngineMode::NativeRustRelease
-    } else {
+    let _ = rust_enabled;
+    if force_bash {
         ReleaseEngineMode::LegacyBashRelease
+    } else {
+        ReleaseEngineMode::NativeRustRelease
     }
 }
 
 /// Selects the active release engine for `/v1/self-update`.
 ///
 /// Rollout control:
-/// The engine name and both Rust opt-in aliases share a selector. An explicit Bash
-/// selection or the force-Bash flag takes precedence.
+/// Certified `af-release` (`NativeRustRelease`) is enabled by default. The legacy
+/// `AETHERFLOW_ENABLE_RUST_RELEASE`, `AETHERFLOW_USE_RUST_RELEASE`, and
+/// `AETHERFLOW_RELEASE_ENGINE=rust` aliases remain accepted for backwards compatibility.
+/// Setting `AETHERFLOW_FORCE_BASH_RELEASE=1`/`true` or `AETHERFLOW_RELEASE_ENGINE=bash`
+/// selects the legacy Bash escape hatch (`LegacyBashRelease`).
 pub fn select_release_engine() -> ReleaseEngineMode {
     let enabled = |key| {
         env::var(key)

@@ -844,6 +844,10 @@ async fn test_release_engine_rollout_control_and_self_update_validation() {
     let _env_guard = ENV_TEST_MUTEX.lock().await;
     assert_eq!(
         select_release_engine_with_flags(false, false),
+        ReleaseEngineMode::NativeRustRelease
+    );
+    assert_eq!(
+        select_release_engine_with_flags(false, true),
         ReleaseEngineMode::LegacyBashRelease
     );
     assert_eq!(
@@ -912,7 +916,10 @@ async fn test_release_engine_rollout_control_and_self_update_validation() {
         env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", &fake_systemd_run);
         env::set_var("AETHERFLOW_CLI_BIN", &fake_af);
         env::set_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT", &fake_rm);
-        env::set_var("AETHERFLOW_ENABLE_RUST_RELEASE", "1");
+        // Native Rust af-release is the default without opt-in flags.
+        env::remove_var("AETHERFLOW_ENABLE_RUST_RELEASE");
+        env::remove_var("AETHERFLOW_USE_RUST_RELEASE");
+        env::remove_var("AETHERFLOW_RELEASE_ENGINE");
         env::remove_var("AETHERFLOW_FORCE_BASH_RELEASE");
         env::set_var("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE", "1");
 
@@ -2416,6 +2423,31 @@ fn release_selector_accepts_both_aliases_and_explicit_engine() {
     for key in keys {
         env::remove_var(key);
     }
+
+    // Default with no overrides must be the certified NativeRustRelease engine.
+    assert_eq!(
+        select_release_engine(),
+        ReleaseEngineMode::NativeRustRelease
+    );
+
+    // Explicit legacy Bash escape hatches must override the default.
+    env::set_var("AETHERFLOW_RELEASE_ENGINE", "bash");
+    assert_eq!(
+        select_release_engine(),
+        ReleaseEngineMode::LegacyBashRelease
+    );
+    env::remove_var("AETHERFLOW_RELEASE_ENGINE");
+
+    for force_val in ["1", "true"] {
+        env::set_var("AETHERFLOW_FORCE_BASH_RELEASE", force_val);
+        assert_eq!(
+            select_release_engine(),
+            ReleaseEngineMode::LegacyBashRelease
+        );
+        env::remove_var("AETHERFLOW_FORCE_BASH_RELEASE");
+    }
+
+    // Backwards-compatible opt-in flags stay accepted and yield to FORCE_BASH.
     for key in &keys[..3] {
         env::set_var(
             key,

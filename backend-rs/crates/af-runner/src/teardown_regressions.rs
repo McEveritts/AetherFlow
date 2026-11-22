@@ -29,6 +29,24 @@ async fn teardown_success_respects_explicit_purge_and_only_then_clears_marker() 
                 } else {
                     "remove".to_string()
                 })));
+        assert_eq!(
+            commands.iter().any(|(program, arguments)| {
+                program == "apt-get" && arguments.contains(&"autoremove".to_string())
+            }),
+            purge,
+            "apt-get autoremove must run only when DELETE_DATA/purge is true"
+        );
+        if !purge {
+            assert!(
+                fixture
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|event| !event.message.contains("Purging ")),
+                "non-purge teardown must not emit misleading 'Purging ' messages"
+            );
+        }
     }
 }
 

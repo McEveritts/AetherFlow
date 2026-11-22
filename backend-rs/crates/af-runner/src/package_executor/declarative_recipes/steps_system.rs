@@ -226,11 +226,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 packages,
                 autoremove,
                 ..
-            }
-            | DeclarativeStep::AptPurge {
-                packages,
-                autoremove,
-                ..
             } => {
                 let removal_action = if self.env_cfg.delete_data {
                     "purge"
@@ -261,7 +256,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         ),
                     });
                 }
-                if *autoremove {
+                if *autoremove && self.env_cfg.delete_data {
                     cancel.check(&recipe.package_id)?;
                     let ar_args = vec![
                         "-o".to_string(),

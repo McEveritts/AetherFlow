@@ -11,11 +11,6 @@ pub(super) fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
             description,
             ..
         }
-        | DeclarativeStep::AptPurge {
-            progress_pct,
-            description,
-            ..
-        }
         | DeclarativeStep::AptRemove {
             progress_pct,
             description,

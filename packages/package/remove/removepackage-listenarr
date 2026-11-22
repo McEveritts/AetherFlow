@@ -39,6 +39,9 @@ fi
 log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} service..."
 
+# Stop and purge listenarr.service BEFORE removing INSTALL_DIR so systemd tears down
+# its private mount-namespace BindPaths (/var/lib/listenarr/config -> /opt/Listenarr/config)
+# and /var/lib/listenarr/config stays completely untouched unless DELETE_DATA=true.
 purge_systemd_unit "listenarr"
 af_logged systemctl daemon-reload
 

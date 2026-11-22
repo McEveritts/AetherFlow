@@ -223,12 +223,15 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             format!("{}{}", master_pass, znc_salt).as_bytes(),
         ));
 
+        let bind_address = resolve_bind_address(env::var("AF_BIND_ADDRESS").ok().as_deref())?;
+
         let mut vars: HashMap<String, String> = HashMap::new();
         vars.insert("PACKAGE_ID".to_string(), recipe.package_id.clone());
         vars.insert("APP_NAME".to_string(), recipe.package_id.clone());
         vars.insert("APP_LABEL".to_string(), recipe.label.clone());
         vars.insert("APP_PORT".to_string(), effective_port.to_string());
         vars.insert("LISTEN_PORT".to_string(), listen_port.to_string());
+        vars.insert("BIND_ADDRESS".to_string(), bind_address);
         vars.insert("SSH_PORT".to_string(), "ssh".to_string());
         vars.insert("MASTER_USER".to_string(), master_user);
         vars.insert("MASTER_PASS".to_string(), master_pass);

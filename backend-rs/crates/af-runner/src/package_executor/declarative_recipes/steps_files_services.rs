@@ -71,9 +71,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         ))
                     }
                 }
+                let bind_address = vars
+                    .get("BIND_ADDRESS")
+                    .map(String::as_str)
+                    .unwrap_or("127.0.0.1");
                 settings.insert(
                     "bindIpAddress".to_string(),
-                    serde_json::Value::String("127.0.0.1".to_string()),
+                    serde_json::Value::String(bind_address.to_string()),
                 );
                 journal.stage_file_mutation(&resolved)?;
                 let contents = serde_json::to_vec_pretty(&settings)
@@ -92,7 +96,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     cancel,
                 )
                 .await?;
-                Ok("defaulted Threadfin bindIpAddress to 127.0.0.1 while preserving other settings".to_string())
+                Ok(format!(
+                    "defaulted Threadfin bindIpAddress to {bind_address} while preserving other settings"
+                ))
             }
 
             DeclarativeStep::ResolveGitHubReleaseTag {

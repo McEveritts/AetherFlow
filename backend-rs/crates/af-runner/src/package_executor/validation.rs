@@ -205,12 +205,75 @@ pub fn validate_chown_target_path(logical_path: &str) -> Result<(), PackageExecu
     Ok(())
 }
 
+/// Resolves and validates an optional bind address (`AF_BIND_ADDRESS`), defaulting to `"127.0.0.1"`.
+/// Rejects whitespace, control characters, shell/config metacharacters, path traversal, and
+/// malformed bracketed expressions.
+pub(crate) fn resolve_bind_address(raw: Option<&str>) -> Result<String, PackageExecutorError> {
+    let Some(raw_val) = raw else {
+        return Ok("127.0.0.1".to_string());
+    };
+    let trimmed = raw_val.trim();
+    if trimmed.is_empty() {
+        return Ok("127.0.0.1".to_string());
+    }
+    if trimmed.len() > 128
+        || trimmed.starts_with('-')
+        || trimmed.contains("..")
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b':' | b'-' | b'[' | b']'))
+    {
+        return Err(PackageExecutorError::Validation(format!(
+            "Invalid AF_BIND_ADDRESS value: {:?}",
+            raw_val
+        )));
+    }
+    let open_brackets = trimmed.bytes().filter(|&b| b == b'[').count();
+    let close_brackets = trimmed.bytes().filter(|&b| b == b']').count();
+    if open_brackets != close_brackets
+        || open_brackets > 1
+        || (open_brackets == 1 && (!trimmed.starts_with('[') || !trimmed.ends_with(']')))
+    {
+        return Err(PackageExecutorError::Validation(format!(
+            "Invalid AF_BIND_ADDRESS bracket syntax: {:?}",
+            raw_val
+        )));
+    }
+    if open_brackets == 1 {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if inner.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(PackageExecutorError::Validation(format!(
+                "Invalid IPv6 AF_BIND_ADDRESS value: {:?}",
+                raw_val
+            )));
+        }
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.parse::<std::net::IpAddr>().is_ok() || trimmed.eq_ignore_ascii_case("localhost") {
+        return Ok(trimmed.to_string());
+    }
+    Err(PackageExecutorError::Validation(format!(
+        "Invalid AF_BIND_ADDRESS value (expected IP address or localhost): {:?}",
+        raw_val
+    )))
+}
+
+/// Converts a configured bind address into a connectable HTTP host component for local readiness probes.
+pub(crate) fn probe_host_for_bind_address(bind_address: &str) -> String {
+    let trimmed = bind_address.trim();
+    match trimmed {
+        "" | "0.0.0.0" | "*" => "127.0.0.1".to_string(),
+        "::" | "[::]" => "[::1]".to_string(),
+        other if other.contains(':') && !other.starts_with('[') => format!("[{other}]"),
+        other => other.to_string(),
+    }
+}
+
 pub(super) fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecutorError> {
     match step {
         DeclarativeStep::AptUpdate { .. } => Ok(()),
         DeclarativeStep::AptInstall { packages, .. }
-        | DeclarativeStep::AptRemove { packages, .. }
-        | DeclarativeStep::AptPurge { packages, .. } => {
+        | DeclarativeStep::AptRemove { packages, .. } => {
             if packages.is_empty() {
                 return Err(PackageExecutorError::Validation(
                     "APT step requires at least one package".into(),

@@ -179,15 +179,10 @@ pub enum DeclarativeStep {
         progress_pct: u8,
         description: String,
     },
+    /// Runs `apt-get remove -y -qq <packages>` when `delete_data == false`, or
+    /// `apt-get purge -y -qq <packages>` (plus optional `autoremove`) when `delete_data == true`.
+    #[serde(alias = "apt_purge")]
     AptRemove {
-        packages: Vec<String>,
-        autoremove: bool,
-        ignore_errors: bool,
-        progress_pct: u8,
-        description: String,
-    },
-    /// Runs `apt-get purge -y -qq <packages>` and optional `autoremove` (non-fatal on missing packages).
-    AptPurge {
         packages: Vec<String>,
         autoremove: bool,
         ignore_errors: bool,

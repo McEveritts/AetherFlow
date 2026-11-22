@@ -253,8 +253,8 @@ fn self_update_launch_response(
 }
 
 /// Validates and executes a `SelfUpdateRequest` using either the native Rust `af-release`
-/// engine (when `AETHERFLOW_ENABLE_RUST_RELEASE=1` and not `AETHERFLOW_FORCE_BASH_RELEASE=1`)
-/// or the legacy `deploy/release-manager.sh` script.
+/// engine (the default, unless `AETHERFLOW_FORCE_BASH_RELEASE=1` or
+/// `AETHERFLOW_RELEASE_ENGINE=bash` is set) or the legacy `deploy/release-manager.sh` script.
 ///
 /// Experimental channel safety: `af_release::validate_self_update_request` validates
 /// `stable`, `nightly`, and `experimental` channels.

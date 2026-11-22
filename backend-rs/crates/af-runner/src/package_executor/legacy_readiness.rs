@@ -22,6 +22,24 @@ const FORBIDDEN_QUERY_PARAM_KEYS: &[&str] = &[
     "auth",
 ];
 
+/// Default post-sandbox readiness wait budget for fast native/Go/lightweight services.
+pub(crate) const DEFAULT_POST_SANDBOX_READINESS_TIMEOUT_SECS: u64 = 30;
+
+/// Extended post-sandbox readiness budget for heavy Python/Node runtimes.
+pub(crate) const HEAVY_PYTHON_NODE_POST_SANDBOX_READINESS_TIMEOUT_SECS: u64 = 60;
+
+/// Extended post-sandbox readiness budget for heavy managed runtimes (.NET / Java / Mono)
+/// whose cold-start JIT + migration startup commonly exceeds 30s on constrained CPUs or TCG.
+pub(crate) const HEAVY_MANAGED_POST_SANDBOX_READINESS_TIMEOUT_SECS: u64 = 120;
+
+/// Strict inclusive bounds for operator `AF_POST_SANDBOX_READINESS_TIMEOUT_SECS` override.
+pub(crate) const MIN_POST_SANDBOX_READINESS_TIMEOUT_SECS: u64 = 10;
+pub(crate) const MAX_POST_SANDBOX_READINESS_TIMEOUT_SECS: u64 = 300;
+
+/// Environment variable allowing bounded production tuning of post-sandbox readiness timeout.
+pub(crate) const POST_SANDBOX_READINESS_TIMEOUT_ENV: &str =
+    "AF_POST_SANDBOX_READINESS_TIMEOUT_SECS";
+
 /// Timing policy for post-install legacy systemd sandbox activation and readiness checks.
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyReadinessConfig {
@@ -37,7 +55,7 @@ impl Default for LegacyReadinessConfig {
     fn default() -> Self {
         Self {
             systemctl_timeout: Duration::from_secs(45),
-            readiness_timeout: Duration::from_secs(30),
+            readiness_timeout: Duration::from_secs(DEFAULT_POST_SANDBOX_READINESS_TIMEOUT_SECS),
             poll_interval: Duration::from_millis(250),
             non_http_settle: Duration::from_millis(250),
             http_connect_timeout: Duration::from_secs(2),
@@ -46,10 +64,69 @@ impl Default for LegacyReadinessConfig {
     }
 }
 
+/// Parses an optional `AF_POST_SANDBOX_READINESS_TIMEOUT_SECS` override, strictly bounded to
+/// `[10, 300]` seconds. Unset, non-numeric, or out-of-range values return `None` so callers
+/// fall back to the runtime-profile budget.
+pub(crate) fn parse_post_sandbox_readiness_timeout_override(raw: Option<&str>) -> Option<Duration> {
+    let secs = raw?.trim().parse::<u64>().ok()?;
+    if (MIN_POST_SANDBOX_READINESS_TIMEOUT_SECS..=MAX_POST_SANDBOX_READINESS_TIMEOUT_SECS)
+        .contains(&secs)
+    {
+        Some(Duration::from_secs(secs))
+    } else {
+        None
+    }
+}
+
+impl LegacyReadinessConfig {
+    /// Builds a runtime-profile-aware readiness configuration for `profile` and `package_id`.
+    /// - Heavy managed runtimes (`dotnet`, `java`, `mono`): 120s
+    /// - Heavy Python/Node services (`homeassistant`, `paperless-ngx`, `dispatcharr`, `n8n`): 60s
+    /// - Native/Go and other services: 30s
+    pub(crate) fn for_profile(profile: &str, package_id: &str) -> Self {
+        let mut cfg = Self::default();
+        let profile_lower = profile.trim().to_ascii_lowercase();
+        let pkg_lower = package_id.trim().to_ascii_lowercase();
+        let secs = if matches!(profile_lower.as_str(), "dotnet" | "java" | "mono") {
+            HEAVY_MANAGED_POST_SANDBOX_READINESS_TIMEOUT_SECS
+        } else if matches!(
+            pkg_lower.as_str(),
+            "homeassistant" | "paperless-ngx" | "dispatcharr" | "n8n"
+        ) {
+            HEAVY_PYTHON_NODE_POST_SANDBOX_READINESS_TIMEOUT_SECS
+        } else {
+            DEFAULT_POST_SANDBOX_READINESS_TIMEOUT_SECS
+        };
+        cfg.readiness_timeout = Duration::from_secs(secs);
+        cfg
+    }
+
+    /// Resolves the runtime-profile-aware readiness configuration for `package_id`, applying
+    /// `env_override` when valid and within `[10, 300]` seconds.
+    pub(crate) fn for_package_with_override(package_id: &str, env_override: Option<&str>) -> Self {
+        let profile = crate::get_runner_package_definition(package_id)
+            .map(|pkg| pkg.sandbox_profile)
+            .unwrap_or_default();
+        let mut cfg = Self::for_profile(&profile, package_id);
+        if let Some(override_timeout) = parse_post_sandbox_readiness_timeout_override(env_override)
+        {
+            cfg.readiness_timeout = override_timeout;
+        }
+        cfg
+    }
+
+    /// Resolves the runtime-profile-aware readiness configuration for `package_id` in production,
+    /// honoring an optional bounded `AF_POST_SANDBOX_READINESS_TIMEOUT_SECS` override (`[10, 300]`).
+    pub(crate) fn for_package(package_id: &str) -> Self {
+        let env_override = env::var(POST_SANDBOX_READINESS_TIMEOUT_ENV).ok();
+        Self::for_package_with_override(package_id, env_override.as_deref())
+    }
+}
+
 #[cfg(test)]
 impl LegacyReadinessConfig {
-    pub(crate) fn from_test_env() -> Self {
-        let mut cfg = Self::default();
+    pub(crate) fn from_test_env_for_package(package_id: &str) -> Self {
+        let mut cfg = Self::for_package(package_id);
         if let Ok(ms) = env::var("AETHERFLOW_TEST_READINESS_TIMEOUT_MS") {
             if let Ok(v) = ms.trim().parse::<u64>() {
                 cfg.readiness_timeout = Duration::from_millis(v.max(50));
@@ -1714,5 +1791,133 @@ mod tests {
         .await
         .expect_err("service dying immediately after HTTP 200 must fail closed");
         assert!(err.to_string().contains("did not remain active"), "{err}");
+    }
+
+    #[test]
+    fn profile_aware_readiness_budget_scales_for_managed_and_heavy_runtimes() {
+        for managed_pkg in [
+            "listenarr",
+            "emby",
+            "jellyfin",
+            "sonarr",
+            "radarr",
+            "lidarr",
+            "prowlarr",
+            "readarr",
+            "ombi",
+            "jackett",
+            "kavita",
+            "duplicati",
+            "requestrr",
+            "filebot",
+            "piped",
+        ] {
+            let cfg = LegacyReadinessConfig::for_package_with_override(managed_pkg, None);
+            assert_eq!(
+                cfg.readiness_timeout,
+                Duration::from_secs(HEAVY_MANAGED_POST_SANDBOX_READINESS_TIMEOUT_SECS),
+                "expected 120s managed runtime readiness budget for {managed_pkg}"
+            );
+        }
+
+        assert_eq!(
+            LegacyReadinessConfig::for_profile("mono", "custom-mono").readiness_timeout,
+            Duration::from_secs(120)
+        );
+
+        for heavy_script_pkg in ["homeassistant", "paperless-ngx", "dispatcharr", "n8n"] {
+            let cfg = LegacyReadinessConfig::for_package_with_override(heavy_script_pkg, None);
+            assert_eq!(
+                cfg.readiness_timeout,
+                Duration::from_secs(HEAVY_PYTHON_NODE_POST_SANDBOX_READINESS_TIMEOUT_SECS),
+                "expected 60s heavy Python/Node readiness budget for {heavy_script_pkg}"
+            );
+        }
+
+        for fast_pkg in ["rclone", "threadfin", "syncthing", "qbittorrent"] {
+            let cfg = LegacyReadinessConfig::for_package_with_override(fast_pkg, None);
+            assert_eq!(
+                cfg.readiness_timeout,
+                Duration::from_secs(DEFAULT_POST_SANDBOX_READINESS_TIMEOUT_SECS),
+                "expected 30s native/Go readiness budget for {fast_pkg}"
+            );
+        }
+    }
+
+    #[test]
+    fn post_sandbox_readiness_timeout_override_is_strictly_bounded() {
+        assert_eq!(
+            LegacyReadinessConfig::for_package_with_override("listenarr", Some("10"))
+                .readiness_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            LegacyReadinessConfig::for_package_with_override("rclone", Some(" 75 "))
+                .readiness_timeout,
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            LegacyReadinessConfig::for_package_with_override("rclone", Some("300"))
+                .readiness_timeout,
+            Duration::from_secs(300)
+        );
+
+        for invalid in ["", " ", "0", "9", "301", "-5", "abc", "120s"] {
+            assert_eq!(
+                parse_post_sandbox_readiness_timeout_override(Some(invalid)),
+                None,
+                "expected out-of-range/invalid override {invalid:?} to be rejected"
+            );
+            assert_eq!(
+                LegacyReadinessConfig::for_package_with_override("listenarr", Some(invalid))
+                    .readiness_timeout,
+                Duration::from_secs(120),
+                "listenarr should fall back to 120s on invalid override {invalid:?}"
+            );
+            assert_eq!(
+                LegacyReadinessConfig::for_package_with_override("rclone", Some(invalid))
+                    .readiness_timeout,
+                Duration::from_secs(30),
+                "rclone should fall back to 30s on invalid override {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn listenarr_sandbox_dropin_supports_dotnet_and_bindpaths_config() {
+        let pkg = crate::get_runner_package_definition("listenarr")
+            .expect("listenarr catalog entry must exist");
+        assert_eq!(pkg.sandbox_profile, "dotnet");
+        let dropin = crate::render_systemd_sandbox_dropin(
+            &pkg.sandbox_profile,
+            "listenarr.service",
+            &pkg.sandbox_read_write,
+        );
+        assert!(dropin.contains("ProtectSystem=strict"));
+        assert!(
+            !dropin.contains("MemoryDenyWriteExecute=yes"),
+            "dotnet runtime requires JIT RWX mappings"
+        );
+        let rw_line = dropin
+            .lines()
+            .find(|line| line.starts_with("ReadWritePaths="))
+            .expect("listenarr drop-in must declare ReadWritePaths");
+        let rw_entries: Vec<&str> = rw_line
+            .trim_start_matches("ReadWritePaths=")
+            .split_whitespace()
+            .map(|entry| entry.trim_start_matches('-'))
+            .collect();
+        assert!(
+            rw_entries.contains(&"/opt/Listenarr"),
+            "missing /opt/Listenarr in {rw_line}"
+        );
+        assert!(
+            rw_entries.contains(&"/var/lib/listenarr"),
+            "missing /var/lib/listenarr in {rw_line}"
+        );
+        assert!(
+            !rw_entries.contains(&"/opt/Listenarr/config"),
+            "ReadWritePaths must not duplicate the exact BindPaths= target /opt/Listenarr/config: {rw_line}"
+        );
     }
 }

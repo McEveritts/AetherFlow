@@ -183,10 +183,17 @@ class ListenarrReleasePolicyTests(unittest.TestCase):
             self.assertTrue((fixture.root / "opt/Listenarr/wwwroot/index.html").is_file())
             self.assertNotIn("must not be executed", result.stdout + result.stderr)
 
-            # Config symlink points to /var/lib/listenarr/config
-            config_link = fixture.root / "opt/Listenarr/config"
-            self.assertTrue(config_link.is_symlink())
-            self.assertEqual(os.path.realpath(config_link), os.path.realpath(fixture.root / "var/lib/listenarr/config"))
+            # Real mount-point directory inside /opt/Listenarr (0750) paired with systemd BindPaths=
+            config_dir = fixture.root / "opt/Listenarr/config"
+            var_config_dir = fixture.root / "var/lib/listenarr/config"
+            self.assertTrue(config_dir.is_dir())
+            self.assertFalse(config_dir.is_symlink())
+            self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o750)
+            self.assertTrue(var_config_dir.is_dir())
+            self.assertFalse(var_config_dir.is_symlink())
+            self.assertEqual(stat.S_IMODE(var_config_dir.stat().st_mode), 0o750)
+            unit_text = (fixture.root / "etc/systemd/system/listenarr.service").read_text()
+            self.assertIn(f"BindPaths={var_config_dir}:{config_dir}", unit_text)
 
             # Operator-visible log states prerelease policy and exact asset selection
             install_log = (fixture.root / "var/log/aetherflow/install-listenarr.log").read_text()
@@ -458,22 +465,25 @@ class ListenarrReleasePolicyTests(unittest.TestCase):
             self.assertEqual(update_105.returncode, 0, update_105.stdout + update_105.stderr)
             self.assertEqual((fixture.root / "opt/Listenarr/.af-version").read_text(), "1.10.5-canary\n")
 
-            config_link = fixture.root / "opt/Listenarr/config"
-            self.assertTrue(config_link.is_symlink())
-            self.assertEqual(os.path.realpath(config_link), os.path.realpath(fixture.root / "var/lib/listenarr/config"))
+            config_dir = fixture.root / "opt/Listenarr/config"
+            var_config_dir = fixture.root / "var/lib/listenarr/config"
+            self.assertTrue(config_dir.is_dir())
+            self.assertFalse(config_dir.is_symlink())
+            self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o750)
             self.assertEqual(
-                (fixture.root / "var/lib/listenarr/config/database/listenarr.db").read_text(),
+                (var_config_dir / "database/listenarr.db").read_text(),
                 "SQLITE-LEGACY-DB-CONTENT",
             )
             self.assertEqual(
-                (fixture.root / "var/lib/listenarr/config/appsettings.json").read_text(),
+                (var_config_dir / "appsettings.json").read_text(),
                 '{"OperatorSetting": "keep-this"}\n',
             )
             unit_text = (fixture.root / "etc/systemd/system/listenarr.service").read_text()
+            self.assertIn(f"BindPaths={var_config_dir}:{config_dir}", unit_text)
             self.assertIn("ASPNETCORE_URLS=http://127.0.0.1:4646", unit_text)
             self.assertIn('Environment="LISTENARR_CUSTOM_FLAG=preserved-value"', unit_text)
 
-            # Subsequent update to v1.10.6-canary retains migrated config and service customizations
+            # Subsequent update to v1.10.6-canary retains migrated config, real mount-point dir, and service customizations
             update_106 = fixture.run(
                 "update",
                 port=0,
@@ -483,31 +493,43 @@ class ListenarrReleasePolicyTests(unittest.TestCase):
             )
             self.assertEqual(update_106.returncode, 0, update_106.stdout + update_106.stderr)
             self.assertEqual((fixture.root / "opt/Listenarr/.af-version").read_text(), "1.10.6-canary\n")
+            self.assertTrue(config_dir.is_dir())
+            self.assertFalse(config_dir.is_symlink())
+            self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o750)
             self.assertEqual(
-                (fixture.root / "var/lib/listenarr/config/database/listenarr.db").read_text(),
+                (var_config_dir / "database/listenarr.db").read_text(),
                 "SQLITE-LEGACY-DB-CONTENT",
             )
-            self.assertIn("ASPNETCORE_URLS=http://127.0.0.1:4646", (fixture.root / "etc/systemd/system/listenarr.service").read_text())
+            unit_106 = (fixture.root / "etc/systemd/system/listenarr.service").read_text()
+            self.assertIn("ASPNETCORE_URLS=http://127.0.0.1:4646", unit_106)
+            self.assertIn(f"BindPaths={var_config_dir}:{config_dir}", unit_106)
 
-            # Ordinary uninstall removes /opt/Listenarr (unlinking symlink) without deleting /var/lib/listenarr/config
+            # Ordinary uninstall stops/purges listenarr.service BEFORE removing /opt/Listenarr,
+            # leaving /var/lib/listenarr/config 100% preserved.
             removed = fixture.run("remove", DELETE_DATA="false")
             self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
             self.assertFalse((fixture.root / "opt/Listenarr").exists())
             self.assertEqual(
-                (fixture.root / "var/lib/listenarr/config/database/listenarr.db").read_text(),
+                (var_config_dir / "database/listenarr.db").read_text(),
                 "SQLITE-LEGACY-DB-CONTENT",
             )
 
-            # Reinstall after retained uninstall re-links /opt/Listenarr/config and preserves data
+            # Reinstall after retained uninstall recreates real /opt/Listenarr/config mount-point and BindPaths=
             reinstalled = fixture.run(
                 "install",
                 AF_FIXTURE_LISTENARR_RELEASES_FILE=str(releases_file),
                 AF_FIXTURE_LISTENARR_ASSET_MAP=str(asset_map_file),
             )
             self.assertEqual(reinstalled.returncode, 0, reinstalled.stdout + reinstalled.stderr)
-            self.assertTrue((fixture.root / "opt/Listenarr/config").is_symlink())
+            self.assertTrue(config_dir.is_dir())
+            self.assertFalse(config_dir.is_symlink())
+            self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o750)
+            self.assertIn(
+                f"BindPaths={var_config_dir}:{config_dir}",
+                (fixture.root / "etc/systemd/system/listenarr.service").read_text(),
+            )
             self.assertEqual(
-                (fixture.root / "opt/Listenarr/config/database/listenarr.db").read_text(),
+                (var_config_dir / "database/listenarr.db").read_text(),
                 "SQLITE-LEGACY-DB-CONTENT",
             )
 
@@ -515,6 +537,75 @@ class ListenarrReleasePolicyTests(unittest.TestCase):
             purged = fixture.run("remove", DELETE_DATA="true")
             self.assertEqual(purged.returncode, 0, purged.stdout + purged.stderr)
             self.assertFalse((fixture.root / "var/lib/listenarr").exists())
+
+    def test_legacy_symlink_upgrade_replaces_symlink_with_bind_mount_directory_and_rejects_unexpected_links(self):
+        with self.subTest(case="valid-legacy-symlink-upgrade"), InstallerFixture("listenarr") as fixture:
+            z_106, sha_106 = _build_listenarr_zip(fixture.root / "listenarr-1.10.6-canary.zip", "1.10.6-canary")
+            releases_file = fixture.file("listenarr-releases.json", json.dumps([
+                _official_release("v1.10.6-canary", digest=f"sha256:{sha_106}"),
+            ]))
+            asset_map_file = fixture.file("listenarr-assets.json", json.dumps({
+                "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip": str(z_106),
+            }))
+
+            # Seed prior symlink-based install (/opt/Listenarr/config -> /var/lib/listenarr/config)
+            fixture.file("opt/Listenarr/Listenarr.Api", "#!/bin/sh\nexit 0\n").chmod(0o755)
+            fixture.file("opt/Listenarr/.af-version", "1.10.5-canary\n")
+            fixture.file("var/lib/listenarr/config/database/listenarr.db", "SYMLINK-ERA-DB")
+            fixture.file("var/lib/listenarr/config/appsettings/appsettings.json", '{"migrated": true}\n')
+            var_config_dir = fixture.root / "var/lib/listenarr/config"
+            legacy_link = fixture.root / "opt/Listenarr/config"
+            legacy_link.symlink_to(var_config_dir)
+
+            result = fixture.run(
+                "update",
+                AF_FIXTURE_LISTENARR_RELEASES_FILE=str(releases_file),
+                AF_FIXTURE_LISTENARR_ASSET_MAP=str(asset_map_file),
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(legacy_link.is_dir())
+            self.assertFalse(legacy_link.is_symlink())
+            self.assertEqual(stat.S_IMODE(legacy_link.stat().st_mode), 0o750)
+            self.assertEqual((var_config_dir / "database/listenarr.db").read_text(), "SYMLINK-ERA-DB")
+            self.assertEqual(
+                (var_config_dir / "appsettings/appsettings.json").read_text(),
+                '{"migrated": true}\n',
+            )
+            unit_text = (fixture.root / "etc/systemd/system/listenarr.service").read_text()
+            self.assertIn(f"BindPaths={var_config_dir}:{legacy_link}", unit_text)
+
+        with self.subTest(case="unexpected-config-symlink-rejected"), InstallerFixture("listenarr") as fixture:
+            z_106, sha_106 = _build_listenarr_zip(fixture.root / "listenarr-1.10.6-canary.zip", "1.10.6-canary")
+            releases_file = fixture.file("listenarr-releases.json", json.dumps([
+                _official_release("v1.10.6-canary", digest=f"sha256:{sha_106}"),
+            ]))
+            asset_map_file = fixture.file("listenarr-assets.json", json.dumps({
+                "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip": str(z_106),
+            }))
+
+            fixture.file("opt/Listenarr/Listenarr.Api", "#!/bin/sh\nexit 0\n").chmod(0o755)
+            fixture.file("opt/Listenarr/.af-version", "1.10.5-canary\n")
+            foreign_dir = fixture.root / "etc/foreign-config"
+            foreign_dir.mkdir(parents=True, exist_ok=True)
+            (fixture.root / "opt/Listenarr/config").symlink_to(foreign_dir)
+
+            result = fixture.run(
+                "update",
+                AF_FIXTURE_LISTENARR_RELEASES_FILE=str(releases_file),
+                AF_FIXTURE_LISTENARR_ASSET_MAP=str(asset_map_file),
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("unexpected listenarr config symlink", (result.stdout + result.stderr).lower())
+            # Rollback restored previous symlink and version cleanly
+            self.assertEqual((fixture.root / "opt/Listenarr/.af-version").read_text(), "1.10.5-canary\n")
+            self.assertTrue((fixture.root / "opt/Listenarr/config").is_symlink())
+
+        # Static contract check: removepackage-listenarr purges/stops listenarr.service BEFORE deleting /opt/Listenarr
+        remove_text = (ROOT / "packages/package/remove/removepackage-listenarr").read_text(encoding="utf-8")
+        self.assertLess(
+            remove_text.index('purge_systemd_unit "listenarr"'),
+            remove_text.index('safe_rm_rf "${INSTALL_DIR}"'),
+        )
 
     def test_legacy_migration_fails_closed_and_rolls_back_on_symlink_or_conflict(self):
         # Case A: Unsafe symlink inside legacy /opt/Listenarr/config

@@ -1420,7 +1420,10 @@ pub struct MaintenanceHelperOwnership {
     pub rationale: &'static str,
 }
 
-/// Returns the canonical ownership table for all `packages/system/*` maintenance helpers.
+/// Returns the canonical ownership table for all tracked `packages/system/*` maintenance helpers.
+///
+/// Note: legacy `packages/system/af-heal` was retired and removed from disk once
+/// `af_services::workers::start_heal_worker` fully replaced it in Rust.
 pub const fn maintenance_helper_ownership_registry() -> &'static [MaintenanceHelperOwnership] {
     &[
         MaintenanceHelperOwnership {
@@ -1429,13 +1432,6 @@ pub const fn maintenance_helper_ownership_registry() -> &'static [MaintenanceHel
             rust_replacement_or_entry: "af_host::{create_sqlite_snapshot_backup, create_host_archive_backup, verify_backup_artifact, preflight_restore_directory, preflight_tar_gz_archive}",
             destructive_or_privileged: true,
             rationale: "Shared backup foundation in af-host provides versioned manifests, WAL-safe SQLite snapshots, SHA-256 sidecars, chunk split/assemble, and non-destructive restore preflight.",
-        },
-        MaintenanceHelperOwnership {
-            script_path: "packages/system/af-heal",
-            owner: MaintenanceOwnerCrate::AfServices,
-            rust_replacement_or_entry: "af_services::workers::start_heal_worker",
-            destructive_or_privileged: true,
-            rationale: "Systemd unit health polling with exponential backoff runs in af-services and dispatches restarts through af-runner.",
         },
         MaintenanceHelperOwnership {
             script_path: "packages/system/af-systemd-sandbox",
@@ -1645,5 +1641,27 @@ mod p3_backup_tests {
         }
 
         let _ = fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn maintenance_helper_ownership_registry_matches_scripts_on_disk() {
+        let registry = maintenance_helper_ownership_registry();
+        assert!(!registry.is_empty());
+        assert!(
+            !registry
+                .iter()
+                .any(|entry| entry.script_path == "packages/system/af-heal"),
+            "retired packages/system/af-heal script must not remain in ownership registry"
+        );
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        for entry in registry {
+            let full_path = repo_root.join(entry.script_path);
+            assert!(
+                full_path.is_file(),
+                "registered maintenance helper {} does not exist on disk at {}",
+                entry.script_path,
+                full_path.display()
+            );
+        }
     }
 }

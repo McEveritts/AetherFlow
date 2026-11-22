@@ -148,10 +148,12 @@ pub(crate) use stream_dispatch::{
     format_exit_failure_diagnostics,
 };
 
-#[allow(unused_imports)]
-pub(crate) use validation::validate_path_ancestors_with_lstat;
 pub use validation::*;
 use validation::{normalize_unit_filename, validate_step};
+#[allow(unused_imports)]
+pub(crate) use validation::{
+    probe_host_for_bind_address, resolve_bind_address, validate_path_ancestors_with_lstat,
+};
 
 #[cfg(test)]
 mod tests;

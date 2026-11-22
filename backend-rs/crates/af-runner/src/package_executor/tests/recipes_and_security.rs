@@ -1578,8 +1578,8 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
     let apt_idx = recipe
         .remove_steps
         .iter()
-        .position(|s| matches!(s, DeclarativeStep::AptPurge { .. }))
-        .expect("mergerfs remove_steps must include AptPurge");
+        .position(|s| matches!(s, DeclarativeStep::AptRemove { .. }))
+        .expect("mergerfs remove_steps must include AptRemove");
     assert!(
         unmount_idx < apt_idx,
         "mergerfs UnmountPaths must run before APT removal"
@@ -1688,4 +1688,248 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
         b"keep-mergerfs"
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn declarative_recipes_thread_custom_af_bind_address_and_reject_invalid() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+
+    assert_eq!(resolve_bind_address(None).unwrap(), "127.0.0.1");
+    assert_eq!(resolve_bind_address(Some("")).unwrap(), "127.0.0.1");
+    assert_eq!(
+        resolve_bind_address(Some("127.0.0.2")).unwrap(),
+        "127.0.0.2"
+    );
+    assert_eq!(resolve_bind_address(Some("0.0.0.0")).unwrap(), "0.0.0.0");
+    assert_eq!(resolve_bind_address(Some("::1")).unwrap(), "::1");
+    for bad in [
+        "127.0.0.1; id",
+        "localhost\nfoo",
+        "not-an-ip",
+        "127.0.0.1:80",
+    ] {
+        assert!(
+            resolve_bind_address(Some(bad)).is_err(),
+            "expected invalid AF_BIND_ADDRESS {bad:?} to fail"
+        );
+    }
+    assert_eq!(probe_host_for_bind_address("0.0.0.0"), "127.0.0.1");
+    assert_eq!(probe_host_for_bind_address("::"), "[::1]");
+    assert_eq!(probe_host_for_bind_address("::1"), "[::1]");
+    assert_eq!(probe_host_for_bind_address("127.0.0.2"), "127.0.0.2");
+
+    let prev_bind = env::var_os("AF_BIND_ADDRESS");
+    env::set_var("AF_BIND_ADDRESS", "127.0.0.2");
+
+    // 1. Threadfin threads custom AF_BIND_ADDRESS into unit + settings.json
+    let tf_root = create_isolated_test_dir("threadfin-custom-bind");
+    let tf_env = PackageExecutionEnv::isolated(&tf_root);
+    let elf_bytes = create_mock_elf_payload_for_arch(4096, 62);
+    let cache_dir = tf_env.artifact_cache_dir.clone().unwrap();
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("Threadfin_linux_amd64"), &elf_bytes).unwrap();
+    let mut tf_recipe = get_declarative_recipe("threadfin").unwrap();
+    for step in tf_recipe
+        .install_steps
+        .iter_mut()
+        .chain(tf_recipe.update_steps.iter_mut())
+    {
+        if let DeclarativeStep::DownloadBinary { verification, .. } = step {
+            verification.expected_sha256 = Some(hex::encode(Sha256::digest(&elf_bytes)));
+        }
+    }
+    DeclarativePackageExecutor::with_runner(tf_env, MockCommandRunner::default())
+        .execute_recipe(
+            &tf_recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("threadfin install with custom AF_BIND_ADDRESS must succeed");
+    let tf_unit = fs::read_to_string(tf_root.join("etc/systemd/system/threadfin.service")).unwrap();
+    assert!(
+        tf_unit.contains("-bind=127.0.0.2"),
+        "threadfin unit missing custom bind address: {tf_unit}"
+    );
+    let tf_settings =
+        fs::read_to_string(tf_root.join("var/lib/threadfin/conf/settings.json")).unwrap();
+    assert!(
+        tf_settings.contains("\"bindIpAddress\": \"127.0.0.2\""),
+        "threadfin settings.json missing custom bindIpAddress: {tf_settings}"
+    );
+    let _ = fs::remove_dir_all(&tf_root);
+
+    // 2. ZNC threads custom AF_BIND_ADDRESS into znc.conf
+    let znc_root = create_isolated_test_dir("znc-custom-bind");
+    let znc_env = PackageExecutionEnv::isolated(&znc_root);
+    let znc_recipe = get_declarative_recipe("znc").unwrap();
+    DeclarativePackageExecutor::with_runner(znc_env, MockCommandRunner::default())
+        .execute_recipe(
+            &znc_recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("znc install with custom AF_BIND_ADDRESS must succeed");
+    let znc_conf = fs::read_to_string(znc_root.join("var/lib/znc/configs/znc.conf")).unwrap();
+    assert!(
+        znc_conf.contains("Host = 127.0.0.2"),
+        "znc.conf missing custom Host bind address: {znc_conf}"
+    );
+    let _ = fs::remove_dir_all(&znc_root);
+
+    // 3. Netdata threads custom AF_BIND_ADDRESS into netdata.conf
+    let nd_root = create_isolated_test_dir("netdata-custom-bind");
+    let nd_env = PackageExecutionEnv::isolated(&nd_root);
+    let nd_recipe = get_declarative_recipe("netdata").unwrap();
+    DeclarativePackageExecutor::with_runner(nd_env, MockCommandRunner::default())
+        .execute_recipe(
+            &nd_recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("netdata install with custom AF_BIND_ADDRESS must succeed");
+    let nd_conf = fs::read_to_string(nd_root.join("etc/netdata/netdata.conf")).unwrap();
+    assert!(
+        nd_conf.contains("bind to = 127.0.0.2"),
+        "netdata.conf missing custom bind address: {nd_conf}"
+    );
+    let _ = fs::remove_dir_all(&nd_root);
+
+    // 4. Invalid AF_BIND_ADDRESS fails closed before mutating filesystem
+    env::set_var("AF_BIND_ADDRESS", "127.0.0.1; touch /tmp/pwned");
+    let bad_root = create_isolated_test_dir("netdata-bad-bind");
+    let bad_env = PackageExecutionEnv::isolated(&bad_root);
+    let err = DeclarativePackageExecutor::with_runner(bad_env, MockCommandRunner::default())
+        .execute_recipe(
+            &nd_recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect_err("invalid AF_BIND_ADDRESS must fail closed");
+    assert!(
+        err.to_string().contains("AF_BIND_ADDRESS"),
+        "unexpected error: {err}"
+    );
+    assert!(!bad_root.join("etc/netdata/netdata.conf").exists());
+    let _ = fs::remove_dir_all(&bad_root);
+
+    match prev_bind {
+        Some(v) => env::set_var("AF_BIND_ADDRESS", v),
+        None => env::remove_var("AF_BIND_ADDRESS"),
+    }
+}
+
+#[tokio::test]
+async fn mergerfs_install_sets_0775_mount_directories_and_threadfin_deduplicates_update_steps() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+
+    // Threadfin update_steps must reuse install_steps identically without drift
+    let tf_recipe = get_declarative_recipe("threadfin").unwrap();
+    assert_eq!(
+        serde_json::to_value(&tf_recipe.install_steps).unwrap(),
+        serde_json::to_value(&tf_recipe.update_steps).unwrap(),
+        "threadfin update_steps must be deduplicated directly from install_steps"
+    );
+
+    // MergerFS mount directories must be 0o775 (matching installpackage-mergerfs) while
+    // config/state directories remain 0o755
+    let root = create_isolated_test_dir("mergerfs-dir-modes");
+    let env_cfg = PackageExecutionEnv::isolated(&root);
+    let recipe = get_declarative_recipe("mergerfs").unwrap();
+    DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default())
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("mergerfs install must succeed");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for mount_dir in ["mnt/mergerfs", "mnt/local", "mnt/remote", "mnt/unionfs"] {
+            let mode = fs::metadata(root.join(mount_dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o775, "expected 0o775 on /{mount_dir}, got {mode:o}");
+        }
+        for cfg_dir in ["etc/mergerfs", "var/lib/mergerfs"] {
+            let mode = fs::metadata(root.join(cfg_dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o755, "expected 0o755 on /{cfg_dir}, got {mode:o}");
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn apt_remove_skips_autoremove_and_purge_wording_when_delete_data_is_false() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+
+    for pkg in ["znc", "netdata", "mergerfs", "xrdp", "x2go"] {
+        let recipe = get_declarative_recipe(pkg).unwrap();
+        for step in &recipe.remove_steps {
+            if let DeclarativeStep::AptRemove { description, .. } = step {
+                assert!(
+                    !description.starts_with("Purging "),
+                    "{pkg} AptRemove step must not emit misleading 'Purging ...' description: {description}"
+                );
+            }
+        }
+    }
+
+    for delete_data in [false, true] {
+        let root = create_isolated_test_dir(&format!("netdata-apt-autoremove-{delete_data}"));
+        fs::create_dir_all(root.join("install")).unwrap();
+        fs::write(root.join("install/.netdata.lock"), "installed\n").unwrap();
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.delete_data = delete_data;
+        let runner = MockCommandRunner::default();
+        let events = Arc::new(StdMutex::new(Vec::<PackageProgressEvent>::new()));
+        let events_cb = events.clone();
+        DeclarativePackageExecutor::with_runner(env_cfg, runner.clone())
+            .execute_recipe(
+                &get_declarative_recipe("netdata").unwrap(),
+                PackageAction::Remove,
+                CancellationToken::new(),
+                move |ev| events_cb.lock().unwrap().push(ev),
+            )
+            .await
+            .expect("netdata remove must succeed");
+
+        let cmds = runner.recorded_commands();
+        let saw_autoremove = cmds
+            .iter()
+            .any(|c| c.program == "apt-get" && c.args.iter().any(|a| a == "autoremove"));
+        assert_eq!(
+            saw_autoremove, delete_data,
+            "apt-get autoremove must run iff delete_data=true (got {saw_autoremove} for delete_data={delete_data})"
+        );
+        let saw_purge = cmds
+            .iter()
+            .any(|c| c.program == "apt-get" && c.args.iter().any(|a| a == "purge"));
+        assert_eq!(saw_purge, delete_data);
+        if !delete_data {
+            let emitted = events.lock().unwrap();
+            assert!(
+                emitted.iter().all(|e| !e.message.contains("Purging ")),
+                "non-purge removal must not emit 'Purging ' progress messages: {emitted:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }

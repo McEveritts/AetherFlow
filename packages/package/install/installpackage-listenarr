@@ -617,10 +617,15 @@ if os.path.lexists(new_config):
     apply_entries(seed_entries)
     shutil.rmtree(new_config)
 
-os.symlink(target_config, new_config)
+# Listenarr >= v1.10.6 rejects symlinks outside its content root.
+# Create a real mount-point directory inside INSTALL_DIR and bind-mount CONFIG_DIR via systemd BindPaths=.
+os.mkdir(new_config, 0o750)
+os.chmod(new_config, 0o750)
+os.chmod(target_config, 0o750)
 PYEOF
 
 chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+chmod 0750 "${INSTALL_DIR}/config" "${CONFIG_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 {
@@ -635,6 +640,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${INSTALL_DIR}
+BindPaths=${CONFIG_DIR}:${INSTALL_DIR}/config
 Environment="ASPNETCORE_URLS=http://${LISTENARR_BIND_HOST}:${APP_PORT}"
 Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false"
 Environment="HOME=${DATA_DIR}"

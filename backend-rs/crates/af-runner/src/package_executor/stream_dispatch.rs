@@ -876,11 +876,11 @@ pub fn execute_package_request_stream(
         let readiness_config = {
             #[cfg(test)]
             {
-                LegacyReadinessConfig::from_test_env()
+                LegacyReadinessConfig::from_test_env_for_package(&req.package_id)
             }
             #[cfg(not(test))]
             {
-                LegacyReadinessConfig::default()
+                LegacyReadinessConfig::for_package(&req.package_id)
             }
         };
         let mut unit_snapshots = Vec::new();

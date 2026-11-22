@@ -65,7 +65,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             .get("APP_PORT")
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(default_port as u16);
-        let url = format!("http://127.0.0.1:{}{}", port, path);
+        let probe_host = probe_host_for_bind_address(
+            vars.get("BIND_ADDRESS")
+                .map(String::as_str)
+                .unwrap_or("127.0.0.1"),
+        );
+        let url = format!("http://{}:{}{}", probe_host, port, path);
 
         let is_rclone_check = package_id.eq_ignore_ascii_case("rclone");
 
@@ -481,13 +486,17 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
                 if require_live {
-                    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                    let ip_str = probe_host.trim_start_matches('[').trim_end_matches(']');
+                    let target_ip: std::net::IpAddr = ip_str
+                        .parse()
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                    let addr = std::net::SocketAddr::new(target_ip, port);
                     match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
                         Ok(_) => return Ok(format!("verified HTTP readiness at {}", url)),
                         Err(err) => {
                             last_reason = format!(
-                                "application listener on 127.0.0.1:{} is not accepting TCP connections: {}",
-                                port, err
+                                "application listener on {}:{} is not accepting TCP connections: {}",
+                                probe_host, port, err
                             );
                             continue;
                         }

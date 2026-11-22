@@ -403,7 +403,7 @@ pub(in crate::package_executor) fn build_threadfin_recipe() -> DeclarativePackag
         },
         DeclarativeStep::WriteSystemdUnit {
             unit_name: "threadfin.service".to_string(),
-            content_template: "[Unit]\nDescription=Threadfin M3U and HDHomeRun IPTV Proxy\nAfter=syslog.target network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=threadfin\nGroup=threadfin\nEnvironment=HOME=/var/lib/threadfin\nWorkingDirectory=/var/lib/threadfin\nExecStart=/usr/local/bin/threadfin -port={{APP_PORT}} -bind=127.0.0.1 -config=/var/lib/threadfin/conf\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            content_template: "[Unit]\nDescription=Threadfin M3U and HDHomeRun IPTV Proxy\nAfter=syslog.target network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=threadfin\nGroup=threadfin\nEnvironment=HOME=/var/lib/threadfin\nWorkingDirectory=/var/lib/threadfin\nExecStart=/usr/local/bin/threadfin -port={{APP_PORT}} -bind={{BIND_ADDRESS}} -config=/var/lib/threadfin/conf\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
             progress_pct: 84,
             description: "Writing /etc/systemd/system/threadfin.service...".to_string(),
         },
@@ -435,113 +435,7 @@ pub(in crate::package_executor) fn build_threadfin_recipe() -> DeclarativePackag
         DeclarativeStep::WaitForHttpReady {
             path: "/status".to_string(),
             progress_pct: 99,
-            description: "Verifying Threadfin HTTP listener readiness on 127.0.0.1:{{APP_PORT}}/status...".to_string(),
-        },
-    ];
-    let update_steps = vec![
-        DeclarativeStep::AptUpdate {
-            progress_pct: 10,
-            description: "Updating APT package indexes for Threadfin update...".to_string(),
-        },
-        DeclarativeStep::AptInstall {
-            packages: vec![
-                "curl".to_string(),
-                "wget".to_string(),
-                "ca-certificates".to_string(),
-                "ffmpeg".to_string(),
-                "vlc-bin".to_string(),
-            ],
-            progress_pct: 22,
-            description: "Ensuring Threadfin runtime dependencies (curl, wget, ca-certificates, ffmpeg, vlc-bin)...".to_string(),
-        },
-        DeclarativeStep::EnsureSystemUser {
-            username: "threadfin".to_string(),
-            home_dir: "/var/lib/threadfin".to_string(),
-            create_home: true,
-            progress_pct: 32,
-            description: "Ensuring dedicated threadfin system user...".to_string(),
-        },
-        state_directory,
-        DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/opt/threadfin".to_string(),
-                "/var/lib/threadfin/conf".to_string(),
-                "/var/lib/threadfin/temp".to_string(),
-            ],
-            mode: 0o750,
-            owner: Some("threadfin".to_string()),
-            group: Some("threadfin".to_string()),
-            progress_pct: 42,
-            description: "Ensuring /var/lib/threadfin state and configuration directories...".to_string(),
-        },
-        DeclarativeStep::DownloadBinary {
-            url_template: "https://github.com/Threadfin/Threadfin/releases/download/{{VERSION}}/{{ARCH_ASSET}}".to_string(),
-            arch_map: ArchAssetMap {
-                amd64: "Threadfin_linux_amd64_glibc_2.31_compat".to_string(),
-                arm64: "Threadfin_linux_arm64".to_string(),
-                armhf: Some("Threadfin_linux_arm".to_string()),
-            },
-            dest_path: "/usr/local/bin/threadfin".to_string(),
-            mode: 0o755,
-            verification: ArtifactVerificationPolicy {
-                min_size_bytes: 1024,
-                max_size_bytes: 128 * 1024 * 1024,
-                expected_sha256: sha_override,
-                arch_sha256: default_arch_sha256,
-                require_gzip_magic: false,
-                require_elf_magic: true,
-            },
-            progress_pct: 65,
-            description: format!(
-                "Downloading and verifying target Threadfin {} binary for update...",
-                target_version
-            ),
-        },
-        DeclarativeStep::WriteTemplateFile {
-            path: "/var/lib/threadfin/.af-version".to_string(),
-            content_template: "{{VERSION}}\n".to_string(),
-            mode: 0o644,
-            overwrite: true,
-            owner: Some("threadfin".to_string()),
-            group: Some("threadfin".to_string()),
-            progress_pct: 75,
-            description: "Updating /var/lib/threadfin/.af-version metadata...".to_string(),
-        },
-        DeclarativeStep::WriteSystemdUnit {
-            unit_name: "threadfin.service".to_string(),
-            content_template: "[Unit]\nDescription=Threadfin M3U and HDHomeRun IPTV Proxy\nAfter=syslog.target network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=threadfin\nGroup=threadfin\nEnvironment=HOME=/var/lib/threadfin\nWorkingDirectory=/var/lib/threadfin\nExecStart=/usr/local/bin/threadfin -port={{APP_PORT}} -bind=127.0.0.1 -config=/var/lib/threadfin/conf\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
-            progress_pct: 84,
-            description: "Writing /etc/systemd/system/threadfin.service...".to_string(),
-        },
-        DeclarativeStep::EnsureThreadfinConfig {
-            progress_pct: 87,
-            description: "Ensuring Threadfin has a loopback bind default without replacing user settings...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: None,
-            operation: SystemctlOp::DaemonReload,
-            ignore_errors: false,
-            progress_pct: 90,
-            description: "Reloading systemd manager configuration...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("threadfin.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: false,
-            progress_pct: 95,
-            description: "Enabling and starting threadfin.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("threadfin.service".to_string()),
-            operation: SystemctlOp::Restart,
-            ignore_errors: false,
-            progress_pct: 98,
-            description: "Restarting threadfin.service to apply the updated binary and configuration...".to_string(),
-        },
-        DeclarativeStep::WaitForHttpReady {
-            path: "/status".to_string(),
-            progress_pct: 99,
-            description: "Verifying Threadfin HTTP listener readiness on 127.0.0.1:{{APP_PORT}}/status...".to_string(),
+            description: "Verifying Threadfin HTTP listener readiness on {{BIND_ADDRESS}}:{{APP_PORT}}/status...".to_string(),
         },
     ];
     DeclarativePackageRecipe {
@@ -551,7 +445,7 @@ pub(in crate::package_executor) fn build_threadfin_recipe() -> DeclarativePackag
         service_name: "threadfin".to_string(),
         lock_file: "/install/.threadfin.lock".to_string(),
         apply_systemd_sandbox: true,
-        update_steps,
+        update_steps: install_steps.clone(),
         install_steps,
         remove_steps: vec![
             DeclarativeStep::PurgeSystemdUnit {
@@ -632,7 +526,7 @@ pub(in crate::package_executor) fn build_znc_recipe() -> DeclarativePackageRecip
         },
         DeclarativeStep::WriteTemplateFile {
             path: "/var/lib/znc/configs/znc.conf".to_string(),
-            content_template: "Version = {{ZNC_CONF_VERSION}}\n<Listener l>\n    AllowIRC = true\n    AllowWeb = true\n    Port = {{APP_PORT}}\n    IPv4 = true\n    IPv6 = false\n    SSL = false\n    Host = 127.0.0.1\n</Listener>\nLoadModule = webadmin\n\n<User {{MASTER_USER}}>\n    Pass       = sha256#{{ZNC_PASS_HASH}}#{{ZNC_SALT}}#\n    Admin      = true\n    Nick       = {{MASTER_USER}}\n    AltNick    = {{MASTER_USER}}_\n    Ident      = {{MASTER_USER}}\n    RealName   = {{MASTER_USER}}\n</User>\n".to_string(),
+            content_template: "Version = {{ZNC_CONF_VERSION}}\n<Listener l>\n    AllowIRC = true\n    AllowWeb = true\n    Port = {{APP_PORT}}\n    IPv4 = true\n    IPv6 = false\n    SSL = false\n    Host = {{BIND_ADDRESS}}\n</Listener>\nLoadModule = webadmin\n\n<User {{MASTER_USER}}>\n    Pass       = sha256#{{ZNC_PASS_HASH}}#{{ZNC_SALT}}#\n    Admin      = true\n    Nick       = {{MASTER_USER}}\n    AltNick    = {{MASTER_USER}}_\n    Ident      = {{MASTER_USER}}\n    RealName   = {{MASTER_USER}}\n</User>\n".to_string(),
             mode: 0o600,
             overwrite: false,
             owner: Some("znc".to_string()),
@@ -670,7 +564,7 @@ pub(in crate::package_executor) fn build_znc_recipe() -> DeclarativePackageRecip
         DeclarativeStep::WaitForHttpReady {
             path: "/".to_string(),
             progress_pct: 98,
-            description: "Verifying ZNC webadmin HTTP listener readiness on 127.0.0.1:{{APP_PORT}}/...".to_string(),
+            description: "Verifying ZNC webadmin HTTP listener readiness on {{BIND_ADDRESS}}:{{APP_PORT}}/...".to_string(),
         },
     ];
     DeclarativePackageRecipe {
@@ -688,12 +582,13 @@ pub(in crate::package_executor) fn build_znc_recipe() -> DeclarativePackageRecip
                 progress_pct: 20,
                 description: "Stopping and disabling znc.service...".to_string(),
             },
-            DeclarativeStep::AptPurge {
+            DeclarativeStep::AptRemove {
                 packages: vec!["znc".to_string()],
                 autoremove: true,
                 ignore_errors: true,
                 progress_pct: 55,
-                description: "Purging znc APT package...".to_string(),
+                description: "Removing znc APT package (purging only with DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/var/lib/znc/.af-version".to_string()],
@@ -821,12 +716,13 @@ pub(in crate::package_executor) fn build_xrdp_recipe() -> DeclarativePackageReci
                 progress_pct: 35,
                 description: "Stopping and disabling xrdp-sesman.service...".to_string(),
             },
-            DeclarativeStep::AptPurge {
+            DeclarativeStep::AptRemove {
                 packages: vec!["xrdp".to_string(), "xorgxrdp".to_string()],
                 autoremove: true,
                 ignore_errors: true,
                 progress_pct: 60,
-                description: "Purging xrdp APT packages...".to_string(),
+                description: "Removing xrdp APT packages (purging only with DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/var/lib/xrdp/.af-version".to_string()],
@@ -926,12 +822,14 @@ pub(in crate::package_executor) fn build_x2go_recipe() -> DeclarativePackageReci
                 progress_pct: 25,
                 description: "Stopping and disabling x2goserver.service...".to_string(),
             },
-            DeclarativeStep::AptPurge {
+            DeclarativeStep::AptRemove {
                 packages: vec!["x2goserver".to_string(), "x2goserver-xsession".to_string()],
                 autoremove: true,
                 ignore_errors: true,
                 progress_pct: 60,
-                description: "Purging x2goserver APT packages...".to_string(),
+                description:
+                    "Removing x2goserver APT packages (purging only with DELETE_DATA=true)..."
+                        .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![
@@ -992,13 +890,14 @@ pub(in crate::package_executor) fn build_netdata_recipe() -> DeclarativePackageR
             path: "/etc/netdata/netdata.conf".to_string(),
             section: "web".to_string(),
             settings: vec![
-                ("bind to".to_string(), "127.0.0.1".to_string()),
+                ("bind to".to_string(), "{{BIND_ADDRESS}}".to_string()),
                 ("default port".to_string(), "{{APP_PORT}}".to_string()),
             ],
             mode: 0o644,
             progress_pct: 75,
-            description: "Writing /etc/netdata/netdata.conf bound to 127.0.0.1:{{APP_PORT}}..."
-                .to_string(),
+            description:
+                "Writing /etc/netdata/netdata.conf bound to {{BIND_ADDRESS}}:{{APP_PORT}}..."
+                    .to_string(),
         },
         DeclarativeStep::Systemctl {
             unit: None,
@@ -1025,7 +924,7 @@ pub(in crate::package_executor) fn build_netdata_recipe() -> DeclarativePackageR
             path: "/api/v1/info".to_string(),
             progress_pct: 98,
             description:
-                "Verifying Netdata HTTP listener readiness on 127.0.0.1:{{APP_PORT}}/api/v1/info..."
+                "Verifying Netdata HTTP listener readiness on {{BIND_ADDRESS}}:{{APP_PORT}}/api/v1/info..."
                     .to_string(),
         },
     ];
@@ -1044,12 +943,13 @@ pub(in crate::package_executor) fn build_netdata_recipe() -> DeclarativePackageR
                 progress_pct: 25,
                 description: "Stopping and disabling netdata.service...".to_string(),
             },
-            DeclarativeStep::AptPurge {
+            DeclarativeStep::AptRemove {
                 packages: vec!["netdata".to_string()],
                 autoremove: true,
                 ignore_errors: true,
                 progress_pct: 55,
-                description: "Purging netdata APT package...".to_string(),
+                description: "Removing netdata APT package (purging only with DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/etc/netdata/.af-version".to_string()],
@@ -1101,6 +1001,15 @@ pub(in crate::package_executor) fn build_mergerfs_recipe() -> DeclarativePackage
                 "/mnt/local".to_string(),
                 "/mnt/remote".to_string(),
                 "/mnt/unionfs".to_string(),
+            ],
+            mode: 0o775,
+            owner: None,
+            group: None,
+            progress_pct: 55,
+            description: "Ensuring /mnt/unionfs and union mount directories (0775)...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
                 "/etc/mergerfs".to_string(),
                 "/var/lib/mergerfs".to_string(),
             ],
@@ -1108,7 +1017,8 @@ pub(in crate::package_executor) fn build_mergerfs_recipe() -> DeclarativePackage
             owner: None,
             group: None,
             progress_pct: 58,
-            description: "Ensuring /mnt/unionfs and union mount directories...".to_string(),
+            description: "Ensuring /etc/mergerfs and /var/lib/mergerfs state directories..."
+                .to_string(),
         },
         DeclarativeStep::CaptureDpkgVersion {
             package: "mergerfs".to_string(),
@@ -1171,12 +1081,14 @@ pub(in crate::package_executor) fn build_mergerfs_recipe() -> DeclarativePackage
                 description: "Unmounting active MergerFS mountpoints (/mnt/unionfs, /mnt/mergerfs)..."
                     .to_string(),
             },
-            DeclarativeStep::AptPurge {
+            DeclarativeStep::AptRemove {
                 packages: vec!["mergerfs".to_string()],
                 autoremove: true,
                 ignore_errors: true,
                 progress_pct: 60,
-                description: "Purging mergerfs APT package...".to_string(),
+                description:
+                    "Removing mergerfs APT package (purging only with DELETE_DATA=true)..."
+                        .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![

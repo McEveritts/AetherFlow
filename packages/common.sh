@@ -8080,6 +8080,141 @@ af_emit_readiness_record() {
         "$emit_unit" "$probe_url" "$accept_auth" "$accept_409" >&2
 }
 
+af_syncthing_listener_owned_by_unit() {
+    local unit="$1" port="$2" show_out="" main_pid="" cgroup="" line=""
+    systemctl is-active --quiet "$unit" || return 1
+    show_out="$(systemctl show --property=MainPID --property=ControlGroup -- "$unit" 2>/dev/null || true)"
+    while IFS= read -r line; do
+        case "$line" in
+            MainPID=*) main_pid="${line#MainPID=}" ;;
+            ControlGroup=*) cgroup="${line#ControlGroup=}" ;;
+        esac
+    done <<< "$show_out"
+    python3 - "$port" "$main_pid" "$cgroup" <<'PYEOF'
+import os
+import pathlib
+import sys
+
+port_str, main_pid_str, cgroup = sys.argv[1:4]
+try:
+    port = int(port_str)
+except ValueError:
+    raise SystemExit(1)
+if not (1 <= port <= 65535):
+    raise SystemExit(1)
+
+proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
+allowed_pids = set()
+
+if cgroup and cgroup.startswith("/") and ".." not in pathlib.PurePosixPath(cgroup).parts:
+    cg_procs = pathlib.Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "cgroup.procs"
+    try:
+        for raw in cg_procs.read_text(encoding="utf-8", errors="ignore").splitlines():
+            s = raw.strip()
+            if s.isdigit() and int(s) > 1:
+                allowed_pids.add(int(s))
+    except OSError:
+        pass
+
+if main_pid_str.isdigit() and int(main_pid_str) > 1:
+    root_pid = int(main_pid_str)
+    if (proc_root / str(root_pid)).is_dir():
+        allowed_pids.add(root_pid)
+        children_by_ppid = {}
+        try:
+            for entry in proc_root.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                pid_val = int(entry.name)
+                try:
+                    stat_text = (entry / "stat").read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                rparen = stat_text.rfind(")")
+                if rparen == -1:
+                    continue
+                fields = stat_text[rparen + 2:].split()
+                if len(fields) >= 2 and fields[1].isdigit():
+                    children_by_ppid.setdefault(int(fields[1]), []).append(pid_val)
+        except OSError:
+            pass
+        stack = [root_pid]
+        while stack:
+            cur = stack.pop()
+            for child in children_by_ppid.get(cur, ()):
+                if child not in allowed_pids:
+                    allowed_pids.add(child)
+                    stack.append(child)
+
+if not allowed_pids:
+    raise SystemExit(1)
+
+port_hex = f"{port:04X}"
+allowed_v4_hex = {"0100007F", "00000000"}
+allowed_v6_hex = (
+    "00000000000000000000000001000000",
+    "00000000000000000000000000000000",
+    "0000000000000000FFFF00000100007F",
+    "0000000000000000FFFF000000000000",
+)
+
+def _is_loopback_or_wildcard(ip_hex, is_v6):
+    upper = ip_hex.upper()
+    if is_v6:
+        if upper in allowed_v6_hex:
+            return True
+        if upper.startswith("0000000000000000FFFF0000") and upper.endswith("7F"):
+            return True
+        return False
+    if upper in allowed_v4_hex:
+        return True
+    # Little-endian 127.0.0.0/8 on x86/arm64 Linux (/proc/net/tcp)
+    return len(upper) == 8 and (upper.endswith("7F") or upper.startswith("7F"))
+
+listener_inodes = set()
+for table_name, is_v6 in (("tcp", False), ("tcp6", True)):
+    table_path = proc_root / "net" / table_name
+    try:
+        lines = table_path.read_text(encoding="utf-8", errors="ignore").splitlines()[1:]
+    except OSError:
+        continue
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 10 or parts[3].upper() != "0A":
+            continue
+        if ":" not in parts[1]:
+            continue
+        ip_hex, local_port_hex = parts[1].rsplit(":", 1)
+        if local_port_hex.upper() != port_hex:
+            continue
+        if not _is_loopback_or_wildcard(ip_hex, is_v6):
+            continue
+        inode = parts[9]
+        if inode.isdigit() and inode != "0":
+            listener_inodes.add(inode)
+
+if not listener_inodes:
+    raise SystemExit(1)
+
+expected_targets = {f"socket:[{inode}]" for inode in listener_inodes}
+for pid in allowed_pids:
+    fd_dir = proc_root / str(pid) / "fd"
+    try:
+        entries = list(fd_dir.iterdir())
+    except OSError:
+        continue
+    for fd_entry in entries:
+        try:
+            target = os.readlink(fd_entry)
+        except OSError:
+            continue
+        if target in expected_targets:
+            raise SystemExit(0)
+
+raise SystemExit(1)
+PYEOF
+}
+
 wait_for_service_ready() {
     local unit="$1" port="$2" readiness_path="${3:-/}" attempts="${4:-30}" attempt app_name credentials="" http_status ready_url
     local auth_apps_re='^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr|filebot|pihole-ftl)$'
@@ -8148,6 +8283,31 @@ wait_for_service_ready() {
                     af_emit_readiness_record "$unit" "$ready_url" "$emit_accept_auth" false
                 fi
                 return 0
+            elif [[ "$app_name" == syncthing* && "$readiness_path" == /rest/noauth/health ]]; then
+                # Syncthing < v1.22.0 (e.g. Debian 12's 1.19.2~ds1-1+deb12u1) lacks /rest/noauth/health
+                # and returns HTTP 404. Only fall back to / on 127.0.0.1:<port> when the primary endpoint
+                # explicitly answered 404 AND the bound TCP listener is proven owned by the active unit.
+                if http_status="$(curl "${curl_tls_args[@]}" --noproxy '*' -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)" && [[ "$http_status" == "404" ]]; then
+                    local syncthing_fallback_url="http://127.0.0.1:${port}/"
+                    local fallback_status=""
+                    if af_syncthing_listener_owned_by_unit "$unit" "$port" && \
+                        fallback_status="$(curl "${curl_tls_args[@]}" --noproxy '*' -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$syncthing_fallback_url" 2>/dev/null)"; then
+                        case "$fallback_status" in
+                            200|302|401)
+                                if systemctl is-active --quiet "$unit"; then
+                                    if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+                                        local emit_syncthing_auth=false
+                                        if [[ "$fallback_status" == "401" ]]; then
+                                            emit_syncthing_auth=true
+                                        fi
+                                        af_emit_readiness_record "$unit" "$syncthing_fallback_url" "$emit_syncthing_auth" false
+                                    fi
+                                    return 0
+                                fi
+                                ;;
+                        esac
+                    fi
+                fi
             elif [[ "$app_name" =~ $auth_apps_re ]]; then
                 if http_status="$(curl "${curl_tls_args[@]}" --noproxy '*' -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
                     case "$http_status" in
