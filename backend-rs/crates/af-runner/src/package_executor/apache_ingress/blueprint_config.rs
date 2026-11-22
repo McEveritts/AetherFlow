@@ -53,7 +53,9 @@ pub(in crate::package_executor) fn write_config_atomic_preserving_meta(
     Ok(())
 }
 
-pub(in crate::package_executor) fn runner_candidate_exists_or_symlink(p: &Path) -> Result<bool, PackageExecutorError> {
+pub(in crate::package_executor) fn runner_candidate_exists_or_symlink(
+    p: &Path,
+) -> Result<bool, PackageExecutorError> {
     match fs::symlink_metadata(p) {
         Ok(_) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -478,7 +480,10 @@ impl<'a> RunnerBlueprintConfigChanges<'a> {
         )
     }
 
-    pub(in crate::package_executor) fn remove_vhost(&mut self, path: &Path) -> Result<(), PackageExecutorError> {
+    pub(in crate::package_executor) fn remove_vhost(
+        &mut self,
+        path: &Path,
+    ) -> Result<(), PackageExecutorError> {
         self.capture(path)?;
         validate_regular_config_candidate(path, self.fs_root)?;
         fs::remove_file(path).map_err(|err| {
@@ -1133,4 +1138,3 @@ pub(in crate::package_executor) fn apply_runner_blueprint_app_config_changes(
     }
     Ok(())
 }
-

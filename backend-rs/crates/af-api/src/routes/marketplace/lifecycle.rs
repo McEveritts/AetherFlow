@@ -23,7 +23,10 @@ pub(crate) fn append_package_job_output(job_id: &str, line: &str) {
     }
 }
 
-pub(in crate::routes) fn is_lock_file_present(lock_file: &str, fs_root_override: Option<&str>) -> bool {
+pub(in crate::routes) fn is_lock_file_present(
+    lock_file: &str,
+    fs_root_override: Option<&str>,
+) -> bool {
     af_models::inspect_canonical_package_receipt(
         "",
         Some(lock_file),
@@ -290,7 +293,8 @@ where
     }
 }
 
-pub(in crate::routes) async fn system_update_lifecycle_block() -> Option<SystemUpdateLifecycleBlock> {
+pub(in crate::routes) async fn system_update_lifecycle_block() -> Option<SystemUpdateLifecycleBlock>
+{
     system_update_lifecycle_block_with(|| async {
         af_runner::dispatch_self_update_status_request(&af_models::SelfUpdateStatusRequest {
             job_unit: String::new(),

@@ -718,7 +718,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 Ok(format!("purged systemd unit {}", norm))
             }
 
-
             DeclarativeStep::UnmountPaths { paths, .. } => {
                 for logical in paths {
                     cancel.check(&recipe.package_id)?;
@@ -847,7 +846,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 }
                 Ok(format!("executed command {}", program))
             }
-
 
             _ => unreachable!("step handled by primary dispatcher"),
         }

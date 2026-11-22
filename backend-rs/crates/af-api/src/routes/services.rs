@@ -132,7 +132,11 @@ pub(super) fn validate_service_control_request(
     Ok(target)
 }
 
-pub(super) fn service_control_failure_response(error: &anyhow::Error, target: &str, action: &str) -> Response {
+pub(super) fn service_control_failure_response(
+    error: &anyhow::Error,
+    target: &str,
+    action: &str,
+) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     tracing::error!(error_id = %id, %target, %action, detail = %format!("{error:#}"), "service control failed");
     let (status, code, message) = if af_services::is_service_control_timeout(error) {
@@ -294,7 +298,10 @@ pub(super) fn classify_core_restart_receipt(
     }
 }
 
-pub(super) fn core_restart_outcome_log(unit: &str, outcome: &CoreRestartReceiptOutcome) -> Option<String> {
+pub(super) fn core_restart_outcome_log(
+    unit: &str,
+    outcome: &CoreRestartReceiptOutcome,
+) -> Option<String> {
     match outcome {
         CoreRestartReceiptOutcome::Succeeded => Some(format!(
             "Deferred core restart confirmed via durable receipt '{unit}'."
@@ -315,7 +322,10 @@ pub(super) fn core_restart_outcome_log(unit: &str, outcome: &CoreRestartReceiptO
     }
 }
 
-pub(super) fn reconcile_core_restart_receipt_by_unit(unit: &str, outcome: &CoreRestartReceiptOutcome) {
+pub(super) fn reconcile_core_restart_receipt_by_unit(
+    unit: &str,
+    outcome: &CoreRestartReceiptOutcome,
+) {
     let final_status = match outcome {
         CoreRestartReceiptOutcome::Succeeded => Some("executed"),
         CoreRestartReceiptOutcome::Failed => Some("failed"),
@@ -388,7 +398,9 @@ pub(crate) async fn reconcile_pending_action(
     }
 }
 
-pub(super) async fn get_core_restart_status(Query(query): Query<HashMap<String, String>>) -> Response {
+pub(super) async fn get_core_restart_status(
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
     let unit = query.get("job_unit").map(String::as_str).unwrap_or("");
     if !is_valid_core_restart_job_unit(unit) {
         return api_error(

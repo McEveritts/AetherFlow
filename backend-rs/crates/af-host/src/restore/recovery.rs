@@ -5,7 +5,7 @@ use super::journal::{
     write_journal_with_sidecar_and_provenance, RollbackFailureJournal,
     IN_PROGRESS_RECOVERY_JOURNAL_FILENAME, JOURNAL_STATE_ABORTED_CLEAN, JOURNAL_STATE_COMMITTED,
     JOURNAL_STATE_IN_PROGRESS, JOURNAL_STATE_QUIESCING, JOURNAL_STATE_RECOVERED,
-    JOURNAL_STATE_ROLLED_BACK, JOURNAL_STATE_ROLLBACK_FAILED,
+    JOURNAL_STATE_ROLLBACK_FAILED, JOURNAL_STATE_ROLLED_BACK,
 };
 use super::policy::{
     resolve_effective_quiesce_services, resolve_recovery_provenance_dir,

@@ -36,7 +36,8 @@ use tokio_rustls::TlsConnector;
 #[test]
 fn heartbeat_liveness_survives_unknown_and_pending_service_inventory() {
     use crate::inventory_regressions::{isolated, Fixture};
-    let name = "cluster_daemon::tests::heartbeat_liveness_survives_unknown_and_pending_service_inventory";
+    let name =
+        "cluster_daemon::tests::heartbeat_liveness_survives_unknown_and_pending_service_inventory";
     if !isolated(name) {
         return;
     }
@@ -167,9 +168,7 @@ fn test_enrolled_psk_requires_a_trusted_matching_secret() {
     let legacy_2a = legacy_bcrypt.replacen("$2b$", "$2a$", 1);
     assert!(verify_enrolled_cluster_psk(candidate, &legacy_bcrypt).is_ok());
     assert!(verify_enrolled_cluster_psk(candidate, &legacy_2a).is_ok());
-    assert!(
-        verify_enrolled_cluster_psk("wrong-secret-with-32-characters!!", &legacy_2a).is_err()
-    );
+    assert!(verify_enrolled_cluster_psk("wrong-secret-with-32-characters!!", &legacy_2a).is_err());
 }
 
 #[test]
@@ -207,8 +206,7 @@ fn mtls_default_loopback_and_legacy_grpc_wire_compatibility() {
     use crate::inventory_regressions::{isolated, Fixture};
     use std::process::Command as StdCommand;
 
-    let name =
-        "cluster_daemon::tests::mtls_default_loopback_and_legacy_grpc_wire_compatibility";
+    let name = "cluster_daemon::tests::mtls_default_loopback_and_legacy_grpc_wire_compatibility";
     if !isolated(name) {
         return;
     }

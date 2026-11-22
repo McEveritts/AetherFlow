@@ -1357,4 +1357,3 @@ pub(crate) async fn handle_self_update_status(
         ),
     }
 }
-

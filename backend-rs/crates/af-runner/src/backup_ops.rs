@@ -621,7 +621,9 @@ pub async fn execute_backup_local(
     }
 }
 
-pub(crate) async fn handle_backup(Json(req): Json<BackupRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
+pub(crate) async fn handle_backup(
+    Json(req): Json<BackupRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
     match execute_backup_local(&req).await {
         Ok(resp) => {
             let output = serde_json::to_string(&resp).unwrap_or_default();
@@ -660,4 +662,3 @@ pub async fn dispatch_backup_request(
         .await
         .map_err(|(_, msg)| anyhow::anyhow!(msg))
 }
-

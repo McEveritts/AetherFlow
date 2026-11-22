@@ -1,10 +1,6 @@
-use super::{
-    DEFAULT_MAX_RESUMABLE_UPLOAD_BYTES, MAX_FINGERPRINT_LEN, TUS_VERSION,
-};
+use super::{DEFAULT_MAX_RESUMABLE_UPLOAD_BYTES, MAX_FINGERPRINT_LEN, TUS_VERSION};
 use crate::auth::{api_error, AuthUser};
-use crate::mcbrowser::{
-    normalize_relative_path, resolve_configured_base_root, McBrowserError,
-};
+use crate::mcbrowser::{normalize_relative_path, resolve_configured_base_root, McBrowserError};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use base64::engine::general_purpose::{STANDARD as BASE64_STD, STANDARD_NO_PAD as BASE64_NO_PAD};
@@ -222,7 +218,6 @@ pub(crate) enum PublishingResolution {
     UnpublishedStagingIntact,
     AmbiguousRetainQuota,
 }
-
 
 pub(super) fn now_unix_secs() -> i64 {
     chrono::Utc::now().timestamp()

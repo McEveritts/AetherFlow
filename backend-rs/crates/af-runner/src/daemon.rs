@@ -301,4 +301,3 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
     tracing::warn!("UNIX domain socket runner mode requires a Unix/Linux host");
     Ok(())
 }
-

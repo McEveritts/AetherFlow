@@ -88,7 +88,10 @@ pub fn verify_cluster_psk(node_id: &str, candidate_psk: &str) -> Result<(), &'st
     Err("cluster PSK is not configured and node is not enrolled")
 }
 
-pub(super) fn verify_enrolled_cluster_psk(candidate: &str, stored_hash: &str) -> Result<(), &'static str> {
+pub(super) fn verify_enrolled_cluster_psk(
+    candidate: &str,
+    stored_hash: &str,
+) -> Result<(), &'static str> {
     if candidate.is_empty() || stored_hash.is_empty() {
         return Err("cluster PSK is not configured and node is not enrolled");
     }

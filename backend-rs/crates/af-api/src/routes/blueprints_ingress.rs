@@ -758,7 +758,10 @@ pub(super) fn apply_ingress_vhost_policy(
     }
 }
 
-pub(super) fn restore_ingress_config(app: &str, previous: Option<&AppIngressConfig>) -> anyhow::Result<()> {
+pub(super) fn restore_ingress_config(
+    app: &str,
+    previous: Option<&AppIngressConfig>,
+) -> anyhow::Result<()> {
     if let Some(previous) = previous {
         af_db::get_conn()?
             .execute(

@@ -403,9 +403,8 @@ fn test_init_aes_key_requires_key_when_aetherflow_env_production() {
 
     env::set_var("AETHERFLOW_ENV", "disposable-guest-lifecycle-drill");
     env::set_var("GIN_MODE", "release");
-    init_aes_key().expect(
-        "legacy GIN_MODE=release must be ignored when AETHERFLOW_ENV is non-production",
-    );
+    init_aes_key()
+        .expect("legacy GIN_MODE=release must be ignored when AETHERFLOW_ENV is non-production");
 
     match prev_aes {
         Some(v) => env::set_var("AES_MASTER_KEY", v),

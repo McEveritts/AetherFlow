@@ -7,18 +7,18 @@ mod readiness_and_fetch;
 mod steps_files_services;
 mod steps_system;
 
-pub use catalog::{resolve_threadfin_sha256_override, resolve_threadfin_target_version};
 pub(crate) use catalog::recipe_version_file_logical_path;
 pub(super) use catalog::{recipe_mutable_state_dirs, recipe_primary_apt_package};
+pub use catalog::{resolve_threadfin_sha256_override, resolve_threadfin_target_version};
 
 pub use rclone_helpers::{
     detect_rclone_exec_start, detect_rclone_exec_start_for_root, detect_rclone_separate_api_port,
     detect_rclone_separate_api_port_for_root,
 };
+use rclone_helpers::{rclone_unit_path, read_rclone_env};
 pub(crate) use rclone_helpers::{
     resolve_and_reserve_rclone_api_port, resolve_and_reserve_rclone_api_port_with,
 };
-use rclone_helpers::{rclone_unit_path, read_rclone_env};
 
 /// Verified declarative recipes. LegacyBashFallback remains the default engine
 /// unless AETHERFLOW_ENABLE_RUST_PACKAGES=1 opts in to the Rust engine.

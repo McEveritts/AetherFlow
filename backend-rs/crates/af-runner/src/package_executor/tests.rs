@@ -17,7 +17,6 @@ fn legacy_env(req: &PackageRunnerRequest) -> HashMap<String, Option<String>> {
         .collect()
 }
 
-
 /// Serializes async execution tests that share process-global `PACKAGE_MUTEX`,
 /// `ACTIVE_CANCELLATIONS`, or environment variable state (`ENV_TEST_MUTEX`).
 pub(super) use crate::ENV_TEST_MUTEX as TEST_EXECUTION_SERIALIZER;
@@ -176,7 +175,6 @@ fn create_mock_elf_payload_for_arch(size: usize, e_machine: u16) -> Vec<u8> {
     data
 }
 
-
 struct LocalHttpServer {
     pub port: u16,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
@@ -269,7 +267,6 @@ where
     }
 }
 
-
 struct EnvVarGuard {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
@@ -298,7 +295,6 @@ impl Drop for EnvVarGuard {
         }
     }
 }
-
 
 mod blueprint_and_apache;
 mod quassel_threadfin_parity;

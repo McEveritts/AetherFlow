@@ -507,7 +507,6 @@ pub(in crate::routes) async fn dispatch_package_lifecycle_with_target(
     let pkg_lock_file = pkg.lock_file.clone();
     let job_lease = af_services::take_package_job_lease(&clean_id, &job_id);
 
-
     spawn_package_lifecycle_job(PackageLifecycleJobContext {
         job_lease,
         job_id,

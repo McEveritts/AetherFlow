@@ -45,7 +45,7 @@ A multi-provider infrastructure assistant integrated directly into the control p
 
 ### 3. AetherMarketplace (77 Bare-Metal Apps)
 A managed ecosystem of **77 native Linux applications** (including Plex, Jellyfin, the `*Arr` stack, Palate, Maintainerr, Dispatcharr, Threadfin, qBittorrent, Qui, Autobrr, McVNC, KasmVNC, Tailscale, and WireGuard):
-- **One-Click Deploy & In-Place Updates**: Idempotent installation, update, and removal lifecycles backed by 12 declarative Rust recipes and locked Bash installers.
+- **One-Click Deploy & In-Place Updates**: Idempotent installation, update, and removal lifecycles backed by 9 declarative Rust recipes and locked Bash installers.
 - **Whatbox-Style Automatic Subdomain Ingress**: Automatically provisions `<app>.<baseDomain>` through Apache2, the streaming Subdomain Gateway, and `af-certbot-sync`.
 - **Service Orchestration**: Manages dedicated `systemd` units and `af-systemd-sandbox` profiles for every installed application.
 

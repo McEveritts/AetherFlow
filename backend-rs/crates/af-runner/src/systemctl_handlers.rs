@@ -175,7 +175,9 @@ pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
     false
 }
 
-pub(crate) async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Json<RunnerResponse>) {
+pub(crate) async fn handle_systemctl(
+    Json(req): Json<SystemctlRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
     if !ALLOWED_SERVICE_ACTIONS.contains(req.action.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
@@ -761,4 +763,3 @@ pub(crate) async fn handle_package_lifecycle_snapshot(
         }
     }
 }
-

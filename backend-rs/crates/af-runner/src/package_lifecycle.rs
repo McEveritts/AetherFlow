@@ -17,32 +17,32 @@ mod tests;
 mod version_verification_tests;
 
 // Re-exports required by `snapshot_policy.rs` (`use super::*;`).
+use runtime_snapshot::CommittedSwap;
+#[cfg(test)]
+use runtime_snapshot::SNAPSHOT_CAPTURE_THREAD;
+use runtime_targets::verify_no_symlink_ancestors_with_root;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use runtime_snapshot::SNAPSHOT_CAPTURE_THREAD;
-use runtime_snapshot::CommittedSwap;
-use runtime_targets::verify_no_symlink_ancestors_with_root;
 
+#[cfg(test)]
+pub use admitted_snapshots::admitted_lifecycle_snapshot_backup_root;
 pub use admitted_snapshots::{
     capture_admitted_lifecycle_snapshot, discard_admitted_lifecycle_snapshot,
     execute_coordinated_package_stream, has_admitted_lifecycle_snapshot, package_service_units,
     restore_admitted_lifecycle_snapshot, LifecycleReceipt, JOB_MARKER, RECEIPT_MARKER,
 };
-#[cfg(test)]
-pub use admitted_snapshots::admitted_lifecycle_snapshot_backup_root;
 
 pub use backend::is_incomplete_rollback_error;
 #[allow(unused_imports)]
 pub(crate) use backend::{parse_systemd_active_state, parse_systemd_quiesced_state};
 
-pub use probe_command::{run_bounded_probe_command, run_bounded_probe_command_cancellable};
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
 pub(crate) use probe_command::is_process_zombie_linux;
 #[cfg(test)]
 pub use probe_command::INJECT_WAITID_EPERM;
+pub use probe_command::{run_bounded_probe_command, run_bounded_probe_command_cancellable};
 
 pub use receipt_snapshots::{
     candidate_version_marker_paths, candidate_version_marker_paths_with_env,

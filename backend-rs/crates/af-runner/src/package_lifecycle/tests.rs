@@ -122,10 +122,8 @@ impl LifecycleBackend for FakeBackend {
                     let _ = std::fs::write(vfile, target);
                     let bin = root.join("usr/bin/syncthing");
                     let _ = std::fs::create_dir_all(bin.parent().unwrap());
-                    let _ = std::fs::write(
-                        &bin,
-                        format!("#!/bin/sh\necho \"syncthing {target}\"\n"),
-                    );
+                    let _ =
+                        std::fs::write(&bin, format!("#!/bin/sh\necho \"syncthing {target}\"\n"));
                     let dpkg_ver = target.trim_start_matches(['v', 'V']);
                     let dpkg_shim = root.join("usr/bin/dpkg-query");
                     let _ = std::fs::write(
@@ -135,10 +133,8 @@ impl LifecycleBackend for FakeBackend {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            &bin,
-                            std::fs::Permissions::from_mode(0o755),
-                        );
+                        let _ =
+                            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
                         let _ = std::fs::set_permissions(
                             &dpkg_shim,
                             std::fs::Permissions::from_mode(0o755),

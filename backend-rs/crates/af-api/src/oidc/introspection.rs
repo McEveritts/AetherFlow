@@ -392,11 +392,11 @@ fn oidc_introspect_blocking(
                         let Ok(connection) = af_db::get_read_conn() else {
                             return oidc_server_error();
                         };
-                        let client_ok = match check_oidc_client_exists(&connection, &data.claims.aud)
-                        {
-                            Ok(exists) => exists,
-                            Err(_) => return oidc_server_error(),
-                        };
+                        let client_ok =
+                            match check_oidc_client_exists(&connection, &data.claims.aud) {
+                                Ok(exists) => exists,
+                                Err(_) => return oidc_server_error(),
+                            };
                         let subject_ok = match check_access_token_subject_valid(
                             &connection,
                             &data.claims.sub,
@@ -427,11 +427,11 @@ fn oidc_introspect_blocking(
         let Ok(conn) = af_db::get_read_conn() else {
             return oidc_server_error();
         };
-        let has_fam_col = match crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id")
-        {
-            Ok(v) => v,
-            Err(_) => return oidc_server_error(),
-        };
+        let has_fam_col =
+            match crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id") {
+                Ok(v) => v,
+                Err(_) => return oidc_server_error(),
+            };
         let rt_sql = if has_fam_col {
             "SELECT user_id, scope, revoked, expires_at, COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
         } else {

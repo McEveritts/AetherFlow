@@ -478,7 +478,11 @@ where
     Ok(plan)
 }
 
-pub(super) fn archive_authorization_paths(path: &str, trace: &[String], resolved_path: &str) -> Vec<String> {
+pub(super) fn archive_authorization_paths(
+    path: &str,
+    trace: &[String],
+    resolved_path: &str,
+) -> Vec<String> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
     for candidate in std::iter::once(path)
@@ -533,7 +537,12 @@ pub(super) fn collect_archive_plan_for_user_with_control_conn(
 ) -> Result<Vec<ArchivePlanItem>, McBrowserError> {
     collect_archive_plan_with_control(bfs, selected_paths, control, |path| {
         control.check()?;
-        crate::mcbrowser::policy::authorize_with_conn(conn, auth_user, crate::mcbrowser::policy::Permission::Read, path)?;
+        crate::mcbrowser::policy::authorize_with_conn(
+            conn,
+            auth_user,
+            crate::mcbrowser::policy::Permission::Read,
+            path,
+        )?;
         crate::mcbrowser::policy::authorize_with_conn(
             conn,
             auth_user,
@@ -1125,7 +1134,8 @@ pub(super) async fn create_archive_ticket(
                     "Database unavailable for archive ticket creation".to_string(),
                 )
             })?;
-            let effective_scope = crate::mcbrowser::policy::effective_scope_with_conn(&conn, user_id)?;
+            let effective_scope =
+                crate::mcbrowser::policy::effective_scope_with_conn(&conn, user_id)?;
             let bfs = open_configured_user_browser_fs_with_conn(&conn, user_id)?;
             let _plan = collect_archive_plan_for_user_with_control_conn(
                 &conn,

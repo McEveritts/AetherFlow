@@ -682,7 +682,8 @@ async fn marketplace_supports_listenarr_prerelease_updates_and_capitalized_recei
     std::env::set_var("AETHERFLOW_INSTALL_ROOT", &root);
 
     // 1. resolve_candidate_receipt_paths includes /opt/Listenarr/.af-version
-    let receipt_candidates = super::super::marketplace::resolve_candidate_receipt_paths("listenarr");
+    let receipt_candidates =
+        super::super::marketplace::resolve_candidate_receipt_paths("listenarr");
     assert!(
         receipt_candidates.contains(&root.join("opt/Listenarr/.af-version")),
         "expected /opt/Listenarr/.af-version in {receipt_candidates:?}"

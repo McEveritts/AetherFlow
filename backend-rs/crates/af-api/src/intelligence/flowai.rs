@@ -850,8 +850,8 @@ pub async fn test_ai_connection(
     } else {
         "https://api.anthropic.com"
     };
-    let anth_origin_changed =
-        ai_endpoint_origin_tuple(&stored_anth_endpoint) != ai_endpoint_origin_tuple(next_anth_endpoint);
+    let anth_origin_changed = ai_endpoint_origin_tuple(&stored_anth_endpoint)
+        != ai_endpoint_origin_tuple(next_anth_endpoint);
     if is_anthropic_local_test {
         if had_stored_anth_key && !supplied_fresh_anth_key && anth_origin_changed {
             // Testing a local Anthropic-compatible runtime at a different origin must neither

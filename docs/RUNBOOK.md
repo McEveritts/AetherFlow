@@ -45,7 +45,7 @@
 │  │ /var/lib/aetherflow/           │  │ /run/aetherflow/runner.sock│  │
 │  │  • aetherflow.sqlite (WAL)     │  │ aetherflow-runner.service  │  │
 │  │  • mcbrowser/user-<id> (0700)  │  │  • systemctl allowlists    │  │
-│  │  • AES-256-GCM secrets         │  │  • 12 Rust recipes + Bash  │  │
+│  │  • AES-256-GCM secrets         │  │  • 9 Rust recipes + Bash   │  │
 │  └────────────────────────────────┘  │  • WireGuard / Tailscale   │  │
 │                                      │  • Isolated Self-Updater   │  │
 │                                      └────────────────────────────┘  │

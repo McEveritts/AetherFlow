@@ -16,6 +16,8 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 // Preserve existing module-level public paths for crate callers and tests.
+#[cfg(test)]
+pub use archive::decode_tar_archive_entries;
 #[allow(unused_imports)]
 pub use archive::{
     collect_archive_plan_for_user_with_conn, collect_archive_plan_with_auth,
@@ -23,8 +25,6 @@ pub use archive::{
     redeem_and_plan_archive_ticket_with, validate_archive_entry_name, write_archive_to_writer,
     ArchivePlanItem, ArchiveTicketEntry, ArchiveTicketStore,
 };
-#[cfg(test)]
-pub use archive::decode_tar_archive_entries;
 #[allow(unused_imports)]
 pub(crate) use archive::{
     write_zip_central_directory_and_eocd, ChannelChunkWriter, CountingWriter, ZipEntryRecord,
@@ -36,9 +36,7 @@ pub use copy::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-pub use copy::{
-    execute_copy_conn, execute_copy_for_user_with_conn, execute_copy_with_policy_conn,
-};
+pub use copy::{execute_copy_conn, execute_copy_for_user_with_conn, execute_copy_with_policy_conn};
 #[allow(unused_imports)]
 pub use editor::{
     compute_etag_bytes, etag_matches, execute_create_file_conn,
@@ -48,6 +46,9 @@ pub use editor::{
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use editor::{execute_put_content_conn, execute_put_content_for_user_with_conn};
+#[cfg(test)]
+#[allow(unused_imports)]
+pub use info_delete::execute_delete_recursive_conn;
 #[allow(unused_imports)]
 pub use info_delete::{
     collect_entry_info_with_auth, compute_checksums_from_reader,
@@ -55,16 +56,14 @@ pub use info_delete::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-pub use info_delete::execute_delete_recursive_conn;
-pub(super) use rename::execute_rename_request;
-#[cfg(test)]
-#[allow(unused_imports)]
 pub use rename::execute_rename_for_user_with_conn;
+pub(super) use rename::execute_rename_request;
 #[allow(unused_imports)]
 pub use search::{
     build_deterministic_nl_plan, filter_and_rank_entries_with_flowai, filter_walked_entries,
     parse_search_type_filter, FlowAiSearchPlan,
 };
+pub(super) use types::RenameMoveRequest;
 #[allow(unused_imports)]
 pub use types::{
     resolve_operation_conflict_policy, ArchiveFormat, ArchiveRequest, ArchiveTicketResponse,
@@ -73,8 +72,13 @@ pub use types::{
     OperationConflictPolicy, PutContentRequest, PutContentResponse, SearchKindFilter, SearchQuery,
     SearchResponse,
 };
-pub(super) use types::RenameMoveRequest;
 
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::mcbrowser::McBrowserError;
+#[cfg(test)]
+#[allow(unused_imports)]
+use af_models::md5::Md5Hasher;
 #[cfg(test)]
 #[allow(unused_imports)]
 use archive::{
@@ -82,6 +86,18 @@ use archive::{
     download_archive_by_ticket, open_planned_archive_file, ArchivePlanningControl,
     ArchivePlanningGuard, Crc32Hasher,
 };
+#[cfg(test)]
+#[allow(unused_imports)]
+use axum::body::Bytes;
+#[cfg(test)]
+#[allow(unused_imports)]
+use axum::extract::{Extension, Path as AxumPath};
+#[cfg(test)]
+#[allow(unused_imports)]
+use axum::http::{header, StatusCode};
+#[cfg(test)]
+#[allow(unused_imports)]
+use axum::response::Json;
 #[cfg(test)]
 #[allow(unused_imports)]
 use copy::{
@@ -97,24 +113,6 @@ use editor::{
 #[cfg(test)]
 #[allow(unused_imports)]
 use rename::execute_rename_with_accounting_conn;
-#[cfg(test)]
-#[allow(unused_imports)]
-use crate::mcbrowser::McBrowserError;
-#[cfg(test)]
-#[allow(unused_imports)]
-use axum::body::Bytes;
-#[cfg(test)]
-#[allow(unused_imports)]
-use af_models::md5::Md5Hasher;
-#[cfg(test)]
-#[allow(unused_imports)]
-use axum::extract::{Extension, Path as AxumPath};
-#[cfg(test)]
-#[allow(unused_imports)]
-use axum::http::{header, StatusCode};
-#[cfg(test)]
-#[allow(unused_imports)]
-use axum::response::Json;
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::collections::{BTreeMap, HashSet};

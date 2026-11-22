@@ -155,8 +155,9 @@ pub(super) type BaseDomainSyncPauseHook = (
 );
 
 #[cfg(test)]
-pub(super) static BASE_DOMAIN_SYNC_STAGE_HOOK: Lazy<std::sync::Mutex<Option<BaseDomainSyncPauseHook>>> =
-    Lazy::new(|| std::sync::Mutex::new(None));
+pub(super) static BASE_DOMAIN_SYNC_STAGE_HOOK: Lazy<
+    std::sync::Mutex<Option<BaseDomainSyncPauseHook>>,
+> = Lazy::new(|| std::sync::Mutex::new(None));
 
 pub(super) async fn update_settings(
     Extension(user): Extension<AuthUser>,

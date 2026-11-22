@@ -1,7 +1,6 @@
 use super::*;
 
-const EMBEDDED_AUTOMATION_FOR_EXECUTOR: &str =
-    crate::EMBEDDED_AUTOMATION_JSON;
+const EMBEDDED_AUTOMATION_FOR_EXECUTOR: &str = crate::EMBEDDED_AUTOMATION_JSON;
 
 pub(super) fn resolve_package_lock_name(pkg_id: &str) -> &str {
     af_models::resolve_package_lock_name(pkg_id)
@@ -1290,4 +1289,3 @@ pub fn execute_package_request_stream(
         }
     }
 }
-

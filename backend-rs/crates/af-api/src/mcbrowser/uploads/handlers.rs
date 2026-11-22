@@ -10,7 +10,9 @@ use super::session::{
 };
 use super::{session_lock, CHUNK_STREAM_TIMEOUT, MAX_CHUNK_BYTES};
 use crate::auth::AuthUser;
-use crate::mcbrowser::{map_fs_io_error, user_mutation_stripe, validate_mcbrowser_user, McBrowserError};
+use crate::mcbrowser::{
+    map_fs_io_error, user_mutation_stripe, validate_mcbrowser_user, McBrowserError,
+};
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query};
 use axum::http::{header, HeaderMap, StatusCode};

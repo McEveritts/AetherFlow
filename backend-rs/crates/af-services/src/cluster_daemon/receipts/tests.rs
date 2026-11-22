@@ -292,11 +292,8 @@ fn worker_command_retry_after_lost_ack_and_new_lease_reattaches_without_rerun() 
     .unwrap();
     assert!(!legacy_receipts.exists());
 
-    let upgraded_worker = WorkerCommandCoordinator::load_and_recover(
-        "node-beta",
-        &legacy_outbox,
-        &legacy_receipts,
-    );
+    let upgraded_worker =
+        WorkerCommandCoordinator::load_and_recover("node-beta", &legacy_outbox, &legacy_receipts);
     let reattached_legacy = match upgraded_worker.prepare_command_dispatch(legacy_gen2) {
         WorkerCommandDispatchPlan::SendAckOnly(ack) => ack,
         other => panic!("legacy outbox record must reattach without rerun, got {other:?}"),
@@ -533,8 +530,7 @@ fn worker_command_stale_lease_conflicting_identity_and_confined_storage_guards()
 
 #[cfg(unix)]
 #[test]
-fn worker_command_saturation_preserves_unconfirmed_and_intents_applies_backpressure_and_drains()
-{
+fn worker_command_saturation_preserves_unconfirmed_and_intents_applies_backpressure_and_drains() {
     let root = env::temp_dir().join(format!("af-cluster-sat-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let outbox_path = root.join("state/cluster_worker_ack_outbox.json");
@@ -555,9 +551,7 @@ fn worker_command_saturation_preserves_unconfirmed_and_intents_applies_backpress
             updated_at: "2026-11-21T00:00:00Z".to_string(),
         })
         .collect();
-    assert!(
-        persist_worker_command_receipts_atomic(&receipts_path, &unconfirmed_overflow).is_err()
-    );
+    assert!(persist_worker_command_receipts_atomic(&receipts_path, &unconfirmed_overflow).is_err());
 
     let intent_overflow: Vec<WorkerCommandReceipt> = (0..=MAX_WORKER_COMMAND_RECEIPTS)
         .map(|i| WorkerCommandReceipt {
@@ -810,9 +804,7 @@ fn worker_command_byte_bound_and_legacy_outbox_reconciliation_guards() {
     assert_eq!(admitted_heavy.id, "cmd-heavy-new");
     let completed_heavy = byte_worker
         .complete_admitted_mutation(&admitted_heavy, Err("e".repeat(1024)))
-        .expect(
-            "reserved byte headroom must allow admitted intent to persist full-size outcome",
-        );
+        .expect("reserved byte headroom must allow admitted intent to persist full-size outcome");
     assert_eq!(completed_heavy.status, WORKER_COMMAND_STATUS_FAILED);
     assert_eq!(
         load_worker_command_receipts_strict(&byte_receipts)
@@ -984,8 +976,7 @@ fn worker_command_byte_bound_and_legacy_outbox_reconciliation_guards() {
         &recycle_recon_outbox,
         &recycle_recon_receipts,
     );
-    let post_recon_receipts =
-        load_worker_command_receipts_strict(&recycle_recon_receipts).unwrap();
+    let post_recon_receipts = load_worker_command_receipts_strict(&recycle_recon_receipts).unwrap();
     assert_eq!(post_recon_receipts.len(), MAX_WORKER_COMMAND_RECEIPTS);
     assert!(post_recon_receipts
         .iter()

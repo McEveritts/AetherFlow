@@ -114,7 +114,10 @@ pub(in crate::package_executor) fn extract_runner_apache_custom_blocks(
     Ok(blocks)
 }
 
-pub(in crate::package_executor) fn collect_apache_custom_blocks(raw: &str, blocks: &mut Vec<String>) {
+pub(in crate::package_executor) fn collect_apache_custom_blocks(
+    raw: &str,
+    blocks: &mut Vec<String>,
+) {
     collect_apache_live_custom_blocks(raw, blocks);
     let pending = raw
         .lines()
@@ -124,7 +127,10 @@ pub(in crate::package_executor) fn collect_apache_custom_blocks(raw: &str, block
     collect_apache_live_custom_blocks(&pending, blocks);
 }
 
-pub(in crate::package_executor) fn collect_apache_live_custom_blocks(raw: &str, blocks: &mut Vec<String>) {
+pub(in crate::package_executor) fn collect_apache_live_custom_blocks(
+    raw: &str,
+    blocks: &mut Vec<String>,
+) {
     let mut depth = 0usize;
     let mut section = Vec::new();
     for line in raw.lines() {
@@ -250,7 +256,10 @@ pub fn requires_external_app_auth(app: &str) -> bool {
     )
 }
 
-pub(in crate::package_executor) fn apache_bcrypt_entry(username: &str, hash: &str) -> Option<String> {
+pub(in crate::package_executor) fn apache_bcrypt_entry(
+    username: &str,
+    hash: &str,
+) -> Option<String> {
     if !SAFE_USERNAME.is_match(username) || hash.len() != 60 {
         return None;
     }
@@ -367,7 +376,10 @@ pub(in crate::package_executor) fn ensure_apache_htpasswd_with(
     Ok(())
 }
 
-pub(in crate::package_executor) fn external_auth_policy(app: &str, fs_root: Option<&Path>) -> anyhow::Result<String> {
+pub(in crate::package_executor) fn external_auth_policy(
+    app: &str,
+    fs_root: Option<&Path>,
+) -> anyhow::Result<String> {
     external_auth_policy_for_vhost(app, fs_root, false)
 }
 
@@ -436,7 +448,10 @@ pub(in crate::package_executor) fn internal_rewrite_guard() -> String {
     )
 }
 
-pub(in crate::package_executor) fn apache_tls_pair(domain: &str, fs_root: Option<&Path>) -> Option<(String, String)> {
+pub(in crate::package_executor) fn apache_tls_pair(
+    domain: &str,
+    fs_root: Option<&Path>,
+) -> Option<(String, String)> {
     if !af_models::valid_ingress_hostname(domain) || domain.ends_with(".aether.local") {
         return None;
     }
@@ -784,7 +799,10 @@ pub(crate) fn update_legacy_apache_vhost(
     update_legacy_apache_vhost_with_blocks(raw, req, upstream, fs_root, external, &[])
 }
 
-pub(in crate::package_executor) fn strip_legacy_duplicate_public_vhosts(raw: &str, domain: &str) -> String {
+pub(in crate::package_executor) fn strip_legacy_duplicate_public_vhosts(
+    raw: &str,
+    domain: &str,
+) -> String {
     static VHOST: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?is)<VirtualHost\s+[^>]+>.*?</VirtualHost\s*>").unwrap());
     VHOST

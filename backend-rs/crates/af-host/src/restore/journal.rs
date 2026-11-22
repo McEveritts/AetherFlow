@@ -409,7 +409,9 @@ pub(super) fn write_exclusive_staged_file(
     Ok((out, staged_dev_ino, hex::encode(hasher.finalize()), total))
 }
 
-pub(super) fn compute_journal_canonical_digest(journal: &RollbackFailureJournal) -> HostBackupResult<String> {
+pub(super) fn compute_journal_canonical_digest(
+    journal: &RollbackFailureJournal,
+) -> HostBackupResult<String> {
     let mut normalized_journal = journal.clone();
     normalized_journal.journal_digest_sha256 = None;
     let canonical_bytes = serde_json::to_vec(&normalized_journal).map_err(|err| {

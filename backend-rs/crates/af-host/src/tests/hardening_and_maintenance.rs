@@ -1,5 +1,5 @@
-use crate::restore::execute_coordinated_restore;
 use super::{create_sample_wal_database, TempTestDir};
+use crate::restore::execute_coordinated_restore;
 use crate::*;
 use rusqlite::Connection;
 use std::fs;
@@ -8,8 +8,7 @@ use std::time::Duration;
 
 #[cfg(unix)]
 #[test]
-fn s01_atomic_install_rejects_pre_rename_staging_swap_and_records_unverified_post_rename_fault()
-{
+fn s01_atomic_install_rejects_pre_rename_staging_swap_and_records_unverified_post_rename_fault() {
     let tmp = TempTestDir::new("s01-atomic-install-post-rename");
     let src_file = tmp.path().join("staged_source.txt");
     fs::write(&src_file, b"verified_payload_bytes").unwrap();
@@ -184,16 +183,14 @@ fn s03_s04_s08_shared_runtime_lock_interoperability_and_strict_root_lock_parent_
         )
         .unwrap();
         let bad_lock_path = group_writable_non_sticky.join(".snapshot.lock");
-        let gw_err =
-            HostMaintenanceLockGuard::acquire(&bad_lock_path, Duration::from_millis(100))
-                .unwrap_err();
+        let gw_err = HostMaintenanceLockGuard::acquire(&bad_lock_path, Duration::from_millis(100))
+            .unwrap_err();
         assert!(gw_err.is_security_rejection());
 
         let service_owned_var_lib = tmp.path().join("service-owned-var-lib");
         fs::create_dir_all(&service_owned_var_lib).unwrap();
         fs::set_permissions(&service_owned_var_lib, fs::Permissions::from_mode(0o700)).unwrap();
-        let c_var_lib =
-            std::ffi::CString::new(service_owned_var_lib.to_str().unwrap()).unwrap();
+        let c_var_lib = std::ffi::CString::new(service_owned_var_lib.to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::chown(c_var_lib.as_ptr(), 65534, 65534) }, 0);
 
         let rejected_root_lock = service_owned_var_lib.join(".snapshot.lock");
@@ -255,8 +252,7 @@ fn s03_s04_s08_shared_runtime_lock_interoperability_and_strict_root_lock_parent_
 
         std::env::set_var("AETHERFLOW_SERVICE_UID", euid.to_string());
         std::env::set_var("AETHERFLOW_SERVICE_GID", "0");
-        let zero_gid_res =
-            HostMaintenanceLockGuard::acquire(&s08_lock, Duration::from_millis(100));
+        let zero_gid_res = HostMaintenanceLockGuard::acquire(&s08_lock, Duration::from_millis(100));
         std::env::remove_var("AETHERFLOW_SERVICE_UID");
         std::env::remove_var("AETHERFLOW_SERVICE_GID");
         assert!(zero_gid_res.is_err());
@@ -360,8 +356,7 @@ fn sqlite_connection_substitution_is_rejected_after_original_name_is_restored() 
 }
 
 #[test]
-fn s06_s10_s11_recovery_cleans_post_commit_sidecars_blocks_partial_restart_and_binds_checkpoint(
-) {
+fn s06_s10_s11_recovery_cleans_post_commit_sidecars_blocks_partial_restart_and_binds_checkpoint() {
     let tmp = TempTestDir::new("s06-s10-s11-recovery-closure");
     let host_root = tmp.path().join("host");
     let live_db = host_root.join("var/lib/aetherflow/aetherflow.sqlite");
@@ -455,14 +450,12 @@ fn s06_s10_s11_recovery_cleans_post_commit_sidecars_blocks_partial_restart_and_b
 
     let legacy_authority_dir = host_root.join("etc/AetherFlow/legacy-authority");
     fs::create_dir_all(&legacy_authority_dir).unwrap();
-    let pending_journal =
-        legacy_authority_dir.join(".rollback-restore.pending999.journal.json");
+    let pending_journal = legacy_authority_dir.join(".rollback-restore.pending999.journal.json");
     fs::write(&pending_journal, b"{}").unwrap();
 
     let deep_dest = host_root.join("etc/AetherFlow/legacy-authority/sub/nested/deep.conf");
-    let s10_err =
-        crate::restore::validate_destination_not_provenance(&deep_dest, &host_root, None)
-            .unwrap_err();
+    let s10_err = crate::restore::validate_destination_not_provenance(&deep_dest, &host_root, None)
+        .unwrap_err();
     assert!(s10_err.is_security_rejection());
     fs::remove_file(&pending_journal).unwrap();
 

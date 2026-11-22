@@ -33,7 +33,7 @@ Rather than granting the web API unrestricted `sudo` or disabling `ProtectSystem
    - Runs as `User=aetherflow` with `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectControlGroups=yes`, `ProtectKernelTunables=yes`, `RestrictSUIDSGID=yes`, `DevicePolicy=closed` (`/dev/dri` and `/dev/nvidia*` device allowlists), `UMask=0027`, and `LimitNOFILE=65535`.
 2. **`aetherflow-runner.service` (Root UNIX Socket Helper — `af-runner`)**:
    - Runs `/opt/AetherFlow/current/aetherflow-api runner` and listens exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`), verifying caller `SO_PEERCRED` and `/proc/<pid>/exe` against trusted control-plane/CLI binaries (blocking plugin processes and scripting interpreters).
-   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (12 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), blueprint/ingress mutations, WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.
+   - Enforces strict regex, enum, and `lstat` ancestor-symlink allowlists for `systemctl` actions, Marketplace package operations (9 native declarative Rust recipes + locked Bash installers serialized with `DPkg::Lock::Timeout=120`), blueprint/ingress mutations, WireGuard/Tailscale control, disk quotas, and isolated `aetherflow-self-update.service` updates.
 
 ---
 

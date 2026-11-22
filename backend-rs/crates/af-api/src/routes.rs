@@ -52,12 +52,10 @@ use crate::streaming_ext::{
     control_streaming_session, get_streaming_artwork, sync_streaming_server_history,
     test_streaming_server,
 };
-use crate::ws::{
-    handle_log_websocket, handle_websocket, normalize_request_forwarding_for_peer,
-};
 #[cfg(test)]
 #[allow(unused_imports)]
 use crate::ws::PeerIp;
+use crate::ws::{handle_log_websocket, handle_websocket, normalize_request_forwarding_for_peer};
 #[cfg(test)]
 #[allow(unused_imports)]
 use af_models::{AppIngressConfig, MarketplaceApp, User};
@@ -65,13 +63,10 @@ use axum::extract::Request;
 #[cfg(test)]
 #[allow(unused_imports)]
 use axum::extract::{Extension, Path, Query};
-#[cfg(all(test, unix))]
-#[allow(unused_imports)]
-use std::os::unix::ffi::OsStrExt;
-use axum::http::{header, HeaderValue, StatusCode};
 #[cfg(test)]
 #[allow(unused_imports)]
 use axum::http::HeaderMap;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 #[cfg(test)]
@@ -93,6 +88,9 @@ use std::env;
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::fs;
+#[cfg(all(test, unix))]
+#[allow(unused_imports)]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::path::PathBuf;
@@ -124,8 +122,7 @@ use blueprints_ingress::{
 #[cfg(test)]
 #[allow(unused_imports)]
 use blueprints_ingress::{
-    resolve_patched_ingress_config, sync_ingress_vhost, upsert_app_ingress_config,
-    UpdateIngressReq,
+    resolve_patched_ingress_config, sync_ingress_vhost, upsert_app_ingress_config, UpdateIngressReq,
 };
 use fs_browser::browse_directories;
 pub(crate) use health::database_is_ready;
@@ -133,19 +130,19 @@ use health::{
     authenticated_ready, get_hardware_info, get_openapi_spec, get_system_metrics, health_check,
     health_live, health_ready, prometheus_metrics,
 };
+#[cfg(test)]
+#[allow(unused_imports)]
+use notifications::PageQuery;
 use notifications::{
     dismiss_all_notifications, get_audit_log, get_notification_channels, get_notification_rules,
     get_notifications, mark_notification_read,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-use notifications::PageQuery;
+use services::{control_service_handler, get_core_restart_status, get_services};
 #[allow(unused_imports)]
 pub(crate) use services::{
     is_valid_core_restart_job_unit, read_service_inventory, reconcile_pending_action,
     service_inventory_unavailable,
 };
-use services::{control_service_handler, get_core_restart_status, get_services};
 #[cfg(test)]
 #[allow(unused_imports)]
 use services::{
@@ -158,16 +155,15 @@ use settings::{get_settings, update_settings};
 #[cfg(test)]
 #[allow(unused_imports)]
 use settings::{
-    get_settings_for_role, mask_secret, redact_settings_for_role,
-    should_auto_update_active_domain, should_auto_update_retained_domain,
-    BASE_DOMAIN_SYNC_STAGE_HOOK,
+    get_settings_for_role, mask_secret, redact_settings_for_role, should_auto_update_active_domain,
+    should_auto_update_retained_domain, BASE_DOMAIN_SYNC_STAGE_HOOK,
 };
-#[allow(unused_imports)]
-pub(crate) use streaming::{update_streaming_server, UpdateStreamingServerReq};
-use streaming::{get_streaming_dashboard, handle_streaming_demo};
 #[cfg(test)]
 #[allow(unused_imports)]
 use streaming::DemoReq;
+use streaming::{get_streaming_dashboard, handle_streaming_demo};
+#[allow(unused_imports)]
+pub(crate) use streaming::{update_streaming_server, UpdateStreamingServerReq};
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -186,6 +182,9 @@ use marketplace::{
     CANDIDATE_QUIESCE_RECORDER,
 };
 // Keep the existing crate::routes paths for lifecycle callers.
+#[cfg(test)]
+#[allow(unused_imports)]
+use marketplace::load_authoritative_app_ingress_config;
 #[allow(unused_imports)]
 pub(crate) use marketplace::{
     append_package_job_output, reinstall_package, should_rollback_post_certification_failure,
@@ -195,9 +194,6 @@ use marketplace::{
     check_package_updates, check_single_package_update, get_marketplace_apps, install_package,
     package_progress, uninstall_package, update_package,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-use marketplace::load_authoritative_app_ingress_config;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use marketplace::{

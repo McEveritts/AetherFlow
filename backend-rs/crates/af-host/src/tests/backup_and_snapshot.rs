@@ -245,8 +245,7 @@ fn restore_planning_rejects_traversal_rooted_paths_and_unsafe_overwrite() {
         overwrite_policy: OverwritePolicy::AllowRegularFilesInStaging,
         ..Default::default()
     };
-    let staging_plan =
-        plan_restore_from_manifest(&manifest, &target_root, &staging_opts).unwrap();
+    let staging_plan = plan_restore_from_manifest(&manifest, &target_root, &staging_opts).unwrap();
     assert_eq!(
         staging_plan.items[0].action,
         PlannedRestoreAction::ReplaceExistingRegularFile
@@ -361,8 +360,7 @@ fn end_to_end_host_archive_backup_and_non_destructive_preflight_in_isolated_temp
     assert!(inv[0].manifest_present);
     assert_eq!(inv[0].chunk_count, receipt.chunk_paths.len());
 
-    let (ver, loaded_manifest) =
-        verify_backup_artifact(&cfg.backup_dir, &inv[0].filename).unwrap();
+    let (ver, loaded_manifest) = verify_backup_artifact(&cfg.backup_dir, &inv[0].filename).unwrap();
     assert!(ver.verified);
     let loaded_manifest = loaded_manifest.expect("manifest loaded");
 
@@ -487,9 +485,8 @@ fn restore_target_root_rejects_system_root_bypasses_and_relative_paths() {
         ..Default::default()
     };
 
-    let canonical_plan = plan_restore_from_manifest(&manifest, Path::new("/"), &opts).expect(
-        "canonical '/' target_root should be accepted for allowlisted AetherFlow paths",
-    );
+    let canonical_plan = plan_restore_from_manifest(&manifest, Path::new("/"), &opts)
+        .expect("canonical '/' target_root should be accepted for allowlisted AetherFlow paths");
     assert_eq!(
         canonical_plan.items[0].destination_path,
         PathBuf::from("/etc/AetherFlow/cluster.conf")
@@ -714,8 +711,7 @@ fn manifest_validate_and_verify_backup_artifact_detect_metadata_archive_and_chun
     let last_chunk = receipt.chunk_paths.last().unwrap().clone();
     let last_chunk_bytes = fs::read(&last_chunk).unwrap();
     fs::remove_file(&last_chunk).unwrap();
-    let missing_chunk_err =
-        verify_backup_artifact(&cfg.backup_dir, &archive_filename).unwrap_err();
+    let missing_chunk_err = verify_backup_artifact(&cfg.backup_dir, &archive_filename).unwrap_err();
     assert!(matches!(
         missing_chunk_err,
         HostBackupError::ChunkError { .. }
@@ -818,8 +814,7 @@ fn concurrent_sidecar_and_manifest_saves_do_not_collide() {
                 unix_gid: None,
                 required: true,
             });
-            let manifest_path =
-                dir_cloned.join(format!("aetherflow_shared_{}.manifest.json", i));
+            let manifest_path = dir_cloned.join(format!("aetherflow_shared_{}.manifest.json", i));
             m.save_atomic(&manifest_path).unwrap();
             let loaded = BackupManifest::load_from_path(&manifest_path, true).unwrap();
             assert_eq!(loaded.entries.len(), 1);

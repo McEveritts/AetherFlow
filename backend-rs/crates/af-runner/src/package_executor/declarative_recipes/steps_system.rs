@@ -749,7 +749,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 ))
             }
 
-
             DeclarativeStep::InstallRcloneBinary { .. } => {
                 self.execute_install_rclone_binary(recipe, vars, journal, cancel)
                     .await

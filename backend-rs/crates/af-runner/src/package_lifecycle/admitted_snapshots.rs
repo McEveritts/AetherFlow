@@ -456,7 +456,10 @@ pub fn execute_coordinated_package_stream(
     }
 }
 
-pub(super) fn spawn_worker<Run, RunFuture>(request: PackageRunnerRequest, run: Run) -> mpsc::Receiver<String>
+pub(super) fn spawn_worker<Run, RunFuture>(
+    request: PackageRunnerRequest,
+    run: Run,
+) -> mpsc::Receiver<String>
 where
     Run: FnOnce(PackageRunnerRequest, mpsc::Sender<String>) -> RunFuture + Send + 'static,
     RunFuture: std::future::Future<Output = Result<LifecycleReceipt>> + Send + 'static,

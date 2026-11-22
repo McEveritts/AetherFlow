@@ -149,13 +149,9 @@ async fn required_callback_and_script_failures_never_become_completed_receipts()
         } else {
             "update"
         };
-        let mut operation = CoordinatedOperation::admit(
-            conn,
-            request(action),
-            package,
-            vec!["syncthing".into()],
-        )
-        .unwrap();
+        let mut operation =
+            CoordinatedOperation::admit(conn, request(action), package, vec!["syncthing".into()])
+                .unwrap();
         let receipt = operation.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed", "{failure}");
         let (_, status, category) = persisted(&operation.conn);
@@ -380,13 +376,9 @@ async fn afmp003_stopped_or_retained_application_port_is_never_stolen_by_another
     // Automatic port resolution for `syncthing` (default_port = 8384) must skip 8384 (owned by radarr)
     // and skip 17000 (retained by sonarr), allocating 17001 instead!
     let (sender, _receiver) = mpsc::channel(32);
-    let mut op = CoordinatedOperation::admit(
-        conn,
-        request("install"),
-        package,
-        vec!["syncthing".into()],
-    )
-    .unwrap();
+    let mut op =
+        CoordinatedOperation::admit(conn, request("install"), package, vec!["syncthing".into()])
+            .unwrap();
     let receipt = op.execute(&backend, &sender).await.unwrap();
     assert_eq!(receipt.status, "completed");
     assert_eq!(receipt.app_port, 17001);
@@ -502,8 +494,7 @@ async fn update_rejects_missing_or_invalid_target_version_at_admission() {
     let mut req = request("update");
     req.expected_target_version = None;
     assert!(
-        CoordinatedOperation::admit(conn, req, package.clone(), vec!["syncthing".into()])
-            .is_err(),
+        CoordinatedOperation::admit(conn, req, package.clone(), vec!["syncthing".into()]).is_err(),
         "admission must reject update request with missing target version"
     );
 
@@ -712,8 +703,7 @@ async fn test_blueprint_config_rollback_on_target_certification_failure() {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+                    let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
                 }
                 Ok(())
             })

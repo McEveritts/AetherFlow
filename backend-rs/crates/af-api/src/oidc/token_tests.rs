@@ -822,7 +822,10 @@ async fn oidc_introspect_propagates_sqlite_errors_instead_of_returning_active_fa
         return;
     }
     let db = ensure_shared_test_db();
-    env::set_var("OIDC_KEY_PATH", db.parent().unwrap().join("oidc-intr-err.pem"));
+    env::set_var(
+        "OIDC_KEY_PATH",
+        db.parent().unwrap().join("oidc-intr-err.pem"),
+    );
     let secret_hash = hex::encode(Sha256::digest(b"intr-secret"));
     let (access_tok, refresh_tok) = {
         let conn = af_db::get_conn().unwrap();

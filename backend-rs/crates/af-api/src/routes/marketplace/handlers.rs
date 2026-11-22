@@ -21,7 +21,9 @@ pub(in crate::routes) struct PackageTargetPayload {
     target_version: Option<String>,
 }
 
-pub(in crate::routes) fn extract_expected_target_version(bytes: &[u8]) -> Result<Option<String>, StatusCode> {
+pub(in crate::routes) fn extract_expected_target_version(
+    bytes: &[u8],
+) -> Result<Option<String>, StatusCode> {
     if bytes.is_empty() {
         return Ok(None);
     }

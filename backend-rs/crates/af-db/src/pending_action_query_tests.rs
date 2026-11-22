@@ -5,12 +5,12 @@ use crate::pending_actions::{
     query_pending_actions_with_connection, queue_action_with_connection,
 };
 use crate::schema::ensure_pending_actions_schema_invariants;
+use crate::tests::TEST_DB_MUTEX;
 use crate::*;
 use rusqlite::{params, Connection};
 use std::env;
 use std::fs;
 use std::time::Duration;
-use crate::tests::TEST_DB_MUTEX;
 
 fn connection() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -40,8 +40,7 @@ fn status_filter_precedes_pagination_and_counts_all_matching_rows() {
         )
         .unwrap();
     }
-    let (pending, total) =
-        query_pending_actions_with_connection(&conn, "pending", 50, 0).unwrap();
+    let (pending, total) = query_pending_actions_with_connection(&conn, "pending", 50, 0).unwrap();
     assert_eq!(total, 1);
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, 1);
@@ -94,8 +93,7 @@ fn null_status_is_pending_and_history_includes_only_approved_outcomes() {
         )
         .unwrap();
     }
-    let (pending, total) =
-        query_pending_actions_with_connection(&conn, "pending", 50, 0).unwrap();
+    let (pending, total) = query_pending_actions_with_connection(&conn, "pending", 50, 0).unwrap();
     assert_eq!(total, 1);
     assert_eq!(pending[0].status, "pending");
     let (history, total) =
@@ -106,13 +104,11 @@ fn null_status_is_pending_and_history_includes_only_approved_outcomes() {
         vec![4, 3, 1]
     );
     for filter in ["approved", "rejected", "executed", "failed"] {
-        let (actions, total) =
-            query_pending_actions_with_connection(&conn, filter, 1, 0).unwrap();
+        let (actions, total) = query_pending_actions_with_connection(&conn, filter, 1, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(actions[0].status, filter);
     }
-    let (actions, total) =
-        query_pending_actions_with_connection(&conn, "pending", 50, 1).unwrap();
+    let (actions, total) = query_pending_actions_with_connection(&conn, "pending", 50, 1).unwrap();
     assert_eq!(total, 1);
     assert!(actions.is_empty());
 }
@@ -174,8 +170,7 @@ fn deferred_restart_receipt_schema_upgrade_preserves_rows_and_history_filters() 
         vec![4, 3, 2, 1]
     );
 
-    let (queued, q_total) =
-        query_pending_actions_with_connection(&conn, "queued", 50, 0).unwrap();
+    let (queued, q_total) = query_pending_actions_with_connection(&conn, "queued", 50, 0).unwrap();
     assert_eq!(q_total, 1);
     assert_eq!(queued[0].id, 3);
     assert_eq!(
@@ -205,8 +200,7 @@ fn deferred_restart_receipt_transitions_guard_against_mismatches_and_replays() {
     .unwrap();
 
     let unit = "aetherflow-self-update-restart-aetherflow-api-abcdef0123456789.service";
-    let queued =
-        mark_action_queued_with_connection(&conn, 10, unit, "queued for restart").unwrap();
+    let queued = mark_action_queued_with_connection(&conn, 10, unit, "queued for restart").unwrap();
     assert_eq!(queued.status, "queued");
     assert_eq!(queued.job_unit.as_deref(), Some(unit));
 
@@ -245,13 +239,9 @@ fn deferred_restart_receipt_transitions_guard_against_mismatches_and_replays() {
     );
 
     // Terminal row cannot be overwritten back to failed or unavailable.
-    let repeat = finalize_queued_action_by_job_unit_with_connection(
-        &conn,
-        unit,
-        "failed",
-        "stale failure",
-    )
-    .unwrap();
+    let repeat =
+        finalize_queued_action_by_job_unit_with_connection(&conn, unit, "failed", "stale failure")
+            .unwrap();
     assert_eq!(repeat, 0);
     assert_eq!(
         get_pending_action_by_id_with_connection(&conn, 10)

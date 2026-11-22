@@ -401,7 +401,9 @@ pub fn build_update_http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-pub(in crate::workers) fn parse_effective_origin(url: &reqwest::Url) -> Option<(String, String, u16)> {
+pub(in crate::workers) fn parse_effective_origin(
+    url: &reqwest::Url,
+) -> Option<(String, String, u16)> {
     let scheme = url.scheme().to_ascii_lowercase();
     let host = url.host_str()?.to_ascii_lowercase();
     let effective_port = url.port().unwrap_or(match scheme.as_str() {

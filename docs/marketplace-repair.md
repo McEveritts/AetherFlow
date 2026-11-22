@@ -100,7 +100,7 @@ unresolved versions use `unknown` rather than a fabricated `1.0.0`.
 The incomplete Scrutiny Rust recipe is no longer selected; Scrutiny uses its
 existing Bash installer, which downloads its application assets and collector.
 ClamAV and Mosquitto are not in the Marketplace catalog and no longer register
-as Marketplace recipes. Twelve native recipes remain available behind the
+as Marketplace recipes. Nine native recipes remain available behind the
 existing opt-in feature flag.
 
 ## Validation and rollout

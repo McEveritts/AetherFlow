@@ -3060,8 +3060,12 @@ async fn cleanup_and_discover_skip_locked_sessions_and_preserve_global_cursor_an
         None,
     )
     .unwrap();
-    write_publication_proof_at(tmp.path(), &proof_rec, &UploadPublicationProof::Published {})
-        .unwrap();
+    write_publication_proof_at(
+        tmp.path(),
+        &proof_rec,
+        &UploadPublicationProof::Published {},
+    )
+    .unwrap();
     conn.execute(
         "UPDATE mcbrowser_uploads SET offset_bytes = 4, expires_at = 1 WHERE id = ?1",
         params![proof_rec.id],

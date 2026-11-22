@@ -728,4 +728,3 @@ pub fn verify_artifact_file_for_arch(
 
     Ok(digest)
 }
-

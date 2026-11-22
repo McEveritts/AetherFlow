@@ -65,7 +65,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::Archive;
 use tokio::process::Command;
 
-
 mod apache_ingress;
 mod command_env;
 mod declarative_recipes;
@@ -78,10 +77,6 @@ mod stream_dispatch;
 mod validation;
 
 pub use apache_ingress::*;
-pub(crate) use apache_ingress::{
-    apache_upstream_tls, apply_runner_blueprint_in_background, render_managed_apache_vhost,
-    update_legacy_apache_vhost, RunnerBlueprintConfigChanges,
-};
 #[cfg(test)]
 use apache_ingress::{
     apache_bcrypt_entry, apache_tls_pair, apply_runner_blueprint_app_config_changes,
@@ -91,9 +86,13 @@ use apache_ingress::{
     try_apply_runner_blueprint_app_config_with_ingress, ACME_HTTP_EXEMPTION, ACME_REWRITE_GUARD,
     APACHE_HTPASSWD,
 };
+pub(crate) use apache_ingress::{
+    apache_upstream_tls, apply_runner_blueprint_in_background, render_managed_apache_vhost,
+    update_legacy_apache_vhost, RunnerBlueprintConfigChanges,
+};
 
-pub use command_env::*;
 pub(crate) use command_env::terminate_child_process_group;
+pub use command_env::*;
 
 pub use declarative_recipes::*;
 #[allow(unused_imports)]
@@ -102,11 +101,9 @@ pub(crate) use declarative_recipes::{
     resolve_and_reserve_rclone_api_port_with,
 };
 
+#[cfg(test)]
+use helpers::resolve_master_credentials;
 pub use helpers::*;
-pub(crate) use helpers::{
-    ensure_package_sandbox_dropin_under_root_with_journal, package_request_deletes_data,
-    try_resolve_master_credentials,
-};
 use helpers::{
     add_missing_rclone_env_aliases, append_log_line, apply_sandbox_in_root_with_journal,
     escape_systemd_env_quoted, extract_binaries_from_targz, format_znc_major_minor,
@@ -114,44 +111,46 @@ use helpers::{
     step_progress_meta, trigger_certbot_sync_best_effort, update_preserved_rclone_env_pass,
     update_preserved_template_port,
 };
-#[cfg(test)]
-use helpers::resolve_master_credentials;
+pub(crate) use helpers::{
+    ensure_package_sandbox_dropin_under_root_with_journal, package_request_deletes_data,
+    try_resolve_master_credentials,
+};
 
 pub(crate) use legacy_readiness::*;
 
 pub use model::*;
 
 pub use policy::*;
-pub(crate) use policy::{RCLONE_BIN, RCLONE_BIN_OWNER, RCLONE_ENV, RCLONE_LEGACY_ENV};
 use policy::{
     ALLOWED_MANAGED_PREFIXES, FORBIDDEN_EXACT_PATHS, MAX_COMMAND_OUTPUT_BYTES, PROGRESS_LINE_RE,
     SHARED_SYSTEM_CHOWN_PATHS, SSH_PORT_LINE_RE,
 };
+pub(crate) use policy::{RCLONE_BIN, RCLONE_BIN_OWNER, RCLONE_ENV, RCLONE_LEGACY_ENV};
 
 pub(crate) use rollback::{
     acquire_package_mutex_with_cancel, wait_for_cancellation, CrossProcessLockGuard,
     RollbackJournal,
 };
-use rollback::{
-    create_dir_all_0755, set_path_mode, write_file_atomic_with_file_owner,
-    write_file_atomic_with_mode_bounded,
-};
 #[cfg(test)]
 use rollback::{
     copy_dir_snapshot_recursive, open_new_private_file, write_file_atomic_with_mode, RollbackEntry,
 };
+use rollback::{
+    create_dir_all_0755, set_path_mode, write_file_atomic_with_file_owner,
+    write_file_atomic_with_mode_bounded,
+};
 
+use stream_dispatch::resolve_package_lock_name;
 pub use stream_dispatch::*;
 #[allow(unused_imports)]
 pub(crate) use stream_dispatch::{
     apply_legacy_package_environment, configure_legacy_rclone_api_port_env,
     format_exit_failure_diagnostics,
 };
-use stream_dispatch::resolve_package_lock_name;
 
-pub use validation::*;
 #[allow(unused_imports)]
 pub(crate) use validation::validate_path_ancestors_with_lstat;
+pub use validation::*;
 use validation::{normalize_unit_filename, validate_step};
 
 #[cfg(test)]

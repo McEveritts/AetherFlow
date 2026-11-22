@@ -295,8 +295,8 @@ fn staged_restore_executes_verified_replacement_and_rolls_back_on_partial_failur
 }
 
 #[test]
-fn restore_enforces_mandatory_quiescence_compensates_partial_stop_and_requiesces_on_partial_start(
-) {
+fn restore_enforces_mandatory_quiescence_compensates_partial_stop_and_requiesces_on_partial_start()
+{
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -614,21 +614,18 @@ fn delete_backup_artifacts_rejects_uninventoried_and_unverified_files_and_lock_s
     assert!(unverified_db.is_file());
 
     let lock_path = backup_dir.join(".maintenance.lock");
-    let guard1 =
-        HostMaintenanceLockGuard::acquire(&lock_path, Duration::from_millis(100)).unwrap();
+    let guard1 = HostMaintenanceLockGuard::acquire(&lock_path, Duration::from_millis(100)).unwrap();
     let busy_err =
         HostMaintenanceLockGuard::acquire(&lock_path, Duration::from_millis(60)).unwrap_err();
     assert!(busy_err.to_string().contains("maintenance lock busy"));
     drop(guard1);
-    let guard2 =
-        HostMaintenanceLockGuard::acquire(&lock_path, Duration::from_millis(100)).unwrap();
+    let guard2 = HostMaintenanceLockGuard::acquire(&lock_path, Duration::from_millis(100)).unwrap();
     drop(guard2);
 
     let primary_lock_path = tmp.path().join("primary-system.lock");
     std::env::set_var("AETHERFLOW_MAINTENANCE_LOCK_PATH", &primary_lock_path);
     let primary_guard =
-        HostMaintenanceLockGuard::acquire(&primary_lock_path, Duration::from_millis(100))
-            .unwrap();
+        HostMaintenanceLockGuard::acquire(&primary_lock_path, Duration::from_millis(100)).unwrap();
     let fallback_bypass_err =
         HostMaintenanceLockGuard::acquire_default(Some(&backup_dir), Duration::from_millis(60))
             .unwrap_err();
@@ -638,11 +635,9 @@ fn delete_backup_artifacts_rejects_uninventoried_and_unverified_files_and_lock_s
         .contains("maintenance lock busy"));
     drop(primary_guard);
 
-    let (_, mapped) = resolve_trusted_canonical_host_destination(
-        Path::new("/"),
-        "etc/AetherFlow/cluster.conf",
-    )
-    .unwrap();
+    let (_, mapped) =
+        resolve_trusted_canonical_host_destination(Path::new("/"), "etc/AetherFlow/cluster.conf")
+            .unwrap();
     assert_eq!(mapped, PathBuf::from("/etc/AetherFlow/cluster.conf"));
 
     let bad_canonical =
@@ -676,8 +671,7 @@ fn backup_and_restore_enforce_source_sqlite_metadata_and_sanitize_corrupt_target
     }
 
     let cfg = HostBackupConfig::for_isolated_root(&host_root, "v4.0.0");
-    let sqlite_receipt =
-        create_sqlite_snapshot_backup(&cfg, Some("2026-11-03_01-00-00")).unwrap();
+    let sqlite_receipt = create_sqlite_snapshot_backup(&cfg, Some("2026-11-03_01-00-00")).unwrap();
     let archive_receipt = create_host_archive_backup(&cfg, Some("2026-11-03-010000")).unwrap();
 
     let sqlite_entry = sqlite_receipt
@@ -1117,24 +1111,18 @@ fn recovery_journal_rejects_untrusted_destinations_missing_sidecars_and_outside_
     }
 
     let rec_ctx = RecoveryContext::for_target_root(&host_root, None);
-    let missing_sidecar_err = recover_interrupted_restore_with_context(
-        &backup_dir,
-        &rec_ctx,
-        &NoopQuiescenceController,
-    )
-    .unwrap_err();
+    let missing_sidecar_err =
+        recover_interrupted_restore_with_context(&backup_dir, &rec_ctx, &NoopQuiescenceController)
+            .unwrap_err();
     assert!(matches!(
         missing_sidecar_err,
         HostBackupError::MissingChecksumSidecar { .. }
     ));
 
     write_sha256_sidecar(&journal_path).unwrap();
-    let unauthenticated_err = recover_interrupted_restore_with_context(
-        &backup_dir,
-        &rec_ctx,
-        &NoopQuiescenceController,
-    )
-    .unwrap_err();
+    let unauthenticated_err =
+        recover_interrupted_restore_with_context(&backup_dir, &rec_ctx, &NoopQuiescenceController)
+            .unwrap_err();
     assert!(matches!(
         unauthenticated_err,
         HostBackupError::InvalidManifest(_)

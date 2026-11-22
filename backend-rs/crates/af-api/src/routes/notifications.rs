@@ -105,7 +105,9 @@ pub(super) async fn mark_notification_read(
     }
 }
 
-pub(super) async fn dismiss_all_notifications(Extension(auth_user): Extension<AuthUser>) -> Response {
+pub(super) async fn dismiss_all_notifications(
+    Extension(auth_user): Extension<AuthUser>,
+) -> Response {
     let user_id = auth_user.user_id;
     let res = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let mut conn = af_db::get_conn()?;

@@ -7,13 +7,13 @@ use super::lifecycle::{
     verified_prior_state_recovery, versions_match_target,
 };
 use super::receipts::{snapshot_candidate_receipts, ReceiptSnapshotEntry};
+#[cfg(test)]
+use super::rollback::CANDIDATE_QUIESCE_RECORDER;
 use super::rollback::{
     finalize_post_script_lifecycle_with, handle_post_certification_finalization_failure_ext_with,
     is_incomplete_rollback_error, quiesce_and_restore_candidate_receipts_and_runtime_ext,
     should_rollback_post_certification_failure, RunnerLifecycleSnapshotHandle,
 };
-#[cfg(test)]
-use super::rollback::CANDIDATE_QUIESCE_RECORDER;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -136,10 +136,7 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         std::sync::Mutex<Option<RunnerLifecycleSnapshotHandle>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(None));
     let runner_snapshot_slot = captured_runner_snapshot.clone();
-    let pre_remove_rclone_api_port = if clean_id == "rclone"
-        && action == "remove"
-        && !delete_data
-    {
+    let pre_remove_rclone_api_port = if clean_id == "rclone" && action == "remove" && !delete_data {
         af_runner::extract_rclone_runtime_api_port_for_root(
             fs_root_override.as_deref().map(std::path::Path::new),
         )
@@ -461,10 +458,23 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
             } else {
                 let mut restart_failures = Vec::new();
                 if refuse_restart {
-                    restart_failures.push("Refusing to restart pre-stopped service after incomplete rollback".to_string());
-                } else if af_services::should_pre_stop_on_update(&clean_id) && !stopped_units.is_empty() {
-                    for unit in af_runner::af_release::lifecycle::ordered_units_for_start(&stopped_units) {
-                        if let Err(e) = af_services::control_service_with_manager(&unit, "start", "systemd-unit").await {
+                    restart_failures.push(
+                        "Refusing to restart pre-stopped service after incomplete rollback"
+                            .to_string(),
+                    );
+                } else if af_services::should_pre_stop_on_update(&clean_id)
+                    && !stopped_units.is_empty()
+                {
+                    for unit in
+                        af_runner::af_release::lifecycle::ordered_units_for_start(&stopped_units)
+                    {
+                        if let Err(e) = af_services::control_service_with_manager(
+                            &unit,
+                            "start",
+                            "systemd-unit",
+                        )
+                        .await
+                        {
                             restart_failures.push(format!("{unit}: {e}"));
                         }
                     }
@@ -535,17 +545,21 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         let mut restart_failures: Vec<String> = Vec::new();
         if af_services::should_pre_stop_on_update(&clean_id) && !stopped_units.is_empty() {
             for unit in af_runner::af_release::lifecycle::ordered_units_for_start(&stopped_units) {
-                if let Err(e) = af_services::control_service_with_manager(&unit, "start", "systemd-unit").await {
+                if let Err(e) =
+                    af_services::control_service_with_manager(&unit, "start", "systemd-unit").await
+                {
                     tracing::error!(unit, error = %e, "Application service restoration failed after script execution");
                     restart_failures.push(format!("{unit}: {e}"));
                 }
             }
             for unit in &stopped_units {
                 let (st, _, _) = af_services::get_systemd_unit_info(unit);
-                if st != "running" && st != "idle"
-                    && !restart_failures.iter().any(|f| f.starts_with(unit)) {
-                        restart_failures.push(format!("{unit} is {st}"));
-                    }
+                if st != "running"
+                    && st != "idle"
+                    && !restart_failures.iter().any(|f| f.starts_with(unit))
+                {
+                    restart_failures.push(format!("{unit} is {st}"));
+                }
             }
         }
 
@@ -685,7 +699,10 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
                 achieved_ver.as_deref().unwrap_or("none")
             );
             if !post_restore_failures.is_empty() {
-                msg.push_str(&format!("; service restart after receipt restoration failed: {}", post_restore_failures.join("; ")));
+                msg.push_str(&format!(
+                    "; service restart after receipt restoration failed: {}",
+                    post_restore_failures.join("; ")
+                ));
             }
             if let Some(ref r_err) = receipt_restore_error {
                 msg.push_str(&format!("; receipt restoration error: {}", r_err));
@@ -730,12 +747,8 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
             &stopped_units,
             af_services::mutators::apply_lifecycle_blueprint_app_config(&clean_id, allocated_port),
             |unit_name, ctrl_action| async move {
-                af_services::control_service_with_manager(
-                    &unit_name,
-                    ctrl_action,
-                    "systemd-unit",
-                )
-                .await
+                af_services::control_service_with_manager(&unit_name, ctrl_action, "systemd-unit")
+                    .await
             },
             |unit| af_services::get_systemd_unit_info(unit).0,
             async {
@@ -755,16 +768,18 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
                 version
             },
             |cfg| {
-                let secondary_update = (clean_id == "rclone").then(|| {
-                    let fallback = fs_root_override.is_none().then(|| {
-                        af_services::mutators::get_app_runtime_meta("rclone").secondary_port
-                    });
-                    af_runner::rclone_secondary_port_update_for_root(
-                        fs_root_override.as_deref().map(std::path::Path::new),
-                        cfg.listen_port,
-                        fallback,
-                    )
-                }).flatten();
+                let secondary_update = (clean_id == "rclone")
+                    .then(|| {
+                        let fallback = fs_root_override.is_none().then(|| {
+                            af_services::mutators::get_app_runtime_meta("rclone").secondary_port
+                        });
+                        af_runner::rclone_secondary_port_update_for_root(
+                            fs_root_override.as_deref().map(std::path::Path::new),
+                            cfg.listen_port,
+                            fallback,
+                        )
+                    })
+                    .flatten();
                 af_db::set_app_ingress_and_secondary_port_for_lifecycle(
                     cfg,
                     secondary_update,
@@ -805,7 +820,8 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
                         {
                             return Ok(());
                         }
-                        af_services::control_service_with_manager(&unit, ctl_action, "systemd-unit").await
+                        af_services::control_service_with_manager(&unit, ctl_action, "systemd-unit")
+                            .await
                     },
                     |unit| {
                         if std::env::var("AETHERFLOW_FS_ROOT")
@@ -879,8 +895,8 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         }
     } else if action == "remove" {
         let retained = af_db::get_conn().and_then(|mut conn| {
-            let secondary_update = pre_remove_rclone_api_port
-                .map(|p| (af_models::RCLONE_RC_API_PORT_ROLE, Some(p)));
+            let secondary_update =
+                pre_remove_rclone_api_port.map(|p| (af_models::RCLONE_RC_API_PORT_ROLE, Some(p)));
             af_db::synchronize_lifecycle_ingress_with_secondary_port(
                 &mut conn,
                 &clean_id,
@@ -912,13 +928,13 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         }
         if let Err(dns_err) = af_services::mutators::sync_network_dns_providers().await {
             if let Some(ref mut rs) = runner_snapshot {
-        rs.discard(false).await;
-    }
-    if runtime_snapshot.is_some() {
-        let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
-    }
+                rs.discard(false).await;
+            }
+            if runtime_snapshot.is_some() {
+                let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
+            }
 
-    af_services::clear_service_status_cache();
+            af_services::clear_service_status_cache();
             af_services::mutators::clear_app_runtime_meta_cache();
             finish_package_lifecycle(
                 &clean_id,

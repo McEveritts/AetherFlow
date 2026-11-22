@@ -75,7 +75,10 @@ pub(in crate::routes) fn is_incomplete_rollback_error(err_msg: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(in crate::routes) async fn restore_pre_stopped_units_after_installer_failure_with<ControlFn, ControlFut>(
+pub(in crate::routes) async fn restore_pre_stopped_units_after_installer_failure_with<
+    ControlFn,
+    ControlFut,
+>(
     clean_id: &str,
     stopped_units: &[String],
     installer_error: &str,

@@ -167,8 +167,7 @@ async fn admit_enforces_threadfin_pinned_and_pihole_vendor_exact_version_policie
     }
     let _restore = Restore(prev_fs_root);
 
-    let pihole_pkg =
-        crate::get_runner_package_definition_in_root("pihole", Some(&root)).unwrap();
+    let pihole_pkg = crate::get_runner_package_definition_in_root("pihole", Some(&root)).unwrap();
     assert_eq!(pihole_pkg.update_source, "vendor");
     assert!(pihole_pkg.update_repo.is_empty());
 
@@ -391,8 +390,7 @@ async fn failed_reinstall_verified_recovery_vs_incomplete_fresh_and_remove_recei
 }
 
 #[tokio::test]
-async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_retained_ingress(
-) {
+async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_retained_ingress() {
     let (root, path, conn, mut package) = fixture();
     package.name = "rclone".into();
     package.service_name = "rclone".into();
@@ -505,8 +503,7 @@ async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_r
 }
 
 #[tokio::test]
-async fn coordinated_rclone_split_port_lifecycle_rollback_inactive_retain_purge_and_concurrency(
-) {
+async fn coordinated_rclone_split_port_lifecycle_rollback_inactive_retain_purge_and_concurrency() {
     let role = af_models::RCLONE_RC_API_PORT_ROLE;
     let (root, confined_db, conn, base_pkg) = fixture();
     let mk_pkg = |name: &str, default_port: i32| Package {
@@ -516,23 +513,22 @@ async fn coordinated_rclone_split_port_lifecycle_rollback_inactive_retain_purge_
         default_port,
         ..base_pkg.clone()
     };
-    let mk_req =
-        |pkg: &str, act: &str, app_port: i32, secondary_port: i32, delete_data: bool| {
-            let prefix = if act == "remove" {
-                "removepackage-"
-            } else {
-                "installpackage-"
-            };
-            PackageRunnerRequest {
-                action: act.into(),
-                package_id: pkg.into(),
-                script_name: format!("{prefix}{pkg}"),
-                app_port,
-                secondary_port,
-                delete_data,
-                ..Default::default()
-            }
+    let mk_req = |pkg: &str, act: &str, app_port: i32, secondary_port: i32, delete_data: bool| {
+        let prefix = if act == "remove" {
+            "removepackage-"
+        } else {
+            "installpackage-"
         };
+        PackageRunnerRequest {
+            action: act.into(),
+            package_id: pkg.into(),
+            script_name: format!("{prefix}{pkg}"),
+            app_port,
+            secondary_port,
+            delete_data,
+            ..Default::default()
+        }
+    };
     let (rclone_pkg, sonarr_pkg, radarr_pkg) = (
         mk_pkg("rclone", 5572),
         mk_pkg("sonarr", 17455),
@@ -653,8 +649,7 @@ async fn coordinated_rclone_split_port_lifecycle_rollback_inactive_retain_purge_
         op_sonarr.execute(&backend, &sender),
         op_radarr.execute(&backend, &sender),
     );
-    let (sonarr_port, radarr_port) =
-        (sonarr_res.unwrap().app_port, radarr_res.unwrap().app_port);
+    let (sonarr_port, radarr_port) = (sonarr_res.unwrap().app_port, radarr_res.unwrap().app_port);
     assert_ne!(sonarr_port, 17455);
     assert_ne!(radarr_port, 17455);
     assert_ne!(

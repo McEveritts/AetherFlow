@@ -183,7 +183,9 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
     .to_string())
 }
 
-pub(crate) async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
+pub(crate) async fn handle_quota(
+    Json(req): Json<QuotaRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
     if !quota::valid_username(&req.username) {
         return (
             StatusCode::BAD_REQUEST,
@@ -224,4 +226,3 @@ pub(crate) async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (Status
         ),
     }
 }
-

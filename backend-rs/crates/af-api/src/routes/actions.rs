@@ -106,7 +106,9 @@ pub(super) async fn list_pending_actions(Query(q): Query<HashMap<String, String>
     .into_response()
 }
 
-pub(super) fn parse_action_gate_service_command(raw_action: &str) -> Result<(String, String, String), String> {
+pub(super) fn parse_action_gate_service_command(
+    raw_action: &str,
+) -> Result<(String, String, String), String> {
     let trimmed = raw_action.trim();
     if trimmed.is_empty() {
         return Err("Action payload is empty".into());

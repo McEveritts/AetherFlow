@@ -221,7 +221,11 @@ pub(super) fn is_downgrade_allowed() -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn merge_ini_settings(original: &str, section: &str, settings: &[(String, String)]) -> String {
+pub(super) fn merge_ini_settings(
+    original: &str,
+    section: &str,
+    settings: &[(String, String)],
+) -> String {
     let mut remaining = settings.to_vec();
     let mut output = String::new();
     let mut in_section = false;
@@ -719,7 +723,9 @@ pub(super) fn collect_package_version_receipt_logical_paths(
     paths
 }
 
-pub(super) fn resolve_package_sandbox_roots(install_root: Option<&Path>) -> (Option<PathBuf>, PathBuf) {
+pub(super) fn resolve_package_sandbox_roots(
+    install_root: Option<&Path>,
+) -> (Option<PathBuf>, PathBuf) {
     let effective_root: Option<PathBuf> = install_root.map(Path::to_path_buf).or_else(|| {
         env::var("AETHERFLOW_INSTALL_ROOT")
             .or_else(|_| env::var("AETHERFLOW_PACKAGE_FS_ROOT"))

@@ -468,7 +468,10 @@ impl RollbackJournal {
     }
 
     #[cfg(test)]
-    pub(super) fn stage_directory_snapshot(&mut self, target_dir: &Path) -> Result<(), PackageExecutorError> {
+    pub(super) fn stage_directory_snapshot(
+        &mut self,
+        target_dir: &Path,
+    ) -> Result<(), PackageExecutorError> {
         self.stage_directory_snapshots_with_cancel(&[target_dir.to_path_buf()], None)
     }
 
@@ -501,7 +504,10 @@ impl RollbackJournal {
     /// Prepares a file for mutation: validates all ancestors against symlinks, and if `target`
     /// already exists as a regular file, copies it once to `<target>.bak-af`; otherwise records
     /// it as a newly created file.
-    pub(super) fn stage_file_mutation(&mut self, target: &Path) -> Result<(), PackageExecutorError> {
+    pub(super) fn stage_file_mutation(
+        &mut self,
+        target: &Path,
+    ) -> Result<(), PackageExecutorError> {
         validate_filesystem_path(target, self.fs_root.as_deref())?;
         let backup = backup_path_for(target);
         validate_filesystem_path(&backup, self.fs_root.as_deref())?;
@@ -1309,4 +1315,3 @@ impl Drop for CrossProcessLockGuard {
         // persistent inode across processes so concurrent waiters cannot lock an unlinked inode.
     }
 }
-

@@ -61,6 +61,7 @@ if ! id -u syncthing >/dev/null 2>&1; then
 fi
 
 mkdir -p /var/lib/syncthing
+chmod 0755 /var/lib/syncthing
 chown -hRP syncthing:syncthing /var/lib/syncthing
 if [[ ! -s /var/lib/syncthing/config.xml && ! -s /var/lib/syncthing/.local/state/syncthing/config.xml ]]; then
 af_logged sudo -u syncthing HOME=/var/lib/syncthing /usr/bin/syncthing generate --home=/var/lib/syncthing
@@ -80,14 +81,12 @@ with ManagedConfig(sys.argv[1]) as config:
         if element is None:
             element = ET.SubElement(gui, key)
         element.text = value
+    if gui.find('insecureSkipHostcheck') is None:
+        hostcheck = ET.SubElement(gui, 'insecureSkipHostcheck')
+        hostcheck.text = 'true'
     config.write_text(ET.tostring(document, encoding='unicode'), 0o600)
 PYEOF
     chown syncthing:syncthing "$st_cfg"
-done
-for st_cfg in /var/lib/syncthing/config.xml /var/lib/syncthing/.local/state/syncthing/config.xml; do
-    if [[ -f "$st_cfg" ]] && ! grep -q "insecureSkipHostcheck" "$st_cfg"; then
-        sed -i 's|<gui \([^>]*\)>|<gui \1>\n        <insecureSkipHostcheck>true</insecureSkipHostcheck>|' "$st_cfg" || true
-    fi
 done
 fi
 
@@ -116,8 +115,7 @@ EOF
 chmod 0644 /etc/systemd/system/syncthing.service
 
 af_logged systemctl daemon-reload
-af_logged systemctl enable --now syncthing
-
+af_logged systemctl enable syncthing
 af_logged systemctl restart syncthing
 systemctl is-active --quiet syncthing
 queue_app_version /var/lib/syncthing/.af-version "$(resolve_installed_apt_package_version syncthing)"

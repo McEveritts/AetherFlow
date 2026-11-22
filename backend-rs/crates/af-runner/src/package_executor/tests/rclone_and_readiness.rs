@@ -91,7 +91,6 @@ fn test_rclone_both_cli_variants_render_app_port_and_metrics() {
     fs::remove_dir_all(root).unwrap();
 }
 
-
 #[tokio::test]
 async fn test_rclone_authenticated_wait_for_http_ready_rcd_and_gui() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
@@ -525,8 +524,7 @@ async fn test_rclone_authenticated_wait_for_http_ready_rcd_and_gui() {
         )
         .unwrap();
 
-        let netdata_recipe =
-            get_declarative_recipe("netdata").expect("netdata recipe must exist");
+        let netdata_recipe = get_declarative_recipe("netdata").expect("netdata recipe must exist");
         let executor = DeclarativePackageExecutor::new(env_cfg);
         let mut vars = HashMap::new();
         vars.insert("APP_PORT".to_string(), server.port.to_string());
@@ -545,11 +543,7 @@ async fn test_rclone_authenticated_wait_for_http_ready_rcd_and_gui() {
                 &CancellationToken::new(),
             )
             .await;
-        assert!(
-            res.is_ok(),
-            "readiness for netdata must succeed: {:?}",
-            res
-        );
+        assert!(res.is_ok(), "readiness for netdata must succeed: {:?}", res);
 
         let recorded_headers = seen_auth_headers.lock().unwrap().clone();
         assert!(
@@ -1412,4 +1406,3 @@ int main(int argc, char** argv) {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&work_dir);
 }
-

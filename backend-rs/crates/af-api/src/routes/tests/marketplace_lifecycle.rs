@@ -1146,7 +1146,9 @@ async fn test_lifecycle_action_dispatch_does_not_block_install_reinstall_or_remo
 
 #[tokio::test(flavor = "current_thread")]
 async fn rclone_api_lifecycle_port_reservation_and_secondary_port_coordination() {
-    use super::super::marketplace::{allocate_or_resolve_app_port_for_job, reserve_api_lifecycle_ports};
+    use super::super::marketplace::{
+        allocate_or_resolve_app_port_for_job, reserve_api_lifecycle_ports,
+    };
 
     if crate::plugins::tests::run_plugin_test_in_subprocess() {
         return;

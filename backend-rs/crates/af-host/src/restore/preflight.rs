@@ -21,7 +21,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
 
-pub(super) fn validate_execution_target_root(target_root: &Path) -> HostBackupResult<(PathBuf, bool)> {
+pub(super) fn validate_execution_target_root(
+    target_root: &Path,
+) -> HostBackupResult<(PathBuf, bool)> {
     validate_no_parent_traversal(target_root, "restore target_root")?;
     let raw = target_root.to_string_lossy();
     if raw == "/" {

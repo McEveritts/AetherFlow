@@ -128,7 +128,9 @@ pub(in crate::package_executor) fn parse_librespeed_root_tls_flag(raw: &str) -> 
     parse_librespeed_root_tls_config(raw).0
 }
 
-pub(in crate::package_executor) fn scan_librespeed_toml_statements(input: &str) -> Option<Vec<String>> {
+pub(in crate::package_executor) fn scan_librespeed_toml_statements(
+    input: &str,
+) -> Option<Vec<String>> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum QuoteState {
         None,
@@ -384,7 +386,9 @@ pub(in crate::package_executor) fn unquote_librespeed_toml_scalar(raw_val: &str)
     trimmed.to_string()
 }
 
-pub(in crate::package_executor) fn parse_librespeed_root_tls_config(raw: &str) -> (bool, Option<String>) {
+pub(in crate::package_executor) fn parse_librespeed_root_tls_config(
+    raw: &str,
+) -> (bool, Option<String>) {
     let mut enabled = false;
     let mut cert_file: Option<String> = None;
     let Some(stmts) = scan_librespeed_toml_statements(raw) else {
@@ -411,4 +415,3 @@ pub(in crate::package_executor) fn parse_librespeed_root_tls_config(raw: &str) -
     }
     (enabled, cert_file)
 }
-

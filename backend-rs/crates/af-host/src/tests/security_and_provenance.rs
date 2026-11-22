@@ -201,13 +201,11 @@ fn dirfd_service_owner_policy_wal_shm_mode_preservation_and_non_enoent_unlink_fa
     fs::write(&lock_target, b"").unwrap();
     symlink(&lock_target, &symlink_lock).unwrap();
     let symlink_lock_err =
-        HostMaintenanceLockGuard::acquire(&symlink_lock, Duration::from_millis(50))
-            .unwrap_err();
+        HostMaintenanceLockGuard::acquire(&symlink_lock, Duration::from_millis(50)).unwrap_err();
     assert!(symlink_lock_err.is_security_rejection());
 
     let valid_lock = tmp.path().join("valid-maint.lock");
-    let guard =
-        HostMaintenanceLockGuard::acquire(&valid_lock, Duration::from_millis(100)).unwrap();
+    let guard = HostMaintenanceLockGuard::acquire(&valid_lock, Duration::from_millis(100)).unwrap();
     let lock_mode = fs::symlink_metadata(&valid_lock)
         .unwrap()
         .permissions()
@@ -223,9 +221,8 @@ fn dirfd_service_owner_policy_wal_shm_mode_preservation_and_non_enoent_unlink_fa
         fs::Permissions::from_mode(0o777),
     )
     .unwrap();
-    let ww_err =
-        open_or_create_dir_nofollow(&world_writable_dir, 0o750, "world-writable check")
-            .unwrap_err();
+    let ww_err = open_or_create_dir_nofollow(&world_writable_dir, 0o750, "world-writable check")
+        .unwrap_err();
     assert!(ww_err.is_security_rejection());
 
     if unsafe { libc::geteuid() } == 0 {
@@ -437,8 +434,8 @@ fn standalone_sqlite_planning_preflight_and_execution_resolve_identical_destinat
 }
 
 #[test]
-fn recovery_context_rejects_mismatched_target_root_forged_sqlite_override_and_tampered_provenance(
-) {
+fn recovery_context_rejects_mismatched_target_root_forged_sqlite_override_and_tampered_provenance()
+{
     let tmp = TempTestDir::new("provenance-context-security");
     let host_root = tmp.path().join("host");
     let other_root = tmp.path().join("other-host");
@@ -529,8 +526,7 @@ fn recovery_context_rejects_mismatched_target_root_forged_sqlite_override_and_ta
     )
     .unwrap_err();
     assert!(
-        forged_override_err.is_integrity_failure()
-            || forged_override_err.is_security_rejection()
+        forged_override_err.is_integrity_failure() || forged_override_err.is_security_rejection()
     );
 
     fs::write(&failure_journal_path, &orig_journal_bytes).unwrap();
@@ -561,8 +557,7 @@ fn recovery_context_rejects_mismatched_target_root_forged_sqlite_override_and_ta
 
 #[cfg(unix)]
 #[test]
-fn non_root_mismatching_chown_fails_closed_and_untrusted_entry_uid_never_widens_ancestor_trust()
-{
+fn non_root_mismatching_chown_fails_closed_and_untrusted_entry_uid_never_widens_ancestor_trust() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     let tmp = TempTestDir::new("chown-and-nofollow");
@@ -870,9 +865,8 @@ fn recovery_stop_failure_does_not_restart_services_on_partially_restored_state()
         events: Mutex::new(Vec::new()),
     };
     let rec_ctx = RecoveryContext::for_target_root(&host_root, None);
-    let rec_err =
-        recover_interrupted_restore_with_context(&cfg.backup_dir, &rec_ctx, &controller)
-            .unwrap_err();
+    let rec_err = recover_interrupted_restore_with_context(&cfg.backup_dir, &rec_ctx, &controller)
+        .unwrap_err();
     assert!(matches!(
         rec_err,
         HostBackupError::ServiceQuiescenceFailed { .. }
@@ -888,8 +882,8 @@ fn recovery_stop_failure_does_not_restart_services_on_partially_restored_state()
 }
 
 #[test]
-fn sidecar_nofollow_and_redacted_parse_errors_and_cleanup_preserves_provenance_on_removal_failure(
-) {
+fn sidecar_nofollow_and_redacted_parse_errors_and_cleanup_preserves_provenance_on_removal_failure()
+{
     let tmp = TempTestDir::new("sidecar-redaction-and-cleanup-p1-7-p2-9");
     let secret_err =
         parse_sha256_sidecar_str("super_secret_database_password_token  backup.sqlite")
@@ -947,8 +941,8 @@ fn sidecar_nofollow_and_redacted_parse_errors_and_cleanup_preserves_provenance_o
 }
 
 #[test]
-fn recovery_tolerates_interrupted_sidecar_publication_and_ignores_stale_failure_journal_candidate(
-) {
+fn recovery_tolerates_interrupted_sidecar_publication_and_ignores_stale_failure_journal_candidate()
+{
     let tmp = TempTestDir::new("checkpoint-selection-p2-8");
     let host_root = tmp.path().join("host");
     let live_db = host_root.join("var/lib/aetherflow/aetherflow.sqlite");
@@ -1136,8 +1130,7 @@ fn maintenance_lock_preserves_existing_parent_mode_and_configured_custom_sqlite_
     let before_meta = fs::symlink_metadata(&existing_parent).unwrap();
 
     let lock_file = existing_parent.join(".maintenance.lock");
-    let guard =
-        HostMaintenanceLockGuard::acquire(&lock_file, Duration::from_millis(100)).unwrap();
+    let guard = HostMaintenanceLockGuard::acquire(&lock_file, Duration::from_millis(100)).unwrap();
     let after_meta = fs::symlink_metadata(&existing_parent).unwrap();
     assert_eq!(before_meta.uid(), after_meta.uid());
     assert_eq!(before_meta.gid(), after_meta.gid());
@@ -1193,8 +1186,7 @@ fn maintenance_lock_preserves_existing_parent_mode_and_configured_custom_sqlite_
         let mut untrusted_cfg = HostBackupConfig::for_isolated_root(&host_root, "v4.0.0");
         untrusted_cfg.sqlite_db_path = Some(custom_db.clone());
         let untrusted_err =
-            create_sqlite_snapshot_backup(&untrusted_cfg, Some("2026-11-03_11-00-00"))
-                .unwrap_err();
+            create_sqlite_snapshot_backup(&untrusted_cfg, Some("2026-11-03_11-00-00")).unwrap_err();
         assert!(untrusted_err.is_security_rejection());
 
         let mut trusted_cfg = HostBackupConfig::for_isolated_root(&host_root, "v4.0.0");

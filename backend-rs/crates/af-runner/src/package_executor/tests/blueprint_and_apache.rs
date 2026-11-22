@@ -536,7 +536,6 @@ fn blueprint_vhost_absent_ingress_preserves_external_domain_aliases_and_custom_b
     fs::remove_dir_all(root).unwrap();
 }
 
-
 fn create_apache_test_certificate(directory: &Path, san: &str) {
     fs::create_dir_all(directory).unwrap();
     let output = std::process::Command::new("openssl")
@@ -1095,4 +1094,3 @@ fn apache_htpasswd_provisions_bcrypt_and_fails_closed_without_credentials() {
     assert_eq!(fs::read_to_string(&path).unwrap(), entry);
     fs::remove_dir_all(root).unwrap();
 }
-

@@ -284,7 +284,10 @@ pub fn set_app_ingress_and_secondary_port_for_lifecycle(
     Ok(())
 }
 
-pub(crate) fn write_app_ingress_config(conn: &Connection, cfg: &AppIngressConfig) -> anyhow::Result<()> {
+pub(crate) fn write_app_ingress_config(
+    conn: &Connection,
+    cfg: &AppIngressConfig,
+) -> anyhow::Result<()> {
     if cfg.listen_port > 0 {
         let reserved = retained_ingress::list_reserved_ports_excluding(conn, &cfg.app_name)?;
         anyhow::ensure!(

@@ -711,9 +711,7 @@ async fn test_afmp002_native_failed_update_stops_service_restores_state_downgrad
         let cmds = recorded.lock().unwrap().clone();
         let stop_pos = cmds
             .iter()
-            .position(|c| {
-                c.program == "systemctl" && c.args == vec!["stop", "--", "znc.service"]
-            })
+            .position(|c| c.program == "systemctl" && c.args == vec!["stop", "--", "znc.service"])
             .expect("rollback must stop znc.service");
         let downgrade_pos = cmds
             .iter()
@@ -842,4 +840,3 @@ async fn test_afmp002_native_failed_update_stops_service_restores_state_downgrad
     env::remove_var("AETHERFLOW_HTTP_READY_MAX_ATTEMPTS");
     env::remove_var("AETHERFLOW_HTTP_READY_RETRY_DELAY_MS");
 }
-

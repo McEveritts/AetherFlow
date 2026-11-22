@@ -839,4 +839,3 @@ pub async fn trigger_certbot_sync_via_runner() -> anyhow::Result<RunnerResponse>
     }
     Ok(result)
 }
-

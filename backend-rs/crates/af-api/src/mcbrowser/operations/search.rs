@@ -121,7 +121,8 @@ pub(super) const NL_FILLER_WORDS: &[&str] = &[
     "has",
 ];
 
-pub(super) const STOPWORD_ARTICLES: &[&str] = &["the", "a", "an", "of", "and", "or", "on", "at", "by"];
+pub(super) const STOPWORD_ARTICLES: &[&str] =
+    &["the", "a", "an", "of", "and", "or", "on", "at", "by"];
 
 pub fn build_deterministic_nl_plan(raw_query: &str) -> FlowAiSearchPlan {
     let parsed_mods = crate::mcbrowser::search_query::SearchQuery::parse(raw_query);

@@ -30,7 +30,6 @@
 //!     the intact staging file on `HEAD`/`PATCH`, or CONSERVATIVELY retain the quota reservation when publication
 //!     state is ambiguous. Expiry and cancellation NEVER release quota for a published or ambiguously-published file.
 
-
 mod db;
 mod handlers;
 mod protocol;
@@ -48,20 +47,20 @@ use tokio::sync::Mutex as AsyncMutex;
 
 // Preserve existing module-level public paths for crate callers and tests.
 #[allow(unused_imports)]
+pub(crate) use db::reconcile_publishing_session_at;
+#[allow(unused_imports)]
 pub use db::{cleanup_expired_uploads_at, ensure_uploads_schema};
+#[allow(unused_imports)]
+pub(crate) use protocol::{
+    authorize_conflict_policy_permissions_with_conn, authorize_create_permission_with_conn,
+    authorize_modify_permission_with_conn, PublishingResolution, UploadSessionRecord,
+};
 #[allow(unused_imports)]
 pub use protocol::{
     configured_max_upload_bytes, encode_upload_metadata_header, parse_upload_metadata,
     resolve_max_upload_bytes_from_str, validate_conflict_policy, validate_fingerprint_value,
     validate_tus_version, validate_upload_id, ConflictPolicy, ConflictPolicyQuery,
     DiscoverUploadsQuery, DiscoverUploadsResponse, ParsedUploadMetadata, UploadSessionSummary,
-};
-#[allow(unused_imports)]
-pub(crate) use db::reconcile_publishing_session_at;
-#[allow(unused_imports)]
-pub(crate) use protocol::{
-    authorize_conflict_policy_permissions_with_conn, authorize_create_permission_with_conn,
-    authorize_modify_permission_with_conn, PublishingResolution, UploadSessionRecord,
 };
 #[allow(unused_imports)]
 pub(crate) use session::{
@@ -71,7 +70,18 @@ pub(crate) use session::{
 
 #[cfg(test)]
 #[allow(unused_imports)]
-use db::{cleanup_expired_uploads_for_user_at, discard_unpublished_session_conn, load_session_conn};
+use super::{open_user_browser_fs_at, release_user_quota_conn, McBrowserError};
+#[cfg(test)]
+#[allow(unused_imports)]
+use axum::response::Response;
+#[cfg(test)]
+#[allow(unused_imports)]
+use base64::Engine as _;
+#[cfg(test)]
+#[allow(unused_imports)]
+use db::{
+    cleanup_expired_uploads_for_user_at, discard_unpublished_session_conn, load_session_conn,
+};
 #[cfg(test)]
 #[allow(unused_imports)]
 use handlers::{parse_patch_headers, stream_patch_chunk_to_file};
@@ -89,15 +99,6 @@ use staging::{
     publish_zero_byte_upload_conn, read_publication_proof_at, remove_publication_proof_at,
     remove_staging_file_at, write_publication_proof_at, UploadPublicationProof,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-use super::{open_user_browser_fs_at, release_user_quota_conn, McBrowserError};
-#[cfg(test)]
-#[allow(unused_imports)]
-use axum::response::Response;
-#[cfg(test)]
-#[allow(unused_imports)]
-use base64::Engine as _;
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::ffi::CString;

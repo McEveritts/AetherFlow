@@ -330,4 +330,3 @@ pub(crate) fn create_package_lock_directory(path: &Path) -> std::io::Result<()> 
     }
     Ok(())
 }
-

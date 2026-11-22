@@ -574,4 +574,3 @@ impl Drop for ActiveCancellationGuard {
         }
     }
 }
-

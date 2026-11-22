@@ -27,7 +27,6 @@ pub(super) struct OpenHow {
     resolve: u64,
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Capability-Oriented Private Staging Filesystem Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +122,10 @@ pub(super) fn ensure_private_dir_child(
 }
 
 /// Opens `<base_root>/.af-upload-staging/user-<user_id>` safely using `O_NOFOLLOW` and `0700` permissions.
-pub(super) fn open_user_staging_dir_at(base_root: &Path, user_id: i64) -> Result<OwnedFd, McBrowserError> {
+pub(super) fn open_user_staging_dir_at(
+    base_root: &Path,
+    user_id: i64,
+) -> Result<OwnedFd, McBrowserError> {
     if user_id <= 0 {
         return Err(McBrowserError::Unauthorized(
             "Invalid user identity".to_string(),
@@ -512,7 +514,12 @@ pub(super) fn prepare_publication_proof_at(
     )
 }
 
-pub(super) fn prepared_publication_matches(file: &File, device: u64, inode: u64, nonce: Option<&str>) -> bool {
+pub(super) fn prepared_publication_matches(
+    file: &File,
+    device: u64,
+    inode: u64,
+    nonce: Option<&str>,
+) -> bool {
     let Some(nonce) = nonce
         .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
     else {

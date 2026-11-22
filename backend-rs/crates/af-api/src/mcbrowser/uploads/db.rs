@@ -1,12 +1,10 @@
-use super::protocol::{
-    now_unix_secs, ConflictPolicy, PublishingResolution, UploadSessionRecord,
-};
+use super::protocol::{now_unix_secs, ConflictPolicy, PublishingResolution, UploadSessionRecord};
 use super::staging::{
     commit_proven_upload_at, inspect_existing_target_in_bfs, open_bound_scope_browser_fs_at,
-    open_existing_staging_file_at, open_verified_user_root_fd,
-    prepared_publication_matches, publish_staging_file_to_browser_fs, read_publication_proof_at,
-    remove_publication_proof_at, remove_staging_file_at, verify_bound_target_unchanged,
-    verify_session_scope_matches, write_publication_proof_at, UploadPublicationProof,
+    open_existing_staging_file_at, open_verified_user_root_fd, prepared_publication_matches,
+    publish_staging_file_to_browser_fs, read_publication_proof_at, remove_publication_proof_at,
+    remove_staging_file_at, verify_bound_target_unchanged, verify_session_scope_matches,
+    write_publication_proof_at, UploadPublicationProof,
 };
 use super::UPLOAD_SESSION_EXPIRY_SECS;
 use crate::auth::AuthUser;
@@ -302,7 +300,10 @@ pub(super) fn session_published_byte_delta(session: &UploadSessionRecord) -> i64
     }
 }
 
-pub(super) fn load_session_actor_conn(conn: &Connection, user_id: i64) -> Result<AuthUser, McBrowserError> {
+pub(super) fn load_session_actor_conn(
+    conn: &Connection,
+    user_id: i64,
+) -> Result<AuthUser, McBrowserError> {
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT username, role FROM users WHERE id = ?1",
@@ -338,7 +339,9 @@ pub(super) fn ensure_session_pending_audit_conn(
     crate::mcbrowser::events::ensure_events_tables(conn)?;
     let existing_id = session.audit_event_id.trim();
     if !existing_id.is_empty() {
-        if let Some(rec) = crate::mcbrowser::events::load_audit_record_by_id_with_conn(conn, existing_id)? {
+        if let Some(rec) =
+            crate::mcbrowser::events::load_audit_record_by_id_with_conn(conn, existing_id)?
+        {
             if matches!(
                 rec.status,
                 crate::mcbrowser::events::AuditEventStatus::Pending
@@ -754,12 +757,12 @@ fn cleanup_single_expired_upload_locked(
             "uploading" => {
                 // Fresh publication-proof re-check inside BEGIN IMMEDIATE BEFORE releasing quota
                 // or deleting the row so an in-flight or crashed publication is never undercounted.
-                let proof_confirms_unpublished = match read_publication_proof_at(base_root, &current)
-                {
-                    Ok(Some(UploadPublicationProof::Unpublished {})) => true,
-                    Ok(None) if current.offset_bytes < current.upload_length => true,
-                    _ => false,
-                };
+                let proof_confirms_unpublished =
+                    match read_publication_proof_at(base_root, &current) {
+                        Ok(Some(UploadPublicationProof::Unpublished {})) => true,
+                        Ok(None) if current.offset_bytes < current.upload_length => true,
+                        _ => false,
+                    };
                 if !proof_confirms_unpublished {
                     return Ok(false);
                 }
@@ -789,9 +792,7 @@ fn cleanup_single_expired_upload_locked(
             "DELETE FROM mcbrowser_uploads WHERE id = ?1",
             params![current.id],
         )
-        .map_err(|_| {
-            McBrowserError::Internal("Failed to delete expired upload row".to_string())
-        })?;
+        .map_err(|_| McBrowserError::Internal("Failed to delete expired upload row".to_string()))?;
         Ok(true)
     })();
 
@@ -831,15 +832,15 @@ pub(crate) fn cleanup_expired_uploads_for_user_at(
         "SELECT {SESSION_SELECT_COLUMNS} FROM mcbrowser_uploads \
          WHERE user_id = ?1 AND expires_at <= ?2 ORDER BY expires_at, id LIMIT 128"
     );
-    let mut statement = conn.prepare(&sql).map_err(|_| {
-        McBrowserError::Internal("Failed to prepare user expiry query".to_string())
-    })?;
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|_| McBrowserError::Internal("Failed to prepare user expiry query".to_string()))?;
     let rows = statement
         .query_map(params![user_id, now_secs], row_to_session)
         .map_err(|_| McBrowserError::Internal("Failed to scan user expired uploads".to_string()))?;
-    let expired = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| McBrowserError::Internal("Failed to read user expired upload row".to_string()))?;
+    let expired = rows.collect::<Result<Vec<_>, _>>().map_err(|_| {
+        McBrowserError::Internal("Failed to read user expired upload row".to_string())
+    })?;
     drop(statement);
 
     let mut cleaned = 0usize;

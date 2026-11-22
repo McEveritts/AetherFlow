@@ -270,7 +270,11 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
     apply_package_sandbox_reserved(pkg_id, &guard).await
 }
 
-pub(crate) fn write_file_atomically_with_mode(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
+pub(crate) fn write_file_atomically_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> anyhow::Result<()> {
     use std::io::Write;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
@@ -531,7 +535,6 @@ where
     }
 }
 
-
 pub(crate) fn open_runner_state_database(
     root: Option<&Path>,
 ) -> anyhow::Result<rusqlite::Connection> {
@@ -644,4 +647,3 @@ pub async fn dispatch_blueprint_apply(
     );
     Ok(serde_json::from_str(&response.output)?)
 }
-

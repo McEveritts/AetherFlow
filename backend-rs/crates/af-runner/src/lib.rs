@@ -85,7 +85,8 @@ pub use package_executor::*;
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
 
 pub(crate) const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../config/packages.json");
-pub(crate) const EMBEDDED_AUTOMATION_JSON: &str = include_str!("../../../../config/package_automation.json");
+pub(crate) const EMBEDDED_AUTOMATION_JSON: &str =
+    include_str!("../../../../config/package_automation.json");
 
 pub(crate) static PACKAGE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 pub(crate) static BACKUP_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -381,7 +382,6 @@ async fn handle_health() -> Json<RunnerResponse> {
     })
 }
 
-
 pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     if let Ok(explicit) = env::var("AETHERFLOW_SANDBOX_SCRIPT") {
         let trimmed = explicit.trim();
@@ -585,33 +585,33 @@ pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
     get_runner_package_definition_in_root(pkg_id, None)
 }
 
-
-
 mod app_metadata;
 pub use app_metadata::*;
 
 mod backup_ops;
-pub use backup_ops::{dispatch_backup_request, execute_backup_local};
 use backup_ops::handle_backup;
+pub use backup_ops::{dispatch_backup_request, execute_backup_local};
 
 mod confined_fs;
-pub use confined_fs::{
-    dns_provider_directory_exists, read_dns_provider_text, remove_dns_provider_file,
-    write_dns_provider_text,
-};
 pub(crate) use confined_fs::{
     confined_file_name, create_package_lock_directory, lookup_group_gid, open_confined_file,
     read_confined_text, replace_confined_file, replace_confined_text, write_hosts_file_atomically,
 };
+pub use confined_fs::{
+    dns_provider_directory_exists, read_dns_provider_text, remove_dns_provider_file,
+    write_dns_provider_text,
+};
 
 mod daemon;
-pub use daemon::{authorize_runner_peer_credentials, run_privileged_daemon, shutdown_signal};
 #[cfg(unix)]
 pub(crate) use daemon::lookup_passwd_uid_reentrant;
+pub use daemon::{authorize_runner_peer_credentials, run_privileged_daemon, shutdown_signal};
 #[cfg(all(test, unix))]
 use daemon::{authorize_runner_socket_peer, serve_runner_connections, trusted_runner_peer_exe};
 
 mod hosts_dns;
+#[cfg(test)]
+use hosts_dns::resolve_hosts_lock_path;
 pub use hosts_dns::{
     apply_hosts_update, execute_hosts_cli_command, filter_hosts_line, modify_hosts_file_at_path,
     reconcile_hosts_file, reconcile_hosts_file_at_path, reconcile_pihole_custom_list_content,
@@ -622,22 +622,20 @@ pub use hosts_dns::{
     validate_hosts_ip, HostsModifyAction, RunnerError,
 };
 use hosts_dns::{handle_hosts, resolve_provider_dir};
-#[cfg(test)]
-use hosts_dns::resolve_hosts_lock_path;
 
 mod ingress_vhost;
-pub use ingress_vhost::{
-    sync_apache_vhost_local, sync_apache_vhost_via_runner, sync_certbot_and_managed_ingress,
-    trigger_certbot_sync_via_runner,
-};
+#[cfg(test)]
+use ingress_vhost::{apply_ingress_vhost_with_hooks, execute_certbot_sync_with_candidates};
 #[allow(unused_imports)]
 pub(crate) use ingress_vhost::{
     enable_managed_apache_modules, reload_apache_after_rollback_if_live, restore_app_vhost_backups,
     snapshot_app_vhost_backups, validate_ingress_vhost_request, PrevEnabledVhostState, VhostBackup,
 };
 use ingress_vhost::{handle_certbot_sync, handle_ingress_vhost};
-#[cfg(test)]
-use ingress_vhost::{apply_ingress_vhost_with_hooks, execute_certbot_sync_with_candidates};
+pub use ingress_vhost::{
+    sync_apache_vhost_local, sync_apache_vhost_via_runner, sync_certbot_and_managed_ingress,
+    trigger_certbot_sync_via_runner,
+};
 
 mod network_quota_handlers;
 pub use network_quota_handlers::{
@@ -647,6 +645,11 @@ pub use network_quota_handlers::{
 use network_quota_handlers::{handle_network, handle_quota};
 
 mod runner_client;
+pub(crate) use runner_client::post_runner_json;
+#[cfg(test)]
+use runner_client::{
+    consume_package_output, IncrementalPackageLineDecoder, MAX_PACKAGE_STREAM_LINE_BYTES,
+};
 pub use runner_client::{
     dispatch_app_meta, dispatch_core_restart, dispatch_heal_restart, dispatch_hosts_reconcile,
     dispatch_hosts_reconcile_with_provider, dispatch_hosts_remove, dispatch_hosts_request,
@@ -656,17 +659,12 @@ pub use runner_client::{
     dispatch_package_lifecycle_snapshot_capture, dispatch_package_lifecycle_snapshot_discard,
     dispatch_package_lifecycle_snapshot_discard_for_job,
     dispatch_package_lifecycle_snapshot_restore, dispatch_package_stream, dispatch_plugin_start,
-    dispatch_plugin_status, dispatch_plugin_stop, dispatch_plugin_token_rotate,
-    dispatch_quota_set, dispatch_sandbox, dispatch_sandbox_apply, dispatch_self_update,
-    dispatch_self_update_request, dispatch_self_update_status_request, dispatch_set_quota,
-    dispatch_systemctl, execute_package_local, is_lifecycle_busy, reconcile_hosts_file_via_runner,
+    dispatch_plugin_status, dispatch_plugin_stop, dispatch_plugin_token_rotate, dispatch_quota_set,
+    dispatch_sandbox, dispatch_sandbox_apply, dispatch_self_update, dispatch_self_update_request,
+    dispatch_self_update_status_request, dispatch_set_quota, dispatch_systemctl,
+    execute_package_local, is_lifecycle_busy, reconcile_hosts_file_via_runner,
     remove_hosts_file_via_runner, runner_is_ready, start_self_update, update_hosts_file_via_runner,
     LifecycleBusy,
-};
-pub(crate) use runner_client::post_runner_json;
-#[cfg(test)]
-use runner_client::{
-    consume_package_output, IncrementalPackageLineDecoder, MAX_PACKAGE_STREAM_LINE_BYTES,
 };
 
 mod sandbox_ops;
@@ -678,12 +676,12 @@ pub(crate) use sandbox_ops::{
     apply_package_sandbox_reserved, is_exempt_sandbox_unit, open_runner_state_database,
     render_systemd_sandbox_dropin_in_root,
 };
-use sandbox_ops::{
-    handle_blueprint_apply, handle_sandbox, remove_file_if_exists, write_file_atomically_with_mode,
-};
 #[cfg(test)]
 use sandbox_ops::{
     apply_sandbox_dropins_in_dir, expand_sandbox_path, handle_sandbox_with, sandbox_master_user,
+};
+use sandbox_ops::{
+    handle_blueprint_apply, handle_sandbox, remove_file_if_exists, write_file_atomically_with_mode,
 };
 
 mod self_update;
@@ -696,24 +694,26 @@ pub(crate) use self_update::{
     acquire_owned_lifecycle_snapshot_guard, acquire_package_maintenance_guard,
     build_self_update_transient_unit_name, resolve_self_update_isolated_root_from_env,
 };
-use self_update::{
-    handle_self_update, handle_self_update_status, resolve_self_update_jobs_dir_for_cfg,
-    resolve_self_update_lock_path_for_cfg, resolve_validated_self_update_config,
-    service_reservation_target,
-};
 #[cfg(test)]
 use self_update::{
     discover_system_update, query_self_update_job_at, query_self_update_job_in,
     resolve_self_update_jobs_dir_from_env, spawn_self_update_transient_unit,
     update_status_allows_launch,
 };
+use self_update::{
+    handle_self_update, handle_self_update_status, resolve_self_update_jobs_dir_for_cfg,
+    resolve_self_update_lock_path_for_cfg, resolve_validated_self_update_config,
+    service_reservation_target,
+};
 
 mod systemctl_handlers;
-pub use systemctl_handlers::is_managed_runner_systemd_unit;
-pub(crate) use systemctl_handlers::handle_systemctl;
-use systemctl_handlers::{handle_package, handle_package_cancel, handle_package_lifecycle_snapshot};
 #[cfg(test)]
 use systemctl_handlers::deferred_restart_arguments;
+pub(crate) use systemctl_handlers::handle_systemctl;
+pub use systemctl_handlers::is_managed_runner_systemd_unit;
+use systemctl_handlers::{
+    handle_package, handle_package_cancel, handle_package_lifecycle_snapshot,
+};
 
 #[cfg(test)]
 pub(crate) static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> =

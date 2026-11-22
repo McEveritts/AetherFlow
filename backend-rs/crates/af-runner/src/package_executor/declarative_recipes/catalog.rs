@@ -856,7 +856,6 @@ pub(in crate::package_executor) fn build_xrdp_recipe() -> DeclarativePackageReci
     }
 }
 
-
 pub(in crate::package_executor) fn build_x2go_recipe() -> DeclarativePackageRecipe {
     let install_steps = vec![
         DeclarativeStep::AptUpdate {
@@ -960,7 +959,6 @@ pub(in crate::package_executor) fn build_x2go_recipe() -> DeclarativePackageReci
         ],
     }
 }
-
 
 pub(in crate::package_executor) fn build_netdata_recipe() -> DeclarativePackageRecipe {
     let install_steps = vec![
@@ -1210,7 +1208,6 @@ pub(in crate::package_executor) fn build_mergerfs_recipe() -> DeclarativePackage
     }
 }
 
-
 pub(in crate::package_executor) fn build_rclone_recipe() -> DeclarativePackageRecipe {
     let install_steps = vec![
         DeclarativeStep::AptUpdate {
@@ -1378,8 +1375,9 @@ pub(in crate::package_executor) fn build_rclone_recipe() -> DeclarativePackageRe
     }
 }
 
-
-pub(in crate::package_executor) fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
+pub(in crate::package_executor) fn recipe_mutable_state_dirs(
+    recipe: &DeclarativePackageRecipe,
+) -> Vec<String> {
     let mut dirs = Vec::new();
     let mut push_unique = |path: &str| {
         let trimmed = path.trim_end_matches('/');
@@ -1481,4 +1479,3 @@ pub(in crate::package_executor) fn recipe_primary_apt_package(
     }
     None
 }
-

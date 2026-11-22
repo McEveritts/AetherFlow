@@ -45,7 +45,8 @@ pub fn allocate_version_suffix_path(
     for offset in 0..MAX_VERSION_SUFFIX_ATTEMPTS {
         let candidate_index = initial_index.saturating_add(offset);
         let candidate_path = format_version_suffix_candidate(&normalized_base, candidate_index);
-        let validated_candidate = crate::mcbrowser::policy::normalize_target_path(&candidate_path, false)?;
+        let validated_candidate =
+            crate::mcbrowser::policy::normalize_target_path(&candidate_path, false)?;
         match bfs.metadata(&validated_candidate) {
             Ok(_) => continue,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -513,14 +514,24 @@ pub(super) fn collect_copy_directory_descendants(
         alias_dir_path,
     )?;
     for hop in inherited_hops {
-        authorize_copy_permission_if_user(conn, auth_user, crate::mcbrowser::policy::Permission::Read, hop)?;
+        authorize_copy_permission_if_user(
+            conn,
+            auth_user,
+            crate::mcbrowser::policy::Permission::Read,
+            hop,
+        )?;
     }
 
     let listing = bfs
         .list_with_trace_resolving_internal_links(alias_dir_path)
         .map_err(|error| map_fs_io_error(error, "Failed to inspect source directory for copy"))?;
     for hop in &listing.resolution_paths {
-        authorize_copy_permission_if_user(conn, auth_user, crate::mcbrowser::policy::Permission::Read, hop)?;
+        authorize_copy_permission_if_user(
+            conn,
+            auth_user,
+            crate::mcbrowser::policy::Permission::Read,
+            hop,
+        )?;
     }
     if !listing.resolved_path.is_empty() {
         authorize_copy_permission_if_user(
@@ -807,7 +818,12 @@ pub(super) fn prepare_copy_source_plan(
     from_prefix: &str,
     auth_user: Option<&AuthUser>,
 ) -> Result<CopySourcePlan, McBrowserError> {
-    authorize_copy_permission_if_user(conn, auth_user, crate::mcbrowser::policy::Permission::Read, from_path)?;
+    authorize_copy_permission_if_user(
+        conn,
+        auth_user,
+        crate::mcbrowser::policy::Permission::Read,
+        from_path,
+    )?;
 
     match bfs.open_file_resolving_internal_links(from_path) {
         Ok(opened) => {

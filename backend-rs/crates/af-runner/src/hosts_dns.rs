@@ -106,8 +106,9 @@ fn apply_hosts_update_local(req: HostsUpdateRequest) -> Result<RunnerResponse, R
     }
 }
 
-
-pub(crate) async fn handle_hosts(Json(req): Json<HostsRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
+pub(crate) async fn handle_hosts(
+    Json(req): Json<HostsRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
     match apply_hosts_update(req).await {
         Ok(resp) => (StatusCode::OK, Json(resp)),
         Err(e) => {
@@ -963,4 +964,3 @@ pub fn run_hosts_cli(args: &[String]) -> anyhow::Result<String> {
         ),
     }
 }
-

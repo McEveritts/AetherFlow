@@ -107,7 +107,10 @@ pub(in crate::routes) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool
     (false, false)
 }
 
-pub(in crate::routes) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Response {
+pub(in crate::routes) fn get_marketplace_apps_blocking(
+    headers: HeaderMap,
+    require_auth: bool,
+) -> Response {
     let (is_authenticated, diagnostics_allowed) = get_marketplace_auth_info(&headers);
     if require_auth && !is_authenticated {
         return api_error(
@@ -194,7 +197,8 @@ pub(in crate::routes) fn get_marketplace_apps_blocking(headers: HeaderMap, requi
     let Ok(pkgs) = af_services::get_packages_with_jobs(&jobs) else {
         return marketplace_unavailable();
     };
-    let ingress_map: HashMap<String, AppIngressConfig> = match af_db::get_all_app_ingress_configs() {
+    let ingress_map: HashMap<String, AppIngressConfig> = match af_db::get_all_app_ingress_configs()
+    {
         Ok(configs) => configs
             .into_iter()
             .map(|c| (c.app_name.clone(), c))

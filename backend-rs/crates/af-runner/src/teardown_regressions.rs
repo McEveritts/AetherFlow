@@ -404,7 +404,10 @@ async fn teardown_preflight_gates_apt_first_and_companion_recipes() {
         )
         .await
         .is_err());
-    assert!(fixture.root.join("etc/systemd/system/znc.service").is_file());
+    assert!(fixture
+        .root
+        .join("etc/systemd/system/znc.service")
+        .is_file());
     assert!(fixture.root.join("install/.znc.lock").is_file());
 }
 

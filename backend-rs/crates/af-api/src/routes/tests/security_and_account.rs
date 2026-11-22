@@ -546,7 +546,9 @@ async fn account_endpoints_report_sqlite_failures() {
         plugin_scopes: Vec::new(),
     };
     assert_eq!(
-        super::super::get_users(Extension(admin.clone())).await.status(),
+        super::super::get_users(Extension(admin.clone()))
+            .await
+            .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(
@@ -567,7 +569,9 @@ async fn account_endpoints_report_sqlite_failures() {
         )
         .unwrap();
     assert_eq!(
-        super::super::get_users(Extension(admin.clone())).await.status(),
+        super::super::get_users(Extension(admin.clone()))
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(
@@ -584,7 +588,9 @@ async fn account_endpoints_report_sqlite_failures() {
         )
         .unwrap();
     assert_eq!(
-        super::super::get_users(Extension(admin.clone())).await.status(),
+        super::super::get_users(Extension(admin.clone()))
+            .await
+            .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(

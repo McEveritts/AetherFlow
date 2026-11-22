@@ -212,7 +212,6 @@ fn test_isolated_root_checks_ancestors_above_root() {
     fs::remove_dir_all(root).unwrap();
 }
 
-
 #[test]
 fn test_builtin_recipes_validate_cleanly() {
     // Accessing BUILTIN_DECLARATIVE_RECIPES must never panic and every registered recipe
@@ -1534,10 +1533,7 @@ async fn test_generate_self_signed_tls_cert_creates_traversable_0755_parent_dirs
     }
     result.expect("GenerateSelfSignedTlsCert must succeed");
 
-    for dir in [
-        "var/lib/quassel/certs",
-        "etc/quassel/private",
-    ] {
+    for dir in ["var/lib/quassel/certs", "etc/quassel/private"] {
         let mode = fs::metadata(root.join(dir)).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o755,
@@ -1571,11 +1567,13 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
     let unmount_idx = recipe
         .remove_steps
         .iter()
-        .position(|s| matches!(
-            s,
-            DeclarativeStep::UnmountPaths { paths, .. }
-                if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
-        ))
+        .position(|s| {
+            matches!(
+                s,
+                DeclarativeStep::UnmountPaths { paths, .. }
+                    if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
+            )
+        })
         .expect("mergerfs remove_steps must include shell-free UnmountPaths");
     let apt_idx = recipe
         .remove_steps
@@ -1625,11 +1623,12 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
 
         let cmds = runner.recorded_commands();
         assert!(cmds.iter().any(|c| {
-            c.program == "fusermount" && c.args == vec!["-u".to_string(), "/mnt/unionfs".to_string()]
+            c.program == "fusermount"
+                && c.args == vec!["-u".to_string(), "/mnt/unionfs".to_string()]
         }));
-        assert!(cmds.iter().any(|c| {
-            c.program == "umount" && c.args == vec!["/mnt/unionfs".to_string()]
-        }));
+        assert!(cmds
+            .iter()
+            .any(|c| { c.program == "umount" && c.args == vec!["/mnt/unionfs".to_string()] }));
         assert!(
             !cmds
                 .iter()
@@ -1654,7 +1653,11 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
     fs::create_dir_all(root.join("install")).unwrap();
     fs::write(root.join("install/.mergerfs.lock"), "installed\n").unwrap();
     fs::create_dir_all(root.join("etc/mergerfs")).unwrap();
-    fs::write(root.join("etc/mergerfs/mergerfs.conf"), "BRANCHES=/mnt/local\n").unwrap();
+    fs::write(
+        root.join("etc/mergerfs/mergerfs.conf"),
+        "BRANCHES=/mnt/local\n",
+    )
+    .unwrap();
     fs::create_dir_all(root.join("var/lib/mergerfs")).unwrap();
     fs::write(root.join("var/lib/mergerfs/.af-version"), "2.40.2\n").unwrap();
     fs::create_dir_all(root.join("mnt/unionfs")).unwrap();
@@ -1686,5 +1689,3 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
     );
     let _ = fs::remove_dir_all(&root);
 }
-
-

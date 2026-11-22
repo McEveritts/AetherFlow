@@ -35,7 +35,7 @@ cargo test --workspace --locked -- --test-threads=1
 # Test the HTTP/WS API, auth, McBrowser routes, Subdomain Gateway, and streaming contracts
 cargo test -p af-api
 
-# Test the privileged UNIX socket runner and 12 declarative package recipes
+# Test the privileged UNIX socket runner and 9 declarative package recipes
 cargo test -p af-runner
 
 # Test Native McBrowser capability-scoped filesystem operations

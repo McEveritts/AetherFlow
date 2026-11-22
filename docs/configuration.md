@@ -110,7 +110,7 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `AF_GITHUB_TOKEN` | Optional GitHub token for higher rate limits during update checks (falls back to `GITHUB_TOKEN` / `GH_TOKEN`). | `(Unauthenticated)` |
-| `AETHERFLOW_ENABLE_RUST_PACKAGES` | Opt-in flag (`1` / `true`) enabling `af-runner`'s 12 built-in declarative Rust package recipes before Bash fallback. | `false` |
+| `AETHERFLOW_ENABLE_RUST_PACKAGES` | Opt-in flag (`1` / `true`) enabling `af-runner`'s 9 built-in declarative Rust package recipes before Bash fallback. | `false` |
 | `AETHERFLOW_ENABLE_RUST_RELEASE` | Opt-in flag (`1` / `true`) routing `/v1/self-update` directly through `af-release` (deprecated alias: `AETHERFLOW_USE_RUST_RELEASE`). | `false` |
 | `AF_HEAL_AUTO_APPROVE` | When `1` or `true`, `af-heal` (10-second poll loop) restarts failed managed systemd units automatically via `aetherflow-runner` with exponential backoff (`10s * 2^attempt`, up to 3 retries) instead of queueing an Approval Inbox action. | `false` |
 | `CLUSTER_MODE` | Multi-node fleet topology (`standalone`, `master`, `worker`). | `standalone` |

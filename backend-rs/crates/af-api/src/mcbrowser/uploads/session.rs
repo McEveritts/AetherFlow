@@ -20,9 +20,7 @@ use super::staging::{
     remove_staging_file_at, verify_bound_target_unchanged, verify_session_scope_matches,
     write_publication_proof_at, UploadPublicationProof,
 };
-use super::{
-    MAX_ACTIVE_UPLOADS_PER_USER, MAX_CHUNK_BYTES, UPLOAD_SESSION_EXPIRY_SECS,
-};
+use super::{MAX_ACTIVE_UPLOADS_PER_USER, MAX_CHUNK_BYTES, UPLOAD_SESSION_EXPIRY_SECS};
 use crate::auth::AuthUser;
 use crate::mcbrowser::{
     check_fd_free_space, load_active_quota_conn, map_fs_io_error, normalize_relative_path,

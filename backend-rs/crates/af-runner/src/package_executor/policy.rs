@@ -414,4 +414,3 @@ pub(super) static PROGRESS_LINE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\[PROGRESS:(\d{1,3})\]\s*(.*)$").unwrap());
 pub(super) static SSH_PORT_LINE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)^\s*Port\s+([0-9]{1,5})\b").unwrap());
-

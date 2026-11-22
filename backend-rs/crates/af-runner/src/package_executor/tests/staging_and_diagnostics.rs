@@ -315,4 +315,3 @@ fn test_format_exit_failure_diagnostics_overrides_stage_and_diag_json_on_incompl
         Some("install boom; Failed to stop unit test.service (incomplete-rollback)")
     );
 }
-
