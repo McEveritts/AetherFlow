@@ -1,5 +1,5 @@
 use super::{user_mutation_stripe, validate_mcbrowser_user, McBrowserError};
-use crate::auth::AuthUser;
+use crate::{account_cleanup, auth::AuthUser};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 const ACCOUNT_TABLES: &[(&str, &str)] = &[
@@ -111,7 +111,7 @@ fn require_other_usable_admin(
 #[derive(Debug)]
 struct AccountDeletion {
     revoked_jtis: Vec<String>,
-    fileshare_objects: Vec<(String, String, String)>,
+    pending_cleanup_count: usize,
 }
 
 fn delete_account_with_conn(
@@ -128,8 +128,17 @@ fn delete_account_with_conn(
         )
         .optional()
         .map_err(database_error)?;
-    let target_role =
-        target_role.ok_or_else(|| McBrowserError::NotFound("User not found".to_owned()))?;
+    let Some(target_role) = target_role else {
+        let pending_cleanup_count =
+            account_cleanup::pending_count(&transaction, target_user_id).map_err(database_error)?;
+        if pending_cleanup_count == 0 {
+            return Err(McBrowserError::NotFound("User not found".to_owned()));
+        }
+        return Ok(AccountDeletion {
+            revoked_jtis: Vec::new(),
+            pending_cleanup_count,
+        });
+    };
     if target_role.eq_ignore_ascii_case("admin") {
         require_other_usable_admin(
             &transaction,
@@ -174,7 +183,10 @@ fn delete_account_with_conn(
             }
         }
     }
-    let mut fileshare_objects = Vec::new();
+    let configured_root = std::env::var("AF_MCBROWSER_ROOT").ok();
+    let mut pending_cleanup_count =
+        account_cleanup::queue_private(&transaction, target_user_id, configured_root.as_deref())
+            .map_err(cleanup_journal_error)?;
     for (table, owner_column) in ACCOUNT_TABLES {
         let exists: bool = transaction
             .query_row(
@@ -185,20 +197,9 @@ fn delete_account_with_conn(
             .map_err(database_error)?;
         if exists {
             if *table == "fileshare_objects" {
-                let mut statement = transaction.prepare(
-                    "SELECT storage_root, directory, filename FROM fileshare_objects WHERE user_id = ?1"
-                ).map_err(database_error)?;
-                fileshare_objects = statement
-                    .query_map([target_user_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(database_error)?
-                    .collect::<Result<_, _>>()
-                    .map_err(database_error)?;
+                pending_cleanup_count +=
+                    account_cleanup::queue_shared(&transaction, target_user_id)
+                        .map_err(cleanup_journal_error)?;
             }
             transaction
                 .execute(
@@ -232,88 +233,29 @@ fn delete_account_with_conn(
     transaction
         .execute("DELETE FROM users WHERE id = ?1", [target_user_id])
         .map_err(database_error)?;
-    let mut unreferenced = Vec::with_capacity(fileshare_objects.len());
-    for (root, directory, filename) in fileshare_objects {
-        let referenced: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM fileshare_objects WHERE storage_root = ?1 AND directory = ?2 AND filename = ?3)",
-            rusqlite::params![root, directory, filename], |row| row.get(0),
-        ).map_err(database_error)?;
-        if !referenced {
-            unreferenced.push((root, directory, filename));
-        }
-    }
     transaction.commit().map_err(database_error)?;
     Ok(AccountDeletion {
         revoked_jtis,
-        fileshare_objects: unreferenced,
+        pending_cleanup_count,
     })
 }
 
-fn finish_account_deletion(target_user_id: i64, deleted: AccountDeletion) {
+fn cleanup_journal_error(error: anyhow::Error) -> McBrowserError {
+    tracing::error!(%error, "Could not record account storage cleanup");
+    McBrowserError::Internal("Account storage cleanup could not be recorded".to_owned())
+}
+
+fn finish_account_deletion(target_user_id: i64, deleted: AccountDeletion) -> usize {
     crate::auth::finalize_user_credential_revocation(target_user_id, &deleted.revoked_jtis);
     super::media::invalidate_thumbnail_cache(target_user_id, "");
     crate::storage::discard_fileshare_uploads(target_user_id);
-    if let Err(error) = cleanup_mcbrowser_root(target_user_id) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(user_id = target_user_id, %error, "Could not remove McBrowser account storage");
-        }
+    if deleted.pending_cleanup_count == 0 {
+        return 0;
     }
-    for (root, directory, filename) in deleted.fileshare_objects {
-        if let Err(error) = crate::storage::cleanup_fileshare_object(&root, &directory, &filename) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(user_id = target_user_id, %error, "Could not remove unreferenced FileShare object");
-            }
-        }
-    }
-}
-
-fn cleanup_mcbrowser_root(user_id: i64) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
-    use std::os::unix::fs::MetadataExt;
-
-    let configured = std::env::var("AF_MCBROWSER_ROOT").ok();
-    let base = super::resolve_configured_base_root(configured.as_deref())
-        .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid McBrowser storage root"))?;
-    if base.parent().is_none() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Invalid McBrowser storage path",
-        ));
-    }
-    // As in open_user_browser_fs_at, the operator controls the ancestors.
-    // Reject a symlink at the storage root and confine cleanup to its descriptor.
-    let browser = af_files::BrowserFs::open(&base)?;
-    let metadata = browser.directory_metadata()?;
-    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-        return Err(Error::new(
-            ErrorKind::PermissionDenied,
-            "Unsafe McBrowser storage root",
-        ));
-    }
-    let child = format!("user-{user_id}");
-    let staging_child = format!(".af-upload-staging/user-{user_id}");
-    for rel in [child.as_str(), staging_child.as_str()] {
-        let scoped = match browser.scoped(rel) {
-            Ok(s) => s,
-            Err(err) if err.kind() == ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
-        let metadata = match scoped.directory_metadata() {
-            Ok(m) => m,
-            Err(err) if err.kind() == ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "Unsafe McBrowser user directory",
-            ));
-        }
-        browser
-            .remove_tree_with_size_allowing_symlinks(rel)
-            .map_err(|error| error.error)?;
-    }
-    Ok(())
+    account_cleanup::settle(target_user_id).unwrap_or_else(|error| {
+        tracing::warn!(%error, user_id = target_user_id, "Could not reconcile account storage cleanup");
+        deleted.pending_cleanup_count
+    })
 }
 
 fn update_account_role_with_conn(
@@ -390,7 +332,7 @@ pub(crate) async fn update_account_role(
 pub(crate) async fn delete_account(
     caller: AuthUser,
     target_user_id: i64,
-) -> Result<(), McBrowserError> {
+) -> Result<usize, McBrowserError> {
     let shared_guard = crate::storage::lock_fileshare_mutations().await;
     let mutation_guard = user_mutation_stripe(target_user_id).lock_owned().await;
     tokio::task::spawn_blocking(move || {
@@ -401,8 +343,7 @@ pub(crate) async fn delete_account(
         })?;
         let deleted = delete_account_with_conn(&mut connection, &caller, target_user_id)?;
         drop(connection);
-        finish_account_deletion(target_user_id, deleted);
-        Ok(())
+        Ok(finish_account_deletion(target_user_id, deleted))
     })
     .await
     .map_err(|_| McBrowserError::Internal("Account deletion worker failed".to_owned()))?
@@ -554,10 +495,13 @@ mod tests {
              INSERT INTO users VALUES (1, 'admin', 'admin'), (2, 'alice', 'user'), (3, 'bob', 'user');",
         ).unwrap();
         connection
+            .execute_batch(af_db::ACCOUNT_STORAGE_CLEANUP_SCHEMA)
+            .unwrap();
+        connection
     }
 
     #[test]
-    fn deletion_cleans_unreferenced_files_and_private_root() {
+    fn deletion_queues_only_unreferenced_files_and_private_root() {
         use std::fs;
         use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -600,12 +544,19 @@ mod tests {
                 .unwrap();
         }
         let deleted = delete_account_with_conn(&mut connection, &caller(), 2).unwrap();
-        finish_account_deletion(2, deleted);
-        assert!(!alice.exists());
-        assert!(bob.join("private").exists());
-        assert!(!shared.join("alice.txt").exists());
-        assert!(shared.join("bob.txt").exists());
-        assert!(shared.join("joint.txt").exists());
+        assert_eq!(deleted.pending_cleanup_count, 2);
+        let queued = connection
+            .prepare(
+                "SELECT filename FROM account_storage_cleanup WHERE user_id = 2 ORDER BY filename",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(queued, ["alice.txt", "user-2"]);
+        assert!(alice.join("private").exists());
+        assert!(shared.join("alice.txt").exists());
         fs::remove_dir_all(tmp).unwrap();
     }
 

@@ -1858,6 +1858,7 @@
   "User": "Utilisateur",
   "User ID": "ID de l'utilisateur",
   "User deleted": "Utilisateur supprimé",
+  "User deleted. Storage cleanup is pending.": "Utilisateur supprimé. Le nettoyage des fichiers est en attente.",
   "User directory": "Annuaire des utilisateurs",
   "User role updated": "Rôle utilisateur mis à jour",
   "Username": "Nom d’utilisateur",

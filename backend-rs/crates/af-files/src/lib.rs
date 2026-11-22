@@ -209,6 +209,22 @@ impl BrowserFs {
         File::from(self.root_fd.try_clone()?).metadata()
     }
 
+    /// Inspect a leaf without reading its contents or following a symlink.
+    pub fn entry_metadata(&self, path: &str) -> io::Result<std::fs::Metadata> {
+        let (parent, leaf) = self.resolve_parent_and_leaf(path)?;
+        let fd = openat_no_symlinks(
+            parent.as_raw_fd(),
+            leaf.as_c_str(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )?;
+        File::from(fd).metadata()
+    }
+
+    pub fn sync_directory(&self) -> io::Result<()> {
+        sync_dir(self.root_fd.as_raw_fd())
+    }
+
     pub fn scoped_resolving_internal_links(&self, path: &str) -> io::Result<ResolvedDir> {
         match self.resolve_internal_target(path, true, InternalTargetKind::Directory)? {
             VerifiedInternalTarget::Directory(resolved) => Ok(resolved),

@@ -44,7 +44,7 @@ fn release(conn: &rusqlite::Connection, user_id: i64, bytes: u64) -> anyhow::Res
         .map_err(|error| anyhow::anyhow!("Storage quota release failed: {error:?}"))
 }
 
-fn object_key(root: &StdPath, directory: &str) -> anyhow::Result<(String, String)> {
+pub(super) fn object_key(root: &StdPath, directory: &str) -> anyhow::Result<(String, String)> {
     let root = fs::canonicalize(root)?.to_string_lossy().into_owned();
     let directory = directory.trim().trim_matches('/');
     let directory = if directory == "." {
@@ -66,6 +66,15 @@ pub(super) fn publish(
     session: FileshareUpload,
 ) -> anyhow::Result<()> {
     let (root_key, directory) = object_key(root, &session.directory)?;
+    anyhow::ensure!(
+        !crate::account_cleanup::shared_path_pending(
+            conn,
+            &root_key,
+            &directory,
+            &session.filename
+        )?,
+        "This path is awaiting account storage cleanup"
+    );
     let previous: Option<(i64, i64)> = conn.query_row(
         "SELECT user_id, size_bytes FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
         params![root_key, directory, session.filename], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -120,12 +129,20 @@ pub(super) fn delete(
     let (root_key, directory) = object_key(root, directory)?;
     let previous: Option<(i64,i64)> = conn.query_row("SELECT user_id,size_bytes FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3", params![root_key,directory,filename], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
     browser.remove(filename)?;
+    if crate::account_cleanup::shared_path_pending(conn, &root_key, &directory, filename)? {
+        browser.sync_directory()?;
+    }
     transaction(conn, || {
         if let Some((owner, size)) = previous {
             release(conn, owner, size.max(0) as u64)?;
         }
         conn.execute(
             "DELETE FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![root_key, directory, filename],
+        )?;
+        conn.execute(
+            "DELETE FROM account_storage_cleanup
+             WHERE shared = 1 AND storage_root = ?1 AND directory = ?2 AND filename = ?3",
             params![root_key, directory, filename],
         )?;
         Ok(())

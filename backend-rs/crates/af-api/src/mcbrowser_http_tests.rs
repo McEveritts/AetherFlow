@@ -2837,3 +2837,153 @@ async fn mounted_confined_alias_copy_enforces_policy_hops_conflicts_quota_and_au
         )]
     );
 }
+
+#[tokio::test]
+async fn account_deletion_reports_pending_files_and_recovers_without_clobbering() {
+    use rusqlite::Connection;
+
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let _guard = TEST_DATABASE_LOCK.lock().await;
+    let fixture = HttpFixture::new();
+    let upload_root = fixture.directory.join("shared");
+    let folder = upload_root.join("folder");
+    fs::create_dir_all(&folder).unwrap();
+    env::set_var("AETHERFLOW_UPLOAD_DIR", &upload_root);
+    for filename in ["retry.txt", "replaced.txt", "kept.txt"] {
+        fs::write(folder.join(filename), b"user data").unwrap();
+    }
+    for filename in ["retry.txt", "replaced.txt"] {
+        fs::hard_link(folder.join(filename), fixture.directory.join(filename)).unwrap();
+    }
+
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (2, 'admin', 'admin')",
+            [],
+        )
+        .unwrap();
+        let canonical_root = fs::canonicalize(&upload_root).unwrap();
+        for (owner, filename) in [(1, "retry.txt"), (1, "replaced.txt"), (2, "kept.txt")] {
+            conn.execute(
+                "INSERT INTO fileshare_objects VALUES (?1, 'folder', ?2, ?3, 9)",
+                params![canonical_root.to_str().unwrap(), filename, owner],
+            )
+            .unwrap();
+        }
+    }
+    let headers = HeaderMap::new();
+    let (owner, _) = crate::auth::create_standard_jwt(1, &headers).unwrap();
+    let (admin, _) = crate::auth::create_standard_jwt(2, &headers).unwrap();
+    let router = crate::routes::build_router();
+    let request = |method: &str, uri: &str, token: &str| {
+        router.clone().oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let deletion = request("DELETE", "/api/v1/admin/users/1", &admin)
+        .await
+        .unwrap();
+    assert_eq!(deletion.status(), StatusCode::ACCEPTED);
+    let response = deletion.into_body().collect().await.unwrap().to_bytes();
+    let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(response["cleanup_pending"], true);
+    assert_eq!(response["pending_cleanup_count"], 2);
+    let saved = Connection::open(af_db::get_db_path()).unwrap();
+    assert_eq!(crate::account_cleanup::pending_count(&saved, 1).unwrap(), 2);
+    assert_eq!(
+        request("GET", "/api/v1/auth/fileshare?path=folder", &owner)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request("DELETE", "/api/v1/admin/users/1", &admin)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::ACCEPTED
+    );
+
+    // Once the files are readable again, the pending intents must still
+    // suppress them and prohibit a competing actor from publishing the path.
+    for filename in ["retry.txt", "replaced.txt"] {
+        fs::remove_file(fixture.directory.join(filename)).unwrap();
+    }
+    let listing = request("GET", "/api/v1/auth/fileshare?path=/folder/", &admin)
+        .await
+        .unwrap();
+    assert_eq!(listing.status(), StatusCode::OK);
+    let listed = listing.into_body().collect().await.unwrap().to_bytes();
+    let records: Vec<serde_json::Value> = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["name"], "kept.txt");
+    assert_eq!(
+        request(
+            "GET",
+            "/api/v1/auth/fileshare/download/retry.txt?path=folder",
+            &admin
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let upload = router.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/admin/fileshare/upload")
+                .header("x-target-path", "folder")
+            .header("authorization", format!("Bearer {admin}"))
+            .header("content-type", "multipart/form-data; boundary=fixture")
+            .body(Body::from(
+                "--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"retry.txt\"\r\n\r\nreplacement\r\n--fixture--\r\n",
+            ))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(upload.status(), StatusCode::CONFLICT);
+    assert_eq!(fs::read(folder.join("retry.txt")).unwrap(), b"user data");
+
+    fs::rename(
+        folder.join("replaced.txt"),
+        fixture.directory.join("moved.txt"),
+    )
+    .unwrap();
+    fs::write(folder.join("replaced.txt"), b"operator replacement").unwrap();
+    crate::account_cleanup::recover().await;
+    crate::account_cleanup::recover().await;
+    assert_eq!(crate::account_cleanup::pending_count(&saved, 1).unwrap(), 0);
+    assert!(!folder.join("retry.txt").exists());
+    assert_eq!(
+        fs::read(folder.join("replaced.txt")).unwrap(),
+        b"operator replacement"
+    );
+    assert_eq!(fs::read(folder.join("kept.txt")).unwrap(), b"user data");
+    assert_eq!(
+        request(
+            "GET",
+            "/api/v1/auth/fileshare/download/replaced.txt?path=folder",
+            &admin
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        request("DELETE", "/api/v1/admin/users/1", &admin)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}

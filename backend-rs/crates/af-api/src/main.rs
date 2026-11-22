@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod account_cleanup;
 mod app_launch;
 pub mod auth;
 pub mod embed;
@@ -295,6 +296,7 @@ async fn async_main() -> anyhow::Result<()> {
                     storage::maintain_backup_upload_staging();
                 })
                 .await;
+                account_cleanup::recover().await;
             }
         });
     }
@@ -325,6 +327,7 @@ async fn async_main() -> anyhow::Result<()> {
             plugins::reconcile_managed_plugins_on_startup().await;
         });
         tokio::spawn(storage::recover_quota_rollbacks());
+        tokio::spawn(account_cleanup::recover());
     } else {
         tracing::info!(
             "Background mutating workers disabled via AETHERFLOW_DISABLE_BACKGROUND_WORKERS / AETHERFLOW_DISABLE_WORKERS / AETHERFLOW_E2E_ISOLATED"

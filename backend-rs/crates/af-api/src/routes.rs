@@ -3140,9 +3140,11 @@ async fn delete_user(
     if let Err(response) = crate::auth::require_admin(&auth_user) {
         return *response;
     }
-    if let Err(error) = crate::mcbrowser::lifecycle::delete_account(auth_user.clone(), id).await {
-        return error.into_response();
-    }
+    let pending_cleanup_count =
+        match crate::mcbrowser::lifecycle::delete_account(auth_user.clone(), id).await {
+            Ok(count) => count,
+            Err(error) => return error.into_response(),
+        };
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -3154,11 +3156,27 @@ async fn delete_user(
         "user_delete",
         "user",
         &id.to_string(),
-        "",
+        &format!("pending_cleanup_count={pending_cleanup_count}"),
         &ip,
         ua,
     );
-    Json(serde_json::json!({ "message": "User deleted successfully" })).into_response()
+    let (status, message) = if pending_cleanup_count == 0 {
+        (StatusCode::OK, "User deleted successfully")
+    } else {
+        (
+            StatusCode::ACCEPTED,
+            "User deleted. Storage cleanup is pending.",
+        )
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "message": message,
+            "cleanup_pending": pending_cleanup_count != 0,
+            "pending_cleanup_count": pending_cleanup_count,
+        })),
+    )
+        .into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

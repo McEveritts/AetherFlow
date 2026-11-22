@@ -1858,6 +1858,7 @@
   "User": "用户",
   "User ID": "用户身份",
   "User deleted": "用户已删除",
+  "User deleted. Storage cleanup is pending.": "用户已删除，文件清理尚未完成。",
   "User directory": "用户目录",
   "User role updated": "用户角色已更新",
   "Username": "用户名",

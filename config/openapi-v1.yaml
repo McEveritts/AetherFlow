@@ -3036,11 +3036,17 @@ paths:
       summary: Delete users
       responses:
         '200':
-          description: OK
+          description: The account and its managed storage were removed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                $ref: '#/components/schemas/AccountDeletionResult'
+        '202':
+          description: The account was removed and storage cleanup is pending retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDeletionResult'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -6177,6 +6183,17 @@ components:
         tlsEnabled:
           type: boolean
           description: Whether TLS termination is enabled for the public domain (defaults to true when publicDomain is non-empty on first creation)
+    AccountDeletionResult:
+      type: object
+      required: [message, cleanup_pending, pending_cleanup_count]
+      properties:
+        message:
+          type: string
+        cleanup_pending:
+          type: boolean
+        pending_cleanup_count:
+          type: integer
+          minimum: 0
     GenericObject:
       type: object
       additionalProperties: true

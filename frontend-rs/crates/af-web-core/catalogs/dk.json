@@ -1858,6 +1858,7 @@
   "User": "Bruger",
   "User ID": "Bruger-id",
   "User deleted": "Bruger slettet",
+  "User deleted. Storage cleanup is pending.": "Brugeren er slettet. Filerne mangler stadig at blive ryddet op.",
   "User directory": "Brugermappe",
   "User role updated": "Brugerrolle opdateret",
   "Username": "Brugernavn",

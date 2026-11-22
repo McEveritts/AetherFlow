@@ -2251,34 +2251,6 @@ pub(crate) fn discard_fileshare_uploads(user_id: i64) {
     }
 }
 
-pub(crate) fn cleanup_fileshare_object(
-    root: &str,
-    directory: &str,
-    filename: &str,
-) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
-    let relative_root = root
-        .strip_prefix('/')
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid fileshare storage root"))?;
-    if filename.contains('/') || filename.is_empty() || filename == "." || filename == ".." {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Invalid fileshare object name",
-        ));
-    }
-    let browser = af_files::BrowserFs::open(StdPath::new("/"))?
-        .scoped(relative_root)?
-        .scoped(directory)?;
-    if browser.metadata(filename)?.kind != "file" {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Fileshare object is not a regular file",
-        ));
-    }
-    browser.remove(filename)
-}
-
 fn sanitize_filename(name: &str) -> anyhow::Result<String> {
     let clean = name.replace('\0', "");
     let safe_name = StdPath::new(&clean)
@@ -2311,18 +2283,41 @@ fn is_blocked_executable_magic(bytes: &[u8]) -> Option<&'static str> {
 
 pub async fn get_files_list(Query(q): Query<HashMap<String, String>>) -> Response {
     let raw_path = q.get("path").cloned().unwrap_or_default();
-    let listing = tokio::task::spawn_blocking(move || {
-        fileshare_directory(&get_upload_dir(), &raw_path).and_then(|browser| browser.list(""))
+    let shared = lock_fileshare_mutations().await;
+    let listing = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<af_files::Entry>> {
+        let _shared = shared;
+        let root = get_upload_dir();
+        let mut entries = fileshare_directory(&root, &raw_path)?.list("")?;
+        if !entries.is_empty() {
+            let (root, directory) = accounting::object_key(&root, &raw_path)?;
+            let conn = af_db::get_read_conn()?;
+            let pending = crate::account_cleanup::pending_shared_names(&conn, &root, &directory)?;
+            entries.retain(|entry| !pending.contains(&entry.name));
+        }
+        Ok(entries)
     })
     .await;
     let entries = match listing {
         Ok(Ok(entries)) => entries,
-        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        _ => {
+        Ok(Err(error))
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Vec::new()
+        }
+        Ok(Err(error)) if error.is::<std::io::Error>() => {
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Unable to open files directory",
+            )
+        }
+        _ => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Could not list shared files",
             )
         }
     };
@@ -2714,15 +2709,33 @@ pub async fn download_file(
     };
     let name = filename.clone();
     let directory = q.get("path").cloned().unwrap_or_default();
+    let shared = lock_fileshare_mutations().await;
     let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let file = fileshare_directory(&get_upload_dir(), &directory)?.open_file(&name)?;
+        let _shared = shared;
+        let root = get_upload_dir();
+        let file = fileshare_directory(&root, &directory)?.open_file(&name)?;
+        let (root, directory) = accounting::object_key(&root, &directory)?;
+        let conn = af_db::get_read_conn()?;
+        if crate::account_cleanup::shared_path_pending(&conn, &root, &directory, &name)? {
+            return Ok(None);
+        }
         let size = file.metadata()?.len();
-        Ok((file, size))
+        Ok(Some((file, size)))
     })
     .await;
     let (file, size) = match opened {
-        Ok(Ok(pair)) => pair,
-        _ => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found"),
+        Ok(Ok(Some(pair))) => pair,
+        Ok(Ok(None)) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found"),
+        Ok(Err(error)) if error.is::<std::io::Error>() => {
+            return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found");
+        }
+        _ => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Could not open shared file",
+            )
+        }
     };
     let mime = mime_guess::from_path(&filename).first_or_octet_stream();
     let mut resp = Response::new(stream_file(file, size));

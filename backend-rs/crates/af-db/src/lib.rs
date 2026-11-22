@@ -869,6 +869,23 @@ fn migrate(
     })
 }
 
+// No foreign key to users. Cleanup must survive account deletion and restarts.
+pub const ACCOUNT_STORAGE_CLEANUP_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS account_storage_cleanup (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        shared INTEGER NOT NULL CHECK (shared IN (0, 1)),
+        storage_root TEXT NOT NULL,
+        directory TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        identity TEXT,
+        last_error TEXT NOT NULL DEFAULT '',
+        UNIQUE (user_id, shared, storage_root, directory, filename)
+    );
+    CREATE INDEX IF NOT EXISTS idx_account_storage_cleanup_shared
+        ON account_storage_cleanup (storage_root, directory, filename) WHERE shared = 1;
+";
+
 pub fn init_db() -> anyhow::Result<()> {
     let db_path = try_resolve_db_path()?;
     if db_path != ":memory:" && !db_path.starts_with("file:") {
@@ -1510,6 +1527,7 @@ pub fn init_db() -> anyhow::Result<()> {
     ensure_pending_actions_schema_invariants(&conn)?;
     // Streaming owns version 24. Reconcile MediaFlow independently of that epoch.
     ensure_mediaflow_schema_invariants(&conn)?;
+    conn.execute_batch(ACCOUNT_STORAGE_CLEANUP_SCHEMA)?;
     ensure_column(
         &conn,
         "base_domain_sync_state",

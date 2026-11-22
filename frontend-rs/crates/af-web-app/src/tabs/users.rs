@@ -176,14 +176,20 @@ fn UsersAdminContent() -> impl IntoView {
                 .delete(&format!("/api/v1/admin/users/{id}"), None)
                 .await
             {
-                Ok(_) => {
+                Ok(response) => {
                     if busy.try_get_untracked().is_none() {
                         return;
                     }
                     users.refresh();
                     remove.set(false);
                     inspector.set(false);
-                    context.toast(tt(context, "User deleted"), false);
+                    let pending = response["cleanup_pending"].as_bool().unwrap_or_default();
+                    let message = if pending {
+                        "User deleted. Storage cleanup is pending."
+                    } else {
+                        "User deleted"
+                    };
+                    context.toast(tt(context, message), pending);
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }

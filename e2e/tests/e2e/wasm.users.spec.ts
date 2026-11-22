@@ -130,3 +130,39 @@ test('user role save keeps its acknowledged baseline through held and failed lis
     releaseNewRead.resolve();
   }
 });
+
+test('accepted user deletion refreshes the directory and reports pending storage cleanup', async ({ page }) => {
+  await installAetherFlowMocks(page);
+  const admin = { id: 1, username: 'admin', email: 'admin@example.com', role: 'admin' };
+  const member = { id: 2, username: 'teammate', email: 'teammate@example.com', role: 'user' };
+  let removed = false;
+  await page.route('**/api/v1/admin/users', route =>
+    route.fulfill({ json: { users: removed ? [admin] : [admin, member] } }),
+  );
+  await page.route('**/api/v1/admin/users/2', route => {
+    expect(route.request().method()).toBe('DELETE');
+    removed = true;
+    return route.fulfill({
+      status: 202,
+      json: {
+        message: 'User deleted. Storage cleanup is pending.',
+        cleanup_pending: true,
+        pending_cleanup_count: 1,
+      },
+    });
+  });
+
+  await page.goto('/?tab=users');
+  const grid = page.getByRole('grid', { name: 'User directory', exact: true });
+  const row = grid.getByRole('row').filter({ hasText: 'teammate' });
+  await expect(row).toBeVisible();
+  await row.click();
+  await page.getByRole('dialog', { name: 'Manage user' })
+    .getByRole('button', { name: 'Delete User', exact: true }).click();
+  const confirm = page.getByRole('dialog', { name: 'Permanently delete this user?' });
+  await confirm.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(page.getByRole('alert').filter({
+    hasText: /^User deleted\. Storage cleanup is pending\.$/,
+  })).toBeVisible();
+  await expect(row).toHaveCount(0);
+});
