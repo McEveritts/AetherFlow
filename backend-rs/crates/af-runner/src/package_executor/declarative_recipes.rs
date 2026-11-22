@@ -404,6 +404,16 @@ pub(super) fn build_threadfin_recipe() -> DeclarativePackageRecipe {
         })
     };
 
+    let state_directory = DeclarativeStep::EnsureDirectories {
+        paths: vec!["/var/lib/threadfin".to_string()],
+        // The installed-version reader must reach .af-version without
+        // opening Threadfin's private configuration directory.
+        mode: 0o751,
+        owner: Some("threadfin".to_string()),
+        group: Some("threadfin".to_string()),
+        progress_pct: 40,
+        description: "Creating the Threadfin state directory...".to_string(),
+    };
     let install_steps = vec![
         DeclarativeStep::AptUpdate {
             progress_pct: 10,
@@ -427,10 +437,10 @@ pub(super) fn build_threadfin_recipe() -> DeclarativePackageRecipe {
             progress_pct: 32,
             description: "Ensuring dedicated threadfin system user...".to_string(),
         },
+        state_directory.clone(),
         DeclarativeStep::EnsureDirectories {
             paths: vec![
                 "/opt/threadfin".to_string(),
-                "/var/lib/threadfin".to_string(),
                 "/var/lib/threadfin/conf".to_string(),
                 "/var/lib/threadfin/temp".to_string(),
             ],
@@ -533,10 +543,10 @@ pub(super) fn build_threadfin_recipe() -> DeclarativePackageRecipe {
             progress_pct: 32,
             description: "Ensuring dedicated threadfin system user...".to_string(),
         },
+        state_directory,
         DeclarativeStep::EnsureDirectories {
             paths: vec![
                 "/opt/threadfin".to_string(),
-                "/var/lib/threadfin".to_string(),
                 "/var/lib/threadfin/conf".to_string(),
                 "/var/lib/threadfin/temp".to_string(),
             ],

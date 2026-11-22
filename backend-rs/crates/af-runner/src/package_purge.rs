@@ -673,11 +673,10 @@ fn collect_ambiguous_markerless_paths(
                 DeclarativeStep::PurgeSystemUser {
                     home_dir: Some(home),
                     ..
-                } => {
-                    if !is_shared_or_excluded_root(home) && !candidate_logical_paths.contains(home)
-                    {
-                        candidate_logical_paths.push(home.clone());
-                    }
+                } if !is_shared_or_excluded_root(home)
+                    && !candidate_logical_paths.contains(home) =>
+                {
+                    candidate_logical_paths.push(home.clone());
                 }
                 _ => {}
             }

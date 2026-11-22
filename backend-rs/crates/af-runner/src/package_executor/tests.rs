@@ -657,6 +657,17 @@ async fn test_threadfin_install_update_remove_and_rollback_in_isolated_root() {
             .trim(),
         THREADFIN_PINNED_VERSION
     );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (path, mode) in [
+            ("var/lib/threadfin", 0o751),
+            ("var/lib/threadfin/conf", 0o750),
+            ("var/lib/threadfin/.af-version", 0o644),
+        ] {
+            let permissions = fs::metadata(root.join(path)).unwrap().permissions();
+            assert_eq!(permissions.mode() & 0o777, mode, "{path}");
+        }
+    }
     let unit = fs::read_to_string(root.join("etc/systemd/system/threadfin.service")).unwrap();
     assert!(unit.contains("-port=34400"));
 
