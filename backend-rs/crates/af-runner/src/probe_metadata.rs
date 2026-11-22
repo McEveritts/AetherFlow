@@ -30,7 +30,7 @@ static BAZARR_VERSION_RE: Lazy<Regex> =
 static NEXTCLOUD_VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"OC_VersionString\s*=\s*'([^']+)'").unwrap());
 static RUTORRENT_JS_VERSION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([0-9]+\.[0-9]+)").unwrap());
+    Lazy::new(|| Regex::new(r#"(?m)^\s*version\s*:\s*["']v?([0-9]+(?:\.[0-9]+)+)["']"#).unwrap());
 static ORGANIZR_PHP_VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"([0-9]+\.[0-9]+\.[0-9]+)").unwrap());
 static ABS_APP_PATH_RE: Lazy<Regex> = Lazy::new(|| {

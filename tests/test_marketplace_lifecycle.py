@@ -47,7 +47,11 @@ elif command == 'curl':
         shutil.copyfile('/bin/true', target)
     pathlib.Path(str(target) + '.sha256').write_text(hashlib.sha256(target.read_bytes()).hexdigest() + '\n')
 elif command == 'git':
-    if args[0] == 'clone':
+    if args[0] == 'ls-remote' and any('ruTorrent' in arg for arg in args):
+        print('abcdef123456\trefs/tags/v2.1.0')
+    elif 'rev-parse' in args and any('.rutorrent-build.' in arg for arg in args):
+        print('abcdef123456')
+    elif args[0] == 'clone':
         target = pathlib.Path(args[-1])
         target.mkdir(parents=True, exist_ok=True)
         (target / 'new-code').write_text('new-code')

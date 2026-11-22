@@ -47,31 +47,12 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
 report_progress 40 "Cloning ruTorrent repository to /var/www/rutorrent..."
 BUILD_DIR="$(mktemp -d /var/www/.rutorrent-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
-if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    RUT_TARGET_TAG="${AF_TARGET_VERSION#release-}"
-    RUT_TARGET_TAG="${RUT_TARGET_TAG#Release-}"
-    if [[ "$RUT_TARGET_TAG" =~ ^[0-9] ]]; then
-        RUT_TARGET_TAG="v${RUT_TARGET_TAG}"
-    elif [[ "$RUT_TARGET_TAG" =~ ^V([0-9].*)$ ]]; then
-        RUT_TARGET_TAG="v${BASH_REMATCH[1]}"
-    fi
-    if ! af_logged git clone --depth 1 --branch "$RUT_TARGET_TAG" https://github.com/Novik/ruTorrent.git "$BUILD_DIR"; then
-        rm -rf -- "$BUILD_DIR"
-        mkdir -p "$BUILD_DIR"
-        af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
-        if af_logged git -C "$BUILD_DIR" fetch --depth 1 origin "refs/tags/${RUT_TARGET_TAG}:refs/tags/${RUT_TARGET_TAG}"; then
-            af_logged git -C "$BUILD_DIR" checkout --detach "refs/tags/${RUT_TARGET_TAG}"
-        elif [[ "$RUT_TARGET_TAG" != "$AF_TARGET_VERSION" ]] && af_logged git -C "$BUILD_DIR" fetch --depth 1 origin "refs/tags/${AF_TARGET_VERSION}:refs/tags/${AF_TARGET_VERSION}"; then
-            af_logged git -C "$BUILD_DIR" checkout --detach "refs/tags/${AF_TARGET_VERSION}"
-        else
-            print_error "Unable to fetch ruTorrent release tag ${AF_TARGET_VERSION}"
-            exit 1
-        fi
-    fi
-else
-    af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR"
-    af_logged git -C "$BUILD_DIR" fetch --tags --depth 1 origin 2>/dev/null || true
+git_stage_exact_revision "https://github.com/Novik/ruTorrent.git" "$BUILD_DIR" "${AF_TARGET_VERSION:-}"
+if [[ "$AF_STAGED_GIT_REF" != refs/tags/* ]]; then
+    print_error "ruTorrent requires an upstream release tag."
+    exit 1
 fi
+RUT_VERSION="$(af_strip_version_prefix "$AF_STAGED_GIT_VERSION")"
 # Change the upstream TCP fallback in the new checkout. Older tags use a
 # literal port and newer tags also allow an environment override.
 sed -Ei '/^[[:space:]]*\$scgi_port[[:space:]]*=/s/([=[:space:]])5000([[:space:]]*;)/\115000\2/' "$BUILD_DIR/conf/config.php"
@@ -179,8 +160,7 @@ if [[ -e /srv/rutorrent && ! -L /srv/rutorrent ]]; then
 fi
 ln -sfn /var/www/rutorrent /srv/rutorrent
 
-RUT_TAG="$(git_checkout_version "/var/www/rutorrent" "/var/www/rutorrent/.af-version")"
-queue_app_version /var/www/rutorrent/.af-version "${RUT_TAG#v}"
+queue_app_version /var/www/rutorrent/.af-version "$RUT_VERSION"
 
 mkdir -p /var/www/rutorrent/share/torrents \
          /var/www/rutorrent/share/users \

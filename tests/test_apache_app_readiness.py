@@ -123,6 +123,8 @@ elif command == "git":
             (dest / "api/config").mkdir(parents=True, exist_ok=True)
             (dest / "api/config/default.php").write_text(f"<?php return '{ver}';\n")
             (dest / "index.php").write_text(f"<?php echo 'Organizr {ver}';\n")
+    elif "rev-parse" in args and any(".rutorrent-build." in arg for arg in args):
+        print("abcdef123456")
     else:
         print("v" + os.environ.get("AF_FIXTURE_VERSION", "2.1.0"))
     sys.exit(0)

@@ -972,7 +972,7 @@ class ExactSourceRevisionTests(unittest.TestCase):
         self.assertEqual((app_dir / ".af-version").read_text(encoding="utf-8").strip(), "1.33.2")
         self.assertEqual(retained_settings.read_text(encoding="utf-8"), '{"main":{"appTitle":"Operator"}}\n')
 
-    def test_rutorrent_preserves_git_checkout_version_exact_tag_and_avoids_ancestor_certification(self):
+    def test_rutorrent_stages_the_exact_or_latest_stable_tag(self):
         bare, shas = self.fx.make_bare_repo(
             "rutorrent",
             [
@@ -998,6 +998,9 @@ class ExactSourceRevisionTests(unittest.TestCase):
             ],
             default_branch="master",
         )
+        # A newer prerelease and a branch named like the stable tag both point elsewhere.
+        run_git(bare, "tag", "v5.2.0-rc1", shas["master_untagged"])
+        run_git(bare, "branch", "v5.1.0", shas["master_untagged"])
         repo_map = {"https://github.com/Novik/ruTorrent.git": bare}
 
         # 1. Explicit target 5.1.0 records exact tag version 5.1.0 and preserves share/conf
@@ -1009,14 +1012,21 @@ class ExactSourceRevisionTests(unittest.TestCase):
         self.assertEqual(run_git(rut_dir, "rev-parse", "HEAD"), shas["v5_1_0"])
         self.assertEqual((rut_dir / ".af-version").read_text(encoding="utf-8").strip(), "5.1.0")
 
-        # 2. Fresh unpinned install on untagged default branch records commit SHA, NEVER ancestor tag 5.1.0
+        # 2. Fresh unpinned install uses the latest stable tag even when master is newer
         fx_fresh = ExactSourceRevisionFixture()
         self.addCleanup(fx_fresh.cleanup)
-        res_untagged = fx_fresh.run_package("rutorrent", "install", repo_map=repo_map)
-        self.assertEqual(res_untagged.returncode, 0, res_untagged.stdout + res_untagged.stderr)
+        res_stable = fx_fresh.run_package("rutorrent", "install", repo_map=repo_map)
+        self.assertEqual(res_stable.returncode, 0, res_stable.stdout + res_stable.stderr)
         fresh_rut = fx_fresh.root / "var/www/rutorrent"
-        self.assertEqual(run_git(fresh_rut, "rev-parse", "HEAD"), shas["master_untagged"])
-        self.assertEqual((fresh_rut / ".af-version").read_text(encoding="utf-8").strip(), shas["master_untagged"])
+        self.assertEqual(run_git(fresh_rut, "rev-parse", "HEAD"), shas["v5_1_0"])
+        self.assertEqual((fresh_rut / ".af-version").read_text(encoding="utf-8").strip(), "5.1.0")
+
+        missing = fx_fresh.run_package(
+            "rutorrent", "update", repo_map=repo_map, extra_env={"AF_TARGET_VERSION": "5.9.0"}
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(run_git(fresh_rut, "rev-parse", "HEAD"), shas["v5_1_0"])
+        self.assertEqual((fresh_rut / ".af-version").read_text(encoding="utf-8").strip(), "5.1.0")
 
 
 if __name__ == "__main__":
