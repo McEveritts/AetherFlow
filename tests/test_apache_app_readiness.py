@@ -970,6 +970,8 @@ elif command == "git":
                 (dest / "index.php").write_text("<?php http_response_code(500); echo 'Organizr broken'; ?>\n")
             else:
                 (dest / "index.php").write_text(f"<?php echo '<!doctype html><title>Organizr {ver}</title>'; ?>\n")
+    elif "rev-parse" in args and any(".rutorrent-build." in arg for arg in args):
+        print("abcdef123456")
     else:
         print("v" + ver)
     sys.exit(0)
