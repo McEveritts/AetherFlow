@@ -3316,34 +3316,41 @@ pub(crate) fn try_load_runner_config_or_embedded(
     try_load_runner_config_or_embedded_in_root(env_var, filename, embedded, None)
 }
 
-pub fn get_runner_package_definition_in_root(
-    pkg_id: &str,
+pub fn load_runner_package_definitions_in_root(
     explicit_root: Option<&Path>,
-) -> Option<Package> {
+) -> anyhow::Result<impl Iterator<Item = Package>> {
     let raw_pkgs = try_load_runner_config_or_embedded_in_root(
         "AETHERFLOW_PACKAGES_CONFIG",
         "packages.json",
         EMBEDDED_PACKAGES_JSON,
         explicit_root,
-    )
-    .ok()?;
+    )?;
     let raw_auto = try_load_runner_config_or_embedded_in_root(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         "package_automation.json",
         EMBEDDED_AUTOMATION_JSON,
         explicit_root,
-    )
-    .ok()?;
+    )?;
 
-    let pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs).ok()?;
+    let pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs)?;
     let auto_map: HashMap<String, PackageAutomation> =
         serde_json::from_str(&raw_auto).unwrap_or_default();
 
-    let mut package = pkgs.into_iter().find(|p| p.name == pkg_id)?;
-    if let Some(automation) = auto_map.get(pkg_id) {
-        af_models::merge_package_automation(&mut package, automation);
-    }
-    Some(package)
+    Ok(pkgs.into_iter().map(move |mut package| {
+        if let Some(automation) = auto_map.get(&package.name) {
+            af_models::merge_package_automation(&mut package, automation);
+        }
+        package
+    }))
+}
+
+pub fn get_runner_package_definition_in_root(
+    pkg_id: &str,
+    explicit_root: Option<&Path>,
+) -> Option<Package> {
+    load_runner_package_definitions_in_root(explicit_root)
+        .ok()?
+        .find(|package| package.name == pkg_id)
 }
 
 pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {

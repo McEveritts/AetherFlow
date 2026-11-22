@@ -72,8 +72,8 @@ use af_models::SelfUpdateJobStatus;
 use af_release::{ReleaseConfig, ReleaseEngine, ReleaseOutcome};
 use af_runner::{
     get_runner_package_definition, get_runner_package_definition_in_root,
-    parse_quota_size_to_1k_blocks, render_systemd_sandbox_dropin,
-    write_self_update_job_status_atomic,
+    load_runner_package_definitions_in_root, parse_quota_size_to_1k_blocks,
+    render_systemd_sandbox_dropin, write_self_update_job_status_atomic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -97,87 +97,6 @@ pub struct PackageListEntry {
     pub service_name: String,
     pub sandbox_profile: String,
 }
-
-/// Canonical list of allowlisted AetherFlow package identifiers matching `config/packages.json` (77 packages).
-pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
-    "adguardhome",
-    "audiobookshelf",
-    "autobrr",
-    "autoscan",
-    "bazarr",
-    "calibreweb",
-    "cloudplow",
-    "deluge",
-    "dispatcharr",
-    "duplicati",
-    "emby",
-    "fail2ban",
-    "filebot",
-    "filebrowser",
-    "flaresolverr",
-    "flood",
-    "gitea",
-    "grafana",
-    "homeassistant",
-    "invidious",
-    "jackett",
-    "jellyfin",
-    "jellyseerr",
-    "kasmvnc",
-    "kavita",
-    "librespeed",
-    "lidarr",
-    "listenarr",
-    "maintainerr",
-    "mcvnc",
-    "mergerfs",
-    "n8n",
-    "navidrome",
-    "netdata",
-    "nextcloud",
-    "notifiarr",
-    "novnc",
-    "nzbget",
-    "ombi",
-    "organizr",
-    "overseerr",
-    "palate",
-    "paperless-ngx",
-    "pihole",
-    "piped",
-    "plex",
-    "prometheus",
-    "prowlarr",
-    "pyload",
-    "qbittorrent",
-    "quassel",
-    "qui",
-    "radarr",
-    "rclone",
-    "readarr",
-    "recyclarr",
-    "requestrr",
-    "rtorrent",
-    "rutorrent",
-    "sabnzbd",
-    "scrutiny",
-    "seedcross",
-    "sonarr",
-    "syncthing",
-    "tailscale",
-    "tautulli",
-    "thelounge",
-    "threadfin",
-    "transmission",
-    "unmanic",
-    "unpackerr",
-    "uptimekuma",
-    "vaultwarden",
-    "wireguard",
-    "x2go",
-    "xrdp",
-    "znc",
-];
 
 /// Parses raw CLI arguments and executes the resulting command using the default
 /// [`UnixSocketRunnerClient`] resolved from `--socket` or `AETHERFLOW_RUNNER_SOCK`.
@@ -1564,37 +1483,39 @@ fn execute_package_command(
             ))
         }
         PackageCommand::List { installed_only } => {
+            let mut definitions: Vec<_> =
+                load_runner_package_definitions_in_root(global.root.as_deref())
+                    .map_err(|err| CliError::PreflightOrIntegrity(err.to_string()))?
+                    .collect();
+            definitions.sort_by(|left, right| left.name.cmp(&right.name));
+            definitions.dedup_by(|current, previous| current.name == previous.name);
             let mut entries = Vec::new();
-            for &raw_id in KNOWN_CLI_PACKAGE_IDS {
-                let id = raw_id.trim();
-                if let Some(def) = get_runner_package_definition_in_root(id, global.root.as_deref())
-                {
-                    let lock_name = resolve_package_lock_name(id).to_string();
-                    let receipt = inspect_cli_package_receipts_for_def(global, id, Some(&def))?;
-                    let installed = receipt.is_installed();
-                    let retained_lock_path = receipt
-                        .retained_receipt_present
-                        .then_some(receipt.retained_path.clone());
-                    let legacy_lock_path = receipt
-                        .legacy_receipt_present
-                        .then_some(receipt.legacy_path)
-                        .flatten();
-                    if *installed_only && !installed {
-                        continue;
-                    }
-                    entries.push(PackageListEntry {
-                        package_id: def.name,
-                        lock_name,
-                        lock_path: receipt.canonical_path,
-                        installed,
-                        retained_receipt_present: receipt.retained_receipt_present,
-                        retained_lock_path,
-                        legacy_receipt_present: receipt.legacy_receipt_present,
-                        legacy_lock_path,
-                        service_name: def.service_name,
-                        sandbox_profile: def.sandbox_profile,
-                    });
+            for def in definitions {
+                let lock_name = resolve_package_lock_name(&def.name).to_string();
+                let receipt = inspect_cli_package_receipts_for_def(global, &def.name, Some(&def))?;
+                let installed = receipt.is_installed();
+                if *installed_only && !installed {
+                    continue;
                 }
+                let retained_lock_path = receipt
+                    .retained_receipt_present
+                    .then_some(receipt.retained_path);
+                let legacy_lock_path = receipt
+                    .legacy_receipt_present
+                    .then_some(receipt.legacy_path)
+                    .flatten();
+                entries.push(PackageListEntry {
+                    package_id: def.name,
+                    lock_name,
+                    lock_path: receipt.canonical_path,
+                    installed,
+                    retained_receipt_present: receipt.retained_receipt_present,
+                    retained_lock_path,
+                    legacy_receipt_present: receipt.legacy_receipt_present,
+                    legacy_lock_path,
+                    service_name: def.service_name,
+                    sandbox_profile: def.sandbox_profile,
+                });
             }
 
             let installed_count = entries.iter().filter(|e| e.installed).count();

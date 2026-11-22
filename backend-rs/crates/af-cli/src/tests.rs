@@ -1858,36 +1858,52 @@ fn release_deploy_omitting_channel_honors_configured_channel_from_release_manage
 }
 
 #[test]
-fn known_cli_package_ids_match_config_packages_json_exactly() {
-    use std::collections::BTreeSet;
+fn package_list_matches_the_resolved_catalog_in_id_order() {
+    let tmp = TempTestDir::new("package-list-catalog");
+    let root = tmp.path().to_str().unwrap();
+    let invocation = parse_cli_args(["--json", "--root", root, "package", "list"]).unwrap();
+    let transport = MockRunnerTransport::default();
+    let entries = || {
+        let result = execute_invocation(&invocation, &transport);
+        assert_eq!(result.status, "ok", "{}", result.message);
+        serde_json::from_value::<Vec<PackageListEntry>>(result.data.unwrap()["packages"].clone())
+            .unwrap()
+    };
 
-    let raw = include_str!("../../../../config/packages.json");
-    let packages: Vec<serde_json::Value> =
-        serde_json::from_str(raw).expect("parse config/packages.json");
-    let config_set: BTreeSet<String> = packages
-        .iter()
-        .map(|entry| {
-            entry["name"]
-                .as_str()
-                .expect("package entry must have string 'name'")
-                .to_string()
-        })
-        .collect();
-    assert_eq!(config_set.len(), 77);
+    let mut catalog: Vec<af_models::Package> =
+        serde_json::from_str(include_str!("../../../../config/packages.json")).unwrap();
+    catalog.sort_by(|left, right| left.name.cmp(&right.name));
+    assert_eq!(catalog.len(), 77);
+    let actual = entries();
+    assert_eq!(actual.len(), catalog.len());
+    for (entry, package) in actual.iter().zip(&catalog) {
+        assert_eq!(entry.package_id, package.name);
+        assert!(!entry.installed);
+    }
 
-    let cli_set: BTreeSet<String> = KNOWN_CLI_PACKAGE_IDS
-        .iter()
-        .map(|id| (*id).to_string())
-        .collect();
-    assert_eq!(
-        cli_set.len(),
-        KNOWN_CLI_PACKAGE_IDS.len(),
-        "KNOWN_CLI_PACKAGE_IDS must not contain duplicate entries"
-    );
-    assert_eq!(
-        cli_set, config_set,
-        "KNOWN_CLI_PACKAGE_IDS must match config/packages.json 1:1"
-    );
+    let catalog_dir = tmp.path().join("opt/AetherFlow/current/config");
+    fs::create_dir_all(&catalog_dir).unwrap();
+    let mut extra = catalog[0].clone();
+    extra.name = "test-catalog-app".to_string();
+    extra.lock_file = "/install/.test-catalog-app.lock".to_string();
+    let scoped_catalog = vec![extra, catalog.swap_remove(0)];
+    fs::write(
+        catalog_dir.join("packages.json"),
+        serde_json::to_vec(&scoped_catalog).unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join("install")).unwrap();
+    fs::write(
+        tmp.path().join("install/.test-catalog-app.lock"),
+        "installed\n",
+    )
+    .unwrap();
+
+    let actual = entries();
+    assert_eq!(actual.len(), 2);
+    assert_eq!(actual[0].package_id, scoped_catalog[1].name);
+    assert_eq!(actual[1].package_id, scoped_catalog[0].name);
+    assert!(actual[1].installed);
 }
 
 #[test]
