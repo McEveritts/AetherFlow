@@ -59,25 +59,78 @@ pub(super) fn object_key(root: &StdPath, directory: &str) -> anyhow::Result<(Str
     Ok((root, directory))
 }
 
-pub(super) fn publish(
+pub(super) const MAX_ALIGNED_QUOTA_BYTES: i64 = i64::MAX - (i64::MAX % 1024);
+
+pub(super) fn align_quota_bytes_to_kib(bytes: i64) -> anyhow::Result<i64> {
+    anyhow::ensure!(bytes > 0, "Quota must be positive");
+    bytes
+        .checked_add(1023)
+        .map(|sum| sum & !1023)
+        .filter(|&aligned| aligned > 0 && aligned <= MAX_ALIGNED_QUOTA_BYTES)
+        .ok_or_else(|| anyhow::anyhow!("Quota is too large"))
+}
+
+fn inspect_confined_shared_file_size(
+    root: &str,
+    directory: &str,
+    filename: &str,
+) -> std::io::Result<Option<u64>> {
+    let root_path = StdPath::new(root);
+    if !root_path.is_absolute()
+        || root_path.parent().is_none()
+        || filename.contains('/')
+        || matches!(filename, "" | "." | "..")
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid shared storage path",
+        ));
+    }
+    let relative_root = root.trim_start_matches('/');
+    let browser = match af_files::BrowserFs::open(StdPath::new("/"))
+        .and_then(|fs_root| fs_root.scoped(relative_root))
+        .and_then(|root_fs| root_fs.scoped(directory))
+    {
+        Ok(browser) => browser,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match browser.open_file(filename) {
+        Ok(file) => Ok(Some(file.metadata()?.len())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) struct ReservedPublish {
+    root_key: String,
+    directory: String,
+    previous: Option<(i64, i64)>,
+    old_size: u64,
+    new_size: u64,
+    growth: u64,
+}
+
+pub(super) fn reserve_publish(
     conn: &rusqlite::Connection,
     root: &StdPath,
     user_id: i64,
-    session: FileshareUpload,
-) -> anyhow::Result<()> {
-    let (root_key, directory) = object_key(root, &session.directory)?;
+    directory: &str,
+    filename: &str,
+    new_size: u64,
+) -> anyhow::Result<ReservedPublish> {
+    let (root_key, directory) = object_key(root, directory)?;
     anyhow::ensure!(
-        !crate::account_cleanup::shared_path_pending(
-            conn,
-            &root_key,
-            &directory,
-            &session.filename
-        )?,
+        !crate::account_cleanup::shared_path_pending(conn, &root_key, &directory, filename)?,
         "This path is awaiting account storage cleanup"
     );
-    let previous: Option<(i64, i64)> = conn.query_row(
-        "SELECT user_id, size_bytes FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
-        params![root_key, directory, session.filename], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let previous: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT user_id, size_bytes FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![root_key, directory, filename],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
     if let Some((owner, _)) = previous {
         anyhow::ensure!(
             owner == user_id,
@@ -85,15 +138,65 @@ pub(super) fn publish(
         );
     }
     let old_size = previous.map(|(_, size)| size.max(0) as u64).unwrap_or(0);
-    let new_size = session.size as u64;
     let growth = new_size.saturating_sub(old_size);
+    let prev_user = previous.map(|(owner, _)| owner);
+    let prev_size = previous.map(|(_, size)| size);
+    let new_size_i64 = i64::try_from(new_size)?;
+    let growth_i64 = i64::try_from(growth)?;
     transaction(conn, || {
         reserve(conn, user_id, growth)?;
-        conn.execute("INSERT INTO fileshare_objects(storage_root,directory,filename,user_id,size_bytes) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(storage_root,directory,filename) DO UPDATE SET user_id=excluded.user_id,size_bytes=excluded.size_bytes", params![root_key,directory,session.filename,user_id,new_size as i64])?;
+        conn.execute(
+            "INSERT INTO fileshare_objects(storage_root,directory,filename,user_id,size_bytes)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(storage_root,directory,filename) DO UPDATE
+             SET user_id=excluded.user_id,size_bytes=excluded.size_bytes",
+            params![root_key, directory, filename, user_id, new_size_i64],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO fileshare_pending_publishes(
+                 storage_root, directory, filename, user_id, new_size_bytes, growth_bytes,
+                 previous_user_id, previous_size_bytes
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                root_key,
+                directory,
+                filename,
+                user_id,
+                new_size_i64,
+                growth_i64,
+                prev_user,
+                prev_size
+            ],
+        )?;
         Ok(())
     })?;
-    // Keep the quota charged if the process stops here. A refresh reconciles
-    // the ledger with disk. A failed publication refunds only its own reserve.
+    Ok(ReservedPublish {
+        root_key,
+        directory,
+        previous,
+        old_size,
+        new_size,
+        growth,
+    })
+}
+
+pub(super) fn publish(
+    conn: &rusqlite::Connection,
+    root: &StdPath,
+    user_id: i64,
+    session: FileshareUpload,
+) -> anyhow::Result<()> {
+    let reserved = reserve_publish(
+        conn,
+        root,
+        user_id,
+        &session.directory,
+        &session.filename,
+        session.size as u64,
+    )?;
+    // Keep the quota charged and durable pending-publish intent recorded if the
+    // process stops here. Startup reconciliation and quota refresh reconcile
+    // the ledger with disk and release phantom ownership rows.
     let published = if let Some(original) = session.original {
         session.pending.commit_replace(&original)
     } else {
@@ -101,17 +204,44 @@ pub(super) fn publish(
     };
     if let Err(error) = published {
         transaction(conn, || {
-            release(conn, user_id, growth)?;
-            if let Some((owner, size)) = previous {
-                conn.execute("UPDATE fileshare_objects SET user_id=?4,size_bytes=?5 WHERE storage_root=?1 AND directory=?2 AND filename=?3", params![root_key,directory,session.filename,owner,size])?;
+            release(conn, user_id, reserved.growth)?;
+            if let Some((owner, size)) = reserved.previous {
+                conn.execute(
+                    "UPDATE fileshare_objects SET user_id=?4,size_bytes=?5 WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                    params![
+                        reserved.root_key,
+                        reserved.directory,
+                        session.filename,
+                        owner,
+                        size
+                    ],
+                )?;
             } else {
-                conn.execute("DELETE FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3", params![root_key,directory,session.filename])?;
+                conn.execute(
+                    "DELETE FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                    params![reserved.root_key, reserved.directory, session.filename],
+                )?;
             }
+            conn.execute(
+                "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                params![reserved.root_key, reserved.directory, session.filename],
+            )?;
             Ok(())
         })?;
         return Err(error.into());
     }
-    release(conn, user_id, old_size.saturating_sub(new_size))?;
+    transaction(conn, || {
+        release(
+            conn,
+            user_id,
+            reserved.old_size.saturating_sub(reserved.new_size),
+        )?;
+        conn.execute(
+            "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![reserved.root_key, reserved.directory, session.filename],
+        )?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -127,7 +257,13 @@ pub(super) fn delete(
         "Cannot delete directory via file endpoint"
     );
     let (root_key, directory) = object_key(root, directory)?;
-    let previous: Option<(i64,i64)> = conn.query_row("SELECT user_id,size_bytes FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3", params![root_key,directory,filename], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let previous: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT user_id,size_bytes FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![root_key, directory, filename],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
     browser.remove(filename)?;
     if crate::account_cleanup::shared_path_pending(conn, &root_key, &directory, filename)? {
         browser.sync_directory()?;
@@ -141,12 +277,252 @@ pub(super) fn delete(
             params![root_key, directory, filename],
         )?;
         conn.execute(
+            "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![root_key, directory, filename],
+        )?;
+        conn.execute(
             "DELETE FROM account_storage_cleanup
              WHERE shared = 1 AND storage_root = ?1 AND directory = ?2 AND filename = ?3",
             params![root_key, directory, filename],
         )?;
         Ok(())
     })
+}
+
+struct PendingFilesharePublish {
+    storage_root: String,
+    directory: String,
+    filename: String,
+    user_id: i64,
+    new_size_bytes: i64,
+    growth_bytes: i64,
+    previous_user_id: Option<i64>,
+    previous_size_bytes: Option<i64>,
+}
+
+fn has_pending_publishes_table(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='fileshare_pending_publishes')",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn load_pending_publishes(
+    conn: &rusqlite::Connection,
+    user_filter: Option<i64>,
+) -> anyhow::Result<Vec<PendingFilesharePublish>> {
+    if !has_pending_publishes_table(conn)? {
+        return Ok(Vec::new());
+    }
+    let mut rows_out = Vec::new();
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PendingFilesharePublish> {
+        Ok(PendingFilesharePublish {
+            storage_root: row.get(0)?,
+            directory: row.get(1)?,
+            filename: row.get(2)?,
+            user_id: row.get(3)?,
+            new_size_bytes: row.get(4)?,
+            growth_bytes: row.get(5)?,
+            previous_user_id: row.get(6)?,
+            previous_size_bytes: row.get(7)?,
+        })
+    };
+    if let Some(uid) = user_filter {
+        let mut stmt = conn.prepare(
+            "SELECT storage_root, directory, filename, user_id, new_size_bytes, growth_bytes,
+                    previous_user_id, previous_size_bytes
+             FROM fileshare_pending_publishes
+             WHERE user_id = ?1
+             ORDER BY storage_root, directory, filename",
+        )?;
+        for item in stmt.query_map([uid], map_row)? {
+            rows_out.push(item?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT storage_root, directory, filename, user_id, new_size_bytes, growth_bytes,
+                    previous_user_id, previous_size_bytes
+             FROM fileshare_pending_publishes
+             ORDER BY user_id, storage_root, directory, filename",
+        )?;
+        for item in stmt.query_map([], map_row)? {
+            rows_out.push(item?);
+        }
+    }
+    Ok(rows_out)
+}
+
+fn reconcile_one_pending_publish_in_tx(
+    conn: &rusqlite::Connection,
+    pending: &PendingFilesharePublish,
+) -> anyhow::Result<()> {
+    let existing: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT user_id, size_bytes FROM fileshare_objects
+             WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![pending.storage_root, pending.directory, pending.filename],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    let Some((current_owner, _)) = existing else {
+        conn.execute(
+            "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![pending.storage_root, pending.directory, pending.filename],
+        )?;
+        return Ok(());
+    };
+    if current_owner != pending.user_id {
+        conn.execute(
+            "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![pending.storage_root, pending.directory, pending.filename],
+        )?;
+        return Ok(());
+    }
+
+    let old_size = pending.previous_size_bytes.unwrap_or(0).max(0) as u64;
+    let growth = pending.growth_bytes.max(0) as u64;
+    let charged = old_size.saturating_add(growth);
+
+    match inspect_confined_shared_file_size(
+        &pending.storage_root,
+        &pending.directory,
+        &pending.filename,
+    )? {
+        None => {
+            conn.execute(
+                "DELETE FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                params![pending.storage_root, pending.directory, pending.filename],
+            )?;
+            if let Some(prev_uid) = pending.previous_user_id.filter(|&id| id != pending.user_id) {
+                release(conn, pending.user_id, growth)?;
+                release(conn, prev_uid, old_size)?;
+            } else {
+                release(conn, pending.user_id, charged)?;
+            }
+        }
+        Some(actual_size) => {
+            let actual_i64 = i64::try_from(actual_size)?;
+            if let Some(prev_uid) = pending.previous_user_id.filter(|&id| {
+                id != pending.user_id
+                    && pending.previous_size_bytes == Some(actual_i64)
+                    && pending.new_size_bytes != actual_i64
+            }) {
+                conn.execute(
+                    "UPDATE fileshare_objects SET user_id=?4, size_bytes=?5
+                     WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                    params![
+                        pending.storage_root,
+                        pending.directory,
+                        pending.filename,
+                        prev_uid,
+                        actual_i64
+                    ],
+                )?;
+                release(conn, pending.user_id, growth)?;
+            } else {
+                conn.execute(
+                    "UPDATE fileshare_objects SET size_bytes=?4
+                     WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                    params![
+                        pending.storage_root,
+                        pending.directory,
+                        pending.filename,
+                        actual_i64
+                    ],
+                )?;
+                release(conn, pending.user_id, charged.saturating_sub(actual_size))?;
+            }
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+        params![pending.storage_root, pending.directory, pending.filename],
+    )?;
+    Ok(())
+}
+
+pub(super) fn reconcile_pending_fileshare_publishes_in_tx(
+    conn: &rusqlite::Connection,
+    user_filter: Option<i64>,
+) -> anyhow::Result<usize> {
+    let entries = load_pending_publishes(conn, user_filter)?;
+    let count = entries.len();
+    for entry in &entries {
+        reconcile_one_pending_publish_in_tx(conn, entry)?;
+    }
+    Ok(count)
+}
+
+fn reconcile_pending_fileshare_publishes_for_user(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+) -> anyhow::Result<usize> {
+    let entries = load_pending_publishes(conn, Some(user_id))?;
+    let mut reconciled = 0usize;
+    for entry in &entries {
+        match transaction(conn, || reconcile_one_pending_publish_in_tx(conn, entry)) {
+            Ok(()) => reconciled += 1,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    user_id,
+                    root = %entry.storage_root,
+                    directory = %entry.directory,
+                    filename = %entry.filename,
+                    "Pending FileShare publish reconciliation remains pending"
+                );
+            }
+        }
+    }
+    Ok(reconciled)
+}
+
+pub(crate) async fn recover_fileshare_pending_publishes() {
+    let pending_users = tokio::task::spawn_blocking(|| -> anyhow::Result<Vec<i64>> {
+        let conn = af_db::get_conn()?;
+        if !has_pending_publishes_table(&conn)? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT user_id FROM fileshare_pending_publishes ORDER BY user_id")?;
+        let ids = stmt.query_map([], |row| row.get(0))?;
+        Ok(ids.collect::<Result<_, _>>()?)
+    })
+    .await;
+    let user_ids = match pending_users {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Could not read pending FileShare publications");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Pending FileShare publication lookup worker failed");
+            return;
+        }
+    };
+    for user_id in user_ids {
+        let _shared = MUTATIONS.lock().await;
+        let _user = crate::mcbrowser::user_mutation_stripe(user_id)
+            .lock_owned()
+            .await;
+        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let conn = af_db::get_conn()?;
+            reconcile_pending_fileshare_publishes_for_user(&conn, user_id)
+        })
+        .await;
+        match res {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, user_id, "Pending FileShare publication recovery failed");
+            }
+            Err(error) => {
+                tracing::warn!(%error, user_id, "Pending FileShare publication recovery worker failed");
+            }
+        }
+    }
 }
 
 // Reconcile durable reservations after an interrupted publication or an
@@ -156,29 +532,49 @@ fn shared_usage(
     user_id: i64,
     scanned: &[PathBuf],
 ) -> anyhow::Result<u64> {
+    reconcile_pending_fileshare_publishes_in_tx(conn, Some(user_id))?;
     let mut stmt = conn.prepare(
         "SELECT storage_root,directory,filename FROM fileshare_objects WHERE user_id=?1",
     )?;
-    let entries = stmt.query_map([user_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
+    let entries = stmt
+        .query_map([user_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
     let mut total = 0u64;
-    for entry in entries {
-        let (root, directory, filename) = entry?;
-        let actual = (|| -> std::io::Result<u64> {
-            let browser = af_files::BrowserFs::open(StdPath::new(&root))?.scoped(&directory)?;
-            Ok(browser.open_file(&filename)?.metadata()?.len())
-        })();
-        let size = match actual {
-            Ok(size) => size,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(error.into()),
+    for (root, directory, filename) in entries {
+        let actual = inspect_confined_shared_file_size(&root, &directory, &filename)?;
+        let Some(size) = actual else {
+            let pending_cleanup =
+                crate::account_cleanup::shared_path_pending(conn, &root, &directory, &filename)?;
+            if !pending_cleanup {
+                conn.execute(
+                    "DELETE FROM fileshare_objects WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                    params![root, directory, filename],
+                )?;
+                if has_pending_publishes_table(conn)? {
+                    conn.execute(
+                        "DELETE FROM fileshare_pending_publishes WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                        params![root, directory, filename],
+                    )?;
+                }
+            } else {
+                conn.execute(
+                    "UPDATE fileshare_objects SET size_bytes=0 WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+                    params![root, directory, filename],
+                )?;
+            }
+            continue;
         };
-        conn.execute("UPDATE fileshare_objects SET size_bytes=?4 WHERE storage_root=?1 AND directory=?2 AND filename=?3",params![root,directory,filename,i64::try_from(size)?])?;
+        conn.execute(
+            "UPDATE fileshare_objects SET size_bytes=?4 WHERE storage_root=?1 AND directory=?2 AND filename=?3",
+            params![root, directory, filename, i64::try_from(size)?],
+        )?;
         let full = StdPath::new(&root).join(&directory).join(&filename);
         if !scanned.iter().any(|base| full.starts_with(base)) {
             total = total
@@ -280,9 +676,11 @@ async fn run_quota_operation(
         .lock_owned()
         .await;
     restore_committed_quota(user_id).await?;
+    let effective = requested.map(align_quota_bytes_to_kib).transpose()?;
     let username = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let conn = af_db::get_conn()?;
         ensure_no_reserved_uploads(&conn, user_id)?;
+        reconcile_pending_fileshare_publishes_for_user(&conn, user_id)?;
         Ok(
             conn.query_row("SELECT username FROM users WHERE id=?1", [user_id], |row| {
                 row.get(0)
@@ -295,7 +693,6 @@ async fn run_quota_operation(
         user_id,
     })
     .await?;
-    let effective = requested.map(|bytes| ((bytes as u64).div_ceil(1024) * 1024) as i64);
     if effective.is_some() {
         let username = username.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -349,8 +746,10 @@ async fn run_quota_operation(
 }
 
 pub(super) async fn quota_operation(user_id: i64, requested: Option<i64>) -> Response {
-    if requested.is_some_and(|bytes| bytes > i64::MAX - 1023) {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Quota is too large");
+    if let Some(bytes) = requested {
+        if let Err(err) = align_quota_bytes_to_kib(bytes) {
+            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", err.to_string());
+        }
     }
     let Ok(permit) = QUOTA_WORKERS.clone().try_acquire_owned() else {
         return api_error(
@@ -393,6 +792,32 @@ mod tests {
             conn.execute("UPDATE mcbrowser_uploads SET status=?1", [status])
                 .unwrap();
             assert!(ensure_no_reserved_uploads(&conn, 7).is_ok());
+        }
+    }
+
+    #[test]
+    fn align_quota_bytes_to_kib_uses_checked_arithmetic_and_rejects_overflow() {
+        assert_eq!(align_quota_bytes_to_kib(1).unwrap(), 1024);
+        assert_eq!(align_quota_bytes_to_kib(1024).unwrap(), 1024);
+        assert_eq!(align_quota_bytes_to_kib(1537).unwrap(), 2048);
+        assert_eq!(
+            align_quota_bytes_to_kib(MAX_ALIGNED_QUOTA_BYTES).unwrap(),
+            MAX_ALIGNED_QUOTA_BYTES
+        );
+        assert_eq!(MAX_ALIGNED_QUOTA_BYTES % 1024, 0);
+        for invalid in [
+            i64::MIN,
+            -1024,
+            -1,
+            0,
+            MAX_ALIGNED_QUOTA_BYTES + 1,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
+            assert!(
+                align_quota_bytes_to_kib(invalid).is_err(),
+                "expected alignment rejection for {invalid}"
+            );
         }
     }
 }

@@ -15,8 +15,13 @@ pub(super) struct FsQuery {
 }
 
 pub(super) fn get_allowed_fs_roots() -> Vec<PathBuf> {
+    let env_override = env::var("AF_ALLOWED_FS_ROOTS").ok();
+    get_allowed_fs_roots_with(env_override.as_deref())
+}
+
+fn get_allowed_fs_roots_with(env_override: Option<&str>) -> Vec<PathBuf> {
     let mut raw_roots: Vec<PathBuf> = Vec::new();
-    let has_env_override = if let Ok(env_roots) = env::var("AF_ALLOWED_FS_ROOTS") {
+    let has_env_override = if let Some(env_roots) = env_override {
         for part in env_roots.split(',') {
             let trimmed = part.trim();
             if !trimmed.is_empty() {
@@ -29,7 +34,7 @@ pub(super) fn get_allowed_fs_roots() -> Vec<PathBuf> {
     };
 
     if !has_env_override {
-        for def in ["/mnt", "/media", "/srv", "/home"] {
+        for def in ["/mnt", "/media", "/srv", "/data", "/home"] {
             raw_roots.push(PathBuf::from(def));
         }
         raw_roots.push(env::temp_dir());
@@ -247,4 +252,43 @@ pub(super) fn browse_host_directories(q: FsQuery) -> Response {
         "entries": entries,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_allowed_fs_roots_includes_data_root() {
+        let roots = get_allowed_fs_roots_with(None);
+        let expected_data = fs::canonicalize("/data").unwrap_or_else(|_| PathBuf::from("/data"));
+        assert!(
+            roots.contains(&expected_data),
+            "expected /data in default allowed fs roots, got: {roots:?}"
+        );
+        for required in ["/mnt", "/media", "/srv", "/data", "/home"] {
+            let expected = fs::canonicalize(required).unwrap_or_else(|_| PathBuf::from(required));
+            assert!(
+                roots.contains(&expected),
+                "expected {required} in default allowed fs roots, got: {roots:?}"
+            );
+        }
+
+        let overridden = get_allowed_fs_roots_with(Some("/srv,/mnt"));
+        assert!(!overridden.contains(&expected_data));
+    }
+
+    #[test]
+    fn get_allowed_fs_roots_includes_data_when_env_unset() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        env::remove_var("AF_ALLOWED_FS_ROOTS");
+        let roots = get_allowed_fs_roots();
+        let expected_data = fs::canonicalize("/data").unwrap_or_else(|_| PathBuf::from("/data"));
+        assert!(
+            roots.contains(&expected_data),
+            "expected /data in get_allowed_fs_roots() when AF_ALLOWED_FS_ROOTS is unset, got: {roots:?}"
+        );
+    }
 }

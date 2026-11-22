@@ -642,3 +642,123 @@ async fn intelligence_handlers_return_explicit_5xx_on_sqlite_query_and_write_err
         StatusCode::INTERNAL_SERVER_ERROR
     );
 }
+
+#[tokio::test]
+async fn dispatch_worker_command_parity_normalization_capacity_and_storage_errors() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let _db_path = crate::plugins::tests::ensure_shared_test_db();
+    af_services::cluster_daemon::ensure_cluster_schema();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO cluster_nodes (id, hostname, address, psk_hash, role, status)
+             VALUES ('node-api-parity', 'parity', '127.0.0.1:8080', 'hash', 'worker', 'online')",
+            [],
+        )
+        .unwrap();
+    }
+    let admin = AuthUser {
+        user_id: 1,
+        username: "admin".to_string(),
+        role: "admin".to_string(),
+        jti: "jti-admin".to_string(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+
+    // 1. "package" is rejected at admission with 400 BAD_REQUEST.
+    let pkg_resp = dispatch_worker_command(
+        axum::extract::Extension(admin.clone()),
+        Path("node-api-parity".to_string()),
+        Json(serde_json::json!({ "cmd_type": "package", "target": "sonarr" })),
+    )
+    .await;
+    assert_eq!(pkg_resp.status(), StatusCode::BAD_REQUEST);
+
+    // 2. Unknown systemctl action is rejected with 400 BAD_REQUEST.
+    let bad_action = dispatch_worker_command(
+        axum::extract::Extension(admin.clone()),
+        Path("node-api-parity".to_string()),
+        Json(serde_json::json!({ "cmd_type": "systemctl", "target": "sonarr", "action": "nuke" })),
+    )
+    .await;
+    assert_eq!(bad_action.status(), StatusCode::BAD_REQUEST);
+
+    // 3. Legacy systemctl + action normalizes before insert and leases with canonical verb.
+    let stop_resp = dispatch_worker_command(
+        axum::extract::Extension(admin.clone()),
+        Path("node-api-parity".to_string()),
+        Json(serde_json::json!({ "cmd_type": "systemctl", "target": "sonarr", "action": "stop" })),
+    )
+    .await;
+    assert_eq!(stop_resp.status(), StatusCode::OK);
+    let stop_body = axum::body::to_bytes(stop_resp.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let stop_json: serde_json::Value = serde_json::from_slice(&stop_body).unwrap();
+    assert_eq!(stop_json["command"]["cmd_type"], "stop_service");
+    let leased =
+        af_services::cluster_daemon::lease_next_worker_command("node-api-parity", 9000, 30)
+            .unwrap();
+    assert_eq!(leased.cmd_type, "stop_service");
+    assert_eq!(
+        leased.params.get("service").map(String::as_str),
+        Some("sonarr")
+    );
+
+    // 4. Legacy systemctl + nested params.action also normalizes cleanly.
+    let reload_resp = dispatch_worker_command(
+        axum::extract::Extension(admin.clone()),
+        Path("node-api-parity".to_string()),
+        Json(serde_json::json!({
+            "type": "systemctl",
+            "params": { "service": "radarr", "action": "reload" }
+        })),
+    )
+    .await;
+    assert_eq!(reload_resp.status(), StatusCode::OK);
+    let reload_body = axum::body::to_bytes(reload_resp.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let reload_json: serde_json::Value = serde_json::from_slice(&reload_body).unwrap();
+    assert_eq!(reload_json["command"]["cmd_type"], "reload_service");
+    assert_eq!(reload_json["command"]["target"], "radarr");
+
+    // 5. Fill remaining queue capacity (62 more -> 64 total active) and verify 65th returns 429.
+    for _ in 0..62 {
+        let resp = dispatch_worker_command(
+            axum::extract::Extension(admin.clone()),
+            Path("node-api-parity".to_string()),
+            Json(serde_json::json!({ "cmd_type": "ping", "target": "" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let full_resp = dispatch_worker_command(
+        axum::extract::Extension(admin.clone()),
+        Path("node-api-parity".to_string()),
+        Json(serde_json::json!({ "cmd_type": "ping", "target": "" })),
+    )
+    .await;
+    assert_eq!(full_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // 6. SQLite persistence errors map to 500 INTERNAL_SERVER_ERROR, never 400 BAD_REQUEST.
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch(
+            "DELETE FROM cluster_commands WHERE node_id = 'node-api-parity';
+             CREATE TRIGGER fail_cluster_cmd_insert BEFORE INSERT ON cluster_commands
+             BEGIN SELECT RAISE(ABORT, 'simulated sqlite write failure'); END;",
+        )
+        .unwrap();
+    }
+    let db_err_resp = dispatch_worker_command(
+        axum::extract::Extension(admin),
+        Path("node-api-parity".to_string()),
+        Json(serde_json::json!({ "cmd_type": "ping", "target": "" })),
+    )
+    .await;
+    assert_eq!(db_err_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}

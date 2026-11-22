@@ -867,3 +867,105 @@ async fn test_mock_http_live_sessions_artwork_and_honest_item_summaries() {
 
     server.abort();
 }
+
+#[test]
+fn test_resolve_default_emby_url_respects_port_8097_tls_scheme_and_custom_listen_port() {
+    use super::client::resolve_default_emby_url_from;
+
+    // 1. Default fallback uses Emby's marketplace port 8097 (not Jellyfin's 8096).
+    assert_eq!(EMBY_DEFAULT_URL, "http://127.0.0.1:8097");
+    assert_eq!(EmbyServerConfig::default().url, "http://127.0.0.1:8097");
+    assert_eq!(
+        resolve_default_emby_url_from(None, None, ""),
+        "http://127.0.0.1:8097"
+    );
+
+    // 2. External ingress respects tls_enabled = false vs tls_enabled = true.
+    let http_external = af_models::AppIngressConfig {
+        app_name: "emby".to_string(),
+        public_domain: "emby.example.com".to_string(),
+        external_access_enabled: true,
+        listen_port: 8097,
+        tls_enabled: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_default_emby_url_from(None, Some(&http_external), "fallback.example.com"),
+        "http://emby.example.com"
+    );
+
+    let https_external = af_models::AppIngressConfig {
+        tls_enabled: true,
+        ..http_external.clone()
+    };
+    assert_eq!(
+        resolve_default_emby_url_from(None, Some(&https_external), "fallback.example.com"),
+        "https://emby.example.com"
+    );
+
+    // 3. Local-only ingress uses configured custom listen_port on loopback.
+    let custom_local = af_models::AppIngressConfig {
+        app_name: "emby".to_string(),
+        public_domain: "emby.example.com".to_string(),
+        external_access_enabled: false,
+        listen_port: 18097,
+        tls_enabled: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_default_emby_url_from(None, Some(&custom_local), "fallback.example.com"),
+        "http://127.0.0.1:18097"
+    );
+
+    // 4. External enabled with empty public_domain falls back to custom listen_port.
+    let empty_dom = af_models::AppIngressConfig {
+        app_name: "emby".to_string(),
+        public_domain: "   ".to_string(),
+        external_access_enabled: true,
+        listen_port: 18098,
+        tls_enabled: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_default_emby_url_from(None, Some(&empty_dom), "fallback.example.com"),
+        "http://127.0.0.1:18098"
+    );
+
+    // 5. Explicit EMBY_URL override wins and trims trailing slash.
+    assert_eq!(
+        resolve_default_emby_url_from(
+            Some(" http://10.0.0.9:8097/emby/ "),
+            Some(&https_external),
+            "fallback.example.com"
+        ),
+        "http://10.0.0.9:8097/emby"
+    );
+}
+
+#[test]
+fn test_get_stored_emby_config_preserves_existing_operator_url_without_rewriting() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    crate::plugins::tests::ensure_shared_test_db();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO streaming_servers (provider, name, url, api_key, enabled, server_id)
+             VALUES ('emby', 'Operator Emby', 'http://127.0.0.1:8096', 'op-key', 1, 'srv-op')",
+            [],
+        )
+        .unwrap();
+    }
+    let cfg = get_stored_emby_config();
+    assert_eq!(cfg.url, "http://127.0.0.1:8096");
+    let stored_url: String = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT url FROM streaming_servers WHERE provider = 'emby'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_url, "http://127.0.0.1:8096");
+}

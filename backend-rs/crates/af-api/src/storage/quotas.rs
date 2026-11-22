@@ -236,7 +236,17 @@ pub async fn update_user_quota(
     Path(user_id): Path<i64>,
     Json(req): Json<serde_json::Value>,
 ) -> Response {
-    let mut quota_bytes = req.get("quota_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mut quota_bytes = if let Some(raw_bytes) = req.get("quota_bytes") {
+        if let Some(val) = raw_bytes.as_i64() {
+            val
+        } else if raw_bytes.as_u64().is_some() {
+            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Quota is too large");
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     if quota_bytes <= 0 {
         if let Some(q_str) = req.get("quota").and_then(|v| v.as_str()) {
             if !q_str.trim().is_empty() {
@@ -255,6 +265,9 @@ pub async fn update_user_quota(
             "BAD_REQUEST",
             "quota_bytes or quota is required",
         );
+    }
+    if let Err(err) = accounting::align_quota_bytes_to_kib(quota_bytes) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", err.to_string());
     }
 
     accounting::quota_operation(user_id, Some(quota_bytes)).await

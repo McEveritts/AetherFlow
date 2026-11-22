@@ -381,12 +381,17 @@ fn resolve_service_action(cmd: &PendingWorkerCommand) -> Option<&'static str> {
         "start_service" => Some("start"),
         "stop_service" => Some("stop"),
         "reload_service" => Some("reload"),
-        "systemctl" => match cmd.params.get("action").map(|s| s.trim()) {
-            Some("restart") => Some("restart"),
+        "systemctl" => match cmd
+            .params
+            .get("action")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            None | Some("restart") => Some("restart"),
             Some("start") => Some("start"),
             Some("stop") => Some("stop"),
             Some("reload") => Some("reload"),
-            _ => Some("restart"),
+            Some(_) => None,
         },
         _ => None,
     }

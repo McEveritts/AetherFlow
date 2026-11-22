@@ -39,7 +39,7 @@ pub(crate) use backup_staging::maintain_backup_upload_staging;
 
 #[path = "storage_accounting.rs"]
 mod accounting;
-pub(crate) use accounting::recover_quota_rollbacks;
+pub(crate) use accounting::{recover_fileshare_pending_publishes, recover_quota_rollbacks};
 
 mod backup_uploads;
 mod backups;

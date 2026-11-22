@@ -2,9 +2,9 @@ use super::auth::{
     authorize_cluster_control_plane, constant_time_eq, verify_cluster_psk, PeerTransportAuth,
 };
 use super::commands::{
-    acknowledge_worker_command, enqueue_cluster_command, get_cached_worker_metrics,
-    is_allowed_worker_command_type, list_cluster_commands, queue_worker_command,
-    truncate_diagnostic_utf8, truncate_utf8,
+    acknowledge_worker_command, enqueue_cluster_command_with_action, get_cached_worker_metrics,
+    list_cluster_commands, normalize_cluster_command, queue_worker_command_checked,
+    truncate_diagnostic_utf8, ClusterCommandEnqueueError,
 };
 use super::grpc::{
     build_grpc_trailers, cached_snapshot_to_proto_metrics, decode_proto_command_request,
@@ -180,33 +180,54 @@ async fn handle_grpc_request(
             if let Err(msg) = authorize_cluster_control_plane(&header_psk, &peer_auth) {
                 return grpc_error_response(GrpcError::unauthenticated(msg));
             }
-            if !is_allowed_worker_command_type(&req.cmd_type) {
-                return grpc_error_response(GrpcError::invalid_argument(format!(
-                    "unsupported cluster command type '{}'",
-                    truncate_utf8(req.cmd_type.trim(), 64)
-                )));
+            let target = req
+                .params
+                .get("service")
+                .or_else(|| req.params.get("target"))
+                .map(String::as_str)
+                .unwrap_or("");
+            let action = req.params.get("action").map(String::as_str);
+            if let Err(err) = normalize_cluster_command(&req.node_id, &req.cmd_type, target, action)
+            {
+                return grpc_error_response(GrpcError::invalid_argument(err.to_string()));
             }
             let known_worker = is_enrolled_cluster_node(&req.node_id);
+            if !known_worker {
+                let encoded = encode_proto_command_response(
+                    &req.command_id,
+                    false,
+                    "",
+                    "worker not found or command queue full",
+                );
+                return grpc_unary_ok_response(&encoded);
+            }
             let cmd = PendingWorkerCommand {
                 id: req.command_id.clone(),
                 cmd_type: req.cmd_type,
                 params: req.params,
                 lease_generation: 0,
             };
-            let encoded = if known_worker && queue_worker_command(&req.node_id, cmd) {
-                encode_proto_command_response(
+            let encoded = match queue_worker_command_checked(&req.node_id, cmd) {
+                Ok(true) => encode_proto_command_response(
                     &req.command_id,
                     true,
                     "command queued for delivery",
                     "",
-                )
-            } else {
-                encode_proto_command_response(
-                    &req.command_id,
-                    false,
-                    "",
-                    "worker not found or command queue full",
-                )
+                ),
+                Ok(false) | Err(ClusterCommandEnqueueError::QueueFull(_)) => {
+                    encode_proto_command_response(
+                        &req.command_id,
+                        false,
+                        "",
+                        "worker not found or command queue full",
+                    )
+                }
+                Err(ClusterCommandEnqueueError::InvalidInput(msg)) => {
+                    return grpc_error_response(GrpcError::invalid_argument(msg));
+                }
+                Err(ClusterCommandEnqueueError::Storage(msg)) => {
+                    return grpc_error_response(GrpcError::internal(msg));
+                }
             };
             grpc_unary_ok_response(&encoded)
         }
@@ -563,18 +584,39 @@ pub(super) fn route_cluster_http_request(
                 .or_else(|| val.get("type"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let params_obj = val.get("params");
             let target = val
                 .get("target")
                 .or_else(|| val.get("service"))
+                .or_else(|| params_obj.and_then(|p| p.get("service").or_else(|| p.get("target"))))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            match enqueue_cluster_command(node_id, cmd_type, target) {
+            let action = val
+                .get("action")
+                .or_else(|| params_obj.and_then(|p| p.get("action")))
+                .and_then(|v| v.as_str());
+            match enqueue_cluster_command_with_action(node_id, cmd_type, target, action) {
                 Ok(rec) => (200, "OK", serde_json::to_value(rec).unwrap_or_default()),
-                Err(e) => (
-                    400,
-                    "Bad Request",
-                    serde_json::json!({ "error": e.to_string() }),
-                ),
+                Err(e) => match e.downcast_ref::<ClusterCommandEnqueueError>() {
+                    Some(ClusterCommandEnqueueError::InvalidInput(msg)) => {
+                        (400, "Bad Request", serde_json::json!({ "error": msg }))
+                    }
+                    Some(ClusterCommandEnqueueError::QueueFull(msg)) => (
+                        429,
+                        "Too Many Requests",
+                        serde_json::json!({ "error": msg }),
+                    ),
+                    Some(ClusterCommandEnqueueError::Storage(msg)) => (
+                        500,
+                        "Internal Server Error",
+                        serde_json::json!({ "error": msg }),
+                    ),
+                    None => (
+                        500,
+                        "Internal Server Error",
+                        serde_json::json!({ "error": e.to_string() }),
+                    ),
+                },
             }
         }
         ("GET", "/cluster/v1/commands") => {

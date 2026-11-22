@@ -71,6 +71,32 @@ pub(super) fn truncate_diagnostic_utf8(raw: &str, max_bytes: usize) -> String {
     format!("{prefix}...")
 }
 
+/// Structured classification for cluster command admission, capacity, and persistence errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClusterCommandEnqueueError {
+    InvalidInput(String),
+    QueueFull(String),
+    Storage(String),
+}
+
+impl std::fmt::Display for ClusterCommandEnqueueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInput(msg) | Self::QueueFull(msg) | Self::Storage(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for ClusterCommandEnqueueError {}
+
+/// Canonical, admission-validated cluster worker command ready for durable persistence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedClusterCommand {
+    pub node_id: String,
+    pub cmd_type: &'static str,
+    pub target: String,
+}
+
 /// Strictly validates whether `cmd_type` is an allowed remote cluster command verb.
 #[inline]
 pub fn is_allowed_worker_command_type(cmd_type: &str) -> bool {
@@ -81,7 +107,6 @@ pub fn is_allowed_worker_command_type(cmd_type: &str) -> bool {
             | "stop_service"
             | "reload_service"
             | "systemctl"
-            | "package"
             | "ping"
     )
 }
@@ -98,112 +123,199 @@ fn is_valid_command_target(cmd_type: &str, target: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@' | b':'))
 }
 
-/// Enqueues a validated remote command into durable SQLite `cluster_commands`.
-pub fn enqueue_cluster_command(
+/// Validates and normalizes any remote cluster command (including legacy `systemctl` + `action`)
+/// into its canonical worker-executable verb before durable enqueue.
+pub fn normalize_cluster_command(
     node_id: &str,
     cmd_type: &str,
     target: &str,
-) -> anyhow::Result<ClusterCommandRecord> {
-    ensure_cluster_schema();
+    action: Option<&str>,
+) -> Result<NormalizedClusterCommand, ClusterCommandEnqueueError> {
     let clean_node = node_id.trim();
-    let clean_type = cmd_type.trim();
-    let clean_target = target.trim();
-    anyhow::ensure!(
-        !clean_node.is_empty() && clean_node.len() <= 128,
-        "valid node_id is required"
-    );
-    anyhow::ensure!(
-        is_allowed_worker_command_type(clean_type),
-        "unsupported cluster command type (allowed: restart_service, start_service, stop_service, reload_service, systemctl, package, ping)"
-    );
-    anyhow::ensure!(
-        is_valid_command_target(clean_type, clean_target),
-        "invalid command target identifier"
-    );
+    if clean_node.is_empty() || clean_node.len() > 128 {
+        return Err(ClusterCommandEnqueueError::InvalidInput(
+            "valid node_id is required".to_string(),
+        ));
+    }
 
-    let conn = af_db::get_conn().context("database unavailable")?;
-    let active_count: i64 = conn
+    let clean_type = cmd_type.trim();
+    let clean_action = action
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase());
+
+    let canonical_type: &'static str = match clean_type {
+        "restart_service" => "restart_service",
+        "start_service" => "start_service",
+        "stop_service" => "stop_service",
+        "reload_service" => "reload_service",
+        "ping" => "ping",
+        "systemctl" => match clean_action.as_deref() {
+            None | Some("restart") => "restart_service",
+            Some("start") => "start_service",
+            Some("stop") => "stop_service",
+            Some("reload") => "reload_service",
+            Some(other) => {
+                return Err(ClusterCommandEnqueueError::InvalidInput(format!(
+                    "unsupported systemctl action '{}' (allowed: start, stop, restart, reload)",
+                    truncate_diagnostic_utf8(other, 64)
+                )));
+            }
+        },
+        _ => {
+            return Err(ClusterCommandEnqueueError::InvalidInput(
+                "unsupported cluster command type (allowed: restart_service, start_service, stop_service, reload_service, systemctl, ping)".to_string(),
+            ));
+        }
+    };
+
+    let clean_target = target.trim();
+    if !is_valid_command_target(canonical_type, clean_target) {
+        return Err(ClusterCommandEnqueueError::InvalidInput(
+            "invalid command target identifier".to_string(),
+        ));
+    }
+
+    Ok(NormalizedClusterCommand {
+        node_id: clean_node.to_string(),
+        cmd_type: canonical_type,
+        target: clean_target.to_string(),
+    })
+}
+
+fn insert_normalized_cluster_command_atomic(
+    cmd_id: Option<&str>,
+    normalized: &NormalizedClusterCommand,
+    ignore_duplicate: bool,
+) -> Result<Option<ClusterCommandRecord>, ClusterCommandEnqueueError> {
+    let mut conn = af_db::get_conn().map_err(|err| {
+        ClusterCommandEnqueueError::Storage(format!("database unavailable: {err}"))
+    })?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|err| {
+            ClusterCommandEnqueueError::Storage(format!(
+                "failed to start cluster command transaction: {err}"
+            ))
+        })?;
+    let active_count: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM cluster_commands WHERE node_id = ?1 AND status IN ('queued', 'leased')",
-            params![clean_node],
+            params![normalized.node_id],
             |r| r.get(0),
         )
-        .unwrap_or(0);
-    anyhow::ensure!(
-        active_count < MAX_PENDING_COMMANDS_PER_NODE,
-        "worker command queue is full for node '{}'",
-        clean_node
-    );
+        .map_err(|err| {
+            ClusterCommandEnqueueError::Storage(format!(
+                "failed to check worker command queue capacity: {err}"
+            ))
+        })?;
+    if active_count >= MAX_PENDING_COMMANDS_PER_NODE {
+        return Err(ClusterCommandEnqueueError::QueueFull(format!(
+            "worker command queue is full for node '{}'",
+            normalized.node_id
+        )));
+    }
 
-    let cmd_id = format!("cmd-{}", uuid::Uuid::new_v4().simple());
+    let final_id = cmd_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("cmd-{}", uuid::Uuid::new_v4().simple()));
     let now_iso = Utc::now().to_rfc3339();
-    conn.execute(
+    let sql = if ignore_duplicate {
+        "INSERT OR IGNORE INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, lease_generation, result_message, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, 0, NULL, ?5, ?5)"
+    } else {
         "INSERT INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, lease_generation, result_message, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, 0, NULL, ?5, ?5)",
-        params![cmd_id, clean_node, clean_type, clean_target, now_iso],
-    )
-    .context("failed to persist cluster command")?;
+         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, 0, NULL, ?5, ?5)"
+    };
+    let changed = tx
+        .execute(
+            sql,
+            params![
+                final_id,
+                normalized.node_id,
+                normalized.cmd_type,
+                normalized.target,
+                now_iso
+            ],
+        )
+        .map_err(|err| {
+            ClusterCommandEnqueueError::Storage(format!("failed to persist cluster command: {err}"))
+        })?;
+    tx.commit().map_err(|err| {
+        ClusterCommandEnqueueError::Storage(format!("failed to commit cluster command: {err}"))
+    })?;
+    if changed == 0 {
+        return Ok(None);
+    }
 
-    Ok(ClusterCommandRecord {
-        id: cmd_id,
-        node_id: clean_node.to_string(),
-        cmd_type: clean_type.to_string(),
-        target: clean_target.to_string(),
+    Ok(Some(ClusterCommandRecord {
+        id: final_id,
+        node_id: normalized.node_id.clone(),
+        cmd_type: normalized.cmd_type.to_string(),
+        target: normalized.target.clone(),
         status: "queued".to_string(),
         leased_until: None,
         lease_generation: 0,
         result_message: None,
         created_at: now_iso.clone(),
         updated_at: now_iso,
-    })
+    }))
 }
 
-/// Queues a remote command for delivery to a worker node on its next heartbeat response (durable SQLite wrapper).
-pub fn queue_worker_command(node_id: &str, cmd: PendingWorkerCommand) -> bool {
+/// Enqueues a validated remote command (normalizing legacy `systemctl` + optional `action`)
+/// atomically into durable SQLite `cluster_commands`.
+pub fn enqueue_cluster_command_with_action(
+    node_id: &str,
+    cmd_type: &str,
+    target: &str,
+    action: Option<&str>,
+) -> anyhow::Result<ClusterCommandRecord> {
     ensure_cluster_schema();
-    let clean_node = node_id.trim();
-    let clean_type = cmd.cmd_type.trim();
+    let normalized =
+        normalize_cluster_command(node_id, cmd_type, target, action).map_err(anyhow::Error::new)?;
+    let record = insert_normalized_cluster_command_atomic(None, &normalized, false)
+        .map_err(anyhow::Error::new)?
+        .ok_or_else(|| {
+            anyhow::Error::new(ClusterCommandEnqueueError::Storage(
+                "failed to persist cluster command".to_string(),
+            ))
+        })?;
+    Ok(record)
+}
+
+/// Enqueues a validated remote command into durable SQLite `cluster_commands`.
+pub fn enqueue_cluster_command(
+    node_id: &str,
+    cmd_type: &str,
+    target: &str,
+) -> anyhow::Result<ClusterCommandRecord> {
+    enqueue_cluster_command_with_action(node_id, cmd_type, target, None)
+}
+
+/// Atomically validates, normalizes, checks queue capacity, and inserts a worker command,
+/// returning typed admission/capacity/storage errors instead of swallowing SQLite failures.
+pub fn queue_worker_command_checked(
+    node_id: &str,
+    cmd: PendingWorkerCommand,
+) -> Result<bool, ClusterCommandEnqueueError> {
+    ensure_cluster_schema();
     let target = cmd
         .params
         .get("service")
         .or_else(|| cmd.params.get("target"))
-        .or_else(|| cmd.params.get("package"))
         .map(String::as_str)
-        .unwrap_or("")
-        .trim();
-    if clean_node.is_empty()
-        || clean_node.len() > 128
-        || !is_allowed_worker_command_type(clean_type)
-        || !is_valid_command_target(clean_type, target)
-    {
-        return false;
-    }
-    let cmd_id = if cmd.id.trim().is_empty() {
-        format!("cmd-{}", uuid::Uuid::new_v4().simple())
-    } else {
-        cmd.id.trim().to_string()
-    };
-    let Ok(conn) = af_db::get_conn() else {
-        return false;
-    };
-    let active_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM cluster_commands WHERE node_id = ?1 AND status IN ('queued', 'leased')",
-            params![clean_node],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    if active_count >= MAX_PENDING_COMMANDS_PER_NODE {
-        return false;
-    }
-    let now_iso = Utc::now().to_rfc3339();
-    conn.execute(
-        "INSERT OR IGNORE INTO cluster_commands (id, node_id, cmd_type, target, status, leased_until, lease_generation, result_message, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, 0, NULL, ?5, ?5)",
-        params![cmd_id, clean_node, clean_type, target, now_iso],
-    )
-    .map(|n| n > 0)
-    .unwrap_or(false)
+        .unwrap_or("");
+    let action = cmd.params.get("action").map(String::as_str);
+    let normalized = normalize_cluster_command(node_id, &cmd.cmd_type, target, action)?;
+    let inserted = insert_normalized_cluster_command_atomic(Some(&cmd.id), &normalized, true)?;
+    Ok(inserted.is_some())
+}
+
+/// Queues a remote command for delivery to a worker node on its next heartbeat response (durable SQLite wrapper).
+pub fn queue_worker_command(node_id: &str, cmd: PendingWorkerCommand) -> bool {
+    queue_worker_command_checked(node_id, cmd).unwrap_or(false)
 }
 
 /// Leases the next queued (or lease-expired) command for `node_id` from SQLite `cluster_commands`,

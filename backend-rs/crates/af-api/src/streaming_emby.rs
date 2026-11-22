@@ -8,7 +8,7 @@ mod tests;
 
 pub const EMBY_PROVIDER_ID: &str = "emby";
 pub const EMBY_DEFAULT_NAME: &str = "Emby Server";
-pub const EMBY_DEFAULT_URL: &str = "http://127.0.0.1:8096";
+pub const EMBY_DEFAULT_URL: &str = "http://127.0.0.1:8097";
 pub const EMBY_SUPPORT_STAGE: &str = "coming_soon";
 pub const EMBY_TICKS_PER_SECOND: i64 = 10_000_000;
 pub const MAX_EMBY_JSON_PAYLOAD_BYTES: usize = 4 * 1024 * 1024; // 4 MiB hard cap for JSON payloads

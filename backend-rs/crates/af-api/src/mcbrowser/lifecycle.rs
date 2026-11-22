@@ -15,6 +15,7 @@ const ACCOUNT_TABLES: &[(&str, &str)] = &[
     ("oidc_consents", "user_id"),
     ("recovery_codes", "user_id"),
     ("fileshare_objects", "user_id"),
+    ("fileshare_pending_publishes", "user_id"),
     ("log_bookmarks", "user_id"),
     ("notification_reads", "user_id"),
     ("notifications", "user_id"),

@@ -106,6 +106,23 @@ pub const ACCOUNT_STORAGE_CLEANUP_SCHEMA: &str = "
         ON account_storage_cleanup (storage_root, directory, filename) WHERE shared = 1;
 ";
 
+pub const FILESHARE_PENDING_PUBLISHES_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS fileshare_pending_publishes (
+        storage_root TEXT NOT NULL,
+        directory TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        new_size_bytes INTEGER NOT NULL CHECK(new_size_bytes >= 0),
+        growth_bytes INTEGER NOT NULL CHECK(growth_bytes >= 0),
+        previous_user_id INTEGER,
+        previous_size_bytes INTEGER CHECK(previous_size_bytes IS NULL OR previous_size_bytes >= 0),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(storage_root, directory, filename)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fileshare_pending_publishes_user
+        ON fileshare_pending_publishes(user_id);
+";
+
 pub fn init_db() -> anyhow::Result<()> {
     let db_path = try_resolve_db_path()?;
     if db_path != ":memory:" && !db_path.starts_with("file:") {
@@ -756,6 +773,7 @@ pub fn init_db() -> anyhow::Result<()> {
     // Streaming owns version 24. Reconcile MediaFlow independently of that epoch.
     ensure_mediaflow_schema_invariants(&conn)?;
     conn.execute_batch(ACCOUNT_STORAGE_CLEANUP_SCHEMA)?;
+    conn.execute_batch(FILESHARE_PENDING_PUBLISHES_SCHEMA)?;
     ensure_column(
         &conn,
         "base_domain_sync_state",

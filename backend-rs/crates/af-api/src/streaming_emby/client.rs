@@ -16,27 +16,41 @@ static EMBY_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("guarded Emby HTTP client")
 });
 
-pub fn resolve_default_emby_url() -> String {
-    if let Ok(env_url) = env::var("EMBY_URL") {
-        let trimmed = env_url.trim().trim_end_matches('/');
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+pub(super) fn resolve_default_emby_url_from(
+    env_url: Option<&str>,
+    ingress: Option<&af_models::AppIngressConfig>,
+    base_domain: &str,
+) -> String {
+    if let Some(trimmed) = env_url
+        .map(|raw| raw.trim().trim_end_matches('/'))
+        .filter(|s| !s.is_empty())
+    {
+        return trimmed.to_string();
     }
-    if let Ok(Some(cfg)) = af_db::get_app_ingress_config(EMBY_PROVIDER_ID) {
+    if let Some(cfg) = ingress {
         let dom = cfg.public_domain.trim();
         if !dom.is_empty() && cfg.external_access_enabled {
-            return format!("https://{}", dom);
+            let scheme = if cfg.tls_enabled { "https" } else { "http" };
+            return format!("{scheme}://{dom}");
         }
         if cfg.listen_port > 0 {
             return format!("http://127.0.0.1:{}", cfg.listen_port);
         }
     }
-    let base_dom = af_services::resolve_base_domain();
+    let base_dom = base_domain.trim();
     if !base_dom.is_empty() {
         return format!("https://emby.{}", base_dom);
     }
     EMBY_DEFAULT_URL.to_string()
+}
+
+pub fn resolve_default_emby_url() -> String {
+    let env_url = env::var("EMBY_URL").ok();
+    let ingress = af_db::get_app_ingress_config(EMBY_PROVIDER_ID)
+        .ok()
+        .flatten();
+    let base_dom = af_services::resolve_base_domain();
+    resolve_default_emby_url_from(env_url.as_deref(), ingress.as_ref(), &base_dom)
 }
 
 pub fn get_stored_emby_config() -> EmbyServerConfig {

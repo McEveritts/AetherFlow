@@ -964,3 +964,272 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
     let _ = server.await;
     let _ = fs::remove_file(&socket);
 }
+
+#[tokio::test]
+async fn interrupted_fileshare_publish_recovery_releases_phantom_owner_and_reconciles_replacements()
+{
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    ensure_shared_test_db();
+    let root = Scratch::new();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users(id,username) VALUES(720,'crash-owner'),(721,'other-publisher')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user_quotas(user_id,username,quota_bytes,used_bytes,status)
+             VALUES(720,'crash-owner',8192,0,'active'),(721,'other-publisher',8192,0,'active')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let upload = |user, name: &str, size: usize| {
+        let conn = af_db::get_conn().unwrap();
+        append_fileshare_chunk_with(
+            &mut HashMap::new(),
+            &root.0,
+            user,
+            &uuid::Uuid::new_v4().simple().to_string(),
+            "",
+            name,
+            0,
+            1,
+            &vec![b'a'; size],
+            |session| accounting::publish(&conn, &root.0, user, session),
+        )
+    };
+    let used_of = |uid: i64| -> i64 {
+        af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT used_bytes FROM user_quotas WHERE user_id=?1",
+                [uid],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let pending_count = || -> i64 {
+        af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM fileshare_pending_publishes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    // 1. Simulate crash between SQLite reservation and disk commit on first publish.
+    {
+        let conn = af_db::get_conn().unwrap();
+        accounting::reserve_publish(&conn, &root.0, 720, "", "phantom.txt", 3072).unwrap();
+    }
+    assert_eq!(used_of(720), 3072);
+    assert_eq!(pending_count(), 1);
+    assert!(!root.0.join("phantom.txt").exists());
+    // Before startup recovery, another user is blocked by the phantom owner row.
+    assert!(upload(721, "phantom.txt", 100).is_err());
+
+    // Startup reconciliation deletes the phantom owner row, refunds quota, and clears pending state.
+    crate::storage::recover_fileshare_pending_publishes().await;
+    assert_eq!(used_of(720), 0);
+    assert_eq!(pending_count(), 0);
+    let phantom_rows: i64 = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM fileshare_objects WHERE filename='phantom.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(phantom_rows, 0);
+    // Another user can now publish cleanly to the released filename.
+    assert!(upload(721, "phantom.txt", 512).unwrap());
+    assert_eq!(used_of(721), 512);
+    assert_eq!(fs::metadata(root.0.join("phantom.txt")).unwrap().len(), 512);
+
+    // 2. Simulate crash AFTER disk commit on first publish (before post-commit cleanup).
+    {
+        let conn = af_db::get_conn().unwrap();
+        accounting::reserve_publish(&conn, &root.0, 720, "", "committed-first.txt", 2048).unwrap();
+    }
+    fs::write(root.0.join("committed-first.txt"), vec![b'b'; 2048]).unwrap();
+    assert_eq!(used_of(720), 2048);
+    assert_eq!(pending_count(), 1);
+    crate::storage::recover_fileshare_pending_publishes().await;
+    assert_eq!(used_of(720), 2048);
+    assert_eq!(pending_count(), 0);
+    let (owner, size): (i64, i64) = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT user_id, size_bytes FROM fileshare_objects WHERE filename='committed-first.txt'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((owner, size), (720, 2048));
+
+    // 3. Simulate crash BEFORE commit_replace on growing replacement (2048 -> 3072).
+    {
+        let conn = af_db::get_conn().unwrap();
+        accounting::reserve_publish(&conn, &root.0, 720, "", "committed-first.txt", 3072).unwrap();
+    }
+    assert_eq!(used_of(720), 3072);
+    assert_eq!(pending_count(), 1);
+    crate::storage::recover_fileshare_pending_publishes().await;
+    assert_eq!(used_of(720), 2048);
+    assert_eq!(pending_count(), 0);
+    let (owner, size): (i64, i64) = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT user_id, size_bytes FROM fileshare_objects WHERE filename='committed-first.txt'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((owner, size), (720, 2048));
+
+    // 4. Simulate crash AFTER commit_replace on shrinking replacement (2048 -> 1024).
+    {
+        let conn = af_db::get_conn().unwrap();
+        accounting::reserve_publish(&conn, &root.0, 720, "", "committed-first.txt", 1024).unwrap();
+    }
+    fs::write(root.0.join("committed-first.txt"), vec![b'c'; 1024]).unwrap();
+    assert_eq!(used_of(720), 2048);
+    crate::storage::recover_fileshare_pending_publishes().await;
+    assert_eq!(used_of(720), 1024);
+    assert_eq!(pending_count(), 0);
+    let size: i64 = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT size_bytes FROM fileshare_objects WHERE filename='committed-first.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(size, 1024);
+}
+
+#[tokio::test]
+async fn admin_quota_refresh_clears_interrupted_and_stale_absent_fileshare_ownership() {
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    use http_body_util::BodyExt;
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    ensure_shared_test_db();
+    let root = Scratch::new();
+    let short_name = format!(
+        "af-fs-refresh-{}.sock",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+    let socket = PathBuf::from("/tmp").join(short_name);
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    env::set_var("AETHERFLOW_RUNNER_SOCK", &socket);
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| async move {
+                        let _ = request.into_body().collect().await;
+                        let output =
+                            serde_json::json!({"used_bytes": 0, "scanned_roots": []}).to_string();
+                        Ok::<_, std::convert::Infallible>(Response::new(Body::from(
+                            serde_json::json!({"success": true, "output": output, "error": ""})
+                                .to_string(),
+                        )))
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users(id,username) VALUES(722,'refresh-owner'),(723,'refresh-other')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user_quotas(user_id,username,quota_bytes,used_bytes,status)
+             VALUES(722,'refresh-owner',8192,0,'active'),(723,'refresh-other',8192,0,'active')",
+            [],
+        )
+        .unwrap();
+        // 1. Interrupted publish with pending row and no file on disk.
+        accounting::reserve_publish(&conn, &root.0, 722, "", "interrupted-refresh.txt", 2048)
+            .unwrap();
+        // 2. Out-of-band absent file row (no pending publish row, not pending account cleanup).
+        let (canon_root, _) = accounting::object_key(&root.0, "").unwrap();
+        conn.execute(
+            "INSERT INTO fileshare_objects(storage_root,directory,filename,user_id,size_bytes)
+             VALUES(?1,'','stale-absent.txt',722,1024)",
+            params![canon_root],
+        )
+        .unwrap();
+        // 3. Legitimate live file on disk that must remain owned and counted.
+        fs::write(root.0.join("live.txt"), vec![b'z'; 777]).unwrap();
+        conn.execute(
+            "INSERT INTO fileshare_objects(storage_root,directory,filename,user_id,size_bytes)
+             VALUES(?1,'','live.txt',722,777)",
+            params![canon_root],
+        )
+        .unwrap();
+    }
+
+    assert_eq!(refresh_user_quota(Path(722)).await.status(), StatusCode::OK);
+    let rec = query_user_quota_record(722).unwrap();
+    assert_eq!(rec.used_bytes, 777);
+
+    let conn = af_db::get_conn().unwrap();
+    let remaining_files: Vec<String> = conn
+        .prepare("SELECT filename FROM fileshare_objects WHERE user_id=722 ORDER BY filename")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(remaining_files, vec!["live.txt".to_string()]);
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM fileshare_pending_publishes WHERE user_id=722",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+
+    // Another user can now publish cleanly to both formerly phantom/absent filenames!
+    for name in ["interrupted-refresh.txt", "stale-absent.txt"] {
+        assert!(append_fileshare_chunk_with(
+            &mut HashMap::new(),
+            &root.0,
+            723,
+            &uuid::Uuid::new_v4().simple().to_string(),
+            "",
+            name,
+            0,
+            1,
+            b"reclaimed",
+            |session| accounting::publish(&conn, &root.0, 723, session),
+        )
+        .unwrap());
+    }
+
+    server.abort();
+    let _ = server.await;
+    let _ = fs::remove_file(&socket);
+}

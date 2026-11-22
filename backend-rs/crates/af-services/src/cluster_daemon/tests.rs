@@ -1244,7 +1244,7 @@ fn utf8_truncation_deleted_node_guard_verb_allowlist_and_ack_outbox_retention() 
         "deleted worker must NEVER be re-inserted on heartbeat"
     );
 
-    // 3. Command type allowlist: systemctl, package, ping, restart_service allowed; arbitrary verbs rejected (HTTP + gRPC)
+    // 3. Command type allowlist: systemctl, ping, restart_service allowed; package & arbitrary verbs rejected (HTTP + gRPC)
     let reg_live = register_worker_node(&RegisterWorkerRequest {
         node_id: "node-live".to_string(),
         hostname: "live".to_string(),
@@ -1256,10 +1256,21 @@ fn utf8_truncation_deleted_node_guard_verb_allowlist_and_ack_outbox_retention() 
     .unwrap();
     assert!(reg_live.accepted);
 
-    assert!(enqueue_cluster_command("node-live", "systemctl", "radarr").is_ok());
-    assert!(enqueue_cluster_command("node-live", "package", "sonarr").is_ok());
+    let norm_systemctl = enqueue_cluster_command("node-live", "systemctl", "radarr").unwrap();
+    assert_eq!(norm_systemctl.cmd_type, "restart_service");
+    assert!(enqueue_cluster_command("node-live", "package", "sonarr").is_err());
+    assert!(!is_allowed_worker_command_type("package"));
     assert!(enqueue_cluster_command("node-live", "ping", "").is_ok());
     assert!(enqueue_cluster_command("node-live", "exec_shell", "bash").is_err());
+    assert!(!queue_worker_command(
+        "node-live",
+        PendingWorkerCommand {
+            id: "bad-pkg".to_string(),
+            cmd_type: "package".to_string(),
+            params: HashMap::from([("target".to_string(), "sonarr".to_string())]),
+            lease_generation: 0,
+        }
+    ));
     assert!(!queue_worker_command(
         "node-live",
         PendingWorkerCommand {
@@ -1368,6 +1379,223 @@ fn utf8_truncation_deleted_node_guard_verb_allowlist_and_ack_outbox_retention() 
     )
     .unwrap();
     assert!(load_worker_ack_outbox_nofollow(&outbox_file).is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn cluster_command_admission_normalizes_systemctl_rejects_package_and_enforces_atomic_capacity() {
+    let name = "cluster_daemon::tests::cluster_command_admission_normalizes_systemctl_rejects_package_and_enforces_atomic_capacity";
+    if !crate::inventory_regressions::isolated(name) {
+        return;
+    }
+
+    let root = env::temp_dir().join(format!("af-cluster-adm-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("cluster_adm.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        env::set_var(key, &db_path);
+    }
+    let psk = "admission-cluster-master-psk-at-least-32-chars!!";
+    env::set_var("CLUSTER_PSK", psk);
+    af_db::init_db().unwrap();
+    ensure_cluster_schema();
+
+    assert!(!is_allowed_worker_command_type("package"));
+    assert!(matches!(
+        normalize_cluster_command("node-adm", "package", "sonarr", None),
+        Err(ClusterCommandEnqueueError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        normalize_cluster_command("node-adm", "systemctl", "sonarr", Some("destroy")),
+        Err(ClusterCommandEnqueueError::InvalidInput(_))
+    ));
+
+    // Legacy systemctl + action normalizes BEFORE insert and survives durable lease intact.
+    for (action, expected_verb) in [
+        (Some("stop"), "stop_service"),
+        (Some("start"), "start_service"),
+        (Some("reload"), "reload_service"),
+        (Some("restart"), "restart_service"),
+        (None, "restart_service"),
+        (Some(""), "restart_service"),
+    ] {
+        let rec = enqueue_cluster_command_with_action("node-norm", "systemctl", "radarr", action)
+            .unwrap();
+        assert_eq!(rec.cmd_type, expected_verb);
+        let leased = lease_next_worker_command("node-norm", 5000, 30).unwrap();
+        assert_eq!(leased.id, rec.id);
+        assert_eq!(leased.cmd_type, expected_verb);
+        assert_eq!(
+            leased.params.get("service").map(String::as_str),
+            Some("radarr")
+        );
+        assert!(acknowledge_worker_command(
+            "node-norm",
+            &WorkerCommandAck {
+                id: rec.id,
+                status: WORKER_COMMAND_STATUS_EXECUTED.to_string(),
+                result_message: Some("ok".to_string()),
+                lease_generation: Some(leased.lease_generation),
+            }
+        )
+        .unwrap());
+    }
+
+    // queue_worker_command_checked normalizes systemctl + params["action"] identically and rejects unknown actions.
+    assert!(queue_worker_command_checked(
+        "node-norm",
+        PendingWorkerCommand {
+            id: "grpc-stop-1".to_string(),
+            cmd_type: "systemctl".to_string(),
+            params: HashMap::from([
+                ("service".to_string(), "sonarr".to_string()),
+                ("action".to_string(), "stop".to_string()),
+            ]),
+            lease_generation: 0,
+        }
+    )
+    .unwrap());
+    let leased_grpc = lease_next_worker_command("node-norm", 5100, 30).unwrap();
+    assert_eq!(leased_grpc.id, "grpc-stop-1");
+    assert_eq!(leased_grpc.cmd_type, "stop_service");
+    assert!(matches!(
+        queue_worker_command_checked(
+            "node-norm",
+            PendingWorkerCommand {
+                id: "grpc-bad-act".to_string(),
+                cmd_type: "systemctl".to_string(),
+                params: HashMap::from([
+                    ("service".to_string(), "sonarr".to_string()),
+                    ("action".to_string(), "mask".to_string()),
+                ]),
+                lease_generation: 0,
+            }
+        ),
+        Err(ClusterCommandEnqueueError::InvalidInput(_))
+    ));
+
+    // HTTP POST /cluster/v1/commands normalizes systemctl + action and rejects package/unknown action with 400.
+    let (pkg_code, _, _) = route_cluster_http_request(
+        "POST",
+        "/cluster/v1/commands",
+        "/cluster/v1/commands",
+        psk,
+        br#"{"node_id":"node-http","cmd_type":"package","target":"sonarr"}"#,
+        &PeerTransportAuth::InsecureLoopback,
+    );
+    assert_eq!(pkg_code, 400);
+
+    let (bad_act_code, _, _) = route_cluster_http_request(
+        "POST",
+        "/cluster/v1/commands",
+        "/cluster/v1/commands",
+        psk,
+        br#"{"node_id":"node-http","cmd_type":"systemctl","target":"sonarr","action":"purge"}"#,
+        &PeerTransportAuth::InsecureLoopback,
+    );
+    assert_eq!(bad_act_code, 400);
+
+    let (ok_code, _, ok_json) = route_cluster_http_request(
+        "POST",
+        "/cluster/v1/commands",
+        "/cluster/v1/commands",
+        psk,
+        br#"{"node_id":"node-http","cmd_type":"systemctl","target":"sonarr","action":"reload"}"#,
+        &PeerTransportAuth::InsecureLoopback,
+    );
+    assert_eq!(ok_code, 200);
+    assert_eq!(ok_json["cmd_type"], "reload_service");
+
+    // Atomic capacity limit (64) enforced under concurrent enqueue attempts without overflow.
+    let mut handles = Vec::new();
+    for idx in 0..80usize {
+        handles.push(std::thread::spawn(move || {
+            if idx % 2 == 0 {
+                enqueue_cluster_command_with_action("node-cap", "ping", "", None).is_ok()
+            } else {
+                queue_worker_command_checked(
+                    "node-cap",
+                    PendingWorkerCommand {
+                        id: format!("cap-{idx}"),
+                        cmd_type: "ping".to_string(),
+                        params: HashMap::new(),
+                        lease_generation: 0,
+                    },
+                )
+                .is_ok()
+            }
+        }));
+    }
+    let succeeded: usize = handles
+        .into_iter()
+        .map(|h| usize::from(h.join().unwrap()))
+        .sum();
+    assert_eq!(
+        succeeded, 64,
+        "exactly 64 commands may be admitted atomically"
+    );
+    let active_rows: i64 = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM cluster_commands WHERE node_id = 'node-cap' AND status IN ('queued', 'leased')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_rows, 64);
+    let over_err = enqueue_cluster_command("node-cap", "ping", "").unwrap_err();
+    assert!(matches!(
+        over_err.downcast_ref::<ClusterCommandEnqueueError>(),
+        Some(ClusterCommandEnqueueError::QueueFull(_))
+    ));
+    let (cap_http_code, _, _) = route_cluster_http_request(
+        "POST",
+        "/cluster/v1/commands",
+        "/cluster/v1/commands",
+        psk,
+        br#"{"node_id":"node-cap","cmd_type":"ping","target":""}"#,
+        &PeerTransportAuth::InsecureLoopback,
+    );
+    assert_eq!(cap_http_code, 429);
+
+    // DB count/schema failure must surface as Storage error (HTTP 500), never silently map to 0.
+    af_db::get_conn()
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE cluster_commands; CREATE TABLE cluster_commands (broken INTEGER);",
+        )
+        .unwrap();
+    let db_err = enqueue_cluster_command("node-cap", "ping", "").unwrap_err();
+    assert!(
+        matches!(
+            db_err.downcast_ref::<ClusterCommandEnqueueError>(),
+            Some(ClusterCommandEnqueueError::Storage(_))
+        ),
+        "broken cluster_commands schema must surface as Storage error, got: {db_err}"
+    );
+    assert!(matches!(
+        queue_worker_command_checked(
+            "node-cap",
+            PendingWorkerCommand {
+                id: "db-err-1".to_string(),
+                cmd_type: "ping".to_string(),
+                params: HashMap::new(),
+                lease_generation: 0,
+            }
+        ),
+        Err(ClusterCommandEnqueueError::Storage(_))
+    ));
+    let (db_http_code, _, _) = route_cluster_http_request(
+        "POST",
+        "/cluster/v1/commands",
+        "/cluster/v1/commands",
+        psk,
+        br#"{"node_id":"node-cap","cmd_type":"ping","target":""}"#,
+        &PeerTransportAuth::InsecureLoopback,
+    );
+    assert_eq!(db_http_code, 500);
 
     let _ = std::fs::remove_dir_all(&root);
 }

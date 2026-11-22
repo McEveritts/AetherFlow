@@ -37,9 +37,11 @@ pub use auth::{
 };
 pub use commands::{
     acknowledge_worker_command, cache_worker_metrics, enqueue_cluster_command,
-    get_cached_worker_metrics, is_allowed_worker_command_type, lease_next_worker_command,
-    list_cluster_commands, pop_worker_command, queue_worker_command, remove_cached_worker_metrics,
-    truncate_utf8, WORKER_COMMAND_STATUS_EXECUTED, WORKER_COMMAND_STATUS_FAILED,
+    enqueue_cluster_command_with_action, get_cached_worker_metrics, is_allowed_worker_command_type,
+    lease_next_worker_command, list_cluster_commands, normalize_cluster_command,
+    pop_worker_command, queue_worker_command, queue_worker_command_checked,
+    remove_cached_worker_metrics, truncate_utf8, ClusterCommandEnqueueError,
+    NormalizedClusterCommand, WORKER_COMMAND_STATUS_EXECUTED, WORKER_COMMAND_STATUS_FAILED,
     WORKER_COMMAND_STATUS_UNKNOWN,
 };
 pub use master::serve_cluster_master_connection;

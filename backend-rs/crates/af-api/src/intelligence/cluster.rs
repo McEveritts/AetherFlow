@@ -437,13 +437,21 @@ pub async fn dispatch_worker_command(
         .or_else(|| req.get("type"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let params_obj = req.get("params");
     let target = req
         .get("target")
         .or_else(|| req.get("service"))
+        .or_else(|| params_obj.and_then(|p| p.get("service").or_else(|| p.get("target"))))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let action = req
+        .get("action")
+        .or_else(|| params_obj.and_then(|p| p.get("action")))
+        .and_then(|v| v.as_str());
 
-    match af_services::cluster_daemon::enqueue_cluster_command(clean_node, cmd_type, target) {
+    match af_services::cluster_daemon::enqueue_cluster_command_with_action(
+        clean_node, cmd_type, target, action,
+    ) {
         Ok(record) => {
             af_db::record_audit(
                 auth_user.user_id,
@@ -464,7 +472,32 @@ pub async fn dispatch_worker_command(
             }))
             .into_response()
         }
-        Err(err) => api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", err.to_string()),
+        Err(err) => {
+            match err.downcast_ref::<af_services::cluster_daemon::ClusterCommandEnqueueError>() {
+                Some(af_services::cluster_daemon::ClusterCommandEnqueueError::InvalidInput(
+                    msg,
+                )) => api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", msg.clone()),
+                Some(af_services::cluster_daemon::ClusterCommandEnqueueError::QueueFull(msg)) => {
+                    api_error(StatusCode::TOO_MANY_REQUESTS, "QUEUE_FULL", msg.clone())
+                }
+                Some(af_services::cluster_daemon::ClusterCommandEnqueueError::Storage(msg)) => {
+                    tracing::warn!(error = %msg, node_id = clean_node, "Failed to persist cluster worker command");
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DATABASE_ERROR",
+                        "Failed to queue cluster command",
+                    )
+                }
+                None => {
+                    tracing::warn!(%err, node_id = clean_node, "Unexpected error queuing cluster worker command");
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        "Failed to queue cluster command",
+                    )
+                }
+            }
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 use super::fileshare::{delete_shared_file, download_file, get_files_list};
 use super::quotas::{
     get_own_quota, list_user_quota_records_conn, list_user_quotas, parse_human_size,
+    update_user_quota,
 };
 use crate::auth::AuthUser;
 use axum::body::Body;
@@ -130,4 +131,52 @@ async fn delete_shared_file_returns_internal_error_on_db_failure_and_bad_request
     assert_eq!(db_err.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn update_user_quota_rejects_overflowing_values_before_journalling_or_runner() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    crate::plugins::tests::ensure_shared_test_db();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users(id, username, role) VALUES (702, 'quota-overflow-user', 'user')",
+            [],
+        )
+        .unwrap();
+    }
+    // Point runner socket to a non-existent path so any runner invocation would fail with 502.
+    env::set_var(
+        "AETHERFLOW_RUNNER_SOCK",
+        "/tmp/af-nonexistent-runner-overflow.sock",
+    );
+
+    for payload in [
+        serde_json::json!({ "quota_bytes": i64::MAX }),
+        serde_json::json!({ "quota_bytes": i64::MAX - 1 }),
+        serde_json::json!({ "quota_bytes": i64::MAX - 1022 }),
+        serde_json::json!({ "quota_bytes": u64::MAX }),
+    ] {
+        let resp = update_user_quota(Path(702), axum::Json(payload.clone())).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "overflowing quota payload {payload} must return 400 BAD_REQUEST"
+        );
+    }
+
+    let rollbacks: i64 = af_db::get_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM quota_rollbacks WHERE user_id = 702",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rollbacks, 0,
+        "rejected overflow quota must not journal rollback rows"
+    );
 }

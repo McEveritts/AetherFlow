@@ -296,6 +296,7 @@ async fn async_main() -> anyhow::Result<()> {
                     storage::maintain_backup_upload_staging();
                 })
                 .await;
+                storage::recover_fileshare_pending_publishes().await;
                 account_cleanup::recover().await;
             }
         });
@@ -327,6 +328,7 @@ async fn async_main() -> anyhow::Result<()> {
             plugins::reconcile_managed_plugins_on_startup().await;
         });
         tokio::spawn(storage::recover_quota_rollbacks());
+        tokio::spawn(storage::recover_fileshare_pending_publishes());
         tokio::spawn(account_cleanup::recover());
     } else {
         tracing::info!(
