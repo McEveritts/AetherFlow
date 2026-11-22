@@ -3448,7 +3448,46 @@ fn expand_sandbox_path(
     }
 }
 
+fn read_unit_service_user(unit_path: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(unit_path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 256 * 1024 {
+        return None;
+    }
+    let content = fs::read_to_string(unit_path).ok()?;
+    let mut in_service = false;
+    let mut found = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_service = trimmed.eq_ignore_ascii_case("[Service]");
+            continue;
+        }
+        if in_service {
+            if let Some(raw_user) = trimmed.strip_prefix("User=") {
+                let candidate = raw_user.trim().trim_matches(['"', '\'']);
+                if SAFE_USERNAME.is_match(candidate) {
+                    found = Some(candidate.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
 pub fn render_systemd_sandbox_dropin(profile: &str, unit: &str, rw_paths: &[String]) -> String {
+    render_systemd_sandbox_dropin_in_root(profile, unit, rw_paths, None, None)
+}
+
+pub(crate) fn render_systemd_sandbox_dropin_in_root(
+    profile: &str,
+    unit: &str,
+    rw_paths: &[String],
+    systemd_root: Option<&Path>,
+    fs_root: Option<&Path>,
+) -> String {
     let norm_unit = normalize_systemd_unit(unit);
     if is_exempt_sandbox_unit(&norm_unit) {
         return String::new();
@@ -3509,47 +3548,66 @@ pub fn render_systemd_sandbox_dropin(profile: &str, unit: &str, rw_paths: &[Stri
 
     if !rw_paths.is_empty() {
         let needs_identity = rw_paths.iter().any(|raw| raw.contains("{{"));
-        let service_user = if needs_identity && cfg!(target_os = "linux") {
-            std::process::Command::new("systemctl")
-                .args(["show", &norm_unit, "-p", "User", "--value"])
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                .filter(|username| SAFE_USERNAME.is_match(username))
+        let unit_file = systemd_root
+            .map(|dir| dir.join(&norm_unit))
+            .unwrap_or_else(|| PathBuf::from("/etc/systemd/system").join(&norm_unit));
+        let service_user = if needs_identity {
+            let from_systemctl = if fs_root.is_none() && cfg!(target_os = "linux") {
+                std::process::Command::new("systemctl")
+                    .args(["show", &norm_unit, "-p", "User", "--value"])
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .filter(|username| SAFE_USERNAME.is_match(username))
+            } else {
+                None
+            };
+            from_systemctl
+                .or_else(|| read_unit_service_user(&unit_file))
                 .unwrap_or_else(|| "root".to_string())
         } else {
             "root".to_string()
         };
-        let service_home = fs::read_to_string("/etc/passwd")
-            .ok()
-            .and_then(|passwd| {
-                passwd.lines().find_map(|entry| {
-                    let fields: Vec<_> = entry.split(':').collect();
-                    (fields.len() >= 7 && fields[0] == service_user).then(|| fields[5].to_string())
+        let passwd_candidates: Vec<PathBuf> = match fs_root {
+            Some(root) => vec![root.join("etc/passwd"), PathBuf::from("/etc/passwd")],
+            None => vec![PathBuf::from("/etc/passwd")],
+        };
+        let service_home = passwd_candidates
+            .iter()
+            .find_map(|passwd_path| {
+                fs::read_to_string(passwd_path).ok().and_then(|passwd| {
+                    passwd.lines().find_map(|entry| {
+                        let fields: Vec<_> = entry.split(':').collect();
+                        (fields.len() >= 7 && fields[0] == service_user)
+                            .then(|| fields[5].to_string())
+                    })
                 })
             })
             .unwrap_or_else(|| format!("/home/{}", service_user));
-        let master_user = [
+        let master_creds_paths = [
             "/var/lib/aetherflow/.master.creds",
             "/etc/aetherflow/.master.creds",
             "/root/.master.creds",
-        ]
-        .iter()
-        .find_map(|path| {
-            fs::read_to_string(path)
-                .ok()
-                .and_then(|credentials| sandbox_master_user(&credentials))
-        })
-        .unwrap_or_else(|| service_user.clone());
+        ];
+        let master_user = master_creds_paths
+            .iter()
+            .find_map(|path| {
+                let candidate = match fs_root {
+                    Some(root) => root.join(path.trim_start_matches('/')),
+                    None => PathBuf::from(path),
+                };
+                fs::read_to_string(candidate)
+                    .ok()
+                    .and_then(|credentials| sandbox_master_user(&credentials))
+            })
+            .unwrap_or_else(|| service_user.clone());
         let mut expanded = Vec::with_capacity(rw_paths.len());
         for raw in rw_paths {
-            expanded.push(expand_sandbox_path(
-                raw,
-                &service_user,
-                &service_home,
-                &master_user,
-            ));
+            let entry = expand_sandbox_path(raw, &service_user, &service_home, &master_user);
+            if !expanded.contains(&entry) {
+                expanded.push(entry);
+            }
         }
         lines.push(format!("ReadWritePaths={}", expanded.join(" ")));
     }

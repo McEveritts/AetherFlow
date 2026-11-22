@@ -406,9 +406,10 @@ pub(super) fn build_threadfin_recipe() -> DeclarativePackageRecipe {
 
     let state_directory = DeclarativeStep::EnsureDirectories {
         paths: vec!["/var/lib/threadfin".to_string()],
-        // The installed-version reader must reach .af-version without
-        // opening Threadfin's private configuration directory.
-        mode: 0o751,
+        // The installed-version reader opens ancestor directories with
+        // O_RDONLY | O_DIRECTORY | O_NOFOLLOW; 0755 lets it read .af-version
+        // while /var/lib/threadfin/conf stays private (0750).
+        mode: 0o755,
         owner: Some("threadfin".to_string()),
         group: Some("threadfin".to_string()),
         progress_pct: 40,
@@ -2655,7 +2656,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             if self.env_cfg.fs_root.is_none()
                 || std::env::var("AF_REJECT_TMPFS_STAGING").as_deref() == Ok("1")
             {
-                let staging_target = self.env_cfg.resolve_path("/var/tmp")?;
+                let staging_target = self.env_cfg.resolve_readonly_path("/var/tmp");
+                validate_filesystem_path(&staging_target, self.env_cfg.fs_root.as_deref())?;
                 ensure_sufficient_disk_space(&staging_target, 512 * 1024 * 1024, 1024)?;
             }
         }
@@ -2786,6 +2788,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             PackageAction::Install | PackageAction::Reinstall | PackageAction::Update
         ) && recipe.apply_systemd_sandbox;
         let mut sandbox_applied = false;
+        let mut sandbox_needs_refresh = false;
 
         if action == PackageAction::Remove {
             let mut units = vec![normalize_unit_filename(&recipe.service_name)];
@@ -2882,6 +2885,55 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         break;
                     }
                 }
+            } else if should_apply_sandbox
+                && sandbox_needs_refresh
+                && matches!(
+                    step,
+                    DeclarativeStep::Systemctl {
+                        operation: SystemctlOp::DaemonReload
+                            | SystemctlOp::EnableNow
+                            | SystemctlOp::Enable
+                            | SystemctlOp::Start
+                            | SystemctlOp::Restart
+                            | SystemctlOp::TryRestart,
+                        ..
+                    }
+                )
+            {
+                let needs_reload = !matches!(
+                    step,
+                    DeclarativeStep::Systemctl {
+                        operation: SystemctlOp::DaemonReload,
+                        ..
+                    }
+                );
+                let sb_res = if needs_reload {
+                    self.apply_recipe_sandbox(&recipe.package_id, &mut journal, &cancel)
+                        .await
+                } else {
+                    let systemd_root = self
+                        .env_cfg
+                        .fs_root
+                        .as_ref()
+                        .map(|root| root.join("etc/systemd/system"))
+                        .unwrap_or_else(|| PathBuf::from("/etc/systemd/system"));
+                    apply_sandbox_in_root_with_journal(
+                        &recipe.package_id,
+                        &systemd_root,
+                        Some(&mut journal),
+                        self.env_cfg.fs_root.as_deref(),
+                    )
+                };
+                match sb_res {
+                    Ok(st) => {
+                        sandbox_status = Some(st);
+                        sandbox_needs_refresh = false;
+                    }
+                    Err(err) => {
+                        exec_err = Some(err);
+                        break;
+                    }
+                }
             }
 
             let (pct, desc) = step_progress_meta(step);
@@ -2906,6 +2958,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     if !step_note.is_empty() {
                         append_log_line(&log_file_path, &format!("[INFO] {}", step_note));
                         logs.push(format!("[INFO] {}", step_note));
+                    }
+                    if sandbox_applied && matches!(step, DeclarativeStep::WriteSystemdUnit { .. }) {
+                        sandbox_needs_refresh = true;
                     }
                     completed_steps += 1;
                 }

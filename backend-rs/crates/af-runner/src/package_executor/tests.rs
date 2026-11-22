@@ -667,7 +667,7 @@ async fn test_threadfin_install_update_remove_and_rollback_in_isolated_root() {
     {
         use std::os::unix::fs::PermissionsExt;
         for (path, mode) in [
-            ("var/lib/threadfin", 0o751),
+            ("var/lib/threadfin", 0o755),
             ("var/lib/threadfin/conf", 0o750),
             ("var/lib/threadfin/.af-version", 0o644),
         ] {
@@ -5733,6 +5733,199 @@ fn test_preflight_rejects_tmpfs_staging() {
     std::env::remove_var("AF_REJECT_TMPFS_STAGING");
 
     let _ = fs::remove_dir_all(&test_root);
+}
+
+#[tokio::test]
+async fn test_threadfin_execute_recipe_staging_preflight_allows_disk_var_tmp_and_blocks_symlinks_and_tmpfs(
+) {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    let _env_guard = EnvVarGuard::new(&[("AF_REJECT_TMPFS_STAGING", Some("1"))]);
+
+    // Managed mutable path boundaries must NOT be widened to include /var/tmp.
+    assert!(
+        validate_managed_path("/var/tmp").is_err(),
+        "/var/tmp must remain outside ALLOWED_MANAGED_PREFIXES"
+    );
+
+    let elf_bytes = create_mock_elf_payload_for_arch(4096, 62);
+    let mut recipe =
+        get_declarative_recipe("threadfin").expect("threadfin recipe must be registered");
+    for step in recipe
+        .install_steps
+        .iter_mut()
+        .chain(recipe.update_steps.iter_mut())
+    {
+        if let DeclarativeStep::DownloadBinary { verification, .. } = step {
+            verification.expected_sha256 = Some(hex::encode(Sha256::digest(&elf_bytes)));
+        }
+    }
+
+    // 1. Disk-backed staging root under /var/tmp must pass preflight instead of
+    // tripping ALLOWED_MANAGED_PREFIXES SecurityViolation on "/var/tmp".
+    let disk_base = Path::new("/var/tmp");
+    if disk_base.is_dir()
+        && ensure_sufficient_disk_space(disk_base, 512 * 1024 * 1024, 1024).is_ok()
+    {
+        let root = disk_base.join(format!("af-threadfin-staging-ok-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("var/tmp")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(
+            root.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nthreadfin:x:995:987::/var/lib/threadfin:/usr/sbin/nologin\n",
+        )
+        .unwrap();
+        let env_cfg = PackageExecutionEnv::isolated(&root);
+        let cache_dir = env_cfg.artifact_cache_dir.clone().unwrap();
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(
+            cache_dir.join("Threadfin_linux_amd64_glibc_2.31_compat"),
+            &elf_bytes,
+        )
+        .unwrap();
+
+        let executor =
+            DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+        let outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin install must pass /var/tmp staging preflight on disk-backed root");
+        assert!(outcome.lock_present);
+        assert!(root.join("install/.threadfin.lock").is_file());
+        assert!(root.join("usr/local/bin/threadfin").is_file());
+        assert_eq!(
+            fs::read_to_string(root.join("var/lib/threadfin/.af-version"))
+                .unwrap()
+                .trim(),
+            THREADFIN_PINNED_VERSION
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(root.join("var/lib/threadfin"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            assert_eq!(
+                fs::metadata(root.join("var/lib/threadfin/conf"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o750
+            );
+            assert_eq!(
+                fs::metadata(root.join("var/lib/threadfin/conf/settings.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        for dropin_name in ["10-aetherflow-sandbox.conf", "aetherflow-sandbox.conf"] {
+            let dropin_text = fs::read_to_string(
+                root.join("etc/systemd/system/threadfin.service.d")
+                    .join(dropin_name),
+            )
+            .unwrap();
+            assert!(
+                dropin_text.contains("ReadWritePaths=/var/lib/threadfin ")
+                    || dropin_text.contains("ReadWritePaths=-/var/lib/threadfin "),
+                "{dropin_name} must refresh ReadWritePaths after WriteSystemdUnit, got:\n{dropin_text}"
+            );
+            assert!(
+                !dropin_text.contains("/var/lib/threadfin /var/lib/threadfin")
+                    && !dropin_text.contains("-/var/lib/threadfin -/var/lib/threadfin"),
+                "{dropin_name} must deduplicate {{SERVICE_HOME}} against /var/lib/threadfin, got:\n{dropin_text}"
+            );
+            assert!(
+                !dropin_text.contains("/root"),
+                "{dropin_name} must not leak /root into ReadWritePaths, got:\n{dropin_text}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        // 2. Symlinked <root>/var/tmp must be rejected by validate_filesystem_path.
+        #[cfg(unix)]
+        {
+            let sym_root =
+                disk_base.join(format!("af-threadfin-staging-sym-{}", uuid::Uuid::new_v4()));
+            let real_dir = sym_root.join("real-tmp");
+            fs::create_dir_all(&real_dir).unwrap();
+            fs::create_dir_all(sym_root.join("var")).unwrap();
+            std::os::unix::fs::symlink(&real_dir, sym_root.join("var/tmp")).unwrap();
+
+            let sym_env = PackageExecutionEnv::isolated(&sym_root);
+            let sym_cache = sym_env.artifact_cache_dir.clone().unwrap();
+            fs::create_dir_all(&sym_cache).unwrap();
+            fs::write(
+                sym_cache.join("Threadfin_linux_amd64_glibc_2.31_compat"),
+                &elf_bytes,
+            )
+            .unwrap();
+
+            let sym_exec =
+                DeclarativePackageExecutor::with_runner(sym_env, MockCommandRunner::default());
+            let err = sym_exec
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Install,
+                    CancellationToken::new(),
+                    |_| {},
+                )
+                .await
+                .expect_err("symlinked /var/tmp staging root must be rejected");
+            assert!(
+                matches!(err, PackageExecutorError::SecurityViolation(_))
+                    && err.to_string().contains("symlink"),
+                "expected symlink SecurityViolation, got: {err}"
+            );
+            assert!(!sym_root.join("install/.threadfin.lock").exists());
+            let _ = fs::remove_dir_all(&sym_root);
+        }
+    }
+
+    // 3. tmpfs staging root (/dev/shm) must still be rejected by staging preflight.
+    let shm_dir = Path::new("/dev/shm");
+    if shm_dir.is_dir() {
+        let shm_root = shm_dir.join(format!("af-threadfin-staging-shm-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(shm_root.join("var/tmp")).unwrap();
+        let shm_env = PackageExecutionEnv::isolated(&shm_root);
+        let shm_cache = shm_env.artifact_cache_dir.clone().unwrap();
+        fs::create_dir_all(&shm_cache).unwrap();
+        fs::write(
+            shm_cache.join("Threadfin_linux_amd64_glibc_2.31_compat"),
+            &elf_bytes,
+        )
+        .unwrap();
+
+        let shm_exec =
+            DeclarativePackageExecutor::with_runner(shm_env, MockCommandRunner::default());
+        let err = shm_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect_err("tmpfs /var/tmp staging root must be rejected");
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "expected tmpfs staging rejection, got: {err}"
+        );
+        assert!(!shm_root.join("install/.threadfin.lock").exists());
+        let _ = fs::remove_dir_all(&shm_root);
+    }
 }
 
 #[test]

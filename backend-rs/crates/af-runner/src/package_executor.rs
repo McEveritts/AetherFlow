@@ -4337,10 +4337,12 @@ fn apply_sandbox_in_root_with_journal(
         }
         create_dir_all_0755(&dropin_dir)?;
         validate_filesystem_path(&dropin_dir, fs_root)?;
-        let content = crate::render_systemd_sandbox_dropin(
+        let content = crate::render_systemd_sandbox_dropin_in_root(
             &pkg.sandbox_profile,
             &norm,
             &pkg.sandbox_read_write,
+            Some(systemd_root),
+            fs_root,
         );
         if let Some(ref mut j) = journal {
             j.stage_file_mutation(&dropin_aether)?;
