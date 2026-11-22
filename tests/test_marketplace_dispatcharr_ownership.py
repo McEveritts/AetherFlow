@@ -29,7 +29,10 @@ class DispatcharrOwnershipTests(unittest.TestCase):
             (self.root / directory).mkdir(parents=True)
         for relative in ("pyproject.toml", "manage.py", "frontend/package.json"):
             self.file("upstream/" + relative, "vendor fixture")
-        mock = UPGRADE_MOCK.replace('sys.exit(subprocess.run(["/usr/bin/git", *args]).returncode)', 'shutil.copytree(root / "upstream", pathlib.Path(args[-1]), dirs_exist_ok=True)')
+        mock = UPGRADE_MOCK.replace(
+            'sys.exit(subprocess.run(["/usr/bin/git", *args]).returncode)',
+            'if "ls-remote" in args:\n        print("a" * 40 + "\\trefs/tags/v0.33.0")\n    elif "rev-parse" in args:\n        print("a" * 40)\n    elif "clone" in args:\n        shutil.copytree(root / "upstream", pathlib.Path(args[-1]), dirs_exist_ok=True)',
+        )
         mock = mock.replace('if args[:2] == ["-", "postgres"]:', 'if os.environ.get("FAIL_SQL") and os.environ["FAIL_SQL"] in args[-1]:\n        sys.exit(42)\n    if args[:2] == ["-", "postgres"]:')
         mock = mock.replace('"chown", "id", "useradd"):', '"chown", "id", "useradd", "getent", "userdel", "groupdel"):')
         for command in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "curl", "sleep", "apt-get", "chown", "id", "useradd", "getent", "userdel", "groupdel"):
@@ -57,7 +60,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -
 lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 """
-        names = ("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "safe_config_python", "validate_config_paths", "write_config_file", "purge_systemd_unit", "purge_system_user", "command_exists", "safe_rm_rf")
+        names = ("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "git_stage_exact_revision", "safe_config_python", "validate_config_paths", "write_config_file", "purge_systemd_unit", "purge_system_user", "command_exists", "safe_rm_rf")
         source = (ROOT / "packages/common.sh").read_text()
         names += tuple(name for name in ("purge_systemd_units", "stop_systemd_unit", "systemd_unit_inactive", "backup_postgresql_database", "restore_postgresql_database") if f"\n{name}() " in source)
         common += self.rebase(common_functions(*names))

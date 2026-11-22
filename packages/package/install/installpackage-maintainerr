@@ -318,7 +318,7 @@ case "$(uname -m)" in
     aarch64|arm64) NODE_ARCH=arm64 ;;
     *) log_error "Unsupported Node.js architecture: $(uname -m)"; exit 1 ;;
 esac
-curl --fail --silent --show-error --location https://nodejs.org/dist/latest-v26.x/SHASUMS256.txt -o "$BUILD_ROOT/node-shasums.txt"
+curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location https://nodejs.org/dist/latest-v26.x/SHASUMS256.txt -o "$BUILD_ROOT/node-shasums.txt"
 NODE_ARCHIVE="$(awk -v suffix="-linux-${NODE_ARCH}.tar.xz" 'index($2, suffix) && substr($2, length($2)-length(suffix)+1) == suffix {print $2}' "$BUILD_ROOT/node-shasums.txt")"
 if [[ ! "$NODE_ARCHIVE" =~ ^node-v26\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$ ]]; then
     log_error "Unable to resolve the private Node.js 26 runtime."
@@ -343,8 +343,17 @@ finally:
     os.close(rfd)
 PY
 (cd "$BUILD_ROOT" && grep -F "  ${NODE_ARCHIVE}" node-shasums.txt | sha256sum --check --status)
+af_validate_tar_archive --allow-intra-symlinks --strip-components=1 "$BUILD_ROOT/$NODE_ARCHIVE"
 
-af_logged run_as_builder git -c core.hooksPath=/dev/null clone --depth 1 --branch "$LATEST_TAG" https://github.com/Maintainerr/Maintainerr.git "$BUILD_DIR"
+git() {
+    run_as_builder git -c core.hooksPath=/dev/null "$@"
+}
+if ! git_stage_exact_revision "https://github.com/Maintainerr/Maintainerr.git" "$BUILD_DIR" "$LATEST_TAG"; then
+    unset -f git
+    quiesce_builder_processes || true
+    exit 1
+fi
+unset -f git
 quiesce_builder_processes
 if [[ -L "$BUILD_DIR" || -e "$BUILD_DIR/.runtime" || -L "$BUILD_DIR/.runtime" ]]; then
     log_error "Unexpected .runtime path in Maintainerr source tree."

@@ -114,11 +114,71 @@ while IFS= read -r LAYER_DIGEST; do
         exit 1
     fi
     BLOB_FILE="$TMP_EXTRACT/layer.tar.gz"
+    MEMBER_LIST="$TMP_EXTRACT/layer-members.nul"
     af_logged vaultwarden_oci_fetch "$OCI_REGISTRY/blobs/$LAYER_DIGEST" -o "$BLOB_FILE"
     verify_sha256 "$BLOB_FILE" "${LAYER_DIGEST#sha256:}" "Vaultwarden OCI layer"
-    tar -xzf "$BLOB_FILE" --no-same-owner --no-same-permissions -C "$TMP_EXTRACT" vaultwarden web-vault 2>/dev/null ||
-        tar -xzf "$BLOB_FILE" --no-same-owner --no-same-permissions -C "$TMP_EXTRACT" ./vaultwarden ./web-vault 2>/dev/null || true
-    rm -f -- "$BLOB_FILE"
+    python3 - "$BLOB_FILE" "$MEMBER_LIST" <<'PYEOF'
+import pathlib, sys, tarfile
+
+blob_path, list_path = sys.argv[1], sys.argv[2]
+selected = []
+
+try:
+    with tarfile.open(blob_path, "r:*") as tf:
+        for member in tf.getmembers():
+            raw = member.name or ""
+            if "\x00" in raw:
+                raise ValueError(f"disallowed NUL byte in OCI layer entry: {raw!r}")
+            stripped = raw
+            while stripped.startswith("./"):
+                stripped = stripped[2:]
+            trimmed_abs = stripped.lstrip("/\\")
+            raw_parts = pathlib.PurePosixPath(raw).parts
+            in_scope = (
+                stripped == "vaultwarden"
+                or stripped.startswith("vaultwarden/")
+                or stripped == "web-vault"
+                or stripped.startswith("web-vault/")
+                or trimmed_abs == "vaultwarden"
+                or trimmed_abs.startswith("vaultwarden/")
+                or trimmed_abs == "web-vault"
+                or trimmed_abs.startswith("web-vault/")
+                or (".." in raw_parts and any(p in ("vaultwarden", "web-vault") for p in raw_parts))
+            )
+            if not in_scope:
+                continue
+            if raw.startswith("/") or raw.startswith("\\") or "\\" in raw:
+                raise ValueError(f"disallowed absolute or backslash OCI layer entry: {raw}")
+            if ".." in raw_parts:
+                raise ValueError(f"disallowed path-traversal OCI layer entry: {raw}")
+            norm_parts = tuple(part for part in raw_parts if part not in ("", "."))
+            if not norm_parts:
+                continue
+            if norm_parts[0] == "vaultwarden":
+                if len(norm_parts) != 1 or not member.isfile():
+                    raise ValueError(
+                        f"disallowed vaultwarden OCI layer entry: {raw} (type={member.type!r})"
+                    )
+            elif norm_parts[0] == "web-vault":
+                if not (member.isfile() or member.isdir()):
+                    raise ValueError(
+                        f"disallowed non-regular web-vault OCI layer entry: {raw} (type={member.type!r})"
+                    )
+            else:
+                continue
+            selected.append(raw)
+except Exception as exc:
+    sys.stderr.write(f"Vaultwarden OCI layer validation failed: {exc}\n")
+    raise SystemExit(1)
+
+with open(list_path, "wb") as out:
+    for item in selected:
+        out.write(item.encode("utf-8") + b"\x00")
+PYEOF
+    if [[ -s "$MEMBER_LIST" ]]; then
+        tar -xzf "$BLOB_FILE" --no-same-owner --no-same-permissions --no-recursion --no-wildcards -C "$TMP_EXTRACT" --verbatim-files-from --null -T "$MEMBER_LIST"
+    fi
+    rm -f -- "$BLOB_FILE" "$MEMBER_LIST"
 done <<< "$LAYER_DIGESTS"
 
 if [[ ! -f "$TMP_EXTRACT/vaultwarden" || -L "$TMP_EXTRACT/vaultwarden" ]]; then

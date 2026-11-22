@@ -139,7 +139,7 @@ mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/sabnzbd-XXXXXX.tar.gz")
 af_logged download_file "$SAB_URL" "$TMP_TAR"
 af_validate_tar_archive "$TMP_TAR"
-af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
+af_logged tar --no-same-owner --no-same-permissions -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
 rm -f "$TMP_TAR"
 test -s "$BUILD_DIR/SABnzbd.py" || { log_error "Failed to verify SABnzbd archive extraction"; exit 1; }
 

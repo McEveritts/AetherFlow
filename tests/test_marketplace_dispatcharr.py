@@ -530,12 +530,13 @@ report_progress() { :; }
 log_info() { :; }
 log_warn() { :; }
 log_error() { printf '%s\\n' "$*" >&2; }
+print_error() { printf '%s\\n' "$*" >&2; }
 ensure_node() { printf 'node %s\\n' "$1" >> "$TEST_ROOT/commands"; }
 write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
 lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 ''')
         with common.open("a") as output:
-            helpers = common_functions("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "safe_config_python", "validate_config_paths", "write_config_file", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
+            helpers = common_functions("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "git_stage_exact_revision", "safe_config_python", "validate_config_paths", "write_config_file", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
             output.write(helpers.replace("/var/lib/postgresql", str(self.root / "var/lib/postgresql")))
         self.install = self.root / "opt/dispatcharr"
         self.config = self.root / "etc/dispatcharr"

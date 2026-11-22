@@ -107,11 +107,11 @@ mkdir -p /opt /var/lib/bazarr /var/backups
 
 report_progress 30 "Downloading official Bazarr release bundle..."
 BAZARR_VERSION="$(github_latest_tag "morpheus65535/bazarr" "1.5.1")"
-if [[ -n "${BAZARR_VERSION:-}" ]]; then
-    BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/download/v${BAZARR_VERSION#v}/bazarr.zip"
-else
-    BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip"
+if [[ -z "${BAZARR_VERSION:-}" ]]; then
+    print_error "Failed to resolve a pinned Bazarr release version"
+    exit 1
 fi
+BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/download/v${BAZARR_VERSION#v}/bazarr.zip"
 
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_ZIP="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/bazarr-XXXXXX.zip")"
@@ -170,9 +170,7 @@ VENV_PYEOF
 chown -hRP root:root "$BUILD_DIR"
 chmod -R go-w,a+rX "$BUILD_DIR"
 
-if [[ -n "$BAZARR_VERSION" ]]; then
-    queue_app_version "/opt/bazarr/.af-version" "${BAZARR_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
-fi
+queue_app_version "/opt/bazarr/.af-version" "${BAZARR_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
 if [[ -e /opt/bazarr || -L /opt/bazarr ]]; then
     mv -T /opt/bazarr "$BACKUP_DIR/app"
     APP_MOVED=true

@@ -106,7 +106,6 @@ fi
 
 report_progress 50 "Downloading and verifying KasmVNC ${VERSION}..."
 download_file "$ASSET_URL" "${TMP_DIR}/kasmvnc.deb" kasmvnc "${ASSET_DIGEST#sha256:}"
-printf '%s  %s\n' "${ASSET_DIGEST#sha256:}" "${TMP_DIR}/kasmvnc.deb" | af_logged sha256sum -c -
 KASMVNC_DEB_VERSION="$(dpkg-deb -f "${TMP_DIR}/kasmvnc.deb" Version)"
 af_logged apt-get install --no-remove -y "${TMP_DIR}/kasmvnc.deb"
 verify_deb_installed kasmvncserver "$KASMVNC_DEB_VERSION"

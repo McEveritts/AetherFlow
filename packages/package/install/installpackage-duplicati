@@ -126,16 +126,24 @@ case "${ARCH}" in
     amd64) D_ARCH="linux-x64" ;;
     arm64) D_ARCH="linux-arm64" ;;
     armhf) D_ARCH="linux-arm7" ;;
-    *) D_ARCH="all" ;;
+    *)
+        print_error "Unsupported architecture for Duplicati: ${ARCH}"
+        exit 1
+        ;;
 esac
 
-DEB_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${D_ARCH}.deb" '.assets[]? | select(.name | endswith($arch)) | .browser_download_url' | head -n1 || true)"
+DEB_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${D_ARCH}.deb" --arg arch_gui "${D_ARCH}-gui.deb" --arg deb_arch "_${ARCH}.deb" '.assets[]? | select(.name | (endswith($arch) or endswith($arch_gui) or endswith($deb_arch))) | .browser_download_url' | head -n1 || true)"
 if [[ -z "${DEB_URL}" ]]; then
-    DEB_URL="$(echo "${RELEASES_JSON}" | jq -r '.assets[]? | select(.name | endswith(".deb")) | .browser_download_url' | head -n1 || true)"
+    DEB_URL="$(echo "${RELEASES_JSON}" | jq -r '.assets[]? | select(.name | endswith("_all.deb")) | .browser_download_url' | head -n1 || true)"
 fi
 
 if [[ -z "${DEB_URL}" ]]; then
-    DEB_URL="https://github.com/duplicati/duplicati/releases/download/${LATEST_TAG}/duplicati_${LATEST_TAG#v}_all.deb"
+    if [[ -z "${RELEASES_JSON}" && "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        DEB_URL="https://github.com/duplicati/duplicati/releases/download/${LATEST_TAG}/duplicati_${LATEST_TAG#v}_all.deb"
+    else
+        print_error "No compatible Duplicati .deb asset found for architecture ${ARCH} (${D_ARCH}) in release ${LATEST_TAG}"
+        exit 1
+    fi
 fi
 
 report_progress 65 "Downloading Duplicati package (${LATEST_TAG})..."

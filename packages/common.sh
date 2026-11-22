@@ -339,33 +339,190 @@ PYEOF
 }
 
 af_validate_tar_archive() {
-    local archive_path="$1"
-    [[ -f "$archive_path" && ! -L "$archive_path" ]] || {
-        log_error "Refusing missing or symlinked archive path: ${archive_path}"
+    local allow_intra_symlinks=0 strip_components=0 archive_path=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --allow-intra-symlinks)
+                allow_intra_symlinks=1
+                shift
+                ;;
+            --strip-components=*)
+                strip_components="${1#*=}"
+                shift
+                ;;
+            --strip-components)
+                if [[ $# -lt 2 ]]; then
+                    if declare -F log_error >/dev/null 2>&1; then
+                        log_error "Missing value for --strip-components"
+                    else
+                        printf '[ERROR] Missing value for --strip-components\n' >&2
+                    fi
+                    return 1
+                fi
+                strip_components="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                if declare -F log_error >/dev/null 2>&1; then
+                    log_error "Unknown option for af_validate_tar_archive: $1"
+                else
+                    printf '[ERROR] Unknown option for af_validate_tar_archive: %s\n' "$1" >&2
+                fi
+                return 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    archive_path="${1:-}"
+    if [[ $# -ne 1 || -z "$archive_path" ]]; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "af_validate_tar_archive requires exactly one archive path"
+        else
+            printf '[ERROR] af_validate_tar_archive requires exactly one archive path\n' >&2
+        fi
         return 1
-    }
-    python3 - "$archive_path" <<'PYEOF'
+    fi
+    if [[ ! "$strip_components" =~ ^[0-9]+$ ]]; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "Invalid --strip-components value: ${strip_components}"
+        else
+            printf '[ERROR] Invalid --strip-components value: %s\n' "${strip_components}" >&2
+        fi
+        return 1
+    fi
+    if [[ ! -f "$archive_path" || -L "$archive_path" ]]; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "Refusing missing or symlinked archive path: ${archive_path}"
+        else
+            printf '[ERROR] Refusing missing or symlinked archive path: %s\n' "${archive_path}" >&2
+        fi
+        return 1
+    fi
+    python3 - "$archive_path" "$allow_intra_symlinks" "$strip_components" <<'PYEOF'
 import pathlib, sys, tarfile
 
 archive = sys.argv[1]
+allow_intra_symlinks = sys.argv[2] == "1"
+strip_components = int(sys.argv[3])
+MAX_SYMLINK_HOPS = 40
+
 try:
     with tarfile.open(archive, "r:*") as tf:
         members = tf.getmembers()
         if not members:
             raise ValueError("empty tar archive")
+        symlink_map = {}
+        seen_non_symlinks = set()
+        effective_entries = []
+        kept_any = False
+
         for member in members:
             name = member.name or ""
-            if not (member.isfile() or member.isdir()):
-                raise ValueError(f"disallowed non-regular tar entry: {name} (type={member.type!r})")
+            if "\x00" in name:
+                raise ValueError(f"disallowed NUL byte in tar entry: {name!r}")
             if name.startswith("/") or name.startswith("\\"):
                 raise ValueError(f"disallowed absolute tar entry: {name}")
-            parts = pathlib.PurePosixPath(name).parts
-            if ".." in parts:
+            raw_parts = pathlib.PurePosixPath(name).parts
+            if ".." in raw_parts:
                 raise ValueError(f"disallowed path-traversal tar entry: {name}")
+
+            is_regular_or_dir = member.isfile() or member.isdir()
+            is_symlink = member.issym()
+            if not is_regular_or_dir and not (allow_intra_symlinks and is_symlink):
+                raise ValueError(f"disallowed non-regular tar entry: {name} (type={member.type!r})")
+
+            norm_parts = tuple(part for part in raw_parts if part not in ("", "."))
+            if strip_components > 0:
+                if len(norm_parts) <= strip_components:
+                    if is_symlink:
+                        raise ValueError(f"disallowed stripped tar symlink entry: {name}")
+                    continue
+                eff_parts = norm_parts[strip_components:]
+            else:
+                eff_parts = norm_parts
+            kept_any = True
+
+            if is_symlink:
+                linkname = member.linkname or ""
+                if (
+                    not linkname
+                    or "\x00" in linkname
+                    or linkname.startswith("/")
+                    or linkname.startswith("\\")
+                    or "\\" in linkname
+                ):
+                    raise ValueError(f"disallowed tar symlink target: {name} -> {linkname!r}")
+                if not eff_parts:
+                    raise ValueError(f"disallowed root tar symlink entry: {name}")
+                if eff_parts in symlink_map or eff_parts in seen_non_symlinks:
+                    raise ValueError(f"disallowed duplicate/conflicting tar symlink entry: {name}")
+                cur = list(eff_parts[:-1])
+                for comp in pathlib.PurePosixPath(linkname).parts:
+                    if comp in ("", "."):
+                        continue
+                    if comp == "..":
+                        if not cur:
+                            raise ValueError(f"disallowed escaping tar symlink: {name} -> {linkname}")
+                        cur.pop()
+                    else:
+                        cur.append(comp)
+                symlink_map[eff_parts] = (name, linkname)
+            else:
+                if eff_parts in symlink_map:
+                    raise ValueError(f"disallowed tar entry colliding with symlink: {name}")
+                if eff_parts:
+                    seen_non_symlinks.add(eff_parts)
+            effective_entries.append((eff_parts, name))
+
+        if strip_components > 0 and not kept_any:
+            raise ValueError("tar archive contains no entries after --strip-components")
+
+        if symlink_map:
+            for eff_parts, name in effective_entries:
+                for depth in range(1, len(eff_parts)):
+                    if eff_parts[:depth] in symlink_map:
+                        raise ValueError(f"disallowed tar entry traversing symlink ancestor: {name}")
+
+            for start_parts, (orig_name, start_target) in symlink_map.items():
+                cur = list(start_parts[:-1])
+                queue = list(pathlib.PurePosixPath(start_target).parts)
+                hops = 0
+                while queue:
+                    comp = queue.pop(0)
+                    if comp in ("", "."):
+                        continue
+                    if comp == "..":
+                        if not cur:
+                            raise ValueError(
+                                f"disallowed escaping tar symlink chain: {orig_name} -> {start_target}"
+                            )
+                        cur.pop()
+                        continue
+                    cur.append(comp)
+                    cur_tuple = tuple(cur)
+                    if cur_tuple in symlink_map:
+                        hops += 1
+                        if hops > MAX_SYMLINK_HOPS:
+                            raise ValueError(
+                                f"disallowed cyclic tar symlink chain: {orig_name} -> {start_target}"
+                            )
+                        cur.pop()
+                        next_target = symlink_map[cur_tuple][1]
+                        queue = list(pathlib.PurePosixPath(next_target).parts) + queue
 except Exception as exc:
     sys.stderr.write(f"Tar archive validation failed for {archive}: {exc}\n")
     raise SystemExit(1)
 PYEOF
+}
+
+af_validate_tar_archive_allow_intra_symlinks() {
+    af_validate_tar_archive --allow-intra-symlinks "$@"
 }
 
 # Validate all member names and types before extracting into a private staging directory.
@@ -939,7 +1096,7 @@ git_stage_exact_revision() {
     AF_STAGED_GIT_REF=""
     AF_STAGED_GIT_COMMIT=""
 
-    if [[ -z "$repo_url" || "$repo_url" == -* || -z "$build_dir" ]]; then
+    if [[ -z "$repo_url" || "$repo_url" == -* || -z "$build_dir" || "$build_dir" == -* ]]; then
         if declare -F af_write_failure_receipt >/dev/null 2>&1; then
             af_write_failure_receipt 1 "download" "invalid_git_source" "Invalid Git repository URL or staging directory"
         fi
@@ -949,7 +1106,7 @@ git_stage_exact_revision() {
 
     # Cloudplow publishes commits on its default branch instead of release tags.
     if [[ -z "$raw_target" && "${4:-}" == "head" ]]; then
-        if ! advertised_head="$(git ls-remote --exit-code "$repo_url" HEAD)" ||
+        if ! advertised_head="$(git ls-remote --exit-code -- "$repo_url" HEAD)" ||
             [[ ! "$advertised_head" =~ ^([[:xdigit:]]{40}|[[:xdigit:]]{64})$'\t'HEAD$ ]]; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt 1 "download" "invalid_target_commit" "Unable to resolve remote HEAD for ${repo_url}"
@@ -996,7 +1153,7 @@ print(trimmed)
             fi
         fi
 
-        if ! remote_tags="$(git ls-remote --tags "$repo_url")"; then
+        if ! remote_tags="$(git ls-remote --tags -- "$repo_url")"; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt 1 "download" "git_ls_remote_failed" "Failed to query remote tags from ${repo_url}"
             fi
@@ -1156,7 +1313,7 @@ print(best_sha)
             print_error "Invalid resolved tag name '${selected_tag}' for ${repo_url}"
             return 1
         fi
-        if ! af_logged git clone --no-checkout --depth 1 --branch "$selected_tag" "$repo_url" "$build_dir"; then
+        if ! af_logged git clone --no-checkout --depth 1 --branch "$selected_tag" -- "$repo_url" "$build_dir"; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt 1 "download" "git_clone_failed" "Failed to clone ${repo_url} at tag ${selected_tag}"
             fi
@@ -1182,7 +1339,7 @@ print(best_sha)
             return 1
         fi
     elif [[ "$selected_kind" == "commit" ]]; then
-        if ! af_logged git clone --no-checkout "$repo_url" "$build_dir"; then
+        if ! af_logged git clone --no-checkout -- "$repo_url" "$build_dir"; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt 1 "download" "git_clone_failed" "Failed to clone ${repo_url} for commit ${expected_commit}"
             fi
@@ -2629,7 +2786,7 @@ install_binary_atomic() {
         print_error "Downloaded binary is empty: $source"
         return 1
     fi
-    mkdir -p "$(dirname "$destination")"
+    install -d -m 0755 -- "$(dirname "$destination")"
     staged="$(mktemp "${destination}.af-new.XXXXXX")"
     if ! install -m 0755 "$source" "$staged" || ! mv -fT "$staged" "$destination"; then
         rm -f "$staged"

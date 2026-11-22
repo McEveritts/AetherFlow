@@ -365,15 +365,14 @@ if [[ -z "${LATEST_TAG}" ]]; then
         exit 1
     fi
 fi
-[[ "${LATEST_TAG}" == v* ]] || LATEST_TAG="v${LATEST_TAG}"
 
 BUILD_DIR="$(mktemp -d "${INSTALL_DIR}.af-build.XXXXXX")"
-af_logged git clone --depth 1 --branch "${LATEST_TAG}" https://github.com/Dispatcharr/Dispatcharr.git "${BUILD_DIR}"
+git_stage_exact_revision "https://github.com/Dispatcharr/Dispatcharr.git" "${BUILD_DIR}" "${LATEST_TAG}"
+LATEST_TAG="${AF_STAGED_GIT_VERSION}"
 SERVICES_STOPPED=1
 if [[ "${#ACTIVE_UNITS[@]}" -gt 0 ]]; then
     af_logged systemctl stop "${ACTIVE_UNITS[@]}"
 fi
-af_logged_stderr su - postgres -c 'pg_dump --format=custom dispatcharr' > "${BACKUP_DIR}/db.dump"
 backup_postgresql_database "$BACKUP_DIR" dispatcharr
 prepare_dispatcharr_data
 if [[ -d "$DATA_DIR" ]]; then
@@ -679,6 +678,7 @@ if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
         cd "$2"
         "$2/env/bin/python" manage.py collectstatic --noinput --clear
     ' _ "${CONFIG_DIR}" "${INSTALL_DIR}"
+    chmod -R a+rX,go-w "${INSTALL_DIR}"
     AF_ADMIN_USER="${ADMIN_USER}" AF_ADMIN_PASS="${AF_CONFIG_PASS:-$ADMIN_PASS}" AF_ADMIN_EMAIL="${ADMIN_EMAIL}" \
         AF_KEEP_EXISTING_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-}" \
         af_logged su -s /bin/bash "${APP_USER}" -c "set -a; source '${CONFIG_DIR}/dispatcharr.env'; set +a; cd '${INSTALL_DIR}' && '${INSTALL_DIR}/env/bin/python' manage.py shell" <<'PYEOF'

@@ -158,7 +158,7 @@ fi
 if [[ -z "${TEST_ROOT:-}" ]]; then
     af_validate_tar_archive "$TMP_XZ"
 fi
-tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR"
+tar --no-same-owner --no-same-permissions -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar --no-same-owner --no-same-permissions -xJf "$TMP_XZ" -C "$BUILD_DIR"
 rm -f "$TMP_XZ"
 test -f "$BUILD_DIR/src/manage.py" || { log_error "Failed to verify Paperless-ngx manage.py"; exit 1; }
 queue_app_version "/opt/paperless/.af-version" "${PNGX_VER#v}"

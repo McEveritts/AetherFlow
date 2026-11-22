@@ -134,10 +134,6 @@ snapshot_app_state "$BACKUP_DIR" /home/homeassistant/.homeassistant /var/lib/hom
 if [[ -f /etc/systemd/system/home-assistant@homeassistant.service ]]; then
     cp -a /etc/systemd/system/home-assistant@homeassistant.service "$BACKUP_DIR/home-assistant@homeassistant.service"
 fi
-if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-    stop_systemd_unit home-assistant@homeassistant
-    SERVICE_STOPPED=1
-fi
 if [[ -d /srv/homeassistant ]]; then
     mv /srv/homeassistant "$BACKUP_DIR/app"
     APP_MOVED=1

@@ -106,13 +106,7 @@ TARGET_PKG="n8n"
 TARGET_VER="${AF_PACKAGE_VERSION:-${AETHERFLOW_PACKAGE_VERSION:-${AF_TARGET_VERSION:-}}}"
 if [[ -n "$TARGET_VER" ]]; then
     TARGET_VER="${TARGET_VER#v}"
-    TARGET_MAJOR="$(printf '%s' "$TARGET_VER" | cut -d. -f1)"
-    if [[ "${NODE_MAJOR:-20}" -lt 24 && "$TARGET_MAJOR" -ge 2 ]]; then
-        print_error "n8n ${TARGET_VER} requires Node.js >= 24; current runtime is Node ${NODE_MAJOR}."
-        exit 1
-    fi
     TARGET_PKG="n8n@${TARGET_VER}"
-
 fi
 RUNTIME_MUTATED=1
 install_npm_app "$TARGET_PKG" /opt/n8n /usr/local/bin/n8n

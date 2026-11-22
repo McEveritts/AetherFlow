@@ -186,16 +186,27 @@ elif command == "uname":
     print(os.environ.get("TEST_ARCHITECTURE", os.uname().machine))
 elif command == "git":
     assert os.environ.get("MOCK_BUILDER_USER") == "af-maintainerr-build", "git must run as af-maintainerr-build"
-    target = Path(arguments[-1])
-    for directory in (".yarn/releases", "apps/ui", "apps/server/assets", "packages/contracts"):
-        (target / directory).mkdir(parents=True, exist_ok=True)
-    (target / "package.json").write_text(json.dumps({
-        "version": os.environ.get("TEST_VERSION", "3.31.0"),
-        "packageManager": os.environ.get("TEST_MANAGER", "yarn@4.17.1"),
-    }))
-    if failure != "missing-yarn":
-        (target / ".yarn/releases/yarn-4.17.1.cjs").write_text("bundled yarn")
-    (target / "apps/server/assets/font.ttf").write_text("font")
+    assert arguments[:2] == ["-c", "core.hooksPath=/dev/null"], f"expected hooks disabled: {arguments}"
+    if "ls-remote" in arguments:
+        tag = os.environ.get("TEST_TAG", "v3.31.0")
+        if tag and not tag.startswith("v"):
+            tag = "v" + tag
+        print("a" * 40 + "\trefs/tags/" + tag)
+    elif "rev-parse" in arguments:
+        print("a" * 40)
+    elif "clone" in arguments:
+        target = Path(arguments[-1])
+        for directory in (".yarn/releases", "apps/ui", "apps/server/assets", "packages/contracts"):
+            (target / directory).mkdir(parents=True, exist_ok=True)
+        (target / "package.json").write_text(json.dumps({
+            "version": os.environ.get("TEST_VERSION", "3.31.0"),
+            "packageManager": os.environ.get("TEST_MANAGER", "yarn@4.17.1"),
+        }))
+        if failure != "missing-yarn":
+            (target / ".yarn/releases/yarn-4.17.1.cjs").write_text("bundled yarn")
+        (target / "apps/server/assets/font.ttf").write_text("font")
+    elif "checkout" in arguments or "fetch" in arguments:
+        pass
 elif command == "node":
     assert os.environ.get("MOCK_BUILDER_USER") == "af-maintainerr-build", "all node executions must run as af-maintainerr-build"
     assert "SECRET_LEAK_TEST" not in os.environ, "builder node environment must not leak root variables"
@@ -367,6 +378,7 @@ class MaintainerrInstallerTests(unittest.TestCase):
         common.write_text('''require_root() { :; }
 log_info() { printf '%s\\n' "$*"; }
 log_error() { printf '%s\\n' "$*" >&2; }
+print_error() { printf '%s\\n' "$*" >&2; }
 report_progress() { :; }
 github_latest_tag() { printf '%s\\n' "${TEST_TAG-v3.31.0}"; }
 write_lock() { touch "$TEST_ROOT/install/.maintainerr.lock"; }
@@ -380,7 +392,7 @@ purge_systemd_unit() {
 purge_system_user() { touch "$TEST_ROOT/user-removed"; }
 ''')
         with common.open("a") as output:
-            output.write(replace_paths_once(common_functions("safe_config_python", "validate_config_paths", "safe_rm_rf"),
+            output.write(replace_paths_once(common_functions("safe_config_python", "validate_config_paths", "safe_rm_rf", "git_stage_exact_revision"),
                                            (("/var/backups/", str(self.root) + "/var/backups/"),)))
         for command in (
             "apt-get", "chown", "id", "getent", "uname", "sleep", "useradd", "userdel",
@@ -728,7 +740,7 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
             for line in (self.root / "builder-runs").read_text().splitlines()
             if line.strip()
         ]
-        self.assertEqual(len(builder_runs), 5)
+        self.assertGreaterEqual(len(builder_runs), 5)
         for run in builder_runs:
             self.assertEqual(run["user"], "af-maintainerr-build")
             env = run["env"]
@@ -739,15 +751,23 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
             ):
                 self.assertIn(".maintainerr-build.", env[key])
                 self.assertNotIn("var/lib/maintainerr", env[key])
-        self.assertEqual(builder_runs[0]["cmd"][:4], ["git", "-c", "core.hooksPath=/dev/null", "clone"])
-        self.assertEqual(builder_runs[1]["cmd"][0], "mkdir")
-        self.assertTrue(builder_runs[1]["cmd"][1].endswith("/app/.runtime"))
-        self.assertEqual(builder_runs[2]["cmd"][:2], ["tar", "-xJf"])
-        self.assertIn("--no-same-owner", builder_runs[2]["cmd"])
-        self.assertIn("--no-same-permissions", builder_runs[2]["cmd"])
-        self.assertTrue(builder_runs[3]["cmd"][0].endswith("/app/.runtime/bin/node"))
-        self.assertEqual(builder_runs[3]["cmd"][1], "-e")
-        self.assertEqual(builder_runs[4]["cmd"][:3], ["/bin/bash", "-e", "-c"])
+        git_runs = [run["cmd"] for run in builder_runs if run["cmd"][0] == "git"]
+        non_git_runs = [run["cmd"] for run in builder_runs if run["cmd"][0] != "git"]
+        self.assertTrue(git_runs)
+        for cmd in git_runs:
+            self.assertEqual(cmd[:3], ["git", "-c", "core.hooksPath=/dev/null"])
+        self.assertTrue(any("ls-remote" in cmd for cmd in git_runs))
+        self.assertTrue(any("clone" in cmd for cmd in git_runs))
+        self.assertTrue(any("checkout" in cmd for cmd in git_runs))
+        self.assertEqual(len(non_git_runs), 4)
+        self.assertEqual(non_git_runs[0][0], "mkdir")
+        self.assertTrue(non_git_runs[0][1].endswith("/app/.runtime"))
+        self.assertEqual(non_git_runs[1][:2], ["tar", "-xJf"])
+        self.assertIn("--no-same-owner", non_git_runs[1])
+        self.assertIn("--no-same-permissions", non_git_runs[1])
+        self.assertTrue(non_git_runs[2][0].endswith("/app/.runtime/bin/node"))
+        self.assertEqual(non_git_runs[2][1], "-e")
+        self.assertEqual(non_git_runs[3][:3], ["/bin/bash", "-e", "-c"])
         node_probes = [
             json.loads(line)
             for line in (self.root / "node-probes").read_text().splitlines()

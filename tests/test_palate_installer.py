@@ -48,13 +48,17 @@ elif command == 'psql':
 elif command == 'pg_dump':
     print('database-backup')
 elif command == 'git':
-    if args[0] == 'ls-remote':
+    if 'ls-remote' in args:
         print('a' * 40 + '\trefs/tags/' + os.environ.get('TEST_TAG', 'v1.5.23'))
-    else:
+    elif 'rev-parse' in args:
+        print('a' * 40)
+    elif 'clone' in args:
         target = Path(args[-1])
         (target / 'package.json').write_text(json.dumps({'version': '1.5.23'}))
         (target / 'vault').mkdir()
         (target / 'vault/recipe.md').write_text('upstream-recipe')
+    elif 'checkout' in args or 'fetch' in args:
+        pass
 elif command == 'node':
     if args[0] == '-p':
         print('1.5.23')
@@ -125,7 +129,7 @@ purge_systemd_unit() {
 purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
 ''')
         with common.open("a") as output:
-            helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
+            helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "git_stage_exact_revision", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
             output.write(helpers.replace("/var/lib/postgresql", str(self.root / "var/lib/postgresql")))
         for name in ('apt-get', 'chown', 'id', 'useradd', 'install', 'runuser', 'psql', 'pg_dump', 'git', 'node', 'npm', 'curl', 'systemctl'):
             path = self.root / 'mock-bin' / name

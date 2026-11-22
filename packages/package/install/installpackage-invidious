@@ -138,14 +138,17 @@ esac
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/af-invidious-build.XXXXXX")"
 CRYSTAL_VERSION=1.22.2
 youtube_asset crystal-lang/crystal "$CRYSTAL_VERSION" "crystal-${CRYSTAL_VERSION}-1-linux-${ARCH}-bundled.tar.gz" "${TMP_DIR}/crystal.tar.gz"
+af_validate_tar_archive --allow-intra-symlinks --strip-components=1 "${TMP_DIR}/crystal.tar.gz"
 install -d "${INSTALL_DIR}/crystal"
-tar -xzf "${TMP_DIR}/crystal.tar.gz" --strip-components=1 -C "${INSTALL_DIR}/crystal"
+tar -xzf "${TMP_DIR}/crystal.tar.gz" --strip-components=1 --no-same-owner --no-same-permissions -C "${INSTALL_DIR}/crystal"
+chmod -R a+rX,go-w "${INSTALL_DIR}/crystal"
 CRYSTAL_PATH="${INSTALL_DIR}/crystal/bin"
 for CRYSTAL_BIN in "${INSTALL_DIR}"/crystal/crystal-*/bin; do
     [[ ! -d "$CRYSTAL_BIN" ]] || CRYSTAL_PATH="$CRYSTAL_PATH:$CRYSTAL_BIN"
 done
 youtube_asset iv-org/invidious-companion release-master "invidious_companion-${ARCH}-unknown-linux-gnu.tar.gz" "${TMP_DIR}/companion.tar.gz"
-tar -xzf "${TMP_DIR}/companion.tar.gz" -C "$TMP_DIR"
+af_validate_tar_archive "${TMP_DIR}/companion.tar.gz"
+tar -xzf "${TMP_DIR}/companion.tar.gz" --no-same-owner --no-same-permissions -C "$TMP_DIR"
 install -m 755 "${TMP_DIR}/invidious_companion" "${INSTALL_DIR}/invidious_companion"
 
 af_set_stage "fetch_source" 30

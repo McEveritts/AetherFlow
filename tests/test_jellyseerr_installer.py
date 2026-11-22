@@ -37,8 +37,16 @@ with (root / "commands").open("a") as output:
 if command in ("apt-get", "chown", "id", "sleep"):
     pass
 elif command == "git":
-    target = Path(arguments[-1])
-    (target / "package.json").write_text(json.dumps({"version": "3.5.1", "packageManager": "pnpm@10.24.0"}))
+    if "ls-remote" in arguments:
+        tag = os.environ.get("TEST_TAG", "v3.5.1")
+        print("a" * 40 + "\trefs/tags/" + tag)
+    elif "rev-parse" in arguments:
+        print("a" * 40)
+    elif "clone" in arguments:
+        target = Path(arguments[-1])
+        (target / "package.json").write_text(json.dumps({"version": "3.5.1", "packageManager": "pnpm@10.24.0"}))
+    elif "checkout" in arguments or "fetch" in arguments:
+        pass
 elif command == "node":
     if arguments[0] == "-p":
         print(json.loads(Path("package.json").read_text())["packageManager"])
@@ -106,12 +114,13 @@ class JellyseerrInstallerTests(unittest.TestCase):
         common.write_text('''require_root() { :; }
 log_info() { printf '%s\\n' "$*"; }
 log_error() { printf '%s\\n' "$*" >&2; }
+print_error() { printf '%s\\n' "$*" >&2; }
 report_progress() { :; }
 github_latest_tag() { printf '%s\\n' "${TEST_TAG-v3.5.1}"; }
 write_lock() { touch "$TEST_ROOT/completed"; }
 ''')
         with common.open("a") as output:
-            output.write(replace_paths_once(common_functions("node_build", "write_app_version"),
+            output.write(replace_paths_once(common_functions("node_build", "write_app_version", "git_stage_exact_revision"),
                                            (("/var/backups/", str(self.root) + "/var/backups/"),)))
         for command in ("apt-get", "chown", "id", "sleep", "git", "node", "npm", "pnpm", "curl", "systemctl"):
             executable = self.root / "mock-bin" / command
