@@ -1226,30 +1226,53 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         self.assertIn("dir_fd=parent_fd", installer)
         self.assertIn("dir_fd=cur_fd", installer)
 
-        # Verify readiness target snippet preserves non-loopback IPv4/IPv6 bind_address
-        m_ready = re.search(
-            r'LS_READINESS_TARGET="\$\(python3 - /opt/librespeed/settings\.toml "\$APP_PORT" <<\'PYEOF\'\n(.*?)\nPYEOF',
+        listener_settings = re.search(
+            r"""LS_RUNTIME_SETTINGS="\$\(python3 - [^\n]+ <<'PYEOF'\n(.*?)\nPYEOF""",
             installer,
             re.S,
         )
-        self.assertIsNotNone(m_ready)
-        snippet = m_ready.group(1)  # type: ignore[union-attr]
+        self.assertIsNotNone(listener_settings)
+        snippet = listener_settings.group(1)  # type: ignore[union-attr]
+        run_fixture = """
+import sys
+from unittest.mock import patch
+
+snippet = sys.argv.pop(1)
+if sys.argv.pop(1) == "legacy-python":
+    sys.modules["tomllib"] = None
+with patch("os.geteuid", return_value=1000), patch("subprocess.run"):
+    exec(compile(snippet, "librespeed-settings", "exec"))
+"""
         with tempfile.TemporaryDirectory(dir=RESOLVED_TMP_ROOT) as tmp:
-            cfg = Path(tmp) / "settings.toml"
-            for raw_cfg, expected in (
-                ('bind_address="127.0.0.1"\nenable_tls=false\n', "/"),
-                ('bind_address="0.0.0.0"\nenable_tls=false\n', "/"),
-                ('bind_address="::1"\nenable_tls=false\n', "http://[::1]:8988/"),
-                ('bind_address="192.168.1.50"\nenable_tls=false\n', "http://192.168.1.50:8988/"),
-                ('bind_address="fd00::55"\nenable_tls=false\n', "http://[fd00::55]:8988/"),
-                ('bind_address="192.168.1.50"\nenable_tls=true\n', "https://192.168.1.50:8988/"),
-            ):
-                cfg.write_text(raw_cfg, encoding="utf-8")
-                out = subprocess.check_output(
-                    [sys.executable, "-c", snippet, str(cfg), "8988"],
-                    text=True,
-                ).strip()
-                self.assertEqual(out, expected, f"Failed readiness URL for {raw_cfg!r}")
+            root = Path(tmp)
+            state_dir = root / "state"
+            state_dir.mkdir()
+            cfg = state_dir / "settings.toml"
+            proxy = root / "apache" / "proxy.conf"
+            public_cfg = root / "public" / "settings.toml"
+            for parser in ("default", "legacy-python"):
+                for bind, tls, listen, probe in (
+                    ("127.0.0.1", "false", "127.0.0.1:8988", "/"),
+                    ("0.0.0.0", "false", "0.0.0.0:8988", "/"),
+                    ("", "false", "0.0.0.0:8988", "/"),
+                    ("::", "true", "[::]:8988", "https://[::1]:8988/"),
+                    ("::1", "false", "[::1]:8988", "http://[::1]:8988/"),
+                    ("192.168.1.50", "true", "192.168.1.50:8988", "https://192.168.1.50:8988/"),
+                    ("fd00::55", "false", "[fd00::55]:8988", "http://[fd00::55]:8988/"),
+                ):
+                    with self.subTest(parser=parser, bind=bind, tls=tls):
+                        cfg.write_text(
+                            f'bind_address="{bind}"\nenable_tls={tls}\n'
+                            '[example]\nbind_address="invalid host"\nenable_tls=true\n',
+                            encoding="utf-8",
+                        )
+                        out = subprocess.check_output(
+                            [sys.executable, "-c", run_fixture, snippet, parser,
+                             str(state_dir), str(proxy), str(public_cfg), "8988"],
+                            text=True,
+                        ).strip()
+                        self.assertEqual(out.split("\t"), [listen, probe, tls])
+                        self.assertIn(f"enable_tls = {tls}\n", public_cfg.read_text(encoding="utf-8"))
 
         for rel in ("packages/system/af-certbot-sync", "packages/common.sh"):
             txt = (ROOT / rel).read_text(encoding="utf-8")

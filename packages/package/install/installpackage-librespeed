@@ -35,7 +35,6 @@ fi
 
 require_root
 validate_config_paths /opt/librespeed/settings.toml /opt/librespeed/.af-directory-check /etc/aetherflow/librespeed/settings.toml
-validate_config_paths /opt/librespeed/settings.toml /etc/aetherflow/librespeed/settings.toml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for LibreSpeed..."
 
@@ -738,7 +737,7 @@ chown -h root:librespeed /opt/librespeed
 chmod 1770 /opt/librespeed
 chown -hRP root:librespeed /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/assets
 chmod 755 /opt/librespeed/speedtest-backend
-python3 - /opt/librespeed /etc/aetherflow/librespeed-proxy-token.conf /etc/aetherflow/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+LS_RUNTIME_SETTINGS="$(python3 - /opt/librespeed /etc/aetherflow/librespeed-proxy-token.conf /etc/aetherflow/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
 import grp, json, os, pwd, re, stat, subprocess, sys
 
 state_dir = os.path.normpath(sys.argv[1])
@@ -832,9 +831,11 @@ try:
 
     cfg_full_text = cfg_bytes.decode("utf-8", errors="replace")
     try:
-        import tomllib as _tomllib
-    except ImportError:
-        _tomllib = None  # type: ignore[assignment]
+        import tomllib
+        settings = tomllib.loads(cfg_full_text)
+    except (ImportError, ValueError):
+        settings = None
+
     def _root_preamble(src: str) -> str:
         n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
         while i < n:
@@ -861,15 +862,8 @@ try:
             elif ch == "]" and bdepth > 0: bdepth -= 1
             bol = False; i += 1
         return src
-    def _root_str_val(full_src: str, root_src: str, key_name: str) -> str:
-        if _tomllib is not None:
-            try:
-                parsed = _tomllib.loads(full_src)
-                v = parsed.get(key_name)
-                return v.strip() if isinstance(v, str) else ""
-            except Exception:
-                pass
-        n, i, res = len(root_src), 0, ""
+    def _root_assignments(root_src: str):
+        n, i = len(root_src), 0
         while i < n:
             while i < n and root_src[i] in (" ", "\t", "\r"): i += 1
             if i >= n: break
@@ -900,15 +894,23 @@ try:
                 if ch in ("[", "{"): bd += 1
                 elif ch in ("]", "}") and bd > 0: bd -= 1
                 i += 1
-            if eq and k == key_name:
-                rhs = root_src[rs:(cpos if cpos is not None else i)].strip()
-                if len(rhs) >= 6 and ((rhs.startswith('"""') and rhs.endswith('"""')) or (rhs.startswith("'''") and rhs.endswith("'''"))):
-                    res = rhs[3:-3].lstrip("\r\n").strip()
-                elif len(rhs) >= 2 and ((rhs.startswith('"') and rhs.endswith('"')) or (rhs.startswith("'") and rhs.endswith("'"))):
-                    res = rhs[1:-1].strip()
-        return res
-    cfg_text = _root_preamble(cfg_full_text)
-    raw_db = _root_str_val(cfg_full_text, cfg_text, "database_file")
+            if eq:
+                yield k, root_src[rs:(cpos if cpos is not None else i)].strip()
+
+    raw_settings = dict(_root_assignments(_root_preamble(cfg_full_text))) if settings is None else {}
+
+    def root_string(key: str):
+        if settings is not None:
+            value = settings.get(key)
+            return value.strip() if isinstance(value, str) else None
+        rhs = raw_settings.get(key, "")
+        if len(rhs) >= 6 and rhs[:3] in ('"""', "'''") and rhs.endswith(rhs[:3]):
+            return rhs[3:-3].strip()
+        if len(rhs) >= 2 and rhs[0] in ('"', "'") and rhs.endswith(rhs[0]):
+            return rhs[1:-1].strip()
+        return None
+
+    raw_db = root_string("database_file")
     if raw_db:
         resolved_db = os.path.normpath(raw_db if os.path.isabs(raw_db) else os.path.join(state_dir, raw_db))
         prefix = state_dir.rstrip("/") + "/"
@@ -949,7 +951,7 @@ try:
                         for sub_fd in reversed(opened_fds):
                             os.close(sub_fd)
 
-    proxy_secret = _root_str_val(cfg_full_text, cfg_text, "trusted_proxy_secret")
+    proxy_secret = root_string("trusted_proxy_secret")
     if proxy_secret and not re.fullmatch(r"[A-Za-z0-9_.:=-]{16,128}", proxy_secret):
         raise SystemExit("Refusing unsafe trusted_proxy_secret characters in LibreSpeed settings.toml")
 
@@ -993,32 +995,32 @@ try:
             pass
         raise
 
-    pub_bind = _root_str_val(cfg_full_text, cfg_text, "bind_address") or "127.0.0.1"
-    pub_port = default_port
-    pub_tls = False
-    if _tomllib is not None:
-        try:
-            parsed_pub = _tomllib.loads(cfg_full_text)
-            pv = parsed_pub.get("listen_port")
-            if isinstance(pv, int) and not isinstance(pv, bool) and 1 <= pv <= 65535:
-                pub_port = pv
-            tv = parsed_pub.get("enable_tls")
-            if isinstance(tv, bool):
-                pub_tls = tv
-            elif isinstance(tv, str):
-                pub_tls = tv.strip().lower() == "true"
-        except Exception:
-            pass
+    bind_address = root_string("bind_address")
+    if bind_address is None:
+        bind_address = "127.0.0.1"
+    socket_host = "0.0.0.0" if bind_address in ("", "*") else bind_address
+    if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", socket_host):
+        raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_address!r}")
+    if ":" in socket_host and not socket_host.startswith("["):
+        socket_host = f"[{socket_host}]"
+    probe_host = {"0.0.0.0": "127.0.0.1", "[::]": "[::1]"}.get(socket_host, socket_host)
+
+    if settings is not None:
+        listen_port = settings.get("listen_port")
+        enable_tls = settings.get("enable_tls")
     else:
-        for line in cfg_text.splitlines():
-            s = line.split("#", 1)[0].strip()
-            if "=" in s:
-                k, v = [p.strip() for p in s.split("=", 1)]
-                if k == "listen_port" and v.isdecimal() and 1 <= int(v) <= 65535:
-                    pub_port = int(v)
-                elif k == "enable_tls":
-                    pub_tls = v.strip("\"'").strip().lower() == "true"
-    pub_cert = _root_str_val(cfg_full_text, cfg_text, "tls_cert_file")
+        raw_port = raw_settings.get("listen_port", "")
+        listen_port = int(raw_port) if raw_port.isdecimal() else None
+        enable_tls = raw_settings.get("enable_tls", "").strip("\"'")
+    pub_port = listen_port if type(listen_port) is int and 1 <= listen_port <= 65535 else default_port
+    pub_tls = enable_tls is True or (isinstance(enable_tls, str) and enable_tls.strip().lower() == "true")
+    pub_cert = root_string("tls_cert_file") or ""
+    readiness_target = "/"
+    if pub_tls:
+        readiness_target = f"https://{probe_host}:{default_port}/"
+    elif probe_host != "127.0.0.1":
+        readiness_target = f"http://{probe_host}:{default_port}/"
+    tls_flag = "true" if pub_tls else "false"
 
     public_dir = os.path.dirname(public_settings_path)
     if not os.path.lexists(public_dir):
@@ -1036,9 +1038,9 @@ try:
 
     public_body = (
         "# Public non-secret LibreSpeed listener and TLS metadata (0644 root:root)\n"
-        f"bind_address = {json.dumps(pub_bind)}\n"
+        f"bind_address = {json.dumps(bind_address or '127.0.0.1')}\n"
         f"listen_port = {pub_port}\n"
-        f"enable_tls = {'true' if pub_tls else 'false'}\n"
+        f"enable_tls = {tls_flag}\n"
         f"tls_cert_file = {json.dumps(pub_cert)}\n"
     ).encode("utf-8")
     tmp_public = f"{public_settings_path}.tmp.{os.getpid()}"
@@ -1064,16 +1066,19 @@ try:
         except OSError:
             pass
         raise
+    print(f"{socket_host}:{default_port}\t{readiness_target}\t{tls_flag}")
 finally:
     os.close(dir_fd)
 PYEOF
+)"
+IFS=$'\t' read -r LS_SOCKET_LISTEN LS_READINESS_TARGET LS_TLS_ENABLED <<< "$LS_RUNTIME_SETTINGS"
 
 if [[ "${EUID}" -eq 0 && -d /etc/apache2/mods-available ]]; then
     if command -v a2enmod >/dev/null 2>&1; then
         if [[ ! -e /etc/apache2/mods-enabled/headers.load ]]; then
             af_logged a2enmod -q headers || true
         fi
-        if [[ ! -L /opt/librespeed && ! -L /opt/librespeed/settings.toml && -f /opt/librespeed/settings.toml ]] && awk '/^[[:space:]]*\[/{exit} tolower($0) ~ /^[[:space:]]*enable_tls[[:space:]]*=[[:space:]]*"?true"?([[:space:]]*(#.*)?)?$/{found=1; exit} END{exit !found}' /opt/librespeed/settings.toml; then
+        if [[ "$LS_TLS_ENABLED" == true ]]; then
             for _mod in ssl proxy proxy_http proxy_wstunnel rewrite; do
                 if [[ ! -e "/etc/apache2/mods-enabled/${_mod}.load" ]]; then
                     af_logged a2enmod -q "${_mod}" || true
@@ -1087,237 +1092,6 @@ if [[ "${EUID}" -eq 0 && -d /etc/apache2/mods-available ]]; then
 fi
 
 report_progress 85 "Configuring and starting librespeed.socket + librespeed.service on port ${APP_PORT}..."
-LS_SOCKET_LISTEN="127.0.0.1:${APP_PORT}"
-LS_READINESS_TARGET="/"
-if [[ -e /opt/librespeed/settings.toml || -L /opt/librespeed/settings.toml ]]; then
-    LS_SOCKET_LISTEN="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
-import os, re, stat, sys
-cfg_path, port = sys.argv[1], sys.argv[2]
-parent_dir, base_name = os.path.split(os.path.normpath(cfg_path))
-o_nofollow = getattr(os, "O_NOFOLLOW", 0)
-o_cloexec = getattr(os, "O_CLOEXEC", 0)
-o_directory = getattr(os, "O_DIRECTORY", 0)
-dfd = os.open(parent_dir or ".", os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
-try:
-    if not stat.S_ISDIR(os.fstat(dfd).st_mode):
-        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {parent_dir}")
-    fd = os.open(base_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dfd)
-finally:
-    os.close(dfd)
-try:
-    fst = os.fstat(fd)
-    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > 1048576:
-        raise SystemExit(f"Refusing unsafe LibreSpeed settings.toml descriptor: {cfg_path}")
-    txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
-finally:
-    os.close(fd)
-def _root_preamble(src: str) -> str:
-    n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
-    while i < n:
-        ch = src[i]
-        if in_s is not None:
-            if in_s in ('"""', "'''"):
-                if src.startswith(in_s, i):
-                    i += 3; in_s = None; continue
-                i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
-            i += 2 if (in_s == '"' and ch == "\\") else 1
-            if ch == in_s: in_s = None
-            continue
-        if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
-        if ch in (" ", "\t", "\r"): i += 1; continue
-        if ch == "#":
-            nl = src.find("\n", i)
-            if nl == -1: break
-            i = nl + 1; bol = True; lstart = i; continue
-        if src.startswith('"""', i) or src.startswith("'''", i):
-            in_s = src[i:i+3]; bol = False; i += 3; continue
-        if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
-        if ch == "[" and bdepth == 0 and bol: return src[:lstart]
-        if ch == "[": bdepth += 1
-        elif ch == "]" and bdepth > 0: bdepth -= 1
-        bol = False; i += 1
-    return src
-txt_root = _root_preamble(txt)
-try:
-    import tomllib as _tomllib
-except ImportError:
-    _tomllib = None  # type: ignore[assignment]
-bind_raw = None
-if _tomllib is not None:
-    try:
-        v = _tomllib.loads(txt).get("bind_address")
-        if isinstance(v, str):
-            bind_raw = v.strip()
-    except Exception:
-        pass
-if bind_raw is None:
-    n, i = len(txt_root), 0
-    while i < n:
-        while i < n and txt_root[i] in (" ", "\t", "\r"): i += 1
-        if i >= n: break
-        if txt_root[i] == "\n": i += 1; continue
-        if txt_root[i] == "#":
-            nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; continue
-        ks = i
-        while i < n and (txt_root[i].isalnum() or txt_root[i] in ("_", "-")): i += 1
-        k = txt_root[ks:i].strip()
-        while i < n and txt_root[i] in (" ", "\t"): i += 1
-        eq = (i < n and txt_root[i] == "=")
-        if eq: i += 1
-        rs, in_s, bd, cpos = i, None, 0, None
-        while i < n:
-            ch = txt_root[i]
-            if in_s is not None:
-                if in_s in ('"""', "'''"):
-                    if txt_root.startswith(in_s, i): i += 3; in_s = None; continue
-                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
-                i += 2 if (in_s == '"' and ch == "\\") else 1
-                if ch == in_s: in_s = None
-                continue
-            if ch == "#" and bd == 0:
-                cpos = i; nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; break
-            if ch == "\n" and bd == 0: i += 1; break
-            if txt_root.startswith('"""', i) or txt_root.startswith("'''", i): in_s = txt_root[i:i+3]; i += 3; continue
-            if ch in ('"', "'"): in_s = ch; i += 1; continue
-            if ch in ("[", "{"): bd += 1
-            elif ch in ("]", "}") and bd > 0: bd -= 1
-            i += 1
-        if eq and k == "bind_address":
-            rhs = txt_root[rs:(cpos if cpos is not None else i)].strip()
-            if len(rhs) >= 2 and ((rhs[0] == '"' and rhs[-1] == '"') or (rhs[0] == "'" and rhs[-1] == "'")):
-                bind_raw = rhs[1:-1].strip()
-bind_val = (bind_raw if bind_raw is not None else "127.0.0.1") or "0.0.0.0"
-if bind_val == "*":
-    bind_val = "0.0.0.0"
-if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", bind_val):
-    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
-if ":" in bind_val and not bind_val.startswith("["):
-    bind_val = f"[{bind_val}]"
-print(f"{bind_val}:{port}")
-PYEOF
-)"
-    LS_READINESS_TARGET="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
-import os, re, stat, sys
-cfg_path, port = sys.argv[1], sys.argv[2]
-parent_dir, base_name = os.path.split(os.path.normpath(cfg_path))
-o_nofollow = getattr(os, "O_NOFOLLOW", 0)
-o_cloexec = getattr(os, "O_CLOEXEC", 0)
-o_directory = getattr(os, "O_DIRECTORY", 0)
-dfd = os.open(parent_dir or ".", os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
-try:
-    if not stat.S_ISDIR(os.fstat(dfd).st_mode):
-        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {parent_dir}")
-    fd = os.open(base_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dfd)
-finally:
-    os.close(dfd)
-try:
-    fst = os.fstat(fd)
-    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > 1048576:
-        raise SystemExit(f"Refusing unsafe LibreSpeed settings.toml descriptor: {cfg_path}")
-    txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
-finally:
-    os.close(fd)
-def _root_preamble(src: str) -> str:
-    n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
-    while i < n:
-        ch = src[i]
-        if in_s is not None:
-            if in_s in ('"""', "'''"):
-                if src.startswith(in_s, i):
-                    i += 3; in_s = None; continue
-                i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
-            i += 2 if (in_s == '"' and ch == "\\") else 1
-            if ch == in_s: in_s = None
-            continue
-        if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
-        if ch in (" ", "\t", "\r"): i += 1; continue
-        if ch == "#":
-            nl = src.find("\n", i)
-            if nl == -1: break
-            i = nl + 1; bol = True; lstart = i; continue
-        if src.startswith('"""', i) or src.startswith("'''", i):
-            in_s = src[i:i+3]; bol = False; i += 3; continue
-        if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
-        if ch == "[" and bdepth == 0 and bol: return src[:lstart]
-        if ch == "[": bdepth += 1
-        elif ch == "]" and bdepth > 0: bdepth -= 1
-        bol = False; i += 1
-    return src
-txt_root = _root_preamble(txt)
-try:
-    import tomllib as _tomllib
-except ImportError:
-    _tomllib = None  # type: ignore[assignment]
-tls_on = None
-bind_raw = None
-if _tomllib is not None:
-    try:
-        parsed = _tomllib.loads(txt)
-        tv = parsed.get("enable_tls")
-        if isinstance(tv, bool):
-            tls_on = tv
-        elif isinstance(tv, str):
-            tls_on = tv.strip().lower() == "true"
-        bv = parsed.get("bind_address")
-        if isinstance(bv, str):
-            bind_raw = bv.strip()
-    except Exception:
-        pass
-if tls_on is None or bind_raw is None:
-    n, i = len(txt_root), 0
-    while i < n:
-        while i < n and txt_root[i] in (" ", "\t", "\r"): i += 1
-        if i >= n: break
-        if txt_root[i] == "\n": i += 1; continue
-        if txt_root[i] == "#":
-            nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; continue
-        ks = i
-        while i < n and (txt_root[i].isalnum() or txt_root[i] in ("_", "-")): i += 1
-        k = txt_root[ks:i].strip()
-        while i < n and txt_root[i] in (" ", "\t"): i += 1
-        eq = (i < n and txt_root[i] == "=")
-        if eq: i += 1
-        rs, in_s, bd, cpos = i, None, 0, None
-        while i < n:
-            ch = txt_root[i]
-            if in_s is not None:
-                if in_s in ('"""', "'''"):
-                    if txt_root.startswith(in_s, i): i += 3; in_s = None; continue
-                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
-                i += 2 if (in_s == '"' and ch == "\\") else 1
-                if ch == in_s: in_s = None
-                continue
-            if ch == "#" and bd == 0:
-                cpos = i; nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; break
-            if ch == "\n" and bd == 0: i += 1; break
-            if txt_root.startswith('"""', i) or txt_root.startswith("'''", i): in_s = txt_root[i:i+3]; i += 3; continue
-            if ch in ('"', "'"): in_s = ch; i += 1; continue
-            if ch in ("[", "{"): bd += 1
-            elif ch in ("]", "}") and bd > 0: bd -= 1
-            i += 1
-        rhs = txt_root[rs:(cpos if cpos is not None else i)].strip()
-        if eq and k == "enable_tls" and tls_on is None:
-            tls_on = rhs.strip("\"'").strip().lower() == "true"
-        elif eq and k == "bind_address" and bind_raw is None:
-            if len(rhs) >= 2 and ((rhs[0] == '"' and rhs[-1] == '"') or (rhs[0] == "'" and rhs[-1] == "'")):
-                bind_raw = rhs[1:-1].strip()
-tls_on = bool(tls_on)
-bind_val = (bind_raw if bind_raw is not None else "127.0.0.1") or "127.0.0.1"
-host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
-if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
-    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
-if ":" in host and not host.startswith("["):
-    host = f"[{host}]"
-if tls_on:
-    print(f"https://{host}:{port}/")
-elif host != "127.0.0.1":
-    print(f"http://{host}:{port}/")
-else:
-    print("/")
-PYEOF
-)"
-fi
-
 cat <<EOF > /etc/systemd/system/librespeed.socket
 [Unit]
 Description=LibreSpeed Speedtest Socket (PID 1 loopback port guard)
