@@ -1531,37 +1531,22 @@ apt-get() {
                     continue
                     ;;
             esac
-            if [[ "$local_deb" != true && -n "$primary" && -n "$target" ]]; then
-                if [[ "$argument" == "$primary" ]]; then
-                    argument="${primary}=${target}"
-                    primary_selected=true
-                elif [[ "$argument" == "${primary}="* ]]; then
-                    if [[ "${argument#*=}" != "$target" ]]; then
-                        print_error "Refusing conflicting APT package target '$argument' for requested exact version '$target'"
-                        return 1
-                    fi
-                    primary_selected=true
-                elif [[ "$argument" == "${primary}/"* ]]; then
-                    print_error "Refusing floating APT release target '$argument' for requested exact version '$target'"
-                    return 1
-                elif [[ "$argument" != -* && "$argument" != /*.deb ]]; then
-                    if [[ "$argument" == *=* ]]; then
-                        arg_pkg="${argument%%=*}"
-                        if apt_package_is_lockstep "$arg_pkg"; then
-                            if [[ "${argument#*=}" != "$target" ]]; then
-                                print_error "Refusing conflicting APT package target '$argument' for requested exact version '$target'"
-                                return 1
-                            fi
-                        fi
-                    elif [[ "$argument" == */* ]]; then
-                        arg_pkg="${argument%%/*}"
-                        if apt_package_is_lockstep "$arg_pkg"; then
+            if [[ "$local_deb" != true && -n "$primary" && -n "$target" && "$argument" != -* && "$argument" != /*.deb ]]; then
+                arg_pkg="${argument%%[=/]*}"
+                if [[ "$arg_pkg" == "$primary" ]] || apt_package_is_lockstep "$arg_pkg"; then
+                    case "$argument" in
+                        "$arg_pkg") argument="${arg_pkg}=${target}" ;;
+                        "$arg_pkg=$target") ;;
+                        "$arg_pkg="*)
+                            print_error "Refusing conflicting APT package target '$argument' for requested exact version '$target'"
+                            return 1
+                            ;;
+                        *)
                             print_error "Refusing floating APT release target '$argument' for requested exact version '$target'"
                             return 1
-                        fi
-                    elif apt_package_is_lockstep "$argument"; then
-                        argument="${argument}=${target}"
-                    fi
+                            ;;
+                    esac
+                    [[ "$arg_pkg" != "$primary" ]] || primary_selected=true
                 fi
             fi
             rewritten+=("$argument")
