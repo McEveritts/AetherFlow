@@ -174,9 +174,37 @@ ABS_STATUS_URL="http://${ABS_PROBE_HOST}:${APP_PORT}/status"
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now audiobookshelf
 verify_systemd_service_active audiobookshelf
-NO_PROXY='*' no_proxy='*' AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" AF_PROBE_HOST="$ABS_PROBE_HOST" af_logged python3 - <<'PYEOF'
+AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" AF_PROBE_HOST="$ABS_PROBE_HOST" af_logged python3 - <<'PYEOF'
+import http.client
+import ipaddress
+import json
 import os
-import sys, time, json, urllib.request
+import sys
+import time
+import urllib.request
+
+
+class LocalConnection(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()
+        peer = ipaddress.ip_address(self.sock.getpeername()[0])
+        loopback = (getattr(peer, 'ipv4_mapped', None) or peer).is_loopback
+        if not loopback and peer != ipaddress.ip_address(self.sock.getsockname()[0]):
+            self.close()
+            raise OSError("Audiobookshelf bootstrap requires a listener on this host")
+
+
+class LocalHttpHandler(urllib.request.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(LocalConnection, request)
+
+
+# Contact the configured local listener directly and keep redirects out of bootstrap.
+opener = urllib.request.OpenerDirector()
+opener.add_handler(LocalHttpHandler())
+opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+opener.add_handler(urllib.request.HTTPErrorProcessor())
+
 user, pw = os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"]
 host = os.environ.get("AF_PROBE_HOST", "127.0.0.1")
 port = os.environ["AF_APP_PORT"]
@@ -184,7 +212,7 @@ status_url = f"http://{host}:{port}/status"
 init_url = f"http://{host}:{port}/init"
 for _ in range(30):
     try:
-        with urllib.request.urlopen(status_url, timeout=3) as r:
+        with opener.open(status_url, timeout=3) as r:
             if r.status != 200:
                 raise ValueError('Unexpected Audiobookshelf status response')
             st = json.loads(r.read().decode('utf-8'))
@@ -198,7 +226,7 @@ for _ in range(30):
 else:
     sys.exit(1)
 req = urllib.request.Request(init_url, data=json.dumps({'newRoot': {'username': user, 'password': pw}}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
-with urllib.request.urlopen(req, timeout=10) as response:
+with opener.open(req, timeout=10) as response:
     if not 200 <= response.status < 300:
         sys.exit(1)
     response.read()

@@ -462,7 +462,7 @@ class LocalInstallerReadinessRecordTests(unittest.TestCase):
                 response = mock.MagicMock(status=200)
                 response.__enter__.return_value = response
                 response.read.return_value = b'{"isInit": true}'
-                urlopen_mock = mock.Mock(return_value=response)
+                open_mock = mock.Mock(return_value=response)
                 with mock.patch.dict(
                     os.environ,
                     {
@@ -471,11 +471,36 @@ class LocalInstallerReadinessRecordTests(unittest.TestCase):
                         "AF_SEED_USER": "admin",
                         "AF_SEED_PASS": "secret-pass",
                     },
-                ), mock.patch("urllib.request.urlopen", side_effect=urlopen_mock), mock.patch("time.sleep"):
+                ), mock.patch("urllib.request.OpenerDirector.open", side_effect=open_mock), mock.patch("time.sleep"):
                     with self.assertRaises(SystemExit) as exited:
                         exec(compile(bootstrap_program, "installpackage-audiobookshelf", "exec"), {})
                 self.assertEqual(exited.exception.code, 0)
-                self.assertEqual(urlopen_mock.call_args.args[0], expected_url)
+                self.assertEqual(open_mock.call_args.args[0], expected_url)
+
+    def test_audiobookshelf_bootstrap_sends_no_http_to_an_off_host_peer(self):
+        source = (ROOT / "packages/package/install/installpackage-audiobookshelf").read_text()
+        bootstrap_program = next(
+            block for block in re.findall(r"<<'PYEOF'\n(.*?)\nPYEOF", source, re.DOTALL)
+            if "urllib.request" in block
+        )
+
+        socket = mock.Mock()
+        socket.getsockname.return_value = ("192.0.2.40", 38470)
+        socket.getpeername.return_value = ("192.0.2.45", 18379)
+
+        def connect(connection):
+            connection.sock = socket
+
+        with mock.patch.dict(
+            os.environ,
+            {"AF_APP_PORT": "18379", "AF_PROBE_HOST": "192.0.2.45",
+             "AF_SEED_USER": "admin", "AF_SEED_PASS": "fixture-password"},
+        ), mock.patch("http.client.HTTPConnection.connect", autospec=True, side_effect=connect), mock.patch("time.sleep"):
+            with self.assertRaises(SystemExit) as exited:
+                exec(compile(bootstrap_program, "installpackage-audiobookshelf", "exec"), {})
+        self.assertEqual(exited.exception.code, 1)
+        socket.close.assert_called()
+        socket.sendall.assert_not_called()
 
     def test_kasmvnc_records_actual_http_fallback_scheme_and_omits_on_failure(self):
         source = (ROOT / "packages/package/install/installpackage-kasmvnc").read_text(encoding="utf-8")

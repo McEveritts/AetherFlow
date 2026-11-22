@@ -2800,8 +2800,9 @@ PYEOF
     def run_account_bootstrap(self, app, request, retained=False):
         source = (ROOT / "packages/package/install" / ("installpackage-" + app)).read_text()
         program = next(block for block in re.findall(r"<<'PYEOF'\n(.*?)\nPYEOF", source, re.DOTALL) if "urllib.request" in block)
+        open_request = "urllib.request.OpenerDirector.open" if app == "audiobookshelf" else "urllib.request.urlopen"
         with mock.patch.dict(os.environ, {"AF_APP_PORT": "12345", "MASTER_USER": "admin", "MASTER_PASS": "fixture-password", "AF_SEED_USER": "admin", "AF_SEED_PASS": "fixture-password", "AF_BOOTSTRAP_RETAINED": "1" if retained else "0"}):
-            with mock.patch.object(sys, "argv", ["-", "admin", "fixture-password"]), mock.patch("urllib.request.urlopen", side_effect=request), mock.patch("time.sleep"):
+            with mock.patch.object(sys, "argv", ["-", "admin", "fixture-password"]), mock.patch(open_request, side_effect=request), mock.patch("time.sleep"):
                 exec(compile(program, str(ROOT / "packages/package/install" / ("installpackage-" + app)), "exec"), {})
 
     def test_account_bootstrap_status_failure_never_attempts_initialization(self):

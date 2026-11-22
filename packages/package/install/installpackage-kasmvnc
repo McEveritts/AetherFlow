@@ -321,16 +321,13 @@ for attempt in {1..30}; do
     if ! systemctl is-active --quiet af-kasmvnc.service; then
         break
     fi
-    HTTP_STATUS="$(curl --noproxy '*' -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "https://127.0.0.1:${APP_PORT}/" 2>/dev/null || true)"
-    if [[ "$HTTP_STATUS" =~ ^(200|401|301|302|307)$ ]]; then
-        READY=true
-        READY_URL="https://127.0.0.1:${APP_PORT}/"
-        break
-    fi
-    HTTP_STATUS="$(curl --noproxy '*' -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" 2>/dev/null || true)"
-    if [[ "$HTTP_STATUS" =~ ^(200|401|301|302|307)$ ]]; then
-        READY=true
+    READY_URL="https://127.0.0.1:${APP_PORT}/"
+    if ! HTTP_STATUS="$(curl --noproxy '*' -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$READY_URL" 2>/dev/null)"; then
         READY_URL="http://127.0.0.1:${APP_PORT}/"
+        HTTP_STATUS="$(curl --noproxy '*' -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$READY_URL" 2>/dev/null || true)"
+    fi
+    if [[ "$HTTP_STATUS" =~ ^(200|401|301|302|307)$ ]]; then
+        READY=true
         break
     fi
     sleep 1
