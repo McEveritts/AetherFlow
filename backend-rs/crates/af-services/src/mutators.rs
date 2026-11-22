@@ -1258,6 +1258,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 meta.url_base = runner_meta.url_base;
             }
             meta.configured_port = runner_meta.configured_port;
+            if meta.secondary_port <= 0 {
+                meta.secondary_port = runner_meta.secondary_port;
+            }
             confirmed = true;
         }
     }

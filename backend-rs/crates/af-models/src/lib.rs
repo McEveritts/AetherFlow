@@ -23,6 +23,12 @@ use std::path::{Path, PathBuf};
 
 /// Ports available for configurable marketplace apps when their default is busy.
 pub const MARKETPLACE_FALLBACK_PORT_RANGE: [i32; 2] = [17000, 19999];
+/// Secondary port role persisted for Rclone split-port GUI `--api-addr`.
+pub const RCLONE_RC_API_PORT_ROLE: &str = "rc_api";
+/// Preferred secondary RC API port for Rclone split-port GUI mode when GUI is not on 5573.
+pub const RCLONE_DEFAULT_RC_API_PORT: i32 = 5573;
+/// Alternate preferred secondary RC API port when Rclone's GUI itself is bound to 5573.
+pub const RCLONE_ALT_RC_API_PORT: i32 = 5574;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hardware & System Telemetry Models
@@ -478,6 +484,8 @@ pub struct PackageRunnerRequest {
     pub lifecycle_job_id: String,
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub app_port: i32,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub secondary_port: i32,
     /// Explicit destructive purge for `remove` only. The runner never inherits
     /// `DELETE_DATA` from its own environment; ordinary removals retain data.
     #[serde(skip_serializing_if = "is_false", default)]
@@ -2488,6 +2496,8 @@ pub struct AppRuntimeMeta {
     pub api_key: String,
     #[serde(default)]
     pub configured_port: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub secondary_port: i32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url_base: String,
 }

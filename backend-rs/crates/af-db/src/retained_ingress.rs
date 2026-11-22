@@ -3,7 +3,100 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::BTreeSet;
 
 fn schema(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS app_secondary_ports (
+             app_name TEXT NOT NULL,
+             port_role TEXT NOT NULL,
+             port INTEGER NOT NULL,
+             retained INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (app_name, port_role)
+         );",
+    )?;
+    Ok(())
+}
+
+fn has_table(conn: &Connection, table: &str) -> anyhow::Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn has_active_secondary_port_conflict(
+    conn: &Connection,
+    app: &str,
+    port: i32,
+) -> anyhow::Result<bool> {
+    if port <= 0 || !has_table(conn, "app_secondary_ports")? {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_secondary_ports WHERE LOWER(app_name)=LOWER(?1) AND retained=0 AND port=?2)",
+        params![canonical_app(app), port],
+        |row| row.get(0),
+    )?)
+}
+
+pub fn load_lifecycle_secondary_port(
+    conn: &Connection,
+    app: &str,
+    role: &str,
+) -> anyhow::Result<Option<i32>> {
+    let role_clean = role.trim();
+    if role_clean.is_empty() || !has_table(conn, "app_secondary_ports")? {
+        return Ok(None);
+    }
+    let port: Option<i32> = conn
+        .query_row(
+            "SELECT port FROM app_secondary_ports
+             WHERE LOWER(app_name)=LOWER(?1) AND port_role=?2 AND port>0
+             ORDER BY retained ASC LIMIT 1",
+            params![canonical_app(app), role_clean],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(port.filter(|p| (1..=65535).contains(p)))
+}
+
+fn write_secondary_port_in_tx(
+    tx: &Connection,
+    app: &str,
+    role: &str,
+    port: Option<i32>,
+    primary_port: i32,
+) -> anyhow::Result<()> {
+    let role_clean = role.trim();
+    anyhow::ensure!(!role_clean.is_empty(), "Secondary port role is required");
+    schema(tx)?;
+    let canonical = canonical_app(app);
+    match port {
+        Some(p) if p > 0 => {
+            anyhow::ensure!((1..=65535).contains(&p), "Secondary port {p} is invalid");
+            anyhow::ensure!(
+                primary_port <= 0 || p != primary_port,
+                "Secondary port {p} must differ from primary port {primary_port}"
+            );
+            let reserved = list_reserved_ports_excluding(tx, &canonical)?;
+            anyhow::ensure!(
+                !reserved.contains(&p),
+                "Secondary port {p} is already reserved by another application"
+            );
+            tx.execute(
+                "INSERT INTO app_secondary_ports (app_name, port_role, port, retained)
+                 VALUES (?1, ?2, ?3, 0)
+                 ON CONFLICT(app_name, port_role) DO UPDATE SET port = excluded.port, retained = 0",
+                params![canonical, role_clean, p],
+            )?;
+        }
+        _ => {
+            tx.execute(
+                "DELETE FROM app_secondary_ports WHERE LOWER(app_name) = LOWER(?1) AND port_role = ?2",
+                params![canonical, role_clean],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -71,6 +164,15 @@ pub(super) fn set_config(
     config: &AppIngressConfig,
     owner: Option<(&str, &str)>,
 ) -> anyhow::Result<()> {
+    set_config_with_secondary_port(conn, config, None, owner)
+}
+
+pub(super) fn set_config_with_secondary_port(
+    conn: &mut Connection,
+    config: &AppIngressConfig,
+    secondary_port: Option<(&str, Option<i32>)>,
+    owner: Option<(&str, &str)>,
+) -> anyhow::Result<()> {
     if let Some((identity, action)) = owner {
         anyhow::ensure!(
             !identity.is_empty() && matches!(action, "install" | "reinstall" | "update"),
@@ -79,6 +181,9 @@ pub(super) fn set_config(
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     check_reservation(&tx, &config.app_name, owner)?;
+    if let Some((role, sec)) = secondary_port {
+        write_secondary_port_in_tx(&tx, &config.app_name, role, sec, config.listen_port)?;
+    }
     crate::write_app_ingress_config(&tx, config)?;
     tx.commit()?;
     Ok(())
@@ -413,6 +518,29 @@ pub fn synchronize_lifecycle_ingress(
     purge: bool,
     base_domain: &str,
 ) -> anyhow::Result<()> {
+    synchronize_lifecycle_ingress_with_secondary_port(
+        conn,
+        app,
+        action,
+        job_id,
+        port,
+        None,
+        purge,
+        base_domain,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn synchronize_lifecycle_ingress_with_secondary_port(
+    conn: &mut Connection,
+    app: &str,
+    action: &str,
+    job_id: &str,
+    port: i32,
+    secondary_port: Option<(&str, Option<i32>)>,
+    purge: bool,
+    base_domain: &str,
+) -> anyhow::Result<()> {
     anyhow::ensure!(!job_id.is_empty(), "Ingress lifecycle identity is required");
     anyhow::ensure!(
         matches!(action, "install" | "reinstall" | "update" | "remove"),
@@ -423,10 +551,13 @@ pub fn synchronize_lifecycle_ingress(
         "Purge requires package removal"
     );
     if action == "remove" {
-        archive(conn, app, purge, Some((job_id, action)))?;
+        archive_with_secondary(conn, app, purge, secondary_port, Some((job_id, action)))?;
     } else {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_reservation(&tx, app, Some((job_id, action)))?;
+        if let Some((role, sec)) = secondary_port {
+            write_secondary_port_in_tx(&tx, app, role, sec, port)?;
+        }
         if port > 0 {
             let existing = load_lifecycle_ingress(&tx, app)?;
             if let Some(config) = plan_lifecycle_ingress(app, port, base_domain, existing.as_ref())?
@@ -469,20 +600,56 @@ fn archive(
     purge: bool,
     owner: Option<(&str, &str)>,
 ) -> anyhow::Result<()> {
+    archive_with_secondary(conn, app, purge, None, owner)
+}
+
+fn archive_with_secondary(
+    conn: &mut Connection,
+    app: &str,
+    purge: bool,
+    secondary_port: Option<(&str, Option<i32>)>,
+    owner: Option<(&str, &str)>,
+) -> anyhow::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     check_reservation(&tx, app, owner)?;
     schema(&tx)?;
+    let canonical = canonical_app(app);
     if purge {
         tx.execute(
             "DELETE FROM retained_app_ingress_configs WHERE app_name=?1",
             [app],
         )?;
-    } else if let Some(config) = read_config(&tx, app)? {
         tx.execute(
-            "INSERT INTO retained_app_ingress_configs (app_name,config_json) VALUES (?1,?2)
-             ON CONFLICT(app_name) DO UPDATE SET config_json=excluded.config_json",
-            params![app, serde_json::to_string(&config)?],
+            "DELETE FROM app_secondary_ports WHERE LOWER(app_name)=LOWER(?1)",
+            [&canonical],
         )?;
+    } else {
+        if let Some(config) = read_config(&tx, app)? {
+            tx.execute(
+                "INSERT INTO retained_app_ingress_configs (app_name,config_json) VALUES (?1,?2)
+                 ON CONFLICT(app_name) DO UPDATE SET config_json=excluded.config_json",
+                params![app, serde_json::to_string(&config)?],
+            )?;
+        }
+        if let Some((role, Some(port))) = secondary_port {
+            let role_clean = role.trim();
+            if !role_clean.is_empty()
+                && (1..=65535).contains(&port)
+                && !list_reserved_ports_excluding(&tx, &canonical)?.contains(&port)
+            {
+                tx.execute(
+                    "INSERT INTO app_secondary_ports (app_name, port_role, port, retained)
+                     VALUES (?1, ?2, ?3, 1)
+                     ON CONFLICT(app_name, port_role) DO UPDATE SET port=excluded.port, retained=1",
+                    params![canonical, role_clean, port],
+                )?;
+            }
+        } else {
+            tx.execute(
+                "UPDATE app_secondary_ports SET retained=1 WHERE LOWER(app_name)=LOWER(?1)",
+                [&canonical],
+            )?;
+        }
     }
     tx.execute("DELETE FROM app_ingress_configs WHERE app_name=?1", [app])?;
     if owner.is_some() {
@@ -501,12 +668,7 @@ pub fn list_reserved_ports_excluding(
     let target = canonical_app(app);
     let mut reserved = BTreeSet::new();
 
-    let has_active: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_ingress_configs')",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_active {
+    if has_table(conn, "app_ingress_configs")? {
         let mut stmt = conn.prepare(
             "SELECT app_name, listen_port FROM app_ingress_configs WHERE listen_port > 0",
         )?;
@@ -521,12 +683,7 @@ pub fn list_reserved_ports_excluding(
         }
     }
 
-    let has_retained: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_app_ingress_configs')",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_retained {
+    if has_table(conn, "retained_app_ingress_configs")? {
         let mut stmt =
             conn.prepare("SELECT app_name, config_json FROM retained_app_ingress_configs")?;
         let rows = stmt.query_map([], |row| {
@@ -535,21 +692,42 @@ pub fn list_reserved_ports_excluding(
         for row in rows {
             let (owner_app, raw_json) = row?;
             if canonical_app(&owner_app) != target {
-                if let Ok(cfg) = serde_json::from_str::<AppIngressConfig>(&raw_json) {
-                    if cfg.listen_port > 0 {
-                        reserved.insert(cfg.listen_port);
-                    }
+                let port = serde_json::from_str::<AppIngressConfig>(&raw_json)
+                    .ok()
+                    .map(|cfg| cfg.listen_port)
+                    .or_else(|| {
+                        serde_json::from_str::<serde_json::Value>(&raw_json)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("listenPort")
+                                    .or_else(|| v.get("listen_port"))
+                                    .and_then(|n| n.as_i64())
+                                    .and_then(|p| i32::try_from(p).ok())
+                            })
+                    })
+                    .unwrap_or(0);
+                if port > 0 {
+                    reserved.insert(port);
                 }
             }
         }
     }
 
-    let has_jobs: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_jobs {
+    if has_table(conn, "app_secondary_ports")? {
+        let mut stmt =
+            conn.prepare("SELECT app_name, port FROM app_secondary_ports WHERE port > 0")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+        })?;
+        for row in rows {
+            let (owner_app, port) = row?;
+            if port > 0 && canonical_app(&owner_app) != target {
+                reserved.insert(port);
+            }
+        }
+    }
+
+    if has_table(conn, "package_lifecycle_jobs")? {
         let mut stmt = conn.prepare(
             "SELECT package_id, service_units FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted')",
         )?;
@@ -575,6 +753,82 @@ pub fn list_reserved_ports_excluding(
     }
 
     Ok(reserved)
+}
+
+/// Runs `choose(tx, reserved)` inside a single `IMMEDIATE` transaction and, when it
+/// returns `Some(port)`, records `port:<port>` on the active `package_lifecycle_jobs`
+/// row for `(app, job_id)` before committing.
+pub fn reserve_lifecycle_port_in_tx<F>(
+    conn: &mut Connection,
+    app: &str,
+    job_id: &str,
+    action: Option<&str>,
+    choose: F,
+) -> anyhow::Result<Option<i32>>
+where
+    F: FnOnce(&Connection, &BTreeSet<i32>) -> anyhow::Result<Option<i32>>,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let reserved = list_reserved_ports_excluding(&tx, app)?;
+    let chosen = choose(&tx, &reserved)?;
+    if let Some(port) = chosen.filter(|&p| (1..=65535).contains(&p)) {
+        if !job_id.is_empty() {
+            anyhow::ensure!(
+                has_table(&tx, "package_lifecycle_jobs")?,
+                "Lifecycle job reservation table is missing"
+            );
+            let target = canonical_app(app);
+            let expected_status = action.and_then(|a| match a.trim() {
+                "install" | "reinstall" => Some("installing"),
+                "update" => Some("updating"),
+                "remove" => Some("uninstalling"),
+                _ => None,
+            });
+            let matched: Option<(String, String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT package_id, status, service_units FROM package_lifecycle_jobs WHERE job_id = ?1",
+                )?;
+                let mut rows = stmt.query([job_id])?;
+                let mut found = None;
+                while let Some(row) = rows.next()? {
+                    let pkg: String = row.get(0)?;
+                    if canonical_app(&pkg) == target {
+                        found = Some((pkg, row.get(1)?, row.get(2)?));
+                        break;
+                    }
+                }
+                found
+            };
+            let Some((pkg_id, status, units_json)) = matched else {
+                anyhow::bail!("Lifecycle job reservation is missing or no longer active");
+            };
+            anyhow::ensure!(
+                !matches!(status.as_str(), "completed" | "failed" | "interrupted")
+                    && expected_status.is_none_or(|exp| status == exp),
+                "Lifecycle job reservation is no longer active for {pkg_id}"
+            );
+            let mut normalized: BTreeSet<String> = serde_json::from_str::<Vec<String>>(&units_json)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| {
+                    u.trim()
+                        .to_ascii_lowercase()
+                        .trim_end_matches(".service")
+                        .to_owned()
+                })
+                .filter(|u| !u.is_empty())
+                .collect();
+            if normalized.insert(format!("port:{port}")) {
+                let updated: Vec<String> = normalized.into_iter().collect();
+                tx.execute(
+                    "UPDATE package_lifecycle_jobs SET service_units=?1 WHERE package_id=?2 AND job_id=?3",
+                    params![serde_json::to_string(&updated)?, pkg_id, job_id],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(chosen)
 }
 
 /// Returns all nonzero listen ports persisted or actively reserved by applications
@@ -955,5 +1209,202 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, "maintainerr");
         assert_eq!(all[0].1.public_domain, "maintainerr.new.example.test");
+    }
+
+    #[test]
+    fn secondary_port_lifecycle_swap_retain_downgrade_purge_and_concurrent_allocation() {
+        let role = af_models::RCLONE_RC_API_PORT_ROLE;
+        let mut conn = Connection::open_in_memory().unwrap();
+        fixture(&conn);
+        let set_job = |c: &Connection, id: &str, act: &str, st: &str| {
+            c.execute(
+                "INSERT INTO package_lifecycle_jobs VALUES ('rclone',?1,?2,?3,'[\"rclone\"]')
+                 ON CONFLICT(package_id) DO UPDATE SET job_id=excluded.job_id, action=excluded.action, status=excluded.status",
+                params![id, act, st],
+            )
+            .unwrap();
+        };
+
+        // 1. Atomic primary + secondary commit blocks other apps and prevents manual self-conflict.
+        set_job(&conn, "job-1", "install", "installing");
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn,
+            "rclone",
+            "install",
+            "job-1",
+            5572,
+            Some((role, Some(5573))),
+            false,
+            "example.test",
+        )
+        .unwrap();
+        set_job(&conn, "job-1", "install", "completed");
+        assert_eq!(
+            load_lifecycle_secondary_port(&conn, "rclone", role).unwrap(),
+            Some(5573)
+        );
+        let reserved = list_reserved_ports_excluding(&conn, "sonarr").unwrap();
+        assert!(reserved.contains(&5572) && reserved.contains(&5573));
+        assert!(set_config(
+            &mut conn,
+            &AppIngressConfig {
+                app_name: "sonarr".into(),
+                listen_port: 5573,
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+        assert!(set_config(
+            &mut conn,
+            &AppIngressConfig {
+                app_name: "rclone".into(),
+                listen_port: 5573,
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+
+        // 2. Atomic swap: GUI moves onto old RC port 5573 while RC moves to 17005.
+        set_job(&conn, "job-2", "reinstall", "installing");
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn,
+            "rclone",
+            "reinstall",
+            "job-2",
+            5573,
+            Some((role, Some(17005))),
+            false,
+            "example.test",
+        )
+        .unwrap();
+        assert_eq!(
+            read_config(&conn, "rclone").unwrap().unwrap().listen_port,
+            5573
+        );
+        assert_eq!(
+            load_lifecycle_secondary_port(&conn, "rclone", role).unwrap(),
+            Some(17005)
+        );
+
+        // 3. Retained remove marks retained=1 and keeps 17005 reserved; idempotent second retain keeps it.
+        set_job(&conn, "job-3", "remove", "uninstalling");
+        for _ in 0..2 {
+            synchronize_lifecycle_ingress_with_secondary_port(
+                &mut conn, "rclone", "remove", "job-3", 0, None, false, "",
+            )
+            .unwrap();
+        }
+        let retained_flag: i64 = conn
+            .query_row("SELECT retained FROM app_secondary_ports WHERE app_name='rclone' AND port_role='rc_api'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(retained_flag, 1);
+        assert!(list_reserved_ports_excluding(&conn, "sonarr")
+            .unwrap()
+            .contains(&17005));
+
+        // 4. Downgrade to single-port clears secondary port and releases 17005.
+        set_job(&conn, "job-4", "reinstall", "installing");
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn,
+            "rclone",
+            "reinstall",
+            "job-4",
+            5573,
+            Some((role, None)),
+            false,
+            "example.test",
+        )
+        .unwrap();
+        assert_eq!(
+            load_lifecycle_secondary_port(&conn, "rclone", role).unwrap(),
+            None
+        );
+        assert!(!list_reserved_ports_excluding(&conn, "sonarr")
+            .unwrap()
+            .contains(&17005));
+
+        // 5. Pre-fix retained remove seeds retained=1 from pre-remove port; purge deletes it.
+        set_job(&conn, "job-5", "remove", "uninstalling");
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn,
+            "rclone",
+            "remove",
+            "job-5",
+            0,
+            Some((role, Some(17006))),
+            false,
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            load_lifecycle_secondary_port(&conn, "rclone", role).unwrap(),
+            Some(17006)
+        );
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn, "rclone", "remove", "job-5", 0, None, true, "",
+        )
+        .unwrap();
+        assert_eq!(
+            load_lifecycle_secondary_port(&conn, "rclone", role).unwrap(),
+            None
+        );
+
+        // 6. Concurrent atomic allocation across two connections never assigns the same port.
+        let path = std::env::temp_dir().join(format!(
+            "af-concurrent-ports-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let setup = Connection::open(&path).unwrap();
+        setup
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        fixture(&setup);
+        setup.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             INSERT INTO package_lifecycle_jobs VALUES ('rclone','rc-job','install','installing','[\"rclone\"]');
+             INSERT INTO package_lifecycle_jobs VALUES ('sonarr','sn-job','install','installing','[\"sonarr\"]');",
+        ).unwrap();
+        drop(setup);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let spawn_alloc = |app: &'static str, jid: &'static str, skip: i32| {
+            let (p, b) = (path.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let mut c = Connection::open(&p).unwrap();
+                c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                b.wait();
+                reserve_lifecycle_port_in_tx(&mut c, app, jid, Some("install"), |_, res| {
+                    Ok(std::iter::once(5573)
+                        .chain(17000..=17010)
+                        .find(|n| *n != skip && !res.contains(n)))
+                })
+                .unwrap()
+                .unwrap()
+            })
+        };
+        let t1 = spawn_alloc("rclone", "rc-job", 5572);
+        let t2 = spawn_alloc("sonarr", "sn-job", 0);
+        let (rclone_alloc, sonarr_alloc) = (t1.join().unwrap(), t2.join().unwrap());
+        assert_ne!(
+            rclone_alloc, sonarr_alloc,
+            "concurrent allocators must never hand out the same port"
+        );
+        let check = Connection::open(&path).unwrap();
+        let reserved_by_others = list_reserved_ports_excluding(&check, "radarr").unwrap();
+        assert!(
+            reserved_by_others.contains(&rclone_alloc)
+                && reserved_by_others.contains(&sonarr_alloc)
+        );
+        drop(check);
+        for p in [
+            path.clone(),
+            path.with_extension("db-wal"),
+            path.with_extension("db-shm"),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }

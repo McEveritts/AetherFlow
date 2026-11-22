@@ -264,6 +264,31 @@ fi
 set_config_file_mode 0600 /etc/rclone/rclone.conf "$RCLONE_CANONICAL_ENV"
 chown -h rclone:rclone /etc/rclone /etc/rclone/rclone.conf "$RCLONE_CANONICAL_ENV" /var/lib/rclone /var/lib/rclone/cache
 
+resolve_standalone_api_port() {
+    local gui_port="$1" unit_file="${RCLONE_UNIT_FILE:-/etc/systemd/system/rclone.service}"
+    local unit_api="" unit_src line
+    [[ "$gui_port" =~ ^[0-9]{1,5}$ ]] || return 1
+    for unit_src in "$unit_file" "${unit_file}.d"/*.conf; do
+        [[ -f "$unit_src" && ! -L "$unit_src" ]] || continue
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            if [[ "$line" =~ ^ExecStart[[:space:]]*=[[:space:]]*$ ]]; then
+                unit_api=""
+            elif [[ "$line" =~ ^ExecStart[[:space:]]*= && "$line" =~ --api-addr[=[:space:]]+[^[:space:]]*:([0-9]{1,5})([[:space:]\"\']|$) ]]; then
+                unit_api="${BASH_REMATCH[1]}"
+            fi
+        done < "$unit_src"
+    done
+    if [[ "$unit_api" =~ ^[0-9]{1,5}$ ]] &&
+        (( 10#$unit_api >= 1 && 10#$unit_api <= 65535 && 10#$unit_api != 10#$gui_port )); then
+        printf '%d\n' "$((10#$unit_api))"
+    elif (( 10#$gui_port == 5573 )); then
+        printf '%s\n' 5574
+    else
+        printf '%s\n' 5573
+    fi
+}
+
 wait_for_service_ready() {
     local service="${1:-rclone}" port="${2:-$APP_PORT}"
     local env_file="${RCLONE_ENV_FILE:-${RCLONE_CANONICAL_ENV:-/etc/rclone/rclone.env}}"
@@ -285,7 +310,7 @@ wait_for_service_ready() {
     local rc_check_port="${RCLONE_API_PORT:-}"
     if [[ -z "$rc_check_port" ]]; then
         if [[ "$rclone_mode" == "gui" ]]; then
-            rc_check_port=5573
+            rc_check_port="$(resolve_standalone_api_port "$port")" || return 1
         else
             rc_check_port="$port"
         fi
@@ -367,9 +392,28 @@ else
         RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --rc-addr=${RCLONE_BIND_HOST}:${APP_PORT}"
     fi
     if [[ "$RCLONE_GUI_HELP" == *--api-addr* ]]; then
-        if [[ -z "${RCLONE_API_PORT:-}" ]]; then
-            RCLONE_API_PORT=5573
-            [[ "$APP_PORT" != 5573 ]] || RCLONE_API_PORT=5574
+        if [[ -n "${AF_RCLONE_API_PORT_ERROR:-}" ]]; then
+            print_error "$AF_RCLONE_API_PORT_ERROR"
+            exit 1
+        elif [[ -n "${AF_RCLONE_API_PORT:-}" ]]; then
+            RCLONE_API_PORT="$AF_RCLONE_API_PORT"
+        elif [[ -z "${RCLONE_API_PORT:-}" ]]; then
+            # Standalone fallback (outside af-runner): preserve env or existing unit --api-addr
+            RCLONE_ENV_API_PORT=""
+            RCLONE_ENV_SRC=""
+            if [[ -f "$RCLONE_CANONICAL_ENV" && ! -L "$RCLONE_CANONICAL_ENV" ]]; then
+                RCLONE_ENV_SRC="$RCLONE_CANONICAL_ENV"
+            elif [[ -f "$RCLONE_LEGACY_ENV" && ! -L "$RCLONE_LEGACY_ENV" ]]; then
+                RCLONE_ENV_SRC="$RCLONE_LEGACY_ENV"
+            fi
+            if [[ -n "$RCLONE_ENV_SRC" ]]; then
+                RCLONE_ENV_API_PORT="$(awk -F= '/^[[:space:]]*(export[[:space:]]+)?RCLONE_API_PORT[[:space:]]*=/{v=$2; sub(/[[:space:]]+#.*/,"",v); gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/,"",v); val=v} END{print val}' "$RCLONE_ENV_SRC")"
+            fi
+            if [[ -n "$RCLONE_ENV_API_PORT" ]]; then
+                RCLONE_API_PORT="$RCLONE_ENV_API_PORT"
+            else
+                RCLONE_API_PORT="$(resolve_standalone_api_port "$APP_PORT")"
+            fi
         fi
         if [[ ! "$RCLONE_API_PORT" =~ ^[0-9]{1,5}$ ]] ||
             (( 10#$RCLONE_API_PORT < 1 || 10#$RCLONE_API_PORT > 65535 || 10#$RCLONE_API_PORT == APP_PORT )); then

@@ -969,13 +969,115 @@ pub(super) async fn system_update_lifecycle_block() -> Option<SystemUpdateLifecy
     .await
 }
 
+fn load_reserved_ports_for_api(app_name: &str) -> anyhow::Result<std::collections::BTreeSet<i32>> {
+    let mut reserved = af_db::get_reserved_ports_excluding(app_name)?;
+    let fs_root = env::var("AETHERFLOW_FS_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
+    reserved.extend(af_runner::rclone_extra_reserved_ports(
+        app_name,
+        fs_root.as_deref(),
+    ));
+    Ok(reserved)
+}
+
 pub(super) fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
     allocate_or_resolve_app_port_with(
         app_name,
         default_port,
         load_authoritative_app_ingress_config,
-        af_db::get_reserved_ports_excluding,
+        load_reserved_ports_for_api,
     )
+}
+
+pub(super) fn allocate_or_resolve_app_port_for_job(
+    app_name: &str,
+    default_port: i32,
+    job_id: &str,
+    action: &str,
+    fs_root: Option<&std::path::Path>,
+) -> i32 {
+    let Ok(mut conn) = af_db::get_conn() else {
+        return 0;
+    };
+    let extra_reserved = af_runner::rclone_extra_reserved_ports(app_name, fs_root);
+    af_db::reserve_lifecycle_port_in_tx(&mut conn, app_name, job_id, Some(action), |tx, base| {
+        let mut reserved = base.clone();
+        reserved.extend(extra_reserved.iter().copied());
+        if app_name.eq_ignore_ascii_case("rclone") {
+            if let Some(sec) = af_db::load_lifecycle_secondary_port(
+                tx,
+                "rclone",
+                af_models::RCLONE_RC_API_PORT_ROLE,
+            )? {
+                reserved.insert(sec);
+            }
+        }
+        let port = allocate_or_resolve_app_port_with(
+            app_name,
+            default_port,
+            |app| af_db::load_lifecycle_ingress(tx, app),
+            |_| Ok(reserved.clone()),
+        );
+        Ok((port > 0).then_some(port))
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+}
+
+pub(super) fn reserve_api_lifecycle_ports(
+    app_name: &str,
+    job_id: &str,
+    action: &str,
+    resolved_port: i32,
+    fs_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if action == "remove" {
+        return Ok(());
+    }
+    let mut conn = af_db::get_conn().map_err(|e| e.to_string())?;
+    let extra_reserved = af_runner::rclone_extra_reserved_ports(app_name, fs_root);
+    if (1024..=65535).contains(&resolved_port) {
+        af_db::reserve_lifecycle_port_in_tx(
+            &mut conn,
+            app_name,
+            job_id,
+            Some(action),
+            |_, reserved| {
+                anyhow::ensure!(
+                    !reserved.contains(&resolved_port) && !extra_reserved.contains(&resolved_port),
+                    "Listen port {resolved_port} is already reserved by another application"
+                );
+                Ok(Some(resolved_port))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if app_name.eq_ignore_ascii_case("rclone") {
+        let _ = af_db::reserve_lifecycle_port_in_tx(
+            &mut conn,
+            "rclone",
+            job_id,
+            Some(action),
+            |tx, reserved| {
+                let secondary = af_db::load_lifecycle_secondary_port(
+                    tx,
+                    "rclone",
+                    af_models::RCLONE_RC_API_PORT_ROLE,
+                )?
+                .or_else(|| {
+                    af_runner::extract_rclone_runtime_api_port_for_root(fs_root).map(i32::from)
+                })
+                .filter(|&p| {
+                    (1..=65535).contains(&p) && p != resolved_port && !reserved.contains(&p)
+                });
+                Ok(secondary)
+            },
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn allocate_or_resolve_app_port_with<LoadExistingFn, LoadReservedFn>(
@@ -1255,7 +1357,7 @@ where
             }
             if let Ok(Some(receipt_port)) = af_services::package_receipt_port(clean_id) {
                 if (1024..=65535).contains(&receipt_port)
-                    && af_db::get_reserved_ports_excluding(clean_id)
+                    && load_reserved_ports_for_api(clean_id)
                         .is_ok_and(|reserved| !reserved.contains(&receipt_port))
                 {
                     return Ok(receipt_port);
@@ -3444,6 +3546,17 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             std::sync::Mutex<Option<RunnerLifecycleSnapshotHandle>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let runner_snapshot_slot = captured_runner_snapshot.clone();
+        let pre_remove_rclone_api_port = if clean_id == "rclone"
+            && action == "remove"
+            && !delete_data
+        {
+            af_runner::extract_rclone_runtime_api_port_for_root(
+                fs_root_override.as_deref().map(std::path::Path::new),
+            )
+            .map(i32::from)
+        } else {
+            None
+        };
         let (allocated_port, stopped_units, execution_result) =
             match run_package_lifecycle_dispatch_gate_with(
                 action,
@@ -3452,7 +3565,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 &fs_root_override_raw,
                 |app_id| af_services::mutators::get_app_runtime_meta(app_id).configured_port,
                 load_authoritative_app_ingress_config,
-                allocate_or_resolve_app_port,
+                |app_name, default_port| {
+                    allocate_or_resolve_app_port_for_job(
+                        app_name,
+                        default_port,
+                        &job_id,
+                        action,
+                        fs_root_override.as_deref().map(std::path::Path::new),
+                    )
+                },
                 |app_id| af_services::resolve_controllable_service_units(app_id, "stop"),
                 |unit_name| af_services::get_systemd_unit_info(unit_name).0,
                 |unit_name, control_action| async move {
@@ -3477,6 +3598,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     let runtime_snapshot_slot = runtime_snapshot_slot.clone();
                     let runner_snapshot_slot = runner_snapshot_slot.clone();
                     async move {
+                        if let Err(err) = reserve_api_lifecycle_ports(
+                            &clean_id,
+                            &job_id,
+                            action,
+                            resolved_port,
+                            fs_root_override.as_deref().map(std::path::Path::new),
+                        ) {
+                            return Err(anyhow::anyhow!("Preparation: {err}"));
+                        }
                         if matches!(action, "install" | "reinstall" | "update") {
                             let mut capture_units =
                                 af_services::resolve_controllable_service_units(&clean_id, "stop");
@@ -4034,7 +4164,24 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     }
                     version
                 },
-                |cfg| af_db::set_app_ingress_config_for_lifecycle(cfg, &job_id, action),
+                |cfg| {
+                    let secondary_update = (clean_id == "rclone").then(|| {
+                        let fallback = fs_root_override.is_none().then(|| {
+                            af_services::mutators::get_app_runtime_meta("rclone").secondary_port
+                        });
+                        af_runner::rclone_secondary_port_update_for_root(
+                            fs_root_override.as_deref().map(std::path::Path::new),
+                            cfg.listen_port,
+                            fallback,
+                        )
+                    }).flatten();
+                    af_db::set_app_ingress_and_secondary_port_for_lifecycle(
+                        cfg,
+                        secondary_update,
+                        &job_id,
+                        action,
+                    )
+                },
             )
             .await;
             if let Err(required_err) = finalization {
@@ -4142,12 +4289,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             }
         } else if action == "remove" {
             let retained = af_db::get_conn().and_then(|mut conn| {
-                af_db::synchronize_lifecycle_ingress(
+                let secondary_update = pre_remove_rclone_api_port
+                    .map(|p| (af_models::RCLONE_RC_API_PORT_ROLE, Some(p)));
+                af_db::synchronize_lifecycle_ingress_with_secondary_port(
                     &mut conn,
                     &clean_id,
                     action,
                     &job_id,
                     0,
+                    secondary_update,
                     delete_data,
                     "",
                 )

@@ -19,6 +19,16 @@ from installer_test_helpers import common_functions
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def rclone_readiness_functions(script):
+    definitions = []
+    for name in ("rclone_env_config", "resolve_standalone_api_port", "wait_for_service_ready"):
+        start = script.index(f"{name}() {{")
+        end = script.index("\n}\n", start) + 3
+        definitions.append(script[start:end])
+    return "\n".join(definitions)
+
+
 MOCK_SCRIPT = r"""#!/bin/bash
 set -e
 root="${TEST_ROOT}"
@@ -1689,12 +1699,7 @@ curl() {
         self.assertIn("POST", rclone_script)
         self.assertIn("/core/version", rclone_script)
 
-        # Extract wait_for_service_ready function definition
-        start = rclone_script.index("wait_for_service_ready() {")
-        end = rclone_script.index("\n}\n", start) + 3
-        helper_start = rclone_script.index("rclone_env_config() {")
-        helper_end = rclone_script.index("\n}\n", helper_start) + 3
-        fn_code = rclone_script[helper_start:helper_end] + rclone_script[start:end]
+        fn_code = rclone_readiness_functions(rclone_script)
 
         env_file = self.root / "rclone.env"
         env_file.write_text("RCLONE_RC_USER=admin\nRCLONE_RC_PASS=supersecret\n")
@@ -1706,7 +1711,7 @@ curl() {
 source "{common_script}"
 {fn_code}
 systemctl() {{ return 0; }}
-export RCLONE_ENV_FILE="{env_file}"
+export RCLONE_ENV_FILE="{env_file}" RCLONE_MODE="gui" RCLONE_UNIT_FILE="{self.root / 'rclone.service'}"
 curl() {{
     if [[ "$*" == *"/core/version"* && "$*" != *"-K"* ]]; then
         printf '200'
@@ -1829,6 +1834,126 @@ wait_for_service_ready rclone 5572 / 2
         res_metrics_500 = subprocess.run(["bash", "-c", test_metrics_500], capture_output=True, text=True)
         self.assertNotEqual(res_metrics_500.returncode, 0)
         self.assertIn("did not become ready", res_metrics_500.stderr)
+
+    def test_rclone_gui_preserves_unit_and_env_api_port_and_honors_runner_override_and_error(self):
+        self.prepare_rclone_fixture()
+        unit_path = self.root / "etc/systemd/system/rclone.service"
+
+        # 1. Runner-provided AF_RCLONE_API_PORT is honored in split-port GUI mode.
+        installed = self.run_script(
+            "rclone",
+            AF_TARGET_VERSION="1.75.2",
+            AF_APP_PORT="5572",
+            AF_RCLONE_API_PORT="17444",
+            RCLONE_FIXTURE_GUI_ONLY="1",
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertIn("--addr=127.0.0.1:5572", unit_path.read_text())
+        self.assertIn("--api-addr=127.0.0.1:17444", unit_path.read_text())
+
+        # 2. Updating without AF_RCLONE_API_PORT / RCLONE_API_PORT preserves retained --api-addr.
+        updated = self.run_script(
+            "rclone",
+            AF_TARGET_VERSION="1.75.2",
+            AF_APP_PORT="5572",
+            RCLONE_FIXTURE_GUI_ONLY="1",
+        )
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        unit_after = unit_path.read_text()
+        self.assertIn("--api-addr=127.0.0.1:17444", unit_after)
+
+        # 3. AF_RCLONE_API_PORT_ERROR fails closed in GUI mode with rollback leaving prior unit intact...
+        gui_err = self.run_script(
+            "rclone",
+            AF_TARGET_VERSION="1.75.2",
+            AF_APP_PORT="5572",
+            RCLONE_FIXTURE_GUI_ONLY="1",
+            AF_RCLONE_API_PORT_ERROR="Listen port 5573 is already reserved by another application",
+        )
+        self.assertNotEqual(gui_err.returncode, 0)
+        self.assertIn("already reserved by another application", gui_err.stderr)
+        self.assertEqual(unit_path.read_text(), unit_after)
+        self.assertTrue((self.root / "install/.rclone.lock").exists())
+
+        # ...while single-port rcd mode ignores AF_RCLONE_API_PORT_ERROR.
+        rcd_ok = self.run_script(
+            "rclone",
+            AF_TARGET_VERSION="1.75.2",
+            AF_APP_PORT="5572",
+            RCLONE_FIXTURE_GUI_ONLY="0",
+            AF_RCLONE_API_PORT_ERROR="Listen port 5573 is already reserved by another application",
+        )
+        self.assertEqual(rcd_ok.returncode, 0, rcd_ok.stderr)
+        rcd_unit = unit_path.read_text()
+        self.assertIn(" rcd --rc-web-gui --rc-addr=127.0.0.1:5572", rcd_unit)
+        self.assertNotIn("--api-addr", rcd_unit)
+
+        # 4. Reinstall in GUI mode moving AF_APP_PORT onto old --api-addr reallocates away cleanly,
+        #    and RCLONE_API_PORT in rclone.env is preserved.
+        env_path = self.root / "etc/rclone/rclone.env"
+        env_path.write_text(env_path.read_text() + 'RCLONE_API_PORT="17890"\n')
+        from_env = self.run_script(
+            "rclone",
+            AF_TARGET_VERSION="1.75.2",
+            AF_APP_PORT="5572",
+            RCLONE_FIXTURE_GUI_ONLY="1",
+        )
+        self.assertEqual(from_env.returncode, 0, from_env.stderr)
+        self.assertIn("--api-addr=127.0.0.1:17890", unit_path.read_text())
+
+        env_path.write_text(
+            "\n".join(
+                line for line in env_path.read_text().splitlines()
+                if not line.startswith("RCLONE_API_PORT=")
+            ) + "\n"
+        )
+        shifted = self.run_script(
+            "rclone",
+            AF_TARGET_VERSION="1.75.2",
+            AF_APP_PORT="17890",
+            RCLONE_FIXTURE_GUI_ONLY="1",
+        )
+        self.assertEqual(shifted.returncode, 0, shifted.stderr)
+        shifted_unit = unit_path.read_text()
+        self.assertIn("--addr=127.0.0.1:17890", shifted_unit)
+        api_match = re.search(r"--api-addr=127\.0\.0\.1:(\d+)", shifted_unit)
+        self.assertIsNotNone(api_match, shifted_unit)
+        self.assertNotEqual(int(api_match.group(1)), 17890)
+
+    def test_rclone_wait_for_service_ready_reads_unit_api_addr_when_env_unset(self):
+        rclone_script = (ROOT / "packages/package/install/installpackage-rclone").read_text()
+        fn_code = rclone_readiness_functions(rclone_script)
+
+        env_file = self.root / "rclone.env"
+        env_file.write_text("RCLONE_RC_USER=admin\nRCLONE_RC_PASS=supersecret\n")
+        unit_file = self.root / "rclone.service"
+        unit_file.write_text(
+            "[Service]\nExecStart=/opt/AetherFlow/apps/rclone/rclone gui "
+            "--addr=127.0.0.1:5572 --api-addr=127.0.0.1:17444 --rc-enable-metrics\n"
+        )
+        common_script = self.root / "opt/AetherFlow/packages/common.sh"
+
+        test_script = f"""
+source "{common_script}"
+{fn_code}
+systemctl() {{ return 0; }}
+unset RCLONE_API_PORT
+export RCLONE_ENV_FILE="{env_file}" RCLONE_UNIT_FILE="{unit_file}" RCLONE_MODE="gui"
+curl() {{
+    if [[ "$*" == *":5572/"* ]]; then
+        printf '200'
+    elif [[ "$*" == *"-K"* && ( "$*" == *":17444/core/version"* || "$*" == *":17444/metrics"* ) ]]; then
+        printf '200'
+    elif [[ "$*" == *":17444/core/version"* || "$*" == *":17444/metrics"* ]]; then
+        printf '401'
+    else
+        printf '000'
+    fi
+}}
+wait_for_service_ready rclone 5572 / 2
+"""
+        res = subprocess.run(["bash", "-c", test_script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_maintainerr_and_github_latest_tag_unprefixed_target(self):
         """Verify github_latest_tag handles unprefixed AF_TARGET_VERSION when strip_v is false,

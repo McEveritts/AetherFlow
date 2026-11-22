@@ -3163,3 +3163,45 @@ fn test_cli_apt_exact_target_policy_parity() {
         assert_eq!(response.status, status, "{}", response.message);
     }
 }
+
+#[test]
+fn rclone_cli_reads_camel_case_retained_listen_port_and_forwards_secondary_port() {
+    let tmp = TempTestDir::new("cli-rclone-ports");
+    let db_path = tmp.path().join("var/lib/aetherflow/aetherflow.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    Connection::open(&db_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE app_ingress_configs (app_name TEXT PRIMARY KEY, listen_port INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+             INSERT INTO retained_app_ingress_configs VALUES ('rclone', '{\"appName\":\"rclone\",\"listenPort\":17572}');",
+        )
+        .unwrap();
+    assert_eq!(
+        query_persisted_ingress_port_from_sqlite(&db_path, "rclone"),
+        Some(17572)
+    );
+
+    let saved_api_port = std::env::var_os("RCLONE_API_PORT");
+    std::env::set_var("RCLONE_API_PORT", "17573");
+    let ok_req = build_package_runner_request("install", "rclone", Some(17572)).unwrap();
+    assert_eq!(ok_req.app_port, 17572);
+    assert_eq!(ok_req.secondary_port, 17573);
+
+    let remove_req = build_package_runner_request("remove", "rclone", None).unwrap();
+    assert_eq!(remove_req.secondary_port, 0);
+
+    let other_req = build_package_runner_request("install", "sonarr", Some(8989)).unwrap();
+    assert_eq!(other_req.secondary_port, 0);
+
+    std::env::set_var("RCLONE_API_PORT", "17572");
+    assert!(build_package_runner_request("install", "rclone", Some(17572)).is_err());
+
+    std::env::set_var("RCLONE_API_PORT", "not-a-port");
+    assert!(build_package_runner_request("install", "rclone", Some(17572)).is_err());
+
+    match saved_api_port {
+        Some(val) => std::env::set_var("RCLONE_API_PORT", val),
+        None => std::env::remove_var("RCLONE_API_PORT"),
+    }
+}

@@ -2876,3 +2876,77 @@ async fn lifecycle_snapshot_routes_store_and_preserve_recovery_via_runner_socket
     }
     let _ = fs::remove_dir_all(&scratch);
 }
+
+#[tokio::test]
+async fn rclone_app_metadata_parses_split_port_gui_dropin_and_ignores_env_api_port_as_gui() {
+    let _env_guard = ENV_TEST_MUTEX.lock().await;
+    let saved_config = env::var_os("AETHERFLOW_CONFIG_ROOT");
+    let saved_fs = env::var_os("AETHERFLOW_FS_ROOT");
+
+    let root = env::temp_dir().join(format!("af-rclone-meta-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("etc/systemd/system/rclone.service.d")).unwrap();
+    fs::create_dir_all(root.join("etc/rclone")).unwrap();
+    env::set_var("AETHERFLOW_CONFIG_ROOT", &root);
+    env::set_var("AETHERFLOW_FS_ROOT", &root);
+
+    // 1. Split-port rclone gui --addr + --api-addr parses both ports cleanly.
+    fs::write(
+        root.join("etc/systemd/system/rclone.service"),
+        "[Service]\nExecStart=/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:17005 --api-addr=127.0.0.1:17006 --rc-enable-metrics\n",
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let meta = extract_app_runtime_meta_local_until("rclone", deadline);
+    assert_eq!(meta.configured_port, 17005);
+    assert_eq!(meta.secondary_port, 17006);
+    assert_eq!(
+        rclone_secondary_port_update_for_root(Some(&root), 17005, None),
+        Some((af_models::RCLONE_RC_API_PORT_ROLE, Some(17006)))
+    );
+
+    // 2. Drop-in ExecStart= reset + override supersedes primary unit.
+    fs::write(
+        root.join("etc/systemd/system/rclone.service.d/override.conf"),
+        "[Service]\nExecStart=\nExecStart=/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:17111 --api-addr=127.0.0.1:17112\n",
+    )
+    .unwrap();
+    let meta_dropin = extract_app_runtime_meta_local_until("rclone", deadline);
+    assert_eq!(meta_dropin.configured_port, 17111);
+    assert_eq!(meta_dropin.secondary_port, 17112);
+
+    // 3. Single-port rcd unit reports configured_port with secondary_port = 0.
+    fs::remove_file(root.join("etc/systemd/system/rclone.service.d/override.conf")).unwrap();
+    fs::write(
+        root.join("etc/systemd/system/rclone.service"),
+        "[Service]\nExecStart=/opt/AetherFlow/apps/rclone/rclone rcd --rc-web-gui --rc-addr=127.0.0.1:5572\n",
+    )
+    .unwrap();
+    let meta_rcd = extract_app_runtime_meta_local_until("rclone", deadline);
+    assert_eq!(meta_rcd.configured_port, 5572);
+    assert_eq!(meta_rcd.secondary_port, 0);
+    assert_eq!(
+        rclone_secondary_port_update_for_root(Some(&root), 5572, None),
+        Some((af_models::RCLONE_RC_API_PORT_ROLE, None))
+    );
+
+    // 4. RCLONE_API_PORT in rclone.env never leaks into GUI configured_port when unit is absent.
+    fs::remove_file(root.join("etc/systemd/system/rclone.service")).unwrap();
+    fs::write(
+        root.join("etc/rclone/rclone.env"),
+        "RCLONE_RC_USER=admin\nRCLONE_RC_PASS=secret\nRCLONE_API_PORT=17222\n",
+    )
+    .unwrap();
+    let meta_env_only = extract_app_runtime_meta_local_until("rclone", deadline);
+    assert_eq!(meta_env_only.configured_port, 0);
+    assert_eq!(meta_env_only.secondary_port, 0);
+
+    match saved_config {
+        Some(v) => env::set_var("AETHERFLOW_CONFIG_ROOT", v),
+        None => env::remove_var("AETHERFLOW_CONFIG_ROOT"),
+    }
+    match saved_fs {
+        Some(v) => env::set_var("AETHERFLOW_FS_ROOT", v),
+        None => env::remove_var("AETHERFLOW_FS_ROOT"),
+    }
+    let _ = fs::remove_dir_all(&root);
+}

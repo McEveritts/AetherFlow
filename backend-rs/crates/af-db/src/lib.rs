@@ -4,8 +4,9 @@ pub use retained_ingress::{
     check_app_ingress_reservation, clear_pending_base_domain_sync,
     get_all_retained_app_ingress_configs, get_pending_base_domain_sync,
     get_reserved_ports_excluding, get_retained_app_ingress_config, list_reserved_ports_excluding,
-    list_retained_app_ingress_names, load_lifecycle_ingress, plan_lifecycle_ingress,
-    set_pending_base_domain_sync, synchronize_lifecycle_ingress,
+    list_retained_app_ingress_names, load_lifecycle_ingress, load_lifecycle_secondary_port,
+    plan_lifecycle_ingress, reserve_lifecycle_port_in_tx, set_pending_base_domain_sync,
+    synchronize_lifecycle_ingress, synchronize_lifecycle_ingress_with_secondary_port,
     update_retained_app_ingress_config_in_tx, PendingBaseDomainSync,
 };
 
@@ -979,6 +980,14 @@ pub fn init_db() -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (
             app_name TEXT PRIMARY KEY,
             config_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_secondary_ports (
+            app_name TEXT NOT NULL,
+            port_role TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            retained INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (app_name, port_role)
         );
 
         CREATE TABLE IF NOT EXISTS base_domain_sync_state (
@@ -2471,6 +2480,15 @@ pub fn set_app_ingress_config_for_lifecycle(
     job_id: &str,
     action: &str,
 ) -> anyhow::Result<()> {
+    set_app_ingress_and_secondary_port_for_lifecycle(cfg, None, job_id, action)
+}
+
+pub fn set_app_ingress_and_secondary_port_for_lifecycle(
+    cfg: &AppIngressConfig,
+    secondary_port: Option<(&str, Option<i32>)>,
+    job_id: &str,
+    action: &str,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(action, "install" | "reinstall" | "update"),
         "Invalid ingress lifecycle action"
@@ -2480,7 +2498,12 @@ pub fn set_app_ingress_config_for_lifecycle(
         "Ingress lifecycle job identity is required"
     );
     let mut conn = get_conn()?;
-    retained_ingress::set_config(&mut conn, cfg, Some((job_id, action)))?;
+    retained_ingress::set_config_with_secondary_port(
+        &mut conn,
+        cfg,
+        secondary_port,
+        Some((job_id, action)),
+    )?;
     invalidate_ingress_cache();
     Ok(())
 }
@@ -2492,6 +2515,16 @@ fn write_app_ingress_config(conn: &Connection, cfg: &AppIngressConfig) -> anyhow
             !reserved.contains(&cfg.listen_port),
             "Listen port {} is already reserved by another application",
             cfg.listen_port
+        );
+        anyhow::ensure!(
+            !retained_ingress::has_active_secondary_port_conflict(
+                conn,
+                &cfg.app_name,
+                cfg.listen_port
+            )?,
+            "Listen port {} conflicts with an active secondary port for {}",
+            cfg.listen_port,
+            cfg.app_name
         );
     }
     conn.execute(

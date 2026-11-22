@@ -617,6 +617,28 @@ pub fn build_package_runner_request(
         )));
     }
 
+    let mut secondary_port = 0;
+    if clean_pkg == "rclone" && action != "remove" {
+        if let Ok(raw) = std::env::var("RCLONE_API_PORT") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                let parsed = af_runner::parse_rclone_port_value(trimmed).ok_or_else(|| {
+                    CliError::Validation(format!(
+                        "invalid RCLONE_API_PORT {:?} (must be 1..=65535)",
+                        trimmed
+                    ))
+                })?;
+                if port > 0 && parsed as i32 == port {
+                    return Err(CliError::Validation(format!(
+                        "RCLONE_API_PORT {} must differ from GUI port {}",
+                        parsed, port
+                    )));
+                }
+                secondary_port = parsed as i32;
+            }
+        }
+    }
+
     let target = std::env::var("AF_TARGET_VERSION")
         .ok()
         .filter(|s| !s.trim().is_empty());
@@ -627,6 +649,7 @@ pub fn build_package_runner_request(
         script_name: format!("{}{}", script_prefix, clean_pkg),
         lifecycle_job_id: String::new(),
         app_port: port,
+        secondary_port,
         delete_data: false,
         expected_target_version: target,
         ..Default::default()

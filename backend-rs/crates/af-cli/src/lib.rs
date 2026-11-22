@@ -436,6 +436,7 @@ fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> O
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_raw) {
             if let Some(port) = val
                 .get("listen_port")
+                .or_else(|| val.get("listenPort"))
                 .and_then(|v| v.as_i64())
                 .and_then(|p| i32::try_from(p).ok())
             {

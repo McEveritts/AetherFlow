@@ -1943,6 +1943,191 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn coordinated_rclone_split_port_lifecycle_rollback_inactive_retain_purge_and_concurrency(
+    ) {
+        let role = af_models::RCLONE_RC_API_PORT_ROLE;
+        let (root, confined_db, conn, base_pkg) = fixture();
+        let mk_pkg = |name: &str, default_port: i32| Package {
+            name: name.into(),
+            service_name: name.into(),
+            lock_file: format!("/install/.{name}.lock"),
+            default_port,
+            ..base_pkg.clone()
+        };
+        let mk_req =
+            |pkg: &str, act: &str, app_port: i32, secondary_port: i32, delete_data: bool| {
+                let prefix = if act == "remove" {
+                    "removepackage-"
+                } else {
+                    "installpackage-"
+                };
+                PackageRunnerRequest {
+                    action: act.into(),
+                    package_id: pkg.into(),
+                    script_name: format!("{prefix}{pkg}"),
+                    app_port,
+                    secondary_port,
+                    delete_data,
+                    ..Default::default()
+                }
+            };
+        let (rclone_pkg, sonarr_pkg, radarr_pkg) = (
+            mk_pkg("rclone", 5572),
+            mk_pkg("sonarr", 17455),
+            mk_pkg("radarr", 17455),
+        );
+
+        let systemd_dir = root.join("etc/systemd/system");
+        std::fs::create_dir_all(&systemd_dir).unwrap();
+        std::fs::write(
+            systemd_dir.join("rclone.service"),
+            "[Service]\nExecStart=/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:5572 --api-addr=127.0.0.1:17455\n",
+        ).unwrap();
+
+        let (sender, _rx) = mpsc::channel(32);
+        let backend = FakeBackend::default();
+
+        // 1. Split-port install commits GUI 5572 + RC 17455.
+        let mut op = CoordinatedOperation::admit(
+            conn,
+            mk_req("rclone", "install", 5572, 0, false),
+            rclone_pkg.clone(),
+            vec!["rclone".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            op.execute(&backend, &sender).await.unwrap().status,
+            "completed"
+        );
+        assert_eq!(
+            af_db::load_lifecycle_secondary_port(&op.conn, "rclone", role).unwrap(),
+            Some(17455)
+        );
+        drop(op);
+
+        // 2. Sonarr requesting Rclone's active RC port 17455 is rejected at admission.
+        assert!(CoordinatedOperation::admit(
+            Connection::open(&confined_db).unwrap(),
+            mk_req("sonarr", "install", 17455, 0, false),
+            sonarr_pkg.clone(),
+            vec!["sonarr".into()],
+        )
+        .is_err());
+
+        // 3. Failed reinstall rolls back without overwriting 17455 and releases temp secondary reservation 17499.
+        let fail_backend = FakeBackend {
+            fail_script: true,
+            ..Default::default()
+        };
+        let mut op_fail = CoordinatedOperation::admit(
+            Connection::open(&confined_db).unwrap(),
+            mk_req("rclone", "reinstall", 5572, 17499, false),
+            rclone_pkg.clone(),
+            vec!["rclone".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            op_fail
+                .execute(&fail_backend, &sender)
+                .await
+                .unwrap()
+                .status,
+            "failed"
+        );
+        assert_eq!(
+            af_db::load_lifecycle_secondary_port(&op_fail.conn, "rclone", role).unwrap(),
+            Some(17455)
+        );
+        assert!(
+            !af_db::list_reserved_ports_excluding(&op_fail.conn, "sonarr")
+                .unwrap()
+                .contains(&17499)
+        );
+        drop(op_fail);
+
+        // 4. Inactive retained remove (unit deleted on disk) retains 17455 and blocks other apps.
+        std::fs::remove_file(systemd_dir.join("rclone.service")).unwrap();
+        let inactive_backend = FakeBackend {
+            inactive_after_start: true,
+            ..Default::default()
+        };
+        let mut op_retain = CoordinatedOperation::admit(
+            Connection::open(&confined_db).unwrap(),
+            mk_req("rclone", "remove", 0, 0, false),
+            rclone_pkg.clone(),
+            vec!["rclone".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            op_retain
+                .execute(&inactive_backend, &sender)
+                .await
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(
+            af_db::load_lifecycle_secondary_port(&op_retain.conn, "rclone", role).unwrap(),
+            Some(17455)
+        );
+        drop(op_retain);
+
+        // 5. Concurrent coordinated installs with colliding default ports skip 17455 and never choose the same port.
+        let mut op_sonarr = CoordinatedOperation::admit(
+            Connection::open(&confined_db).unwrap(),
+            mk_req("sonarr", "install", 0, 0, false),
+            sonarr_pkg,
+            vec!["sonarr".into()],
+        )
+        .unwrap();
+        let mut op_radarr = CoordinatedOperation::admit(
+            Connection::open(&confined_db).unwrap(),
+            mk_req("radarr", "install", 0, 0, false),
+            radarr_pkg,
+            vec!["radarr".into()],
+        )
+        .unwrap();
+        let (sonarr_res, radarr_res) = tokio::join!(
+            op_sonarr.execute(&backend, &sender),
+            op_radarr.execute(&backend, &sender),
+        );
+        let (sonarr_port, radarr_port) =
+            (sonarr_res.unwrap().app_port, radarr_res.unwrap().app_port);
+        assert_ne!(sonarr_port, 17455);
+        assert_ne!(radarr_port, 17455);
+        assert_ne!(
+            sonarr_port, radarr_port,
+            "concurrent coordinated installs must never allocate the same port"
+        );
+        drop(op_sonarr);
+        drop(op_radarr);
+
+        // 6. Explicit purge removes retained secondary port 17455 and releases it.
+        let mut op_purge = CoordinatedOperation::admit(
+            Connection::open(&confined_db).unwrap(),
+            mk_req("rclone", "remove", 0, 0, true),
+            rclone_pkg,
+            vec!["rclone".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            op_purge.execute(&backend, &sender).await.unwrap().status,
+            "completed"
+        );
+        assert_eq!(
+            af_db::load_lifecycle_secondary_port(&op_purge.conn, "rclone", role).unwrap(),
+            None
+        );
+        assert!(
+            !af_db::list_reserved_ports_excluding(&op_purge.conn, "sonarr")
+                .unwrap()
+                .contains(&17455)
+        );
+        drop(op_purge);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 async fn run_direct(
@@ -2239,6 +2424,26 @@ struct CoordinatedOperation {
     _owner: OwnerLease,
 }
 
+fn effective_fs_root_for_conn(conn: &Connection) -> Option<std::path::PathBuf> {
+    if let Some(root) = crate::PackageExecutionEnv::default().fs_root {
+        return Some(root);
+    }
+    conn.path().map(Path::new).and_then(|p| {
+        p.ancestors().find_map(|anc| {
+            let rel = p.strip_prefix(anc).ok()?;
+            if anc != Path::new("/")
+                && (rel == Path::new("var/lib/aetherflow/aetherflow.sqlite")
+                    || rel == Path::new("var/lib/aetherflow/aetherflow.db")
+                    || rel == Path::new("etc/aetherflow/aetherflow.db"))
+            {
+                Some(anc.to_path_buf())
+            } else {
+                None
+            }
+        })
+    })
+}
+
 impl CoordinatedOperation {
     fn admit(
         mut conn: Connection,
@@ -2254,6 +2459,22 @@ impl CoordinatedOperation {
             !request.delete_data || request.action == "remove",
             "Purge requires removal"
         );
+        if request.secondary_port != 0 {
+            anyhow::ensure!(
+                (1..=65535).contains(&request.secondary_port),
+                "Requested secondary port is invalid"
+            );
+            anyhow::ensure!(
+                request.package_id == "rclone" && request.action != "remove",
+                "Secondary port is only valid for rclone install, reinstall, or update"
+            );
+            anyhow::ensure!(
+                request.app_port == 0 || request.secondary_port != request.app_port,
+                "Rclone RC API port {} must differ from GUI port {}",
+                request.secondary_port,
+                request.app_port
+            );
+        }
         conn.busy_timeout(Duration::from_secs(5))?;
         lifecycle::initialize_schema(&conn)?;
         if matches!(request.action.as_str(), "install" | "reinstall") {
@@ -2285,6 +2506,12 @@ impl CoordinatedOperation {
             }
         }
         if request.action != "remove" {
+            let fs_root = effective_fs_root_for_conn(&conn);
+            let mut reserved = af_db::list_reserved_ports_excluding(&conn, &request.package_id)?;
+            reserved.extend(crate::rclone_extra_reserved_ports(
+                &request.package_id,
+                fs_root.as_deref(),
+            ));
             let candidate_port = if request.app_port > 0 {
                 Some(request.app_port)
             } else {
@@ -2293,7 +2520,6 @@ impl CoordinatedOperation {
                     .filter(|p| *p > 0)
             };
             if let Some(port) = candidate_port {
-                let reserved = af_db::list_reserved_ports_excluding(&conn, &request.package_id)?;
                 anyhow::ensure!(
                     !reserved.contains(&port),
                     "Listen port {} is already reserved by another application",
@@ -2302,6 +2528,44 @@ impl CoordinatedOperation {
                 if let Some(res) = lifecycle::port_resource(port) {
                     if !units.contains(&res) {
                         units.push(res);
+                    }
+                }
+            }
+            if request.package_id == "rclone" {
+                let candidate_secondary = if request.secondary_port > 0 {
+                    anyhow::ensure!(
+                        candidate_port.is_none_or(|p| p != request.secondary_port),
+                        "Rclone RC API port {} must differ from GUI port {}",
+                        request.secondary_port,
+                        candidate_port.unwrap_or_default()
+                    );
+                    anyhow::ensure!(
+                        !reserved.contains(&request.secondary_port),
+                        "Rclone RC API port {} is already reserved by another application",
+                        request.secondary_port
+                    );
+                    Some(request.secondary_port)
+                } else {
+                    af_db::load_lifecycle_secondary_port(
+                        &conn,
+                        "rclone",
+                        af_models::RCLONE_RC_API_PORT_ROLE,
+                    )?
+                    .or_else(|| {
+                        crate::extract_rclone_runtime_api_port_for_root(fs_root.as_deref())
+                            .map(i32::from)
+                    })
+                    .filter(|&p| {
+                        (1..=65535).contains(&p)
+                            && candidate_port.is_none_or(|gui| gui != p)
+                            && !reserved.contains(&p)
+                    })
+                };
+                if let Some(sec_port) = candidate_secondary {
+                    if let Some(res) = lifecycle::port_resource(sec_port) {
+                        if !units.contains(&res) {
+                            units.push(res);
+                        }
                     }
                 }
             }
@@ -2384,18 +2648,30 @@ impl CoordinatedOperation {
         .unwrap_or(false)
     }
 
-    fn resolve_port(&self, backend: &impl LifecycleBackend) -> Result<i32> {
-        if self.request.action == "remove" {
+    fn resolve_port_in_tx(
+        request: &PackageRunnerRequest,
+        package: &Package,
+        fs_root: Option<&Path>,
+        installed_or_legacy: bool,
+        conn: &Connection,
+        base_reserved: &std::collections::BTreeSet<i32>,
+        backend: &impl LifecycleBackend,
+    ) -> Result<i32> {
+        if request.action == "remove" {
             return Ok(0);
         }
-        let reserved = af_db::list_reserved_ports_excluding(&self.conn, &self.request.package_id)?;
-        let ingress = af_db::load_lifecycle_ingress(&self.conn, &self.request.package_id)?;
+        let mut reserved = base_reserved.clone();
+        reserved.extend(crate::rclone_extra_reserved_ports(
+            &request.package_id,
+            fs_root,
+        ));
+        let ingress = af_db::load_lifecycle_ingress(conn, &request.package_id)?;
         let saved = ingress
             .as_ref()
             .map(|config| config.listen_port)
             .unwrap_or(0);
-        if self.request.action == "update" {
-            let runtime = backend.runtime_port(&self.request.package_id);
+        if request.action == "update" {
+            let runtime = backend.runtime_port(&request.package_id);
             if runtime > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&runtime),
@@ -2421,22 +2697,22 @@ impl CoordinatedOperation {
                 return Ok(saved);
             }
             anyhow::ensure!(
-                self.package.default_port <= 0,
+                package.default_port <= 0,
                 "Existing application listen port is unavailable"
             );
             return Ok(0);
         }
-        if self.request.app_port > 0 {
+        if request.app_port > 0 {
             anyhow::ensure!(
-                (1024..=65535).contains(&self.request.app_port),
+                (1024..=65535).contains(&request.app_port),
                 "Requested listen port is invalid"
             );
             anyhow::ensure!(
-                !reserved.contains(&self.request.app_port),
+                !reserved.contains(&request.app_port),
                 "Listen port {} is already reserved by another application",
-                self.request.app_port
+                request.app_port
             );
-            return Ok(self.request.app_port);
+            return Ok(request.app_port);
         }
         if saved > 0 {
             anyhow::ensure!(
@@ -2450,8 +2726,8 @@ impl CoordinatedOperation {
             );
             return Ok(saved);
         }
-        if self.is_installed_on_disk() || self.has_legacy_upgrade_receipt() {
-            let runtime = backend.runtime_port(&self.request.package_id);
+        if installed_or_legacy {
+            let runtime = backend.runtime_port(&request.package_id);
             if runtime > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&runtime),
@@ -2463,33 +2739,79 @@ impl CoordinatedOperation {
             }
             let env_cfg = crate::PackageExecutionEnv::default();
             if let Ok(Some(receipt_port)) = af_models::read_package_receipt_port(
-                &self.package.name,
-                Some(&self.package.lock_file),
+                &package.name,
+                Some(&package.lock_file),
                 env_cfg.fs_root.as_deref(),
             ) {
                 if (1024..=65535).contains(&receipt_port)
                     && !reserved.contains(&receipt_port)
-                    && (self.request.action == "reinstall" || backend.available_port(receipt_port))
+                    && (request.action == "reinstall" || backend.available_port(receipt_port))
                 {
                     return Ok(receipt_port);
                 }
             }
         }
-        let default = self.package.default_port;
+        let default = package.default_port;
         if default <= 0 {
             return Ok(0);
+        }
+        if request.package_id == "rclone" {
+            if request.secondary_port > 0 {
+                reserved.insert(request.secondary_port);
+            } else if let Some(sec) = af_db::load_lifecycle_secondary_port(
+                conn,
+                "rclone",
+                af_models::RCLONE_RC_API_PORT_ROLE,
+            )? {
+                reserved.insert(sec);
+            }
         }
         if !reserved.contains(&default) && backend.available_port(default) {
             return Ok(default);
         }
         anyhow::ensure!(
-            !matches!(self.request.package_id.as_str(), "plex" | "calibreweb"),
+            !matches!(request.package_id.as_str(), "plex" | "calibreweb"),
             "Fixed application port is unavailable"
         );
         let [start, end] = af_models::MARKETPLACE_FALLBACK_PORT_RANGE;
         (start..=end)
             .find(|port| !reserved.contains(port) && backend.available_port(*port))
             .context("No application listen port is available")
+    }
+
+    fn resolve_and_reserve_port(&mut self, backend: &impl LifecycleBackend) -> Result<i32> {
+        if self.request.action == "remove" {
+            return Ok(0);
+        }
+        let fs_root = self.effective_fs_root();
+        let installed_or_legacy = self.is_installed_on_disk() || self.has_legacy_upgrade_receipt();
+        let request = &self.request;
+        let package = &self.package;
+        let chosen = af_db::reserve_lifecycle_port_in_tx(
+            &mut self.conn,
+            &request.package_id,
+            &request.lifecycle_job_id,
+            Some(&request.action),
+            |tx, reserved| {
+                let port = Self::resolve_port_in_tx(
+                    request,
+                    package,
+                    fs_root.as_deref(),
+                    installed_or_legacy,
+                    tx,
+                    reserved,
+                    backend,
+                )?;
+                Ok((port > 0).then_some(port))
+            },
+        )?
+        .unwrap_or(0);
+        if let Some(res) = lifecycle::port_resource(chosen) {
+            if !self.units.contains(&res) {
+                self.units.push(res);
+            }
+        }
+        Ok(chosen)
     }
 
     fn update_units(&self) -> Vec<String> {
@@ -3092,23 +3414,7 @@ fn redacted_container_value(val: &str) -> bool {
 
 impl CoordinatedOperation {
     fn effective_fs_root(&self) -> Option<std::path::PathBuf> {
-        if let Some(root) = crate::PackageExecutionEnv::default().fs_root {
-            return Some(root);
-        }
-        self.conn.path().map(Path::new).and_then(|p| {
-            p.ancestors().find_map(|anc| {
-                let rel = p.strip_prefix(anc).ok()?;
-                if anc != Path::new("/")
-                    && (rel == Path::new("var/lib/aetherflow/aetherflow.sqlite")
-                        || rel == Path::new("var/lib/aetherflow/aetherflow.db")
-                        || rel == Path::new("etc/aetherflow/aetherflow.db"))
-                {
-                    Some(anc.to_path_buf())
-                } else {
-                    None
-                }
-            })
-        })
+        effective_fs_root_for_conn(&self.conn)
     }
 
     #[cfg(test)]
@@ -3476,25 +3782,17 @@ impl CoordinatedOperation {
         let all_controllable_units = self.update_units();
         let should_quiesce_oneshots_pre_op =
             prior_installed || matches!(self.request.action.as_str(), "update" | "reinstall");
+        let pre_remove_rclone_api_port = if self.request.package_id == "rclone"
+            && self.request.action == "remove"
+            && !self.request.delete_data
+        {
+            crate::extract_rclone_runtime_api_port_for_root(pre_op_env.fs_root.as_deref())
+                .map(i32::from)
+        } else {
+            None
+        };
         let mut execution: Result<()> = async {
-            self.request.app_port = self.resolve_port(backend)?;
-            if let Some(res) = lifecycle::port_resource(self.request.app_port) {
-                if !self.units.contains(&res) {
-                    self.units.push(res);
-                    let normalized: Vec<_> =
-                        lifecycle::package_resources(&self.request.package_id, &self.units)
-                            .into_iter()
-                            .collect();
-                    self.conn.execute(
-                        "UPDATE package_lifecycle_jobs SET service_units=?1 WHERE package_id=?2 AND job_id=?3",
-                        rusqlite::params![
-                            serde_json::to_string(&normalized)?,
-                            self.request.package_id,
-                            self.request.lifecycle_job_id,
-                        ],
-                    )?;
-                }
-            }
+            self.request.app_port = self.resolve_and_reserve_port(backend)?;
             for unit in &all_controllable_units {
                 if !backend.quiescent(unit).await? {
                     stopped.push(unit.clone());
@@ -3515,12 +3813,17 @@ impl CoordinatedOperation {
                 }
             }
             prep_services_verified = true;
-            if matches!(self.request.action.as_str(), "install" | "reinstall" | "update") {
+            if matches!(
+                self.request.action.as_str(),
+                "install" | "reinstall" | "update"
+            ) {
                 vhost_backups = crate::snapshot_app_vhost_backups(
                     &self.request.package_id,
                     pre_op_env.fs_root.as_deref(),
                 )
-                .map_err(|e| anyhow::anyhow!("Failed to snapshot Apache vhosts before execution: {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to snapshot Apache vhosts before execution: {e}")
+                })?;
                 runtime_snapshot = Some(
                     PackageRuntimeSnapshot::capture_blocking(
                         self.request.package_id.clone(),
@@ -3528,7 +3831,9 @@ impl CoordinatedOperation {
                         pre_op_env.clone(),
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to snapshot package runtime before execution: {e}"))?,
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to snapshot package runtime before execution: {e}")
+                    })?,
                 );
                 snapshot_captured = true;
             }
@@ -3772,12 +4077,28 @@ impl CoordinatedOperation {
                         |row| row.get(0),
                     )
                     .optional()?;
-                af_db::synchronize_lifecycle_ingress(
+                let secondary_update = if self.request.package_id == "rclone" {
+                    if self.request.action == "remove" {
+                        pre_remove_rclone_api_port
+                            .map(|p| (af_models::RCLONE_RC_API_PORT_ROLE, Some(p)))
+                    } else {
+                        crate::rclone_secondary_port_update_for_root(
+                            self.effective_fs_root().as_deref(),
+                            self.request.app_port,
+                            (self.request.secondary_port > 0)
+                                .then_some(self.request.secondary_port),
+                        )
+                    }
+                } else {
+                    None
+                };
+                af_db::synchronize_lifecycle_ingress_with_secondary_port(
                     &mut self.conn,
                     &self.request.package_id,
                     &self.request.action,
                     &self.request.lifecycle_job_id,
                     self.request.app_port,
+                    secondary_update,
                     self.request.delete_data,
                     base.as_deref().unwrap_or(""),
                 )?;

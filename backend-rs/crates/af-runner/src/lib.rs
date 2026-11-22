@@ -956,6 +956,14 @@ async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
     if req.app_port != 0 && !(1024..=65535).contains(&req.app_port) {
         return (StatusCode::BAD_REQUEST, "invalid application port").into_response();
     }
+    if req.secondary_port != 0
+        && (!(1..=65535).contains(&req.secondary_port)
+            || req.package_id != "rclone"
+            || req.action == "remove"
+            || (req.app_port != 0 && req.secondary_port == req.app_port))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid secondary port").into_response();
+    }
     if req.delete_data && req.action != "remove" {
         return (
             StatusCode::BAD_REQUEST,
@@ -6760,6 +6768,7 @@ where
             script_name: script_name.to_string(),
             lifecycle_job_id: current_package_job_id(),
             app_port,
+            secondary_port: 0,
             delete_data,
             expected_target_version,
             achieved_version: None,

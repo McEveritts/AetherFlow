@@ -7242,3 +7242,212 @@ async fn test_declarative_apt_exact_non_candidate_selection_and_rollback() {
         );
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rclone_declarative_and_legacy_bash_paths_coordinate_rc_api_port_reservations() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = create_isolated_test_dir("rclone-port-coord");
+    let rclone_bin = root.join("opt/AetherFlow/apps/rclone/rclone");
+    let unit_path = root.join("etc/systemd/system/rclone.service");
+    let env_path = root.join("etc/rclone/rclone.env");
+    for d in [
+        rclone_bin.parent().unwrap(),
+        unit_path.parent().unwrap(),
+        env_path.parent().unwrap(),
+    ] {
+        fs::create_dir_all(d).unwrap();
+    }
+
+    let db_path = root.join("var/lib/aetherflow/aetherflow.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    rusqlite::Connection::open(&db_path).unwrap().execute_batch(
+        "CREATE TABLE app_ingress_configs (app_name TEXT PRIMARY KEY, listen_port INTEGER NOT NULL DEFAULT 0);
+         CREATE TABLE retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+         CREATE TABLE package_lifecycle_jobs (package_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL, service_units TEXT NOT NULL);
+         INSERT INTO app_ingress_configs VALUES ('sonarr', 5573);
+         INSERT INTO retained_app_ingress_configs VALUES ('radarr', '{\"appName\":\"radarr\",\"listenPort\":17000}');
+         INSERT INTO package_lifecycle_jobs VALUES ('lidarr','job-lidarr','install','installing','[\"lidarr\",\"port:17001\"]');
+         INSERT INTO package_lifecycle_jobs VALUES ('rclone','job-rc-1','install','installing','[\"rclone\",\"port:5572\"]');",
+    ).unwrap();
+
+    fs::write(&rclone_bin, "#!/bin/sh\nif [ \"$1\" = rcd ]; then echo '--rc-enable-metrics'; else echo '--addr --api-addr --rc-enable-metrics --no-open-browser'; fi\n").unwrap();
+    fs::set_permissions(&rclone_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let cmd_envs = |req: &PackageRunnerRequest| {
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        configure_legacy_rclone_api_port_env(&mut cmd, req, Some(&root), 5572);
+        cmd.as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|x| x.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+
+    // 1. Legacy Bash runner handoff skips reserved ports, sets AF_RCLONE_API_PORT, and records port:<N> on job.
+    let bash_req = PackageRunnerRequest {
+        action: "install".into(),
+        package_id: "rclone".into(),
+        script_name: "installpackage-rclone".into(),
+        lifecycle_job_id: "job-rc-1".into(),
+        app_port: 5572,
+        ..Default::default()
+    };
+    let legacy_envs = cmd_envs(&bash_req);
+    let legacy_api_port: u16 = legacy_envs["AF_RCLONE_API_PORT"]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (17002..=19999).contains(&legacy_api_port),
+        "{legacy_api_port}"
+    );
+    assert_eq!(legacy_envs.get("AF_RCLONE_API_PORT_ERROR"), Some(&None));
+    let job_units: String = rusqlite::Connection::open(&db_path).unwrap()
+        .query_row("SELECT service_units FROM package_lifecycle_jobs WHERE package_id='rclone' AND job_id='job-rc-1'", [], |r| r.get(0)).unwrap();
+    assert!(
+        job_units.contains(&format!("port:{legacy_api_port}")),
+        "{job_units}"
+    );
+
+    // Conflicting explicit secondary_port fails closed via AF_RCLONE_API_PORT_ERROR.
+    let mut conflict_req = bash_req.clone();
+    conflict_req.secondary_port = 5573;
+    assert!(cmd_envs(&conflict_req)["AF_RCLONE_API_PORT_ERROR"]
+        .as_deref()
+        .unwrap_or("")
+        .contains("already reserved by another application"));
+
+    // 2. Declarative WriteSystemdUnit allocates, preserves on update, reallocates on GUI collision, honors rclone.env.
+    let unit_step = DeclarativeStep::WriteSystemdUnit {
+        unit_name: "rclone.service".into(),
+        content_template: "[Service]\nExecStart={{RCLONE_EXEC_START}}\n".into(),
+        progress_pct: 70,
+        description: "write rclone unit".into(),
+    };
+    let recipe = get_declarative_recipe("rclone").unwrap();
+    let mut env_cfg = PackageExecutionEnv::isolated(&root);
+    env_cfg.lifecycle_job_id = "job-rc-1".into();
+    let executor = DeclarativePackageExecutor::new(env_cfg);
+    let (cancel, mut journal) = (
+        CancellationToken::new(),
+        RollbackJournal::new(Some(root.clone())),
+    );
+    macro_rules! run_unit {
+        ($vars:expr) => {
+            executor.run_single_step(&recipe, &unit_step, $vars, &mut journal, &cancel)
+        };
+    }
+    let parsed_unit = || crate::parse_rclone_unit_ports(&fs::read_to_string(&unit_path).unwrap());
+
+    let mut vars = HashMap::from([
+        ("APP_PORT".into(), "5572".into()),
+        ("LIFECYCLE_ACTION".into(), "install".into()),
+    ]);
+    run_unit!(&mut vars).await.unwrap();
+    let alloc_port = parsed_unit().api_port.unwrap();
+    assert!((17002..=19999).contains(&alloc_port), "{alloc_port}");
+
+    // Update preserves unit --api-addr; moving GUI onto old RC port reallocates RC away.
+    run_unit!(&mut HashMap::from([
+        ("APP_PORT".into(), "5572".into()),
+        ("LIFECYCLE_ACTION".into(), "install".into())
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(parsed_unit().api_port, Some(alloc_port));
+    run_unit!(&mut HashMap::from([
+        ("APP_PORT".into(), alloc_port.to_string()),
+        ("LIFECYCLE_ACTION".into(), "install".into())
+    ]))
+    .await
+    .unwrap();
+    let moved = parsed_unit();
+    assert_eq!(moved.gui_port, Some(alloc_port));
+    assert!(moved
+        .api_port
+        .is_some_and(|p| p != alloc_port && !matches!(p, 5573 | 17000 | 17001)));
+
+    // rclone.env override honored; conflicting override fails closed.
+    fs::write(
+        &env_path,
+        "RCLONE_RC_USER=admin\nRCLONE_RC_PASS=pw\nRCLONE_API_PORT=17890\n",
+    )
+    .unwrap();
+    run_unit!(&mut HashMap::from([
+        ("APP_PORT".into(), "5572".into()),
+        ("LIFECYCLE_ACTION".into(), "install".into())
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(parsed_unit().api_port, Some(17890));
+    fs::write(
+        &env_path,
+        "RCLONE_RC_USER=admin\nRCLONE_RC_PASS=pw\nRCLONE_API_PORT=5573\n",
+    )
+    .unwrap();
+    assert!(
+        run_unit!(&mut HashMap::from([("APP_PORT".into(), "5572".into())]))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already reserved by another application")
+    );
+    fs::remove_file(&env_path).unwrap();
+
+    // Busy loopback port skips 5573 cleanly.
+    let empty_root = create_isolated_test_dir("rclone-loopback-busy");
+    assert_eq!(
+        declarative_recipes::resolve_and_reserve_rclone_api_port_with(
+            Some(&empty_root),
+            5572,
+            None,
+            "",
+            None,
+            |p| p != 5573
+        )
+        .unwrap(),
+        17000
+    );
+    let missing_job = declarative_recipes::resolve_and_reserve_rclone_api_port_with(
+        Some(&empty_root),
+        5572,
+        None,
+        "missing-rclone-job",
+        Some("install"),
+        |_| true,
+    )
+    .unwrap_err();
+    assert!(missing_job
+        .to_string()
+        .contains("active lifecycle database"));
+    let _ = fs::remove_dir_all(&empty_root);
+
+    // Single-port rcd binary clears RCLONE_API_PORT and emits no --api-addr.
+    fs::write(
+        &rclone_bin,
+        "#!/bin/sh\necho '--rc-web-gui --rc-enable-metrics --rc-web-gui-no-open-browser'\n",
+    )
+    .unwrap();
+    let mut rcd_vars = HashMap::from([
+        ("APP_PORT".into(), "5572".into()),
+        ("RCLONE_API_PORT".into(), "17890".into()),
+    ]);
+    run_unit!(&mut rcd_vars).await.unwrap();
+    let rcd_unit = fs::read_to_string(&unit_path).unwrap();
+    assert!(
+        rcd_unit.contains(" rcd --rc-web-gui --rc-addr=127.0.0.1:5572")
+            && !rcd_unit.contains("--api-addr")
+    );
+    assert!(
+        !rcd_vars.contains_key("RCLONE_API_PORT")
+            && rcd_vars.get("RCLONE_MODE").map(String::as_str) == Some("rcd")
+    );
+    let _ = fs::remove_dir_all(&root);
+}

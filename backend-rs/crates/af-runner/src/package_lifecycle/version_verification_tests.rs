@@ -4841,6 +4841,7 @@ fn test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_
         package_id: "n8n".to_string(),
         script_name: "installpackage-n8n".to_string(),
         app_port: 5678,
+        secondary_port: 0,
         delete_data: false,
         expected_target_version: Some("1.90.0".to_string()),
         achieved_version: None,

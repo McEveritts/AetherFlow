@@ -1811,26 +1811,177 @@ pub fn detect_rclone_exec_start_for_root(effective_root: &Path) -> String {
 }
 
 fn rclone_unit_api_port(unit: &str) -> Option<u16> {
-    for line in unit
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
-    {
-        let mut args = line.split_whitespace();
-        while let Some(argument) = args.next() {
-            let address = match argument {
-                "--api-addr" => args.next(),
-                _ => argument.strip_prefix("--api-addr="),
-            };
-            if let Some(port) = address
-                .and_then(|value| value.rsplit_once(':'))
-                .and_then(|(_, port)| port.trim_matches(['"', '\'']).parse::<u16>().ok())
-                .filter(|port| *port != 0)
-            {
-                return Some(port);
-            }
+    crate::app_metadata::parse_rclone_unit_ports(unit).api_port
+}
+
+fn open_confined_package_sqlite(
+    fs_root: Option<&Path>,
+    lifecycle_job_id: &str,
+) -> Option<rusqlite::Connection> {
+    for db_path in crate::candidate_package_sqlite_dbs(fs_root) {
+        let Ok(meta) = fs::symlink_metadata(&db_path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        ) else {
+            continue;
+        };
+        let _ = conn.busy_timeout(Duration::from_secs(5));
+        if lifecycle_job_id.is_empty() {
+            return Some(conn);
+        }
+        let has_job = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE job_id = ?1)",
+                [lifecycle_job_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if has_job {
+            return Some(conn);
         }
     }
     None
+}
+
+pub(crate) fn resolve_and_reserve_rclone_api_port_with<F>(
+    fs_root: Option<&Path>,
+    app_port: u16,
+    explicit_api_port: Option<&str>,
+    lifecycle_job_id: &str,
+    lifecycle_action: Option<&str>,
+    mut available_port: F,
+) -> Result<u16, PackageExecutorError>
+where
+    F: FnMut(u16) -> bool,
+{
+    let effective_root = fs_root.unwrap_or(Path::new("/"));
+    let invalid_err = || {
+        PackageExecutorError::Validation(format!(
+            "Rclone RC API port must be between 1 and 65535 and differ from GUI port {app_port}"
+        ))
+    };
+
+    let mut explicit_pinned: Option<i32> = None;
+    if let Some(raw) = explicit_api_port.map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = crate::app_metadata::parse_rclone_port_value(raw)
+            .filter(|&p| p != app_port)
+            .ok_or_else(invalid_err)?;
+        explicit_pinned = Some(parsed as i32);
+    } else {
+        for logical in [RCLONE_ENV, RCLONE_LEGACY_ENV] {
+            if let Some(content) =
+                read_rclone_env(&effective_root.join(logical.trim_start_matches('/')))?
+            {
+                if let Some(env_port) = crate::app_metadata::parse_rclone_env_api_port(&content)
+                    .map_err(PackageExecutorError::Validation)?
+                {
+                    if env_port == app_port {
+                        return Err(invalid_err());
+                    }
+                    explicit_pinned = Some(env_port as i32);
+                }
+                break;
+            }
+        }
+    }
+    let unit_port = explicit_pinned
+        .is_none()
+        .then(|| {
+            crate::app_metadata::extract_rclone_runtime_api_port_for_root(fs_root)
+                .filter(|&p| p != app_port)
+                .map(i32::from)
+        })
+        .flatten();
+
+    let preferred = if app_port as i32 == af_models::RCLONE_DEFAULT_RC_API_PORT {
+        af_models::RCLONE_ALT_RC_API_PORT
+    } else {
+        af_models::RCLONE_DEFAULT_RC_API_PORT
+    };
+    let [start, end] = af_models::MARKETPLACE_FALLBACK_PORT_RANGE;
+    let select_fresh = |reserved: &std::collections::BTreeSet<i32>, avail: &mut F| {
+        std::iter::once(preferred)
+            .chain(start..=end)
+            .find(|&p| {
+                p != app_port as i32
+                    && (1..=65535).contains(&p)
+                    && !reserved.contains(&p)
+                    && avail(p as u16)
+            })
+            .ok_or_else(|| {
+                PackageExecutorError::Validation(
+                    "No supported Rclone RC API port is available".into(),
+                )
+            })
+    };
+
+    if let Some(mut conn) = open_confined_package_sqlite(fs_root, lifecycle_job_id) {
+        let chosen = af_db::reserve_lifecycle_port_in_tx(
+            &mut conn,
+            "rclone",
+            lifecycle_job_id,
+            lifecycle_action,
+            |tx, reserved| {
+                if let Some(p) = explicit_pinned {
+                    anyhow::ensure!(
+                        !reserved.contains(&p),
+                        "Rclone RC API port {p} is already reserved by another application"
+                    );
+                    return Ok(Some(p));
+                }
+                let saved = match unit_port {
+                    Some(p) => Some(p),
+                    None => af_db::load_lifecycle_secondary_port(
+                        tx,
+                        "rclone",
+                        af_models::RCLONE_RC_API_PORT_ROLE,
+                    )?,
+                };
+                match saved.filter(|&p| p != app_port as i32 && !reserved.contains(&p)) {
+                    Some(p) => Ok(Some(p)),
+                    None => select_fresh(reserved, &mut available_port)
+                        .map(Some)
+                        .map_err(|e| anyhow::anyhow!("{e}")),
+                }
+            },
+        )
+        .map_err(|e| PackageExecutorError::Validation(e.to_string()))?
+        .ok_or_else(|| {
+            PackageExecutorError::Validation("No supported Rclone RC API port is available".into())
+        })?;
+        Ok(chosen as u16)
+    } else if !lifecycle_job_id.is_empty() {
+        Err(PackageExecutorError::Validation(
+            "Cannot reserve the Rclone RC API port without the active lifecycle database".into(),
+        ))
+    } else if let Some(p) = explicit_pinned.or(unit_port) {
+        Ok(p as u16)
+    } else {
+        select_fresh(&std::collections::BTreeSet::new(), &mut available_port).map(|p| p as u16)
+    }
+}
+
+pub(crate) fn resolve_and_reserve_rclone_api_port(
+    fs_root: Option<&Path>,
+    app_port: u16,
+    explicit_api_port: Option<&str>,
+    lifecycle_job_id: &str,
+    lifecycle_action: Option<&str>,
+) -> Result<u16, PackageExecutorError> {
+    resolve_and_reserve_rclone_api_port_with(
+        fs_root,
+        app_port,
+        explicit_api_port,
+        lifecycle_job_id,
+        lifecycle_action,
+        |port| port != 0 && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+    )
 }
 
 pub fn detect_rclone_exec_start() -> String {
@@ -1856,7 +2007,13 @@ pub fn detect_rclone_separate_api_port_for_root(
         return None;
     }
 
-    if let Ok(unit) = fs::read_to_string(rclone_unit_path(vars, effective_root)) {
+    let unit_override = vars
+        .get("SYSTEMD_UNIT")
+        .or_else(|| vars.get("SERVICE_NAME"))
+        .map(String::as_str);
+    if let Some(unit) =
+        crate::app_metadata::read_rclone_unit_text_for_root(effective_root, unit_override)
+    {
         return rclone_unit_api_port(&unit).filter(|port| *port != app_port);
     }
 
@@ -2581,6 +2738,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     uuid::Uuid::new_v4().simple()
                 ),
             );
+            if let Some(explicit_api) = self.env_cfg.rclone_api_port {
+                vars.insert("RCLONE_API_PORT".to_string(), explicit_api.to_string());
+            } else if let Ok(raw) = env::var("RCLONE_API_PORT") {
+                if !raw.trim().is_empty() {
+                    vars.insert("RCLONE_API_PORT".to_string(), raw.trim().to_string());
+                }
+            }
         }
         if let Some(target) = self
             .env_cfg
@@ -5129,24 +5293,20 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             .get("APP_PORT")
                             .and_then(|value| value.parse::<u16>().ok())
                             .unwrap_or(5572);
-                        let api_port = if let Some(value) = vars.get("RCLONE_API_PORT") {
-                            value
-                                .parse::<u16>()
-                                .ok()
-                                .filter(|port| *port != 0 && *port != app_port)
-                                .ok_or_else(|| {
-                                    PackageExecutorError::Validation(format!(
-                                        "Rclone RC API port must be valid and differ from GUI port {app_port}"
-                                    ))
-                                })?
-                        } else {
-                            fs::read_to_string(&resolved)
-                                .ok()
-                                .and_then(|unit| rclone_unit_api_port(&unit))
-                                .filter(|port| *port != app_port)
-                                .unwrap_or_else(|| app_port.checked_add(1).unwrap_or(u16::MAX - 1))
-                        };
+                        let explicit_api = vars.get("RCLONE_API_PORT").map(String::as_str);
+                        let lifecycle_action = vars.get("LIFECYCLE_ACTION").map(String::as_str);
+                        let api_port = resolve_and_reserve_rclone_api_port(
+                            self.env_cfg.fs_root.as_deref(),
+                            app_port,
+                            explicit_api,
+                            &self.env_cfg.lifecycle_job_id,
+                            lifecycle_action,
+                        )?;
                         vars.insert("RCLONE_API_PORT".to_string(), api_port.to_string());
+                        vars.insert("RCLONE_MODE".to_string(), "gui".to_string());
+                    } else {
+                        vars.remove("RCLONE_API_PORT");
+                        vars.insert("RCLONE_MODE".to_string(), "rcd".to_string());
                     }
                 }
                 let rendered = interpolate_template(&content, vars);

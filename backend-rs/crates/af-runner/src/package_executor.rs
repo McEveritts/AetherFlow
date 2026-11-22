@@ -1403,6 +1403,8 @@ pub struct PackageExecutionEnv {
     pub arch_override: Option<String>,
     /// Allocated application port (`1024..=65535` or `0`).
     pub app_port: i32,
+    /// Optional explicit Rclone RC API secondary port override (`1..=65535`).
+    pub rclone_api_port: Option<u16>,
     /// Optional explicit password override (`AF_PASS`) supplied for install/reinstall.
     pub password: Option<String>,
     /// Whether `DELETE_DATA=true` is enabled during `remove`.
@@ -1473,6 +1475,7 @@ impl Default for PackageExecutionEnv {
             recovery_root,
             arch_override: None,
             app_port: 0,
+            rclone_api_port: None,
             password,
             delete_data,
             keep_existing_secrets,
@@ -1498,6 +1501,7 @@ impl PackageExecutionEnv {
             recovery_root: Some(root.join("var/backups/aetherflow-recovery")),
             arch_override: Some("amd64".to_string()),
             app_port: 0,
+            rclone_api_port: None,
             password: None,
             delete_data: false,
             keep_existing_secrets: false,
@@ -5186,6 +5190,17 @@ pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageR
         cmd.env_remove("AF_APP_PORT");
         cmd.env_remove("AETHERFLOW_APP_PORT");
     }
+    cmd.env_remove("AF_RCLONE_API_PORT");
+    cmd.env_remove("AF_RCLONE_API_PORT_ERROR");
+    if req.package_id == "rclone"
+        && matches!(action_lower.as_str(), "install" | "reinstall" | "update")
+        && (1..=65535).contains(&req.secondary_port)
+    {
+        cmd.env("RCLONE_API_PORT", req.secondary_port.to_string());
+    } else if req.package_id != "rclone" || action_lower == "remove" || action_lower == "uninstall"
+    {
+        cmd.env_remove("RCLONE_API_PORT");
+    }
     if let Some(target) = req
         .expected_target_version
         .as_deref()
@@ -5212,6 +5227,49 @@ pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageR
         cmd.env_remove("TEST_ROOT");
     }
     cmd.env("AF_JOB_SCRATCH_ROOT", "/var/tmp/aetherflow-scratch");
+}
+
+pub(crate) fn configure_legacy_rclone_api_port_env(
+    cmd: &mut Command,
+    req: &PackageRunnerRequest,
+    fs_root: Option<&Path>,
+    effective_app_port: i32,
+) {
+    let gui_port = if (1..=65535).contains(&effective_app_port) {
+        effective_app_port as u16
+    } else {
+        5572
+    };
+    let explicit_rc_port = if (1..=65535).contains(&req.secondary_port) {
+        Some(req.secondary_port.to_string())
+    } else {
+        env::var("RCLONE_API_PORT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    match declarative_recipes::resolve_and_reserve_rclone_api_port(
+        fs_root,
+        gui_port,
+        explicit_rc_port.as_deref(),
+        &req.lifecycle_job_id,
+        Some(&req.action),
+    ) {
+        Ok(api_port) => {
+            cmd.env("AF_RCLONE_API_PORT", api_port.to_string());
+            cmd.env_remove("AF_RCLONE_API_PORT_ERROR");
+            if explicit_rc_port.is_some() {
+                cmd.env("RCLONE_API_PORT", api_port.to_string());
+            } else {
+                cmd.env_remove("RCLONE_API_PORT");
+            }
+        }
+        Err(err) => {
+            cmd.env_remove("AF_RCLONE_API_PORT");
+            cmd.env_remove("RCLONE_API_PORT");
+            cmd.env("AF_RCLONE_API_PORT_ERROR", err.to_string());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -5702,6 +5760,9 @@ pub fn execute_package_request_stream(
             };
             let env_cfg = PackageExecutionEnv {
                 app_port: effective_app_port,
+                rclone_api_port: (req.package_id == "rclone"
+                    && (1..=65535).contains(&req.secondary_port))
+                .then_some(req.secondary_port as u16),
                 lifecycle_job_id: req.lifecycle_job_id.clone(),
                 // Purge is an explicit request property, never ambient
                 // runner environment.
@@ -5906,6 +5967,14 @@ pub fn execute_package_request_stream(
             cmd.process_group(0);
         }
         apply_legacy_package_environment(&mut cmd, &req);
+        if req.package_id == "rclone" && installs {
+            configure_legacy_rclone_api_port_env(
+                &mut cmd,
+                &req,
+                env_cfg.fs_root.as_deref(),
+                effective_app_port,
+            );
+        }
         let verify_sandbox = installs && live_sandbox && !sandbox_units.is_empty();
         if verify_sandbox {
             cmd.env("AF_EMIT_READINESS_RECORD", "1");

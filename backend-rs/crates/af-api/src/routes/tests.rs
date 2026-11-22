@@ -6716,3 +6716,157 @@ async fn marketplace_catalog_exposes_retained_purge_only_for_authenticated_prove
     std::env::set_current_dir(previous_directory).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn rclone_api_lifecycle_port_reservation_and_secondary_port_coordination() {
+    use super::marketplace::{allocate_or_resolve_app_port_for_job, reserve_api_lifecycle_ports};
+
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, connection) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    let job = |pkg: &str, id: &str, action: &str, status: &str| af_services::PackageJobInfo {
+        job_id: id.into(),
+        package_id: pkg.into(),
+        action: action.into(),
+        status: status.into(),
+        progress: 10,
+        last_line: String::new(),
+        started_at: "2026-04-20T00:00:00Z".into(),
+        expected_target_version: None,
+    };
+
+    // 1. Pre-fix live split-port unit without SQLite secondary row protects RC port 8989 from Sonarr
+    //    and records port:<N> on Sonarr's active job row.
+    let systemd_dir = root.join("etc/systemd/system");
+    std::fs::create_dir_all(&systemd_dir).unwrap();
+    std::fs::write(
+        systemd_dir.join("rclone.service"),
+        "[Service]\nExecStart=/opt/AetherFlow/apps/rclone/rclone gui --addr=127.0.0.1:5572 --api-addr=127.0.0.1:8989\n",
+    ).unwrap();
+    assert!(af_services::try_start_package_job(job(
+        "sonarr",
+        "sonarr-preflight",
+        "install",
+        "installing"
+    )));
+    let sonarr_port = allocate_or_resolve_app_port_for_job(
+        "sonarr",
+        8989,
+        "sonarr-preflight",
+        "install",
+        Some(&root),
+    );
+    assert!(
+        (17000..=19999).contains(&sonarr_port) && sonarr_port != 8989,
+        "{sonarr_port}"
+    );
+    let sonarr_units: String = connection
+        .query_row("SELECT service_units FROM package_lifecycle_jobs WHERE package_id='sonarr' AND job_id='sonarr-preflight'", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        sonarr_units.contains(&format!("port:{sonarr_port}")),
+        "{sonarr_units}"
+    );
+    af_services::finish_package_job("sonarr", "install", true, "done", "sonarr-preflight").unwrap();
+    std::fs::remove_file(systemd_dir.join("rclone.service")).unwrap();
+
+    // 2. Concurrent API port allocations for colliding default ports never return the same port.
+    assert!(af_services::try_start_package_job(job(
+        "sonarr",
+        "sonarr-conc",
+        "install",
+        "installing"
+    )));
+    assert!(af_services::try_start_package_job(job(
+        "radarr",
+        "radarr-conc",
+        "install",
+        "installing"
+    )));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let (b1, r1, b2, r2) = (barrier.clone(), root.clone(), barrier, root.clone());
+    let t1 = std::thread::spawn(move || {
+        b1.wait();
+        allocate_or_resolve_app_port_for_job("sonarr", 17888, "sonarr-conc", "install", Some(&r1))
+    });
+    let t2 = std::thread::spawn(move || {
+        b2.wait();
+        allocate_or_resolve_app_port_for_job("radarr", 17888, "radarr-conc", "install", Some(&r2))
+    });
+    let (p1, p2) = (t1.join().unwrap(), t2.join().unwrap());
+    assert!(
+        p1 > 0 && p2 > 0 && p1 != p2,
+        "concurrent API allocations collided: {p1} vs {p2}"
+    );
+    af_services::finish_package_job("sonarr", "install", true, "done", "sonarr-conc").unwrap();
+    af_services::finish_package_job("radarr", "install", true, "done", "radarr-conc").unwrap();
+
+    // 3. Rclone split-port install commits primary + secondary RC port; retained remove keeps it; purge clears it.
+    assert!(af_services::try_start_package_job(job(
+        "rclone",
+        "rclone-install-1",
+        "install",
+        "installing"
+    )));
+    let rclone_port = allocate_or_resolve_app_port_for_job(
+        "rclone",
+        5572,
+        "rclone-install-1",
+        "install",
+        Some(&root),
+    );
+    assert!(rclone_port > 0);
+    reserve_api_lifecycle_ports(
+        "rclone",
+        "rclone-install-1",
+        "install",
+        rclone_port,
+        Some(&root),
+    )
+    .unwrap();
+    let rclone_cfg = af_db::plan_lifecycle_ingress("rclone", rclone_port, "", None)
+        .unwrap()
+        .unwrap();
+    af_db::set_app_ingress_and_secondary_port_for_lifecycle(
+        &rclone_cfg,
+        Some((af_models::RCLONE_RC_API_PORT_ROLE, Some(17915))),
+        "rclone-install-1",
+        "install",
+    )
+    .unwrap();
+    af_services::finish_package_job("rclone", "install", true, "done", "rclone-install-1").unwrap();
+    assert!(af_db::get_reserved_ports_excluding("radarr")
+        .unwrap()
+        .contains(&17915));
+
+    assert!(af_services::try_start_package_job(job(
+        "rclone",
+        "rclone-remove-retain",
+        "remove",
+        "uninstalling"
+    )));
+    af_db::archive_app_ingress_config_for_lifecycle("rclone", false, "rclone-remove-retain")
+        .unwrap();
+    af_services::finish_package_job("rclone", "remove", true, "done", "rclone-remove-retain")
+        .unwrap();
+    assert!(af_db::get_reserved_ports_excluding("radarr")
+        .unwrap()
+        .contains(&17915));
+
+    assert!(af_services::try_start_package_job(job(
+        "rclone",
+        "rclone-remove-purge",
+        "remove",
+        "uninstalling"
+    )));
+    af_db::archive_app_ingress_config_for_lifecycle("rclone", true, "rclone-remove-purge").unwrap();
+    af_services::finish_package_job("rclone", "remove", true, "done", "rclone-remove-purge")
+        .unwrap();
+    assert!(!af_db::get_reserved_ports_excluding("radarr")
+        .unwrap()
+        .contains(&17915));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
