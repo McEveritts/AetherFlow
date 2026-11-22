@@ -1253,6 +1253,7 @@ fn mediaflow_output_name(path: &Path) -> String {
 /// Reconciles any `PROCESSING` MediaFlow jobs stranded by a prior crash/restart:
 /// - If a durable `.publish_intent_<job_id>.json` exists and both the published output and
 ///   trashed original exist on disk, finalizes the SQLite row to `COMPLETED` and removes the intent.
+/// - Rolls back proven partial publications and moves the job to `NEEDS_RESCAN` for approval again.
 /// - Otherwise marks stranded `PROCESSING` rows as `FAILED`.
 /// - Marks legacy `PENDING_APPROVAL` / `APPROVED` rows missing persisted source identity as
 ///   `NEEDS_RESCAN` so operators re-scan and re-approve safely.
@@ -1328,7 +1329,17 @@ pub fn reconcile_mediaflow_startup() {
                 output,
             ) {
                 Ok(true) => {
-                    let _ = fs::remove_file(&intent_path);
+                    let persisted = conn.execute(
+                        "UPDATE mediaflow_queue SET status = 'NEEDS_RESCAN',
+                         error_log = 'Publication was interrupted. Rescan to approve another attempt.',
+                         updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'PROCESSING'",
+                        params![job_id],
+                    );
+                    if persisted.is_ok_and(|affected| affected == 1) {
+                        let _ = fs::remove_file(&intent_path);
+                    } else {
+                        deferred.push(job_id);
+                    }
                     continue;
                 }
                 Ok(false) => {}

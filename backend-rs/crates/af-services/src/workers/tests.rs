@@ -4765,7 +4765,12 @@ fn mediaflow_recovery_unlinks_only_a_proven_interrupted_publication() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(status, "FAILED");
+        let expected = if replace_source {
+            "FAILED"
+        } else {
+            "NEEDS_RESCAN"
+        };
+        assert_eq!(status, expected);
     }
     assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
     fs::remove_dir_all(root).unwrap();
