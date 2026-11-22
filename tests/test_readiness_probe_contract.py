@@ -2,16 +2,28 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from tests.installer_test_helpers import common_functions
+from tests.test_marketplace_catalog_lifecycle_matrix import InstallerFixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
+AUTOMATION_CONFIG = json.loads((ROOT / "config/package_automation.json").read_text(encoding="utf-8"))
+
+
+def _parse_probe_records(text: str):
+    return [
+        json.loads(line.split("=", 1)[1])
+        for line in text.splitlines()
+        if line.strip().startswith("__AF_READINESS_PROBE__=")
+    ]
 
 
 class _StatusHandler(http.server.BaseHTTPRequestHandler):
@@ -268,6 +280,301 @@ class ReadinessProbeContractTests(unittest.TestCase):
         finally:
             s_503.shutdown()
             s_503.server_close()
+
+
+@unittest.skipUnless(
+    os.name == "posix" and shutil.which("bash") and shutil.which("curl"),
+    "requires POSIX bash and curl",
+)
+class LocalInstallerReadinessRecordTests(unittest.TestCase):
+    EXPECTED_LOCAL_HTTP_PROBES = {
+        "audiobookshelf": (
+            18378,
+            [
+                {
+                    "unit": "audiobookshelf.service",
+                    "url": "http://127.0.0.1:18378/status",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "invidious": (
+            18281,
+            [
+                {
+                    "unit": "af-invidious.service",
+                    "url": "http://127.0.0.1:18281/",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "jellyseerr": (
+            15055,
+            [
+                {
+                    "unit": "jellyseerr.service",
+                    "url": "http://127.0.0.1:15055/api/v1/status",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "kasmvnc": (
+            16081,
+            [
+                {
+                    "unit": "af-kasmvnc.service",
+                    "url": "https://127.0.0.1:16081/",
+                    "accept_auth": True,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "maintainerr": (
+            16246,
+            [
+                {
+                    "unit": "af-maintainerr.service",
+                    "url": "http://127.0.0.1:16246/api/health/ready",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "mcvnc": (
+            16900,
+            [
+                {
+                    "unit": "af-mcvnc.service",
+                    "url": "http://127.0.0.1:16900/",
+                    "accept_auth": True,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "palate": (
+            28114,
+            [
+                {
+                    "unit": "af-palate.service",
+                    "url": "http://127.0.0.1:28114/login",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "piped": (
+            18280,
+            [
+                {
+                    "unit": "af-piped.service",
+                    "url": "http://127.0.0.1:18280/",
+                    "accept_auth": False,
+                    "accept_409": False,
+                },
+                {
+                    "unit": "af-piped.service",
+                    "url": "http://127.0.0.1:18280/api/healthcheck",
+                    "accept_auth": False,
+                    "accept_409": False,
+                },
+            ],
+        ),
+        "thelounge": (
+            19000,
+            [
+                {
+                    "unit": "thelounge.service",
+                    "url": "http://127.0.0.1:19000/",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+    }
+
+    SYSTEMD_ONLY_INSTALLERS = (
+        "calibreweb",
+        "dispatcharr",
+        "homeassistant",
+        "paperless-ngx",
+        "pyload",
+        "znc",
+    )
+
+    def test_local_http_installers_emit_verified_records_opt_in_and_silent_by_default(self):
+        for app, (port, expected_records) in self.EXPECTED_LOCAL_HTTP_PROBES.items():
+            managed_units = set(AUTOMATION_CONFIG[app]["sandbox_service_units"])
+            with self.subTest(app=app), InstallerFixture(app) as fixture:
+                silent = fixture.run("install", port=port, AF_EMIT_READINESS_RECORD="0")
+                self.assertEqual(silent.returncode, 0, silent.stdout + silent.stderr)
+                self.assertEqual(_parse_probe_records(silent.stdout + silent.stderr), [])
+
+                emitted = fixture.run("reinstall", port=port, AF_EMIT_READINESS_RECORD="1")
+                self.assertEqual(emitted.returncode, 0, emitted.stdout + emitted.stderr)
+                self.assertEqual(_parse_probe_records(emitted.stdout), [])
+                records = _parse_probe_records(emitted.stderr)
+                self.assertEqual(records, expected_records)
+                for rec in records:
+                    self.assertIn(rec["unit"], managed_units)
+                self.assertNotIn("bootstrap-password", emitted.stderr)
+
+    def test_audiobookshelf_preserves_retained_bind_host_in_probe_and_record(self):
+        cases = (
+            ("192.0.2.45", "192.0.2.45"),
+            ("0.0.0.0", "127.0.0.1"),
+            ("::", "[::1]"),
+            ("::1", "[::1]"),
+            ("[::1]", "[::1]"),
+        )
+        source = (ROOT / "packages/package/install/installpackage-audiobookshelf").read_text(encoding="utf-8")
+        bootstrap_program = next(
+            block for block in re.findall(r"<<'PYEOF'\n(.*?)\nPYEOF", source, re.DOTALL)
+            if "urllib.request" in block
+        )
+        for configured_host, expected_probe_host in cases:
+            with self.subTest(host=configured_host), InstallerFixture("audiobookshelf") as fixture:
+                fixture.file(
+                    "etc/systemd/system/audiobookshelf.service",
+                    f"[Service]\nEnvironment=HOST={configured_host}\nEnvironment=PORT=13378\n",
+                )
+                res = fixture.run("reinstall", port=18379, AF_EMIT_READINESS_RECORD="1")
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                expected_url = f"http://{expected_probe_host}:18379/status"
+                self.assertEqual(
+                    _parse_probe_records(res.stderr),
+                    [
+                        {
+                            "unit": "audiobookshelf.service",
+                            "url": expected_url,
+                            "accept_auth": False,
+                            "accept_409": False,
+                        }
+                    ],
+                )
+                self.assertIn(
+                    f"Environment=HOST={configured_host}",
+                    (fixture.root / "etc/systemd/system/audiobookshelf.service").read_text(encoding="utf-8"),
+                )
+
+                response = mock.MagicMock(status=200)
+                response.__enter__.return_value = response
+                response.read.return_value = b'{"isInit": true}'
+                urlopen_mock = mock.Mock(return_value=response)
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "AF_APP_PORT": "18379",
+                        "AF_PROBE_HOST": expected_probe_host,
+                        "AF_SEED_USER": "admin",
+                        "AF_SEED_PASS": "secret-pass",
+                    },
+                ), mock.patch("urllib.request.urlopen", side_effect=urlopen_mock), mock.patch("time.sleep"):
+                    with self.assertRaises(SystemExit) as exited:
+                        exec(compile(bootstrap_program, "installpackage-audiobookshelf", "exec"), {})
+                self.assertEqual(exited.exception.code, 0)
+                self.assertEqual(urlopen_mock.call_args.args[0], expected_url)
+
+    def test_kasmvnc_records_actual_http_fallback_scheme_and_omits_on_failure(self):
+        source = (ROOT / "packages/package/install/installpackage-kasmvnc").read_text(encoding="utf-8")
+        probe_start = source.index("READY=false\nREADY_URL=")
+        probe_end = source.index("VERSION_FILE=/var/lib/kasmvnc/.af-version", probe_start)
+        probe_block = source[probe_start:probe_end]
+        emit_start = source.index("if declare -F af_emit_readiness_record", probe_end)
+        emit_end = source.index("fi\n", emit_start) + 3
+        emit_block = source[emit_start:emit_end]
+        emit_helper = common_functions("af_emit_readiness_record")
+
+        s_401, p_401 = _start_server(401)
+        s_503, p_503 = _start_server(503)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                fake_bin = tmp_path / "bin"
+                fake_bin.mkdir()
+                sc = fake_bin / "systemctl"
+                sc.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+                sc.chmod(0o755)
+                sleep_shim = fake_bin / "sleep"
+                sleep_shim.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+                sleep_shim.chmod(0o755)
+                env = {
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                    "AF_EMIT_READINESS_RECORD": "1",
+                }
+                base_script = (
+                    "set -euo pipefail\n"
+                    "print_error() { printf '[ERROR] %s\\n' \"$*\" >&2; }\n"
+                    f"{emit_helper}\n"
+                    f"{probe_block}\n"
+                    f"{emit_block}\n"
+                )
+
+                res_ok = subprocess.run(
+                    ["bash", "-c", f"APP_PORT={p_401}\n{base_script}"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=15,
+                )
+                self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
+                self.assertEqual(
+                    _parse_probe_records(res_ok.stderr),
+                    [
+                        {
+                            "unit": "af-kasmvnc.service",
+                            "url": f"http://127.0.0.1:{p_401}/",
+                            "accept_auth": True,
+                            "accept_409": False,
+                        }
+                    ],
+                )
+
+                res_fail = subprocess.run(
+                    ["bash", "-c", f"APP_PORT={p_503}\n{base_script}"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=15,
+                )
+                self.assertNotEqual(res_fail.returncode, 0)
+                self.assertEqual(_parse_probe_records(res_fail.stdout + res_fail.stderr), [])
+        finally:
+            for s in (s_401, s_503):
+                s.shutdown()
+                s.server_close()
+
+    def test_local_http_installers_never_emit_records_on_failure(self):
+        failure_modes = (
+            ("audiobookshelf", "bootstrap-python"),
+            ("invidious", "readiness"),
+            ("jellyseerr", "readiness"),
+            ("kasmvnc", "service"),
+            ("maintainerr", "readiness"),
+            ("mcvnc", "service"),
+            ("palate", "readiness"),
+            ("piped", "readiness"),
+            ("thelounge", "readiness"),
+        )
+        for app, failure in failure_modes:
+            with self.subTest(app=app, failure=failure), InstallerFixture(app) as fixture:
+                res = fixture.run(
+                    "install",
+                    AF_FIXTURE_FAILURE=failure,
+                    AF_EMIT_READINESS_RECORD="1",
+                )
+                self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(_parse_probe_records(res.stdout + res.stderr), [])
+
+    def test_systemd_only_installers_emit_no_http_probe_records(self):
+        for app in self.SYSTEMD_ONLY_INSTALLERS:
+            with self.subTest(app=app), InstallerFixture(app) as fixture:
+                res = fixture.run("install", AF_EMIT_READINESS_RECORD="1")
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(_parse_probe_records(res.stdout + res.stderr), [])
 
 
 if __name__ == "__main__":

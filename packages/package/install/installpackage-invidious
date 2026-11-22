@@ -204,7 +204,8 @@ af_set_stage "activate" 85
 systemctl daemon-reload
 af_logged systemctl enable af-invidious.service
 systemctl restart af-invidious.service
-youtube_ready "http://127.0.0.1:${APP_PORT}/"
+INVIDIOUS_READY_URL="http://127.0.0.1:${APP_PORT}/"
+youtube_ready "$INVIDIOUS_READY_URL"
 systemctl is-active --quiet af-invidious.service
 systemctl is-active --quiet af-invidious-companion.service
 
@@ -214,4 +215,7 @@ commit_app_versions
 write_lock invidious
 RUNTIME_CHANGED=false
 INVIDIOUS_INSTALL_COMPLETED=1
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "af-invidious.service" "$INVIDIOUS_READY_URL" false false
+fi
 report_progress 100 "Experimental Invidious installed. YouTube playback depends on upstream anti-bot compatibility."

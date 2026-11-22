@@ -220,9 +220,10 @@ RUNTIME_ENABLE_ATTEMPTED=1
 af_logged systemctl enable thelounge
 af_logged systemctl restart thelounge
 
-if ! af_logged curl --fail --silent --show-error --output /dev/null --connect-timeout 2 --max-time 5 \
+THELOUNGE_READY_URL="http://127.0.0.1:${APP_PORT}/"
+if ! af_logged curl --noproxy '*' --fail --silent --show-error --output /dev/null --connect-timeout 2 --max-time 5 \
     --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
-    "http://127.0.0.1:${APP_PORT}/" \
+    "$THELOUNGE_READY_URL" \
     || ! systemctl is-active --quiet thelounge; then
     log_error "The Lounge failed its HTTP and service readiness checks."
     exit 1
@@ -230,5 +231,8 @@ fi
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "thelounge.service" "$THELOUNGE_READY_URL" false false
+fi
 report_progress 100 "The Lounge installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

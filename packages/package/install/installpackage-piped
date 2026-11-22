@@ -1345,7 +1345,7 @@ PYEOF
 }
 
 af_set_stage "certification" 90
-if ! certify_piped; then
+if ! certify_piped || ! systemctl is-active --quiet af-piped.service; then
     if declare -F print_error >/dev/null 2>&1; then
         print_error "Piped certification failed before commit; invoking rollback"
     else
@@ -1371,4 +1371,8 @@ commit_app_versions
 write_lock piped
 RUNTIME_CHANGED=false
 PIPED_INSTALL_COMPLETED=1
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "af-piped.service" "http://127.0.0.1:${APP_PORT}/" false false
+    af_emit_readiness_record "af-piped.service" "http://127.0.0.1:${APP_PORT}/api/healthcheck" false false
+fi
 report_progress 100 "Experimental Piped installed. YouTube playback may require additional upstream anti-bot configuration."

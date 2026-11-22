@@ -316,13 +316,21 @@ af_logged systemctl enable af-kasmvnc.service
 af_logged systemctl restart af-kasmvnc.service
 systemctl is-active --quiet af-kasmvnc.service
 READY=false
+READY_URL=""
 for attempt in {1..30}; do
     if ! systemctl is-active --quiet af-kasmvnc.service; then
         break
     fi
-    HTTP_STATUS="$(curl -k -s -o /dev/null -w '%{http_code}' "https://127.0.0.1:${APP_PORT}/" 2>/dev/null || curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" 2>/dev/null || true)"
+    HTTP_STATUS="$(curl --noproxy '*' -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "https://127.0.0.1:${APP_PORT}/" 2>/dev/null || true)"
     if [[ "$HTTP_STATUS" =~ ^(200|401|301|302|307)$ ]]; then
         READY=true
+        READY_URL="https://127.0.0.1:${APP_PORT}/"
+        break
+    fi
+    HTTP_STATUS="$(curl --noproxy '*' -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" 2>/dev/null || true)"
+    if [[ "$HTTP_STATUS" =~ ^(200|401|301|302|307)$ ]]; then
+        READY=true
+        READY_URL="http://127.0.0.1:${APP_PORT}/"
         break
     fi
     sleep 1
@@ -331,8 +339,12 @@ if [[ "$READY" != "true" ]]; then
     print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display."
     exit 1
 fi
+systemctl is-active --quiet af-kasmvnc.service
 VERSION_FILE=/var/lib/kasmvnc/.af-version
 queue_app_version "$VERSION_FILE" "$(dpkg-query -W -f='${Version}' kasmvncserver)"
 commit_app_versions
 write_lock kasmvnc
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "af-kasmvnc.service" "$READY_URL" true false
+fi
 report_progress 100 "KasmVNC installed. Use the AetherFlow gateway; username admin, password in /etc/kasmvnc/aetherflow-password (root only)."

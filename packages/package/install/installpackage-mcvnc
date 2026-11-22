@@ -220,12 +220,13 @@ systemctl daemon-reload
 af_logged systemctl enable af-mcvnc.service
 af_logged systemctl restart af-mcvnc.service
 systemctl is-active --quiet af-mcvnc.service
+MCVNC_READY_URL="http://127.0.0.1:${APP_PORT}/"
 READY=false
 for attempt in {1..30}; do
     if ! systemctl is-active --quiet af-mcvnc.service; then
         break
     fi
-    HTTP_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" || true)"
+    HTTP_STATUS="$(curl --noproxy '*' -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$MCVNC_READY_URL" 2>/dev/null || true)"
     if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "401" ]]; then
         READY=true
         break
@@ -236,7 +237,11 @@ if [[ "$READY" != "true" ]]; then
     print_error "McVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-mcvnc and verify DRM render node ${RENDER_DEVICE}."
     exit 1
 fi
+systemctl is-active --quiet af-mcvnc.service
 commit_app_versions
 chown af-mcvnc:af-mcvnc "${DATA_DIR}/.af-version"
 write_lock mcvnc
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "af-mcvnc.service" "$MCVNC_READY_URL" true false
+fi
 report_progress 100 "McVNC ${VERSION} installed. Access the dashboard through the AetherFlow gateway on loopback port ${APP_PORT}."

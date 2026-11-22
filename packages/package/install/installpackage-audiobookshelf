@@ -163,16 +163,28 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+ABS_PROBE_HOST="$ABS_BIND_HOST"
+case "$ABS_PROBE_HOST" in
+    ""|"*"|"0.0.0.0") ABS_PROBE_HOST="127.0.0.1" ;;
+    "::"|"[::]") ABS_PROBE_HOST="[::1]" ;;
+    *:*) [[ "$ABS_PROBE_HOST" == \[*\] ]] || ABS_PROBE_HOST="[${ABS_PROBE_HOST}]" ;;
+esac
+ABS_STATUS_URL="http://${ABS_PROBE_HOST}:${APP_PORT}/status"
+
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now audiobookshelf
 verify_systemd_service_active audiobookshelf
-AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" af_logged python3 - <<'PYEOF'
+NO_PROXY='*' no_proxy='*' AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" AF_PROBE_HOST="$ABS_PROBE_HOST" af_logged python3 - <<'PYEOF'
 import os
 import sys, time, json, urllib.request
 user, pw = os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"]
+host = os.environ.get("AF_PROBE_HOST", "127.0.0.1")
+port = os.environ["AF_APP_PORT"]
+status_url = f"http://{host}:{port}/status"
+init_url = f"http://{host}:{port}/init"
 for _ in range(30):
     try:
-        with urllib.request.urlopen('http://127.0.0.1:13378/status'.replace('13378', os.environ['AF_APP_PORT']), timeout=3) as r:
+        with urllib.request.urlopen(status_url, timeout=3) as r:
             if r.status != 200:
                 raise ValueError('Unexpected Audiobookshelf status response')
             st = json.loads(r.read().decode('utf-8'))
@@ -185,7 +197,7 @@ for _ in range(30):
         time.sleep(1)
 else:
     sys.exit(1)
-req = urllib.request.Request('http://127.0.0.1:13378/init'.replace('13378', os.environ['AF_APP_PORT']), data=json.dumps({'newRoot': {'username': user, 'password': pw}}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
+req = urllib.request.Request(init_url, data=json.dumps({'newRoot': {'username': user, 'password': pw}}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
 with urllib.request.urlopen(req, timeout=10) as response:
     if not 200 <= response.status < 300:
         sys.exit(1)
@@ -196,5 +208,8 @@ systemctl is-active --quiet audiobookshelf
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 ABS_COMMITTED=1
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "audiobookshelf.service" "$ABS_STATUS_URL" false false
+fi
 report_progress 100 "Audiobookshelf installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

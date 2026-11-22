@@ -409,10 +409,14 @@ af_logged systemctl daemon-reload
 af_logged systemctl enable af-palate.service
 af_logged systemctl restart af-palate.service
 report_progress 90 "Checking Palate's login page..."
-af_logged curl --fail --silent --show-error --output /dev/null --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "http://127.0.0.1:${APP_PORT}/login"
+PALATE_READY_URL="http://127.0.0.1:${APP_PORT}/login"
+af_logged curl --noproxy '*' --fail --silent --show-error --output /dev/null --connect-timeout 2 --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "$PALATE_READY_URL"
 systemctl is-active --quiet af-palate.service
 commit_app_versions
 write_lock palate
 SUCCESS=1
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "af-palate.service" "$PALATE_READY_URL" false false
+fi
 rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Palate ${VERSION} installed on port ${APP_PORT}. Configure Jellyfin and the public URL in ${ENV_FILE}; sign in with a Jellyfin account."

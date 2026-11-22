@@ -682,10 +682,11 @@ af_logged systemctl daemon-reload
 af_logged systemctl restart af-maintainerr
 
 report_progress 90 "Checking Maintainerr database readiness..."
+MAINTAINERR_READY_URL="http://127.0.0.1:${APP_PORT}/api/health/ready"
 HEALTHY=0
 for attempt in {1..30}; do
     if systemctl is-active --quiet af-maintainerr \
-        && STATUS_JSON="$(curl --fail --silent --max-time 5 "http://127.0.0.1:${APP_PORT}/api/health/ready")" \
+        && STATUS_JSON="$(curl --noproxy '*' --fail --silent --connect-timeout 2 --max-time 5 "$MAINTAINERR_READY_URL")" \
         && python3 -c 'import json,sys
 try:
     data=json.load(sys.stdin)
@@ -703,9 +704,13 @@ if [[ "$HEALTHY" -ne 1 ]]; then
 fi
 
 af_logged systemctl enable af-maintainerr
+systemctl is-active --quiet af-maintainerr
 commit_app_versions
 write_lock "$PACKAGE_NAME"
 SUCCESS=1
+if declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "af-maintainerr.service" "$MAINTAINERR_READY_URL" false false
+fi
 retain_successful_app_backups "$PACKAGE_NAME" "$BACKUP_DIR" || print_warn "Completed backup retention needs attention; recovery copies remain in /var/backups."
 log_info "Maintainerr ${LATEST_TAG} verified. Previous application and state retained in ${BACKUP_DIR}."
 report_progress 100 "Maintainerr ${LATEST_TAG} installed and verified on port ${APP_PORT}."
