@@ -1890,6 +1890,10 @@ sync_legacy_package_paths() {
     if [[ -d "${LEGACY_BIN_ROOT}" && -f "${CURRENT_LINK}/packages/common.sh" && ! "${CURRENT_LINK}/packages/common.sh" -ef "${LEGACY_BIN_ROOT}/common.sh" ]]; then
         cp -a "${CURRENT_LINK}/packages/common.sh" "${LEGACY_BIN_ROOT}/common.sh"
     fi
+    if [[ -d "${LEGACY_BIN_ROOT}" && ! -L "${LEGACY_BIN_ROOT}/lib" && -d "${CURRENT_LINK}/packages/lib" && ! "${CURRENT_LINK}/packages/lib" -ef "${LEGACY_BIN_ROOT}/lib" ]]; then
+        mkdir -p "${LEGACY_BIN_ROOT}/lib"
+        rsync -a --delete --checksum "${CURRENT_LINK}/packages/lib/" "${LEGACY_BIN_ROOT}/lib/"
+    fi
 }
 
 sync_cli_entrypoints() {

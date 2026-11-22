@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # Python < 3.11 (e.g. Ubuntu 22.04 Python 3.10)
     tomllib = None  # type: ignore[assignment]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions, replace_paths_once
+from installer_test_helpers import common_functions, read_common_sh_source, replace_paths_once
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -587,7 +587,7 @@ sys.exit(0)
 ''')
             verifier.chmod(0o755)
 
-            common_src = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
+            common_src = read_common_sh_source()
             helpers = common_src[common_src.index("command_exists()"):common_src.index("lock_path()")]
             helpers += common_functions(
                 "systemd_unit_inactive",
@@ -1065,7 +1065,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         self.assertIn('"${rustup_sha256}"', wasm_tools)
         self.assertIn("sha256sum --check --strict", wasm_tools)
 
-        common_text = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
+        common_text = read_common_sh_source()
         self.assertIn(r"\[::1\]|localhost", common_text)
         self.assertNotIn("https://127.*:*", common_text)
 
@@ -1277,7 +1277,7 @@ with patch("os.geteuid", return_value=1000), patch("subprocess.run"):
                         self.assertIn(f"enable_tls = {tls}\n", public_cfg.read_text(encoding="utf-8"))
 
         for rel in ("packages/system/af-certbot-sync", "packages/common.sh"):
-            txt = (ROOT / rel).read_text(encoding="utf-8")
+            txt = read_common_sh_source() if rel == "packages/common.sh" else (ROOT / rel).read_text(encoding="utf-8")
             self.assertTrue(
                 "(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=" in txt
                 or '("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH")' in txt,

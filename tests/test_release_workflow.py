@@ -591,6 +591,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "AetherFlow/docs",
             "AetherFlow/e2e",
             "AetherFlow/tests",
+            "AetherFlow/scripts/lib",
             "AetherFlow/plugins/sdk-template-rust",
         )
         for prefix in excluded_prefixes:
@@ -614,6 +615,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "AetherFlow/frontend-rs/Cargo.toml",
             "AetherFlow/deploy/release-manager.sh",
             "AetherFlow/packages/common.sh",
+            "AetherFlow/packages/lib/logging_archives.sh",
+            "AetherFlow/packages/lib/versions_apt.sh",
+            "AetherFlow/packages/lib/state_downloads.sh",
+            "AetherFlow/packages/lib/config_database.sh",
+            "AetherFlow/packages/lib/apache_dns_locks.sh",
+            "AetherFlow/packages/lib/redaction_receipts.sh",
+            "AetherFlow/packages/lib/systemd_credentials.sh",
+            "AetherFlow/packages/lib/cli_shim.sh",
         )
         for member in required_members:
             self.assertIn(member, names, f"Required bootstrap member missing: {member}")

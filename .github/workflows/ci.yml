@@ -61,6 +61,7 @@ jobs:
 
       - name: Test Dependency Preparation and Marketplace Lifecycle
         run: |
+          bash -n packages/common.sh packages/lib/*.sh
           PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py
           python3 tests/check_shell_hygiene.py
 

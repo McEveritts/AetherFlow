@@ -11,7 +11,7 @@ import unittest
 import zipfile
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions, mock_rutorrent_backend
+from installer_test_helpers import common_functions, mock_rutorrent_backend, read_common_sh_source
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK = r'''#!/usr/bin/python3
@@ -120,7 +120,7 @@ class MarketplaceLifecycleTests(unittest.TestCase):
             path.write_text(MOCK.replace('__AF_TESTS_DIR__', str(ROOT / 'tests')))
             path.chmod(0o755)
             shutil.copy2(path, self.root / 'usr/bin' / command)
-        source = (ROOT / 'packages/common.sh').read_text()
+        source = read_common_sh_source()
         helpers = source[source.index('command_exists()'):source.index('lock_path()')]
         helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit', 'verify_systemd_service_active',
                                     'wait_for_service_ready', 'af_write_failure_receipt',

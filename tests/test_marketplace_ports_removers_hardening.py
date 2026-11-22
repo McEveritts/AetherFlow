@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 import unittest
 
-from tests.installer_test_helpers import ROOT, replace_paths_once
+from tests.installer_test_helpers import ROOT, read_common_sh_source, replace_paths_once
 
 
 INSTALL_DIR = ROOT / "packages/package/install"
@@ -117,7 +117,7 @@ class BaseSandboxTest(unittest.TestCase):
 
         self.common_sh = self.root / "packages/common.sh"
         self.common_sh.parent.mkdir(parents=True, exist_ok=True)
-        raw_common = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
+        raw_common = read_common_sh_source()
         common_text = rebase_root(raw_common, self.root)
         common_text = common_text.replace(
             f'export PATH="{self.root}/usr/local/nodejs/bin:',

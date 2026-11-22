@@ -13,7 +13,16 @@ In AetherFlow v4.0.0, Marketplace installation, update, reinstall, and removal (
 
 ```bash
 packages/
-├── common.sh                             # Core helper library (Mandatory for Bash scripts)
+├── common.sh                             # Core helper loader (Mandatory for Bash scripts)
+├── lib/                                  # Modular shell libraries loaded by common.sh + CLI shim helper
+│   ├── logging_archives.sh
+│   ├── versions_apt.sh
+│   ├── state_downloads.sh
+│   ├── config_database.sh
+│   ├── apache_dns_locks.sh
+│   ├── redaction_receipts.sh
+│   ├── systemd_credentials.sh
+│   └── cli_shim.sh
 ├── youtube-common.sh                     # Shared helper for Piped & Invidious
 └── package/
     ├── install/
@@ -26,7 +35,7 @@ packages/
 
 ## The `common.sh` Library
 
-Every Bash marketplace script **must** source `packages/common.sh`:
+Every Bash marketplace script **must** source `packages/common.sh` (a lightweight loader that sources the 7 modular helper libraries under `packages/lib/` in order):
 
 ```bash
 #!/usr/bin/env bash

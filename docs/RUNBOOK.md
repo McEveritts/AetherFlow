@@ -220,7 +220,7 @@ sudo af backup restore <backup-filename> --target-root /var/backups/af-restore-s
 
 ## Self-Update & Release Operations (`af-release`)
 
-Updates run inside the isolated `aetherflow-self-update.service` systemd unit so restarting `aetherflow-runner` and `aetherflow-api` during the cutover never kills the updater.
+Updates run inside the isolated `aetherflow-self-update.service` systemd unit so restarting `aetherflow-runner` and `aetherflow-api` during the cutover never kills the updater. `/v1/self-update` defaults to the native Rust `af-release` engine (`NativeRustRelease`); operators can set `AETHERFLOW_FORCE_BASH_RELEASE=1` (or `AETHERFLOW_RELEASE_ENGINE=bash`) in the runner environment as an escape hatch to `deploy/release-manager.sh`.
 
 ```bash
 # Inspect current release, active symlink, and recovery journal state
@@ -232,6 +232,9 @@ sudo af release deploy --local --channel stable
 # Roll back to the previous known-good release and verify DB integrity
 sudo af release rollback --local
 ```
+
+- **Host Path Picker & Multi-GPU Drop-ins**: `GET /api/v1/auth/fs` defaults to `/mnt,/media,/srv,/data,/home` (override via `AF_ALLOWED_FS_ROOTS`). `aetherflow-api.service` allows `/dev/nvidia0` by default; multi-GPU NVENC hosts can add additional `DeviceAllow=/dev/nvidia1 rw` lines in `/etc/systemd/system/aetherflow-api.service.d/local.conf`.
+- **Modular Marketplace Shell Helpers**: Bash marketplace installers source `packages/common.sh`, which loads the modular helpers under `packages/lib/*.sh`.
 
 See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-release`)](./rust-release-engine.md).
 

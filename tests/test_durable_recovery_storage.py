@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions, installer_common_functions
+from installer_test_helpers import common_functions, installer_common_functions, read_common_sh_source
 from test_marketplace_catalog_lifecycle_matrix import InstallerFixture
 
 
@@ -84,7 +84,7 @@ class DurableRecoveryStorageTests(unittest.TestCase):
             self.assertIn("PrivateTmp=yes", text, f"{rel} must preserve PrivateTmp=yes")
 
         # 2. common.sh begin_state_transaction must use persistent recovery helpers, never /tmp or /var/tmp.
-        common_text = (ROOT / "packages/common.sh").read_text()
+        common_text = read_common_sh_source()
         start = common_text.index("\nbegin_state_transaction() ")
         end = common_text.index("\n}\n", start)
         begin_tx = common_text[start:end]

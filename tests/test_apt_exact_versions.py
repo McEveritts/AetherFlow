@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.installer_test_helpers import ROOT, replace_paths_once
+from tests.installer_test_helpers import ROOT, read_common_sh_source, replace_paths_once
 
 
 APT_AUTOMATION_PATH = ROOT / "config/package_automation.json"
@@ -87,7 +87,7 @@ class SyntheticAptEnvironment:
         # Rebase common.sh into isolated root and keep synthetic bin_dir ahead of system PATH
         self.common_sh = self.root / "packages/common.sh"
         self.common_sh.parent.mkdir(parents=True, exist_ok=True)
-        common_text = self.rebase((ROOT / "packages/common.sh").read_text())
+        common_text = self.rebase(read_common_sh_source())
         common_text = common_text.replace(
             'export PATH="/usr/local/nodejs/bin:',
             f'export PATH="{self.bin_dir}:{self.root / "usr/sbin"}:{self.root / "usr/bin"}:/usr/local/nodejs/bin:',

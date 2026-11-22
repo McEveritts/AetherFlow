@@ -3,6 +3,59 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+COMMON_LIB_MODULES = (
+    "logging_archives.sh",
+    "versions_apt.sh",
+    "state_downloads.sh",
+    "config_database.sh",
+    "apache_dns_locks.sh",
+    "redaction_receipts.sh",
+    "systemd_credentials.sh",
+)
+
+
+def read_common_sh_source(root=ROOT):
+    """Return the resolved self-contained source of packages/common.sh + packages/lib/*.sh in exact loader order."""
+    base = Path(root)
+    loader = (base / "packages/common.sh").read_text(encoding="utf-8")
+    lib_dir = base / "packages/lib"
+    if not lib_dir.is_dir():
+        return loader
+    preamble = loader.split("_AF_COMMON_DIR=", 1)[0]
+    logging_src = (lib_dir / "logging_archives.sh").read_text(encoding="utf-8").rstrip("\n")
+    marker = "\ntimestamp() {"
+    if marker in logging_src:
+        logging_src = logging_src.replace(
+            marker,
+            '\naf_ensure_lock_dir "$LOCK_DIR"\naf_prepare_logfile_path "$LOGFILE"\n' + marker,
+            1,
+        )
+    parts = [
+        preamble.rstrip("\n"),
+        logging_src,
+    ]
+    for module in COMMON_LIB_MODULES[1:]:
+        parts.append((lib_dir / module).read_text(encoding="utf-8").rstrip("\n"))
+    parts.append("load_master_credentials\n_AF_COMMON_SH_LOADED=1\n")
+    return "\n\n".join(parts)
+
+
+def stage_common_sh_into(dst_packages_dir, root=ROOT):
+    """Copy packages/common.sh and packages/lib/*.sh into a staged packages directory."""
+    import shutil
+
+    base = Path(root)
+    dst = Path(dst_packages_dir)
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(base / "packages/common.sh", dst / "common.sh")
+    src_lib = base / "packages/lib"
+    if src_lib.is_dir():
+        dst_lib = dst / "lib"
+        if dst_lib.exists():
+            shutil.rmtree(dst_lib)
+        shutil.copytree(src_lib, dst_lib)
+    return dst / "common.sh"
+
 
 def mock_rutorrent_backend(bin_dir):
     """Supply a healthy SCGI boundary in fixtures focused on other installer behavior."""
@@ -52,7 +105,7 @@ def common_functions(*names):
     if 'af_emit_readiness_record' in names or 'safe_config_python' in names:
         names = tuple(dict.fromkeys((*names, 'safe_config_python', 'af_local_readiness_python',
                                      'af_wait_local_web_services')))
-    source = (ROOT / "packages/common.sh").read_text()
+    source = read_common_sh_source()
     functions = []
     for name in names:
         start = source.index(f"\n{name}() ") + 1

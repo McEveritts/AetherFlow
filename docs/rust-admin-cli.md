@@ -14,7 +14,7 @@
    - Release status, deployment, rollback, slot cleanup, and systemd migration reuse `af_release::{ReleaseConfig, ReleaseEngine, ReleaseOptions, ReleaseChannel, ReleaseCommand, validate_self_update_request}`.
    - Host backup creation, inventory listing, SHA-256 sidecar verification, chunk splitting/assembly, and non-destructive restore preflight reuse `af_host`.
 3. **Conservative Release & Restore Safety**:
-   - Runtime production release/rollback execution defaults to the runner-mediated `release-manager.sh` transient systemd unit (`/v1/self-update`), or `af-release` when `AETHERFLOW_ENABLE_RUST_RELEASE=1` is set (or via `af release deploy/rollback --local`).
+   - Runtime production release/rollback execution defaults to the runner-mediated native Rust `af-release` transient systemd unit (`/v1/self-update` running `af release deploy/rollback --local`), with `AETHERFLOW_FORCE_BASH_RELEASE=1` (or `AETHERFLOW_RELEASE_ENGINE=bash`) available as an explicit escape hatch to `deploy/release-manager.sh`.
    - Unconfirmed live restore (`af backup restore` without `--confirm-destructive-restore`) is **intentionally blocked** and fails closed via `af_host::execute_destructive_restore` (`HostBackupError::DestructiveRestoreUnsupported`, exit code `6`). Operators must run `af backup restore-preflight` first and pass explicit `--target-root <dir> --confirm-destructive-restore` for verified staged extraction.
 4. **Resumable Provisioning Foundation (`STATE_VERSION=2`)**:
    - Implements persisted step completion (`/install/.aetherflow.state`), atomic key-value configuration (`/install/.aetherflow.conf`), crash-safe PID lockfile protection (`/run/aetherflow-setup.lock`), distro preflight checks, SHA-256 sidecar config overlays (`<target>.aetherflow-sha256` + `<target>.user-backup.<ts>`), and `--repair` / `--resume` / `--fresh` / `--dry-run`.
@@ -120,7 +120,7 @@ af release cleanup [--keep-releases <n>] [--config <path>]
 af release migrate-systemd [--config <path>]
 ```
 
-- By default, `deploy` and `rollback` dispatch `SelfUpdateRequest` to `/v1/self-update` on `af-runner` (which launches an isolated transient systemd unit `aetherflow-self-update-<command>-<channel>-<id>.service` running either `deploy/release-manager.sh` or `af release <command> --local` when `AETHERFLOW_ENABLE_RUST_RELEASE=1`). Passing `--local` (or `--root <dir> --dry-run`) invokes `af_release::ReleaseEngine` (`ReleaseConfig::for_root` / `ReleaseConfig::load_from_process_env` and `ReleaseOutcome::{Deploy, Rollback, Cleanup, MigrateSystemd}`) directly.
+- By default, `deploy` and `rollback` dispatch `SelfUpdateRequest` to `/v1/self-update` on `af-runner` (which launches an isolated transient systemd unit `aetherflow-self-update-<command>-<channel>-<id>.service` running the native `af release <command> --local` engine by default, or `deploy/release-manager.sh` when `AETHERFLOW_FORCE_BASH_RELEASE=1` is set). Passing `--local` (or `--root <dir> --dry-run`) invokes `af_release::ReleaseEngine` (`ReleaseConfig::for_root` / `ReleaseConfig::load_from_process_env` and `ReleaseOutcome::{Deploy, Rollback, Cleanup, MigrateSystemd}`) directly.
 
 ### 6. Host Backup & Coordinated Staged Restore (`af backup`)
 

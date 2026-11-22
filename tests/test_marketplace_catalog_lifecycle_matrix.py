@@ -24,7 +24,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-from installer_test_helpers import common_functions, mock_rutorrent_backend
+from installer_test_helpers import common_functions, mock_rutorrent_backend, read_common_sh_source
 
 
 CATALOG_APPS = (
@@ -1019,7 +1019,7 @@ class InstallerFixture:
         if app == "rutorrent":
             mock_rutorrent_backend(self.commands)
         self.file("usr/lib/systemd/system/" + self.metadata["service_name"] + ".service", "[Service]\nExecStart=/fixture/vendor-service\n")
-        source = (ROOT / "packages/common.sh").read_text()
+        source = read_common_sh_source()
         names = re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_-]*)\(\) [({]$", source)
         helpers = self.rewrite(common_functions(*(name for name in names if name != "seed_jellyfin_master_user")))
         overrides = r'''

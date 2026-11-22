@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, read_common_sh_source
 
 ROOT = Path(__file__).resolve().parents[1]
 REAL_GIT = shutil.which("git") or "/usr/bin/git"
@@ -335,7 +335,7 @@ sys.exit(0)
 
 
 def _load_common_sh_base() -> str:
-    source = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
+    source = read_common_sh_source()
     names = re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_-]*)\(\) [({]$", source)
     return common_functions(*(n for n in names if n != "seed_jellyfin_master_user"))
 

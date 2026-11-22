@@ -14,7 +14,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import ROOT, common_functions
+from installer_test_helpers import ROOT, common_functions, read_common_sh_source
 
 COMMON_SH = ROOT / "packages/common.sh"
 INSTALLER_SH = ROOT / "packages/package/install/installpackage-autoscan"
@@ -144,7 +144,7 @@ class _DisposableAutoscanFixture:
         (self.root / "fixture-autoscan-bin").write_bytes(fake_bin)
         (self.root / "fixture-autoscan-bin").chmod(0o755)
 
-        common_src = rebase_text(COMMON_SH.read_text(encoding="utf-8"), self.root)
+        common_src = rebase_text(read_common_sh_source(), self.root)
         # Bound readiness wait attempts in tests so negative rollback cases finish quickly.
         common_src = common_src.replace(
             'attempts="${4:-30}"',

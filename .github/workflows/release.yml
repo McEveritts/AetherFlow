@@ -238,7 +238,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq
-          bash -n packages/youtube-common.sh
+          bash -n packages/common.sh packages/lib/*.sh packages/youtube-common.sh
           for app in invidious piped; do
             bash -n "packages/package/install/installpackage-${app}"
             bash -n "packages/package/remove/removepackage-${app}"
@@ -355,7 +355,7 @@ jobs:
             # Setup and the source build need deployment files and both Rust workspaces.
             git archive --format=tar.gz --prefix=AetherFlow/ HEAD -- \
               . ':!.github' ':!apps' ':!docs' ':!e2e' ':!tests' \
-              ':!scripts/v4_*.py' ':!scripts/run_embedded_e2e.sh' ':!scripts/smoke_v4_release_lifecycle.sh' \
+              ':!scripts/v4_*.py' ':!scripts/lib' ':!scripts/run_embedded_e2e.sh' ':!scripts/smoke_v4_release_lifecycle.sh' \
               ':!scripts/verify_wasm_reproducibility.py' ':!scripts/validate-streaming.sh' \
               ':!scripts/build_wsl.ps1' ':!scripts/setup_wsl_dev.sh' ':!scripts/create-plugin-sdk.sh' \
               ':!package.json' ':!package-lock.json' ':!.nvmrc' ':!.gitleaks.toml' \

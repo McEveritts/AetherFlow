@@ -8,7 +8,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import ROOT, common_functions, replace_paths_once
+from installer_test_helpers import ROOT, common_functions, read_common_sh_source, replace_paths_once
 
 
 FAKE_COMMAND = '''#!/usr/bin/python3
@@ -111,7 +111,7 @@ class MarketplaceTeardownTests(unittest.TestCase):
 
     def run_remove(self, package='syncthing', **environment):
         names = ('purge_systemd_unit', 'purge_system_user', 'remove_apache_app_listener', 'command_exists', 'purge_app_archive_backups', 'safe_rm_rf', 'validate_config_paths', 'safe_config_python', 'read_app_database_config', 'nextcloud_database_ownership')
-        source = (ROOT / 'packages/common.sh').read_text()
+        source = read_common_sh_source()
         names += tuple(name for name in ('systemd_unit_inactive', 'stop_systemd_unit', 'purge_systemd_units', 'prepare_rtorrent_scoped_stop')
                        if f'\n{name}() ' in source)
         helpers = self.rebase(common_functions(*names))

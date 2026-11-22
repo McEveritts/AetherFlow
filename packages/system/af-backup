@@ -2,42 +2,23 @@
 # Compatibility shim delegating legacy af-backup to native `af backup`.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SELF_REAL="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
-
-is_legacy_af_wrapper() {
-  local cand_real legacy_path legacy_real
-  cand_real="$(readlink -f "$1" 2>/dev/null || printf '%s' "$1")"
-  [[ "$cand_real" == "$SELF_REAL" ]] && return 0
-  for legacy_path in \
-    /opt/AetherFlow/packages/system/af \
-    /opt/AetherFlow/current/packages/system/af \
-    /usr/local/bin/AetherFlow/system/af \
-    "${SCRIPT_DIR}/af"; do
-    legacy_real="$(readlink -f "$legacy_path" 2>/dev/null || printf '%s' "$legacy_path")"
-    [[ "$cand_real" == "$legacy_real" ]] && return 0
-  done
-  return 1
-}
-
-is_native_af_cli() {
-  local bin="$1"
-  [[ -n "$bin" && -x "$bin" ]] || return 1
-  is_legacy_af_wrapper "$bin" && return 1
-  if [[ "$bin" == "${AETHERFLOW_CLI_BIN:-}" ]]; then
-    return 0
-  fi
-  if [[ "$(LC_ALL=C head -c 4 "$bin" 2>/dev/null | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]]; then
-    return 0
-  fi
-  "$bin" --version >/dev/null 2>&1
-}
-
-for af_bin in "${AETHERFLOW_CLI_BIN:-}" /opt/AetherFlow/current/bin/af /opt/AetherFlow/current/af /usr/local/bin/af-cli /opt/AetherFlow/bin/af-cli /usr/local/bin/af; do
-  if is_native_af_cli "$af_bin"; then
-    exec "$af_bin" backup "$@"
+SCRIPT_REAL="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_REAL}")" && pwd)"
+_af_cli_shim=""
+for _cand in \
+  "${SCRIPT_DIR}/../lib/cli_shim.sh" \
+  /opt/AetherFlow/current/packages/lib/cli_shim.sh \
+  /opt/AetherFlow/packages/lib/cli_shim.sh \
+  /usr/local/bin/AetherFlow/lib/cli_shim.sh; do
+  if [[ -f "$_cand" ]]; then
+    _af_cli_shim="$_cand"
+    break
   fi
 done
-
-printf 'Native AetherFlow CLI binary (/usr/local/bin/af) not found.\n' >&2
-exit 1
+if [[ -z "$_af_cli_shim" ]]; then
+  printf 'Unable to locate AetherFlow CLI shim helper (packages/lib/cli_shim.sh).\n' >&2
+  exit 1
+fi
+# shellcheck source=../lib/cli_shim.sh
+source "$_af_cli_shim"
+af_exec_native_cli backup "$@"

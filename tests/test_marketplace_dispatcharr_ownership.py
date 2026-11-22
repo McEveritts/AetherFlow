@@ -7,7 +7,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import ROOT, common_functions, replace_paths_once
+from installer_test_helpers import ROOT, common_functions, read_common_sh_source, replace_paths_once
 from test_marketplace_dispatcharr import UPGRADE_MOCK
 from test_marketplace_teardown import FAKE_COMMAND
 
@@ -61,7 +61,7 @@ lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 """
         names = ("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "git_stage_exact_revision", "safe_config_python", "validate_config_paths", "write_config_file", "purge_systemd_unit", "purge_system_user", "command_exists", "safe_rm_rf")
-        source = (ROOT / "packages/common.sh").read_text()
+        source = read_common_sh_source()
         names += tuple(name for name in ("purge_systemd_units", "stop_systemd_unit", "systemd_unit_inactive", "backup_postgresql_database", "restore_postgresql_database") if f"\n{name}() " in source)
         common += self.rebase(common_functions(*names))
         self.file("opt/AetherFlow/packages/common.sh", common)

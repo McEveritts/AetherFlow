@@ -14,7 +14,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions, replace_paths_once
+from installer_test_helpers import common_functions, read_common_sh_source, replace_paths_once
 
 ROOT = Path(__file__).resolve().parents[1]
 APPLICATIONS = {
@@ -121,7 +121,7 @@ if 'Identity/Wizard' not in source and 'auth/createAdmin' not in source:
     raise SystemExit(subprocess.run(['/usr/bin/python3', *sys.argv[1:]], input=source, text=True).returncode)
 ''')
         python.chmod(0o755)
-        source = (ROOT / 'packages/common.sh').read_text()
+        source = read_common_sh_source()
         helpers = source[source.index('command_exists()'):source.index('lock_path()')]
         helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit',
                                     'purge_systemd_unit', 'purge_system_user',

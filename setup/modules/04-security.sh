@@ -466,45 +466,58 @@ function _apachesudo() {
 
 # function to configure apache
 function _apacheconf() {
-	\cp -f "${local_setup}templates/aliases-seedbox.conf.template" /etc/apache2/sites-enabled/aliases-seedbox.conf
-	sed -i "s/USERNAME/${username}/g" /etc/apache2/sites-enabled/aliases-seedbox.conf
-	a2enmod auth_digest >>"${OUTTO}" 2>&1
-	a2enmod ssl >>"${OUTTO}" 2>&1
-	a2enmod scgi >>"${OUTTO}" 2>&1
-	a2enmod rewrite >>"${OUTTO}" 2>&1
-	a2enmod proxy >>"${OUTTO}" 2>&1
-	a2enmod proxy_http >>"${OUTTO}" 2>&1
-	a2enmod proxy_wstunnel >>"${OUTTO}" 2>&1
-	if [[ -f /etc/apache2/sites-enabled/000-default.conf ]]; then
-		mv /etc/apache2/sites-enabled/000-default.conf /etc/apache2/ >>"${OUTTO}" 2>&1
+	local apache_etc="${AF_APACHE_ETC_DIR:-/etc/apache2}"
+	local legacy_aliases_conf="${AF_LEGACY_SEEDBOX_ALIASES_CONF:-${apache_etc}/sites-enabled/aliases-seedbox.conf}"
+	local legacy_digest_file="${HTPASSWD:-/etc/htpasswd}"
+	local basic_htpasswd="${AF_APACHE_HTPASSWD:-${apache_etc}/AetherFlow/htpasswd}"
+	local default_docroot="${AF_DEFAULT_DOCROOT:-/var/www/aetherflow-default}"
+	local legacy_srv_link="${AF_LEGACY_SRV_LINK:-/srv/aetherflow}"
+	local php_etc="${AF_PHP_ETC_DIR:-/etc/php}"
+	local outto="${OUTTO:-/dev/null}"
+
+	if [[ "${AF_ENABLE_LEGACY_SEEDBOX_ALIASES:-0}" == "1" || -f "${legacy_aliases_conf}" || -f "${legacy_digest_file}" ]]; then
+		\cp -f "${local_setup}templates/aliases-seedbox.conf.template" "${legacy_aliases_conf}"
+		sed -i "s/USERNAME/${username}/g" "${legacy_aliases_conf}"
+		a2enmod auth_digest >>"${outto}" 2>&1
 	fi
-	\cp -f "${local_setup}templates/default-ssl.conf.template" /etc/apache2/sites-enabled/default-ssl.conf
-	if [[ ! -s /etc/apache2/AetherFlow/htpasswd && -n "${username:-}" && -n "${passwd:-}" ]] && type _write_apache_htpasswd_files &>/dev/null; then
+	a2enmod ssl >>"${outto}" 2>&1
+	a2enmod scgi >>"${outto}" 2>&1
+	a2enmod rewrite >>"${outto}" 2>&1
+	a2enmod proxy >>"${outto}" 2>&1
+	a2enmod proxy_http >>"${outto}" 2>&1
+	a2enmod proxy_wstunnel >>"${outto}" 2>&1
+	if [[ -f "${apache_etc}/sites-enabled/000-default.conf" ]]; then
+		mv "${apache_etc}/sites-enabled/000-default.conf" "${apache_etc}/" >>"${outto}" 2>&1
+	fi
+	\cp -f "${local_setup}templates/default-ssl.conf.template" "${apache_etc}/sites-enabled/default-ssl.conf"
+	if [[ ! -s "${basic_htpasswd}" && -n "${username:-}" && -n "${passwd:-}" ]] && type _write_apache_htpasswd_files &>/dev/null; then
 		_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM:-Welcome to AetherFlow}" || true
 	fi
-	install -d -m 0755 /var/www/aetherflow-default
-	if [[ -L /srv/aetherflow && "$(readlink /srv/aetherflow 2>/dev/null)" == "/opt/AetherFlow" ]]; then
-		rm -f /srv/aetherflow
+	install -d -m 0755 "${default_docroot}"
+	if [[ -L "${legacy_srv_link}" && "$(readlink "${legacy_srv_link}" 2>/dev/null)" == "/opt/AetherFlow" ]]; then
+		rm -f "${legacy_srv_link}"
 	fi
-	sed -i "s/ServerTokens OS/ServerTokens Prod/g" /etc/apache2/conf-enabled/security.conf
-	sed -i "s/ServerSignature On/ServerSignature Off/g" /etc/apache2/conf-enabled/security.conf
-	rm -f /etc/apache2/sites-enabled/fileshare.conf 2>/dev/null || true
+	if [[ -f "${apache_etc}/conf-enabled/security.conf" ]]; then
+		sed -i "s/ServerTokens OS/ServerTokens Prod/g" "${apache_etc}/conf-enabled/security.conf"
+		sed -i "s/ServerSignature On/ServerSignature Off/g" "${apache_etc}/conf-enabled/security.conf"
+	fi
+	rm -f "${apache_etc}/sites-enabled/fileshare.conf" 2>/dev/null || true
 
 	# ── PHP ini hardening ─────────────────────────────────────────────────
 	# Dynamically detect PHP version if the codename-mapped version is missing
 	local _php_ver="${PHP_VER:-}"
-	if [[ -z "${_php_ver}" ]] || [[ ! -d "/etc/php/${_php_ver}" ]]; then
+	if [[ -z "${_php_ver}" ]] || [[ ! -d "${php_etc}/${_php_ver}" ]]; then
 		# Fall back to the highest installed PHP version
-		_php_ver="$(ls -1d /etc/php/*/fpm 2>/dev/null | sort -V | tail -n1 | grep -oP '/etc/php/\K[^/]+')" || true
+		_php_ver="$(ls -1d "${php_etc}"/*/fpm 2>/dev/null | sort -V | tail -n1 | grep -oP '/php/\K[^/]+')" || true
 		if [[ -z "${_php_ver}" ]]; then
-			echo "[WARN] No PHP installation found under /etc/php/. Skipping PHP ini tuning."
+			echo "[WARN] No PHP installation found under ${php_etc}/. Skipping PHP ini tuning."
 		else
 			echo "[INFO] PHP_VER=${PHP_VER:-unset} not found; using detected version: ${_php_ver}"
 		fi
 	fi
 
-	local _php_ini_fpm="/etc/php/${_php_ver}/fpm/php.ini"
-	local _php_ini_apache="/etc/php/${_php_ver}/apache2/php.ini"
+	local _php_ini_fpm="${php_etc}/${_php_ver}/fpm/php.ini"
+	local _php_ini_apache="${php_etc}/${_php_ver}/apache2/php.ini"
 	local _php_sed_args=(-i.bak -e "s/post_max_size = 8M/post_max_size = 64M/" -e "s/upload_max_filesize = 2M/upload_max_filesize = 92M/" -e "s/expose_php = On/expose_php = Off/" -e "s/128M/768M/" -e "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/" -e "s/;opcache.enable=0/opcache.enable=1/" -e "s/;opcache.memory_consumption=64/opcache.memory_consumption=128/" -e "s/;opcache.max_accelerated_files=2000/opcache.max_accelerated_files=4000/" -e "s/;opcache.revalidate_freq=2/opcache.revalidate_freq=240/")
 
 	if [[ -n "${_php_ver}" ]]; then
@@ -548,10 +561,24 @@ function _apacheconf() {
 	#sed -i 's/memory_limit = 128M/memory_limit = 768M/g' /etc/php/${PHP_VER}/apache2/php.ini
 }
 
+function _af_snakeoil_cert_subject() {
+	local candidate="${1:-${FQDN:-}}"
+	candidate="${candidate%.}"
+	if [[ -n "${candidate}" && "${candidate}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ && "${candidate}" != *..* ]]; then
+		printf '/CN=%s\n' "${candidate}"
+	else
+		printf '/CN=aetherflow.local\n'
+	fi
+}
+
 # function to fix cert
 # add by EFS
 function _fix_cert() {
-	if [[ ! -f /etc/ssl/certs/ssl-cert-snakeoil.pem ]]; then
-		openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout /etc/ssl/private/ssl-cert-snakeoil.key -out /etc/ssl/certs/ssl-cert-snakeoil.pem -subj "/C=CN/ST=BJ/L=PRC/O=IT/CN=www.example.com" >>"${OUTTO}" 2>&1
+	local cert_path="${AF_SNAKEOIL_CERT:-/etc/ssl/certs/ssl-cert-snakeoil.pem}"
+	local key_path="${AF_SNAKEOIL_KEY:-/etc/ssl/private/ssl-cert-snakeoil.key}"
+	if [[ ! -f "${cert_path}" ]]; then
+		local cert_subj
+		cert_subj="$(_af_snakeoil_cert_subject "${FQDN:-}")"
+		openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout "${key_path}" -out "${cert_path}" -subj "${cert_subj}" >>"${OUTTO:-/dev/null}" 2>&1
 	fi
 }

@@ -5,8 +5,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import read_common_sh_source
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -212,7 +216,7 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         (self.root / "etc/os-release").write_text('ID=debian\nVERSION_CODENAME=bookworm\n')
         (self.root / "etc/xrdp/startwm.sh").write_text("original session script\n")
         (self.root / "common.sh").write_text(MOCK_COMMON)
-        common = (REPO / "packages/common.sh").read_text()
+        common = read_common_sh_source()
         common = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root|home)/", lambda match: str(self.root) + match.group(), common)
         (self.root / "real-common.sh").write_text(common)
         (self.root / "mock.py").write_text(MOCK_COMMANDS)

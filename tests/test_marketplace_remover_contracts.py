@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import ROOT, replace_paths_once
+from installer_test_helpers import ROOT, read_common_sh_source, replace_paths_once
 
 
 REMOVE_DIR = ROOT / "packages/package/remove"
@@ -16,7 +16,7 @@ def production_functions(*names):
     names = tuple(dict.fromkeys(('af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', *names)))
     if 'safe_rm_rf' in names:
         names = tuple(dict.fromkeys((*names, 'validate_config_paths', 'safe_config_python')))
-    source = (ROOT / "packages/common.sh").read_text()
+    source = read_common_sh_source()
     functions = []
     for name in names:
         start = source.index(f"\n{name}() ") + 1

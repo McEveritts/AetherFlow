@@ -33,7 +33,7 @@ sudo systemctl restart aetherflow-runner aetherflow-api
 | :--- | :--- | :--- |
 | `AF_MCBROWSER_ROOT` | Dedicated absolute directory owned by `aetherflow` (`0700`) for per-user McBrowser storage (`user-<id>`). | `/var/lib/aetherflow/mcbrowser` |
 | `AF_MCBROWSER_MAX_UPLOAD_BYTES` | Maximum file size for resumable chunked uploads in Native McBrowser. | `68719476736` (`64 GiB`) |
-| `AF_ALLOWED_FS_ROOTS` | Comma-separated roots accessible to administrator-only host path pickers (`/api/v1/auth/fs`). | `/mnt,/media,/srv,/home` |
+| `AF_ALLOWED_FS_ROOTS` | Comma-separated roots accessible to administrator-only host path pickers (`/api/v1/auth/fs`). | `/mnt,/media,/srv,/data,/home` |
 
 ---
 
@@ -111,7 +111,8 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 | :--- | :--- | :--- |
 | `AF_GITHUB_TOKEN` | Optional GitHub token for higher rate limits during update checks (falls back to `GITHUB_TOKEN` / `GH_TOKEN`). | `(Unauthenticated)` |
 | `AETHERFLOW_ENABLE_RUST_PACKAGES` | Opt-in flag (`1` / `true`) enabling `af-runner`'s 9 built-in declarative Rust package recipes before Bash fallback. | `false` |
-| `AETHERFLOW_ENABLE_RUST_RELEASE` | Opt-in flag (`1` / `true`) routing `/v1/self-update` directly through `af-release` (deprecated alias: `AETHERFLOW_USE_RUST_RELEASE`). | `false` |
+| `AETHERFLOW_FORCE_BASH_RELEASE` | Escape-hatch flag (`1` / `true`, or `AETHERFLOW_RELEASE_ENGINE=bash`) routing `/v1/self-update` through legacy `deploy/release-manager.sh` instead of the default native Rust `af-release` engine (`AETHERFLOW_ENABLE_RUST_RELEASE` / `AETHERFLOW_USE_RUST_RELEASE` remain accepted no-op compatibility flags). | `false` |
+| `AF_ENABLE_LEGACY_SEEDBOX_ALIASES` | Setup opt-in flag (`1`) enabling legacy MD5 Digest `/etc/htpasswd` and Apache `aliases-seedbox.conf` on fresh installations (existing upgraded hosts are preserved automatically). | `0` |
 | `AF_HEAL_AUTO_APPROVE` | When `1` or `true`, `af-heal` (10-second poll loop) restarts failed managed systemd units automatically via `aetherflow-runner` with exponential backoff (`10s * 2^attempt`, up to 3 retries) instead of queueing an Approval Inbox action. | `false` |
 | `CLUSTER_MODE` | Multi-node fleet topology (`standalone`, `master`, `worker`). | `standalone` |
 | `CLUSTER_PSK` | Pre-shared key validated via `X-Cluster-PSK` for cluster heartbeat and metrics endpoints. | `(Optional)` |

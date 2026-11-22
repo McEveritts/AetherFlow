@@ -122,13 +122,15 @@ function _askcontinue() {
 	_save_config continued "yes"
 }
 
-# Write Digest (/etc/htpasswd) and Basic-Auth bcrypt (/etc/apache2/AetherFlow/htpasswd) entries
+# Write Basic-Auth bcrypt (/etc/apache2/AetherFlow/htpasswd) and, only when explicitly opted in
+# (AF_ENABLE_LEGACY_SEEDBOX_ALIASES=1) or preserving an upgraded host, legacy Digest (/etc/htpasswd).
 function _write_apache_htpasswd_files() {
 	local user_name="$1"
 	local user_pass="$2"
 	local realm="${3:-Welcome to AetherFlow}"
 	local digest_file="${HTPASSWD:-/etc/htpasswd}"
 	local basic_file="${AF_APACHE_HTPASSWD:-/etc/apache2/AetherFlow/htpasswd}"
+	local legacy_aliases_conf="${AF_LEGACY_SEEDBOX_ALIASES_CONF:-/etc/apache2/sites-enabled/aliases-seedbox.conf}"
 	local basic_dir digest_dir tmp_digest ha1
 	basic_dir="$(dirname "${basic_file}")"
 	digest_dir="$(dirname "${digest_file}")"
@@ -137,20 +139,25 @@ function _write_apache_htpasswd_files() {
 		printf '[ERROR] Invalid Apache credential username or realm\n' >>"${OUTTO:-/dev/null}"
 		return 1
 	fi
-	if [[ -L "${digest_dir}" || -L "${digest_file}" || ( -e "${digest_file}" && ! -f "${digest_file}" ) ||
-	      -L "${basic_dir}" || -L "${basic_file}" || ( -e "${basic_file}" && ! -f "${basic_file}" ) ]]; then
+	if [[ -L "${basic_dir}" || -L "${basic_file}" || ( -e "${basic_file}" && ! -f "${basic_file}" ) ]]; then
 		printf '[ERROR] Refusing unsafe Apache credential file paths\n' >>"${OUTTO:-/dev/null}"
 		return 1
 	fi
-	mkdir -p -- "${digest_dir}" || return 1
-	ha1="$(printf '%s' "${user_name}:${realm}:${user_pass}" | md5sum)" || return 1
-	tmp_digest="$(mktemp "${digest_dir}/.htdigest.XXXXXX")" || return 1
-	if { [[ -f "${digest_file}" ]] && ! awk -F: -v u="${user_name}" '$1 != u' "${digest_file}" > "${tmp_digest}"; } ||
-	   ! printf '%s:%s:%s\n' "${user_name}" "${realm}" "${ha1%% *}" >> "${tmp_digest}" ||
-	   ! chown root:www-data "${tmp_digest}" || ! chmod 0640 "${tmp_digest}" ||
-	   ! mv -fT -- "${tmp_digest}" "${digest_file}"; then
-		rm -f -- "${tmp_digest}"
-		return 1
+	if [[ "${AF_ENABLE_LEGACY_SEEDBOX_ALIASES:-0}" == "1" || -e "${digest_file}" || -L "${digest_file}" || -e "${legacy_aliases_conf}" || -L "${legacy_aliases_conf}" ]]; then
+		if [[ -L "${digest_dir}" || -L "${digest_file}" || ( -e "${digest_file}" && ! -f "${digest_file}" ) ]]; then
+			printf '[ERROR] Refusing unsafe Apache credential file paths\n' >>"${OUTTO:-/dev/null}"
+			return 1
+		fi
+		mkdir -p -- "${digest_dir}" || return 1
+		ha1="$(printf '%s' "${user_name}:${realm}:${user_pass}" | md5sum)" || return 1
+		tmp_digest="$(mktemp "${digest_dir}/.htdigest.XXXXXX")" || return 1
+		if { [[ -f "${digest_file}" ]] && ! awk -F: -v u="${user_name}" '$1 != u' "${digest_file}" > "${tmp_digest}"; } ||
+		   ! printf '%s:%s:%s\n' "${user_name}" "${realm}" "${ha1%% *}" >> "${tmp_digest}" ||
+		   ! chown root:www-data "${tmp_digest}" || ! chmod 0640 "${tmp_digest}" ||
+		   ! mv -fT -- "${tmp_digest}" "${digest_file}"; then
+			rm -f -- "${tmp_digest}"
+			return 1
+		fi
 	fi
 
 	install -d -m 0750 -o root -g "$(getent group www-data >/dev/null 2>&1 && echo www-data || echo root)" "${basic_dir}" 2>/dev/null || mkdir -p "${basic_dir}"

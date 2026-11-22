@@ -32,18 +32,32 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from v4_privileged_guest_drills import (
+from lib.vm_guest_common import (
     ALLOWED_WORK_ROOT_PREFIX,
     DEFAULT_GUEST_MARKER_FILE,
+    PROGRESS_LINE_RE,
+    RUNNER_EXIT_ERROR_PREFIX,
     AssertionRecord,
     CommandRecord,
     DrillAssertionError,
     DrillPhaseResult,
     GuestSafetyError,
+    PackageUdsStreamRecord,
     RunnerDaemonProcess,
     SentinelSnapshot,
+    _UnixStreamHTTPConnection,
     compute_file_sha256,
     evaluate_cli_envelope,
+    evaluate_drill_suite_status,
+    evaluate_package_stream_exchange,
+    inspect_elf_binary_metadata,
+    parse_lock_file_kv,
+    parse_package_stream_output,
+    perform_package_uds_request,
+    probe_http_endpoint,
+    query_dpkg_status,
+    query_systemd_unit_state,
+    record_phase_assertion,
     run_recorded_command,
     snapshot_sentinel,
     utc_now_iso,
@@ -51,6 +65,7 @@ from v4_privileged_guest_drills import (
     validate_isolated_work_root,
     verify_guest_execution_guardrails,
     verify_sentinel_unchanged,
+    wait_for_tcp_listener,
 )
 
 NATIVE_PACKAGE_HARNESS_SCHEMA_VERSION = "4.0.0-native-package-guest-drills-v1"
@@ -80,10 +95,6 @@ ALLOWED_THREADFIN_AMD64_DIGESTS: Tuple[str, ...] = (
     THREADFIN_PINNED_AMD64_COMPAT_SHA256,
     THREADFIN_PINNED_AMD64_PLAIN_SHA256,
 )
-
-PROGRESS_LINE_RE = re.compile(r"^\[PROGRESS:(\d{1,3})\]\s+(.+)$")
-RUNNER_EXIT_ERROR_PREFIX = "__RUNNER_EXIT_ERROR__:"
-
 
 @dataclass(frozen=True)
 class NativeFamilyDrillDefinition:
@@ -126,413 +137,12 @@ NATIVE_FAMILY_DRILLS: Tuple[NativeFamilyDrillDefinition, ...] = (
 NATIVE_FAMILY_DRILLS_BY_FAMILY = {definition.family: definition for definition in NATIVE_FAMILY_DRILLS}
 
 
-@dataclass
-class PackageUdsStreamRecord:
-    socket_path: str
-    method: str
-    path: str
-    request_body: Optional[Dict[str, Any]]
-    http_status: Optional[int]
-    headers: Dict[str, str]
-    engine_header: Optional[str]
-    raw_response: str
-    progress_events: List[Dict[str, Any]]
-    runner_exit_error: Optional[str]
-    socket_error: Optional[str]
-    duration_ms: float
-
-
-class _UnixStreamHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, socket_path: str, timeout: float = 300.0) -> None:
-        super().__init__("localhost", timeout=timeout)
-        self.socket_path = socket_path
-
-    def connect(self) -> None:
-        unix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        unix_sock.settimeout(self.timeout)
-        unix_sock.connect(self.socket_path)
-        self.sock = unix_sock
-
-
-def parse_package_stream_output(raw_text: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    events: List[Dict[str, Any]] = []
-    runner_error: Optional[str] = None
-    for raw_line in raw_text.splitlines():
-        stripped_line = raw_line.strip()
-        if not stripped_line:
-            continue
-        if stripped_line.startswith(RUNNER_EXIT_ERROR_PREFIX):
-            runner_error = stripped_line[len(RUNNER_EXIT_ERROR_PREFIX) :].strip()
-            continue
-        match_obj = PROGRESS_LINE_RE.match(stripped_line)
-        if match_obj:
-            events.append(
-                {
-                    "progress_pct": int(match_obj.group(1)),
-                    "message": match_obj.group(2).strip(),
-                    "raw": stripped_line,
-                }
-            )
-    return events, runner_error
-
-
-def evaluate_package_stream_exchange(
-    exchange: PackageUdsStreamRecord,
-    *,
-    expect_http_status: int = 200,
-    expected_engine: str = "declarative_rust",
-    expect_success: bool = True,
-    expected_error_substring: Optional[str] = None,
-) -> Tuple[bool, str]:
-    if exchange.socket_error is not None:
-        return False, f"socket error: {exchange.socket_error}"
-    if exchange.http_status != expect_http_status:
-        return (
-            False,
-            f"expected HTTP {expect_http_status}, got {exchange.http_status} (raw={exchange.raw_response[:400]!r})",
-        )
-    if expected_engine and exchange.engine_header != expected_engine:
-        return (
-            False,
-            f"expected X-AetherFlow-Package-Engine={expected_engine!r}, got {exchange.engine_header!r}",
-        )
-    if expect_success:
-        if exchange.runner_exit_error is not None:
-            return False, f"unexpected runner exit error: {exchange.runner_exit_error}"
-        if not exchange.progress_events:
-            return False, "expected non-empty [PROGRESS:<pct>] stream events, got zero"
-        percentages = [int(item["progress_pct"]) for item in exchange.progress_events]
-        for index_pos in range(1, len(percentages)):
-            if percentages[index_pos] < percentages[index_pos - 1]:
-                return (
-                    False,
-                    f"progress percentages were not monotonic: {percentages}",
-                )
-        if percentages[-1] != 100:
-            return (
-                False,
-                f"expected final progress percentage 100, got {percentages[-1]} (events={percentages})",
-            )
-        return True, f"verified {len(percentages)} progress events ending at 100%"
-
-    if exchange.runner_exit_error is None:
-        return False, f"expected runner exit error, but stream succeeded: {exchange.raw_response[:400]!r}"
-    if expected_error_substring and expected_error_substring.lower() not in exchange.runner_exit_error.lower():
-        return (
-            False,
-            f"expected error containing {expected_error_substring!r}, got {exchange.runner_exit_error!r}",
-        )
-    return True, f"verified expected failure: {exchange.runner_exit_error}"
-
-
-def perform_package_uds_request(
-    socket_path: str,
-    method: str,
-    path: str,
-    body: Optional[Dict[str, Any]] = None,
-    timeout: float = 300.0,
-) -> PackageUdsStreamRecord:
-    started_mono = time.monotonic()
-    http_status: Optional[int] = None
-    headers_map: Dict[str, str] = {}
-    engine_header: Optional[str] = None
-    raw_response = ""
-    socket_error: Optional[str] = None
-
-    try:
-        connection = _UnixStreamHTTPConnection(socket_path, timeout=timeout)
-        request_headers: Dict[str, str] = {"Host": "unix"}
-        encoded_body: Optional[bytes] = None
-        if body is not None:
-            encoded_body = json.dumps(body).encode("utf-8")
-            request_headers["Content-Type"] = "application/json"
-            request_headers["Content-Length"] = str(len(encoded_body))
-        connection.request(method, path, body=encoded_body, headers=request_headers)
-        response = connection.getresponse()
-        http_status = int(response.status)
-        for header_key, header_val in response.getheaders():
-            headers_map[header_key] = header_val
-            if header_key.lower() == "x-aetherflow-package-engine":
-                engine_header = header_val.strip()
-        raw_response = response.read().decode("utf-8", errors="replace")
-        connection.close()
-    except Exception as error_exc:
-        socket_error = f"{type(error_exc).__name__}: {error_exc}"
-
-    duration_ms = round((time.monotonic() - started_mono) * 1000.0, 2)
-    progress_events, runner_exit_error = parse_package_stream_output(raw_response)
-    return PackageUdsStreamRecord(
-        socket_path=socket_path,
-        method=method,
-        path=path,
-        request_body=body,
-        http_status=http_status,
-        headers=headers_map,
-        engine_header=engine_header,
-        raw_response=raw_response,
-        progress_events=progress_events,
-        runner_exit_error=runner_exit_error,
-        socket_error=socket_error,
-        duration_ms=duration_ms,
-    )
-
-
-def inspect_elf_binary_metadata(binary_path: Path) -> Dict[str, Any]:
-    if not binary_path.is_file():
-        return {
-            "exists": False,
-            "is_elf": False,
-            "e_machine": None,
-            "arch": None,
-            "size_bytes": 0,
-            "sha256": None,
-            "mode_octal": None,
-        }
-    stat_info = binary_path.stat()
-    with binary_path.open("rb") as file_handle:
-        header_bytes = file_handle.read(20)
-    is_elf = len(header_bytes) >= 20 and header_bytes[:4] == b"\x7fELF"
-    e_machine: Optional[int] = None
-    arch_name: Optional[str] = None
-    if is_elf:
-        is_big_endian = header_bytes[5] == 2
-        if is_big_endian:
-            e_machine = int.from_bytes(header_bytes[18:20], byteorder="big")
-        else:
-            e_machine = int.from_bytes(header_bytes[18:20], byteorder="little")
-        arch_lookup = {
-            62: "amd64",
-            183: "arm64",
-            40: "armhf",
-            3: "i386",
-            243: "riscv64",
-        }
-        arch_name = arch_lookup.get(e_machine)
-    return {
-        "exists": True,
-        "is_elf": is_elf,
-        "e_machine": e_machine,
-        "arch": arch_name,
-        "size_bytes": int(stat_info.st_size),
-        "sha256": compute_file_sha256(binary_path),
-        "mode_octal": f"{stat.S_IMODE(stat_info.st_mode):04o}",
-    }
-
-
-def parse_lock_file_kv(lock_path: Path) -> Dict[str, str]:
-    parsed: Dict[str, str] = {}
-    if not lock_path.is_file():
-        return parsed
-    for raw_line in lock_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        stripped_line = raw_line.strip()
-        if not stripped_line or "=" not in stripped_line:
-            continue
-        key_part, val_part = stripped_line.split("=", 1)
-        parsed[key_part.strip()] = val_part.strip()
-    return parsed
-
 
 def evaluate_native_package_suite_status(
     phases: Sequence[DrillPhaseResult],
     required_phases: Sequence[str] = MANDATORY_NATIVE_PACKAGE_PHASES,
 ) -> Dict[str, Any]:
-    phase_map: Dict[str, DrillPhaseResult] = {
-        phase_item.phase_id: phase_item for phase_item in phases
-    }
-    missing_phases: List[str] = []
-    failed_phases: List[str] = []
-    pending_phases: List[str] = []
-    passed_phases: List[str] = []
-
-    for req_id in required_phases:
-        phase_obj = phase_map.get(req_id)
-        if phase_obj is None:
-            missing_phases.append(req_id)
-            continue
-        if not phase_obj.real_execution:
-            failed_phases.append(f"{req_id} (real_execution=False)")
-            continue
-        if not phase_obj.assertions:
-            failed_phases.append(f"{req_id} (zero assertions recorded)")
-            continue
-        if any(not assertion_item.passed for assertion_item in phase_obj.assertions):
-            failed_phases.append(req_id)
-            continue
-        if phase_obj.status == "pending_contract":
-            pending_phases.append(req_id)
-            continue
-        if phase_obj.status != "passed":
-            failed_phases.append(req_id)
-            continue
-        passed_phases.append(req_id)
-
-    for extra_id, phase_obj in phase_map.items():
-        if extra_id not in required_phases:
-            if phase_obj.status == "pending_contract":
-                pending_phases.append(extra_id)
-            elif (
-                phase_obj.status != "passed"
-                or not phase_obj.real_execution
-                or any(not assertion_item.passed for assertion_item in phase_obj.assertions)
-            ):
-                failed_phases.append(extra_id)
-
-    overall_passed = (
-        len(required_phases) > 0
-        and len(missing_phases) == 0
-        and len(failed_phases) == 0
-        and len(pending_phases) == 0
-        and len(passed_phases) == len(required_phases)
-    )
-    if overall_passed:
-        overall_status = "passed"
-    elif pending_phases and not failed_phases and not missing_phases:
-        overall_status = "failed_pending_contract"
-    else:
-        overall_status = "failed"
-
-    return {
-        "overall_status": overall_status,
-        "overall_passed": overall_passed,
-        "required_phase_count": len(required_phases),
-        "passed_phases": passed_phases,
-        "failed_phases": failed_phases,
-        "pending_contract_phases": pending_phases,
-        "missing_phases": missing_phases,
-    }
-
-
-def record_phase_assertion(
-    phase: DrillPhaseResult,
-    name: str,
-    passed: bool,
-    expected: Any,
-    actual: Any,
-    detail: str = "",
-) -> None:
-    phase.assertions.append(
-        AssertionRecord(
-            name=name,
-            passed=bool(passed),
-            expected=expected,
-            actual=actual,
-            detail=detail,
-        )
-    )
-    if not passed:
-        phase.failure_diagnostics.append(
-            f"Assertion {name!r} failed: expected={expected!r}, actual={actual!r} ({detail})"
-        )
-
-
-def query_dpkg_status(package_name: str, cwd: Path) -> Tuple[CommandRecord, str, str]:
-    status_cmd = run_recorded_command(
-        ["dpkg-query", "-W", "-f=${db:Status-Status}|${Version}", package_name],
-        cwd=cwd,
-    )
-    if status_cmd.exit_code != 0:
-        return status_cmd, "not-installed", ""
-    parts = status_cmd.stdout.strip().split("|", 1)
-    pkg_status = parts[0].strip() if parts else "unknown"
-    pkg_version = parts[1].strip() if len(parts) > 1 else ""
-    return status_cmd, pkg_status, pkg_version
-
-
-def query_systemd_unit_state(unit_name: str, cwd: Path) -> Dict[str, Any]:
-    active_cmd = run_recorded_command(["systemctl", "is-active", unit_name], cwd=cwd)
-    enabled_cmd = run_recorded_command(["systemctl", "is-enabled", unit_name], cwd=cwd)
-    show_cmd = run_recorded_command(
-        [
-            "systemctl",
-            "show",
-            "-p",
-            "MainPID,ActiveState,SubState,Result,ExecMainStatus,FragmentPath,DropInPaths",
-            unit_name,
-        ],
-        cwd=cwd,
-    )
-    props: Dict[str, str] = {}
-    for raw_line in show_cmd.stdout.splitlines():
-        if "=" in raw_line:
-            prop_key, prop_val = raw_line.split("=", 1)
-            props[prop_key.strip()] = prop_val.strip()
-    main_pid_str = props.get("MainPID", "0")
-    main_pid = int(main_pid_str) if main_pid_str.isdigit() else 0
-    journal_cmd = run_recorded_command(
-        ["journalctl", "-u", unit_name, "-n", "40", "--no-pager"],
-        cwd=cwd,
-    )
-    return {
-        "unit_name": unit_name,
-        "is_active_exit_code": active_cmd.exit_code,
-        "is_active_stdout": active_cmd.stdout.strip(),
-        "is_enabled_exit_code": enabled_cmd.exit_code,
-        "is_enabled_stdout": enabled_cmd.stdout.strip(),
-        "main_pid": main_pid,
-        "properties": props,
-        "journal_excerpt": journal_cmd.stdout[-2500:],
-        "commands": [active_cmd, enabled_cmd, show_cmd, journal_cmd],
-    }
-
-
-def wait_for_tcp_listener(
-    host: str,
-    port: int,
-    timeout_seconds: float = 15.0,
-) -> Dict[str, Any]:
-    started_mono = time.monotonic()
-    deadline = started_mono + timeout_seconds
-    last_error: Optional[str] = None
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1.5):
-                return {
-                    "listening": True,
-                    "host": host,
-                    "port": port,
-                    "wait_ms": round((time.monotonic() - started_mono) * 1000.0, 2),
-                    "error": None,
-                }
-        except OSError as os_err:
-            last_error = f"{type(os_err).__name__}: {os_err}"
-            time.sleep(0.25)
-    return {
-        "listening": False,
-        "host": host,
-        "port": port,
-        "wait_ms": round((time.monotonic() - started_mono) * 1000.0, 2),
-        "error": last_error,
-    }
-
-
-def probe_http_endpoint(url: str, timeout_seconds: float = 10.0, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    try:
-        request_obj = urllib.request.Request(
-            url,
-            headers={"User-Agent": "AetherFlow-v4-NativePackageDrill/1.0", **(headers or {})},
-        )
-        with urllib.request.urlopen(request_obj, timeout=timeout_seconds) as response_obj:
-            body_bytes = response_obj.read(4096)
-            return {
-                "reachable": True,
-                "status_code": int(response_obj.status),
-                "body_excerpt": body_bytes.decode("utf-8", errors="replace")[:500],
-                "error": None,
-            }
-    except urllib.error.HTTPError as http_err:
-        return {
-            "reachable": True,
-            "status_code": int(http_err.code),
-            "body_excerpt": "",
-            "error": f"HTTPError {http_err.code}",
-        }
-    except Exception as error_exc:
-        return {
-            "reachable": False,
-            "status_code": None,
-            "body_excerpt": "",
-            "error": f"{type(error_exc).__name__}: {error_exc}",
-        }
+    return evaluate_drill_suite_status(phases, required_phases=required_phases)
 
 
 def verify_native_family_guest_drill(

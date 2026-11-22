@@ -58,6 +58,8 @@ DeviceAllow=/dev/urandom r
 DeviceAllow=/dev/dri rw
 DeviceAllow=char-drm rw
 DeviceAllow=/dev/nvidiactl rw
+# Single-GPU default; on multi-GPU NVENC hosts, grant additional nodes (e.g.
+# DeviceAllow=/dev/nvidia1 rw) via /etc/systemd/system/aetherflow-api.service.d/local.conf.
 DeviceAllow=/dev/nvidia0 rw
 DeviceAllow=/dev/nvidia-modeset rw
 DeviceAllow=/dev/nvidia-uvm rw

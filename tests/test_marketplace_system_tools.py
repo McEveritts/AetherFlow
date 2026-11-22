@@ -9,7 +9,7 @@ import unittest
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions, replace_paths_once
+from installer_test_helpers import COMMON_LIB_MODULES, common_functions, replace_paths_once
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,12 +182,15 @@ resolve_master_user() { echo admin; }
         functions = source[validator_start:validator_end] + "\n" + functions
         self.file("releases/new/packages/package/install/installpackage-dispatcharr", "new-installer")
         self.file("releases/new/packages/common.sh", "new-common")
+        self.file("releases/new/packages/lib/logging_archives.sh", "new-lib")
         self.file("releases/old/packages/package/install/installpackage-dispatcharr", "old-installer")
         self.file("releases/old/packages/common.sh", "old-common")
+        self.file("releases/old/packages/lib/logging_archives.sh", "old-lib")
         self.file("legacy-opt/packages/package/install/installpackage-dispatcharr", "stale-opt")
         stale = self.file("legacy-opt/packages/package/install/stale-script", "stale")
         self.file("legacy-bin/package/install/installpackage-dispatcharr", "stale-bin")
         self.file("legacy-bin/common.sh", "stale-common")
+        stale_lib = self.file("legacy-bin/lib/stale-module.sh", "stale-lib")
         for path in self.root.rglob("*"):
             if path.is_file():
                 os.utime(path, (1700000000, 1700000000))
@@ -205,10 +208,103 @@ resolve_master_user() { echo admin; }
             self.assertEqual((self.root / "legacy-opt/packages/package/install/installpackage-dispatcharr").read_text(), expected + "-installer")
             self.assertEqual((self.root / "legacy-bin/package/install/installpackage-dispatcharr").read_text(), expected + "-installer")
             self.assertEqual((self.root / "legacy-bin/common.sh").read_text(), expected + "-common")
+            self.assertEqual((self.root / "legacy-bin/lib/logging_archives.sh").read_text(), expected + "-lib")
             self.assertFalse(stale.exists())
+            self.assertFalse(stale_lib.exists())
         environment.update(DRY_RUN="true", RELEASE_DIR=str(self.root / "releases/new"))
         self.run_bash(functions + "\nlog_info() { :; }; symlink_swap", **environment)
         self.assertEqual((self.root / "legacy-bin/common.sh").read_text(), "old-common")
+        self.assertEqual((self.root / "legacy-bin/lib/logging_archives.sh").read_text(), "old-lib")
+
+    def test_legacy_system_shims_delegate_via_shared_helper_without_recursion(self):
+        native_cli = self.file("bin/native-af", '#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
+        native_cli.chmod(0o755)
+
+        for shim_name, expected_subcommand in (
+            ("af-tune", "tune"),
+            ("clean_log", "clean-logs"),
+            ("showspace", "showspace"),
+            ("af-backup", "backup"),
+        ):
+            with self.subTest(shim=shim_name):
+                shim_path = ROOT / "packages/system" / shim_name
+                self.assertTrue(os.access(shim_path, os.X_OK))
+                shim_text = shim_path.read_text(encoding="utf-8")
+                self.assertIn("cli_shim.sh", shim_text)
+                self.assertIn(f"af_exec_native_cli {expected_subcommand}", shim_text)
+                self.assertNotIn("is_legacy_af_wrapper()", shim_text)
+
+                result = subprocess.run(
+                    ["bash", str(shim_path), "--dry-run", "--json"],
+                    env={**os.environ, "AETHERFLOW_CLI_BIN": str(native_cli)},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [expected_subcommand, "--dry-run", "--json"])
+
+                # Invoking via a symlink in another directory must still locate ../lib/cli_shim.sh
+                symlink = self.root / f"links/{shim_name}"
+                symlink.parent.mkdir(parents=True, exist_ok=True)
+                symlink.symlink_to(shim_path)
+                linked_res = subprocess.run(
+                    [str(symlink), "--flag"],
+                    env={**os.environ, "AETHERFLOW_CLI_BIN": str(native_cli)},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(linked_res.returncode, 0, linked_res.stderr)
+                self.assertEqual(linked_res.stdout.splitlines(), [expected_subcommand, "--flag"])
+
+        # Verify recursion guard rejects pointing AETHERFLOW_CLI_BIN at legacy packages/system/af
+        staged_pkg = self.root / "isolated/packages"
+        (staged_pkg / "lib").mkdir(parents=True, exist_ok=True)
+        (staged_pkg / "system").mkdir(parents=True, exist_ok=True)
+        shim_helper = replace_paths_once(
+            (ROOT / "packages/lib/cli_shim.sh").read_text(encoding="utf-8"),
+            [(prefix, str(self.root) + prefix) for prefix in ("/opt/", "/usr/local/")],
+        )
+        (staged_pkg / "lib/cli_shim.sh").write_text(shim_helper, encoding="utf-8")
+        legacy_af = staged_pkg / "system/af"
+        legacy_af.write_text('#!/usr/bin/env bash\necho RECURSED >&2\nexit 99\n', encoding="utf-8")
+        legacy_af.chmod(0o755)
+        staged_tune = staged_pkg / "system/af-tune"
+        staged_tune.write_text((ROOT / "packages/system/af-tune").read_text(encoding="utf-8"), encoding="utf-8")
+        staged_tune.chmod(0o755)
+        blocked = subprocess.run(
+            ["bash", str(staged_tune), "--dry-run"],
+            env={**os.environ, "AETHERFLOW_CLI_BIN": str(legacy_af)},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertNotIn("RECURSED", blocked.stderr)
+        self.assertIn("Native AetherFlow CLI binary", blocked.stderr)
+
+    def test_common_sh_modular_loader_is_idempotent_and_bounded(self):
+        common_lines = (ROOT / "packages/common.sh").read_text(encoding="utf-8").splitlines()
+        self.assertLessEqual(len(common_lines), 100)
+        for mod in COMMON_LIB_MODULES:
+            mod_path = ROOT / "packages/lib" / mod
+            self.assertTrue(mod_path.is_file(), f"missing common.sh module {mod}")
+            self.assertLess(len(mod_path.read_text(encoding="utf-8").splitlines()), 1800, mod)
+
+        probe = f"""
+export LOGFILE="{self.root / 'loader.log'}"
+export LOCK_DIR="{self.root / 'install'}"
+export AETHERFLOW_SKIP_ENV_FILES=1
+source "{ROOT / 'packages/common.sh'}"
+AF_PENDING_VERSION_PATHS+=("/tmp/sentinel")
+source "{ROOT / 'packages/common.sh'}"
+printf 'count=%s\\n' "${{#AF_PENDING_VERSION_PATHS[@]}}"
+declare -F af_logged prepare_apt_package_transaction begin_state_transaction safe_config_python configure_apache_app_listener af_write_failure_receipt af_syncthing_listener_owned_by_unit wait_for_service_ready >/dev/null
+printf 'ok\\n'
+"""
+        lines = self.run_bash(probe)
+        self.assertEqual(lines, ["count=1", "ok"])
 
 
 if __name__ == "__main__":
