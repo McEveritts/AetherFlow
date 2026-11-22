@@ -59,9 +59,16 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 path.write_bytes(content)
             tool_bin = root / "tools"
             tool_bin.mkdir()
-            # Only Cargo is stubbed; staging, tar, gzip and hashing are real.
-            (tool_bin / "cargo").write_text("#!/bin/sh\nexit 0\n")
+            # Only tool discovery and Cargo are stubbed. Packaging remains real.
+            (tool_bin / "cargo").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "${RUSTFLAGS-}" >> "$FIXTURE_LINK_FLAGS"\n'
+            )
             (tool_bin / "cargo").chmod(0o755)
+            bash_env = root / "without-mold.sh"
+            bash_env.write_text(
+                'command() { if [[ "$*" == "-v mold" ]]; then return 1; fi; builtin command "$@"; }\n'
+            )
+            link_flags = root / "link-flags.log"
             workflow = (ROOT / ".github/workflows/release.yml").read_text()
             package_step = textwrap.dedent(workflow.split(
                 "      - name: Package Release Tarball & SHA-256 Manifest\n        run: |\n", 1
@@ -70,6 +77,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 "FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "BACKEND_RS_DIR", "BACKEND_DIR",
                 "CONFIG_DIR", "PLUGINS_DIR", "CARGO_BUILD_TARGET", "BUILD_DATE", "BINARY_NAME",
                 "CLI_BINARY_NAME", "CARGO_BIN_NAME", "CARGO_CLI_BIN_NAME", "VERSION_FILE",
+                "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
             }}
             env.update({
                 "PATH": str(tool_bin) + os.pathsep + os.environ["PATH"],
@@ -79,6 +87,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 "SOURCE_DATE_EPOCH": "1700000000", "GIT_COMMIT": "fixed",
                 "VERSION": "v4.0.0", "VERSION_STAMP": "v4.0.0",
                 "GITHUB_ENV": str(root / "github-env"), "TMPDIR": str(root),
+                "FIXTURE_LINK_FLAGS": str(link_flags),
             })
             hashes = set()
             for regular_mode, executable_mode, caller_umask in (
@@ -98,7 +107,12 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                             command = ['bash', '-c', 'umask "$1"; exec bash "$2"',
                                        'archive-mode-test', caller_umask, str(source / "scripts/build_gold.sh")]
                             archive_path = output / "aetherflow-linux-amd64.tar.gz"
-                            run_env = {**env, "OUTPUT_DIR": str(output)}
+                            link_flags.write_text("")
+                            run_env = {
+                                **env, "OUTPUT_DIR": str(output), "BASH_ENV": str(bash_env),
+                                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C debuginfo=1",
+                                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C debuginfo=1",
+                            }
                         else:
                             command = ['bash', '-c', 'umask "$1"\n' + package_step,
                                        'archive-mode-test', caller_umask]
@@ -107,6 +121,11 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                         result = subprocess.run(command, cwd=source, env=run_env,
                                                 capture_output=True, text=True, timeout=30)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        if packager == "gold":
+                            self.assertEqual(
+                                link_flags.read_text().splitlines(),
+                                ["-C link-arg=-fuse-ld=bfd -C debuginfo=1"] * 2,
+                            )
                         hashes.add(hashlib.sha256(archive_path.read_bytes()).hexdigest())
                         with tarfile.open(archive_path) as archive:
                             members = archive.getmembers()

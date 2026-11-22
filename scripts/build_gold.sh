@@ -142,6 +142,18 @@ stage_companion_binary() {
   chmod 0755 "${target_dir}/bin/${dest_name}"
 }
 
+configure_rust_linker() {
+  if command -v mold >/dev/null 2>&1 || [[ -v CARGO_ENCODED_RUSTFLAGS || -v RUSTFLAGS ]]; then
+    return 0
+  fi
+  local target_flags_name="${1^^}"
+  target_flags_name="CARGO_TARGET_${target_flags_name//-/_}_RUSTFLAGS"
+  local target_flags="${!target_flags_name:-}"
+  # Cargo merges target flags from the environment and .cargo/config.toml.
+  # RUSTFLAGS takes precedence over the configured mold selection.
+  export RUSTFLAGS="-C link-arg=-fuse-ld=bfd${target_flags:+ ${target_flags}}"
+}
+
 build_target() {
   local raw_arch="$1"
   local arch
@@ -172,6 +184,7 @@ build_target() {
     export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
     export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
     export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
+    configure_rust_linker "${rust_target}"
     if [[ "${arch}" != "${host_arch}" ]]; then
       case "${rust_target}" in
         aarch64-unknown-linux-gnu)
@@ -193,9 +206,6 @@ build_target() {
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
           ;;
       esac
-    elif ! command -v mold >/dev/null 2>&1; then
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
     fi
     cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_BIN_NAME}"
     if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
@@ -354,10 +364,7 @@ if [[ "${RUN_TESTS}" == "1" ]]; then
     export ALLOWED_HOSTS="${ALLOWED_HOSTS:-localhost:8080,127.0.0.1:8080}"
     export AETHERFLOW_DISABLE_BACKGROUND_WORKERS="${AETHERFLOW_DISABLE_BACKGROUND_WORKERS:-1}"
     export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
-    if ! command -v mold >/dev/null 2>&1; then
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-    fi
+    configure_rust_linker "$(rust_target_for_arch "$(normalize_arch_label "$(uname -m)")")"
     cargo test "${CARGO_LOCKED_ARGS[@]}" --workspace
   )
   if [[ -f "${ROOT_DIR}/frontend-rs/Cargo.toml" ]]; then
