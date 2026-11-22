@@ -118,6 +118,7 @@ fn delete_account_with_conn(
     connection: &mut Connection,
     caller: &AuthUser,
     target_user_id: i64,
+    configured_root: Option<&str>,
 ) -> Result<AccountDeletion, McBrowserError> {
     let transaction = account_mutation_transaction(connection, caller, target_user_id)?;
     let target_role: Option<String> = transaction
@@ -183,9 +184,8 @@ fn delete_account_with_conn(
             }
         }
     }
-    let configured_root = std::env::var("AF_MCBROWSER_ROOT").ok();
     let mut pending_cleanup_count =
-        account_cleanup::queue_private(&transaction, target_user_id, configured_root.as_deref())
+        account_cleanup::queue_private(&transaction, target_user_id, configured_root)
             .map_err(cleanup_journal_error)?;
     for (table, owner_column) in ACCOUNT_TABLES {
         let exists: bool = transaction
@@ -341,7 +341,13 @@ pub(crate) async fn delete_account(
         let mut connection = af_db::get_conn().map_err(|_| {
             McBrowserError::Internal("Account deletion database unavailable".to_owned())
         })?;
-        let deleted = delete_account_with_conn(&mut connection, &caller, target_user_id)?;
+        let configured_root = std::env::var("AF_MCBROWSER_ROOT").ok();
+        let deleted = delete_account_with_conn(
+            &mut connection,
+            &caller,
+            target_user_id,
+            configured_root.as_deref(),
+        )?;
         drop(connection);
         Ok(finish_account_deletion(target_user_id, deleted))
     })
@@ -500,6 +506,16 @@ mod tests {
         connection
     }
 
+    fn delete_fixture_account(
+        conn: &mut Connection,
+        admin: &AuthUser,
+        id: i64,
+    ) -> Result<AccountDeletion, McBrowserError> {
+        let absent_root =
+            std::env::temp_dir().join(format!("af-account-metadata-{}", uuid::Uuid::new_v4()));
+        delete_account_with_conn(conn, admin, id, Some(absent_root.to_str().unwrap()))
+    }
+
     #[test]
     fn deletion_queues_only_unreferenced_files_and_private_root() {
         use std::fs;
@@ -524,7 +540,6 @@ mod tests {
         for file in ["alice.txt", "bob.txt", "joint.txt"] {
             fs::write(shared.join(file), "file").unwrap();
         }
-        std::env::set_var("AF_MCBROWSER_ROOT", &browser_root);
 
         let mut connection = database();
         connection.execute_batch(
@@ -543,7 +558,13 @@ mod tests {
                 )
                 .unwrap();
         }
-        let deleted = delete_account_with_conn(&mut connection, &caller(), 2).unwrap();
+        let deleted = delete_account_with_conn(
+            &mut connection,
+            &caller(),
+            2,
+            Some(browser_root.to_str().unwrap()),
+        )
+        .unwrap();
         assert_eq!(deleted.pending_cleanup_count, 2);
         let queued = connection
             .prepare(
@@ -584,7 +605,7 @@ mod tests {
                     .unwrap();
             }
         }
-        delete_account_with_conn(&mut connection, &caller(), 2).unwrap();
+        delete_fixture_account(&mut connection, &caller(), 2).unwrap();
         for (table, column) in ACCOUNT_TABLES {
             let owners: Vec<i64> = connection
                 .prepare(&format!("SELECT {column} FROM {table}"))
@@ -608,12 +629,12 @@ mod tests {
     fn optional_tables_can_be_absent_and_last_admin_is_protected() {
         let mut connection = database();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 1),
+            delete_fixture_account(&mut connection, &caller(), 1),
             Err(McBrowserError::BadRequest(_))
         ));
-        delete_account_with_conn(&mut connection, &caller(), 2).unwrap();
+        delete_fixture_account(&mut connection, &caller(), 2).unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 2),
+            delete_fixture_account(&mut connection, &caller(), 2),
             Err(McBrowserError::NotFound(_))
         ));
     }
@@ -632,7 +653,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 2),
+            delete_fixture_account(&mut connection, &caller(), 2),
             Err(McBrowserError::Internal(_))
         ));
         for query in [
@@ -657,7 +678,7 @@ mod tests {
             .execute("UPDATE users SET role = 'user' WHERE id = 1", [])
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 2),
+            delete_fixture_account(&mut connection, &caller(), 2),
             Err(McBrowserError::Forbidden(_))
         ));
         connection
@@ -667,7 +688,7 @@ mod tests {
             .execute("INSERT INTO user_quotas VALUES (1, 'suspended')", [])
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 2),
+            delete_fixture_account(&mut connection, &caller(), 2),
             Err(McBrowserError::Forbidden(_))
         ));
         connection.execute("DELETE FROM user_quotas", []).unwrap();
@@ -678,14 +699,14 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 2),
+            delete_fixture_account(&mut connection, &caller(), 2),
             Err(McBrowserError::Forbidden(_))
         ));
         connection
             .execute("DELETE FROM users WHERE id = 1", [])
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 2),
+            delete_fixture_account(&mut connection, &caller(), 2),
             Err(McBrowserError::Unauthorized(_))
         ));
     }
@@ -700,7 +721,7 @@ mod tests {
             .execute("INSERT INTO user_quotas VALUES (2, 'suspended')", [])
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 1),
+            delete_fixture_account(&mut connection, &caller(), 1),
             Err(McBrowserError::BadRequest(_))
         ));
         connection.execute("DELETE FROM user_quotas", []).unwrap();
@@ -711,7 +732,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 1),
+            delete_fixture_account(&mut connection, &caller(), 1),
             Err(McBrowserError::BadRequest(_))
         ));
         connection
@@ -723,9 +744,9 @@ mod tests {
         connection
             .execute("INSERT INTO user_quotas VALUES (1, ' Active ')", [])
             .unwrap();
-        delete_account_with_conn(&mut connection, &caller(), 2).unwrap();
+        delete_fixture_account(&mut connection, &caller(), 2).unwrap();
         assert!(matches!(
-            delete_account_with_conn(&mut connection, &caller(), 1),
+            delete_fixture_account(&mut connection, &caller(), 1),
             Err(McBrowserError::BadRequest(_))
         ));
     }
