@@ -103,37 +103,12 @@ REPO_URL="https://github.com/${MCVNC_REPO}.git"
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/af-mcvnc-XXXXXX")"
 chmod 755 "$TMP_DIR"
-if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    TAG="${AF_TARGET_VERSION}"
-else
-    TAG="$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
-    if [[ -z "$TAG" ]]; then
-        TAG="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/${MCVNC_REPO}/tags" 2>/dev/null | jq -r '.[].name' 2>/dev/null | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
-    fi
-    if [[ -z "$TAG" ]]; then
-        TAG="v0.11.0"
-    fi
-fi
-if [[ ! "$TAG" =~ ^v?[0-9]+(\.[0-9]+)+$ ]]; then
-    print_error "Invalid McVNC tag format: ${TAG}"
-    exit 1
-fi
-VERSION="${TAG#v}"
+git_stage_exact_revision "$REPO_URL" "${TMP_DIR}/src" "${AF_TARGET_VERSION:-}"
+VERSION="${AF_STAGED_GIT_VERSION#release-}"
+VERSION="${VERSION#Release-}"
+VERSION="${VERSION#[vV]}"
 
 report_progress 55 "Cloning and compiling McVNC ${VERSION}..."
-if ! af_logged git clone --depth 1 --branch "$TAG" "$REPO_URL" "${TMP_DIR}/src"; then
-    if [[ "$TAG" =~ ^v ]]; then
-        ALT_TAG="${TAG#v}"
-    else
-        ALT_TAG="v${TAG}"
-    fi
-    af_logged git clone --depth 1 --branch "$ALT_TAG" "$REPO_URL" "${TMP_DIR}/src" || {
-        print_error "Failed to clone McVNC repository at tag ${TAG}."
-        exit 1
-    }
-    TAG="$ALT_TAG"
-    VERSION="${TAG#v}"
-fi
 af_logged cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml"
 RUNTIME_BACKUP="$(af_create_recovery_backup_dir "af-mcvnc-runtime.")"
 if [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl is-active --quiet af-mcvnc.service 2>/dev/null; then

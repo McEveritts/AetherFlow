@@ -941,7 +941,7 @@
   "unpackerr": {
     "update_source": "github",
     "require_download_sha256": true,
-    "update_repo": "davidnewhall/unpackerr",
+    "update_repo": "Unpackerr/unpackerr",
     "version_command": [
       "bash",
       "-lc",

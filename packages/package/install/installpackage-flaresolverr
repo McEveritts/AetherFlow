@@ -136,13 +136,14 @@ case "$ARCH" in
 esac
 
 report_progress 40 "Resolving latest FlareSolverr release..."
-FS_VERSION="$(github_latest_tag "FlareSolverr/FlareSolverr" "3.3.21")"
+FS_VERSION=""
 FS_URL=""
 if [[ "$FS_ARCH" == "linux_x64" ]]; then
+    FS_VERSION="$(github_latest_tag "FlareSolverr/FlareSolverr" "3.3.21")"
     FS_URL="https://github.com/FlareSolverr/FlareSolverr/releases/download/v${FS_VERSION#v}/flaresolverr_linux_x64.tar.gz"
 fi
 
-report_progress 60 "Downloading and staging FlareSolverr ${FS_VERSION}..."
+report_progress 60 "Downloading and staging FlareSolverr ${FS_VERSION:-${AF_TARGET_VERSION:-latest}}..."
 validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-flaresolverr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
@@ -163,17 +164,10 @@ if [[ -n "$FS_URL" ]]; then
     TMP_TAR=""
 else
     FS_REPO="https://github.com/FlareSolverr/FlareSolverr.git"
-    FS_TAG="v${FS_VERSION#v}"
-    if ! git ls-remote --exit-code --tags "$FS_REPO" "refs/tags/${FS_TAG}" >/dev/null 2>&1; then
-        if git ls-remote --exit-code --tags "$FS_REPO" "refs/tags/${FS_VERSION#v}" >/dev/null 2>&1; then
-            FS_TAG="${FS_VERSION#v}"
-        else
-            print_error "Upstream tag refs/tags/${FS_TAG} not found in FlareSolverr/FlareSolverr"
-            exit 1
-        fi
-    fi
-    af_logged git clone --branch "$FS_TAG" --depth 1 "$FS_REPO" "$BUILD_DIR"
-    git -C "$BUILD_DIR" rev-parse --verify HEAD >/dev/null 2>&1 || { log_error "Failed to verify cloned FlareSolverr source tree"; exit 1; }
+    git_stage_exact_revision "$FS_REPO" "$BUILD_DIR" "${AF_TARGET_VERSION:-}"
+    FS_VERSION="${AF_STAGED_GIT_VERSION#release-}"
+    FS_VERSION="${FS_VERSION#Release-}"
+    FS_VERSION="${FS_VERSION#[vV]}"
     mkdir -p /opt/flaresolverr
     if [[ -e /opt/flaresolverr/.venv || -L /opt/flaresolverr/.venv ]]; then
         if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then

@@ -71,65 +71,24 @@ chmod 755 "$BUILD_DIR"
 
 report_progress 45 "Cloning ${APP_NAME} repository..."
 SEEDCROSS_REPO="https://github.com/ccf-2012/seedcross.git"
-if [[ -n "${AF_FIXTURE_ROOT:-}" || -n "${TEST_ROOT:-}" ]]; then
-    af_logged git clone --branch "${AF_TARGET_VERSION:-main}" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
+SEEDCROSS_VERSION=""
+if [[ -z "${AF_TARGET_VERSION:-}" && ( -n "${AF_FIXTURE_ROOT:-}" || -n "${TEST_ROOT:-}" ) ]]; then
+    af_logged git clone --branch "${AF_SEEDCROSS_BRANCH:-main}" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
+    SEEDCROSS_VERSION="$(git -C "$BUILD_DIR" rev-parse HEAD)"
 else
     if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-        if [[ "${AF_TARGET_VERSION}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-            SEEDCROSS_BRANCH="${AF_SEEDCROSS_BRANCH:-main}"
-            af_logged git clone --branch "$SEEDCROSS_BRANCH" "$SEEDCROSS_REPO" "$BUILD_DIR"
-            af_logged git -C "$BUILD_DIR" checkout --detach "${AF_TARGET_VERSION}" || {
-                log_error "Failed to checkout commit ${AF_TARGET_VERSION} for ${APP_NAME}"
-                exit 1
-            }
-            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
-            if [[ "$ACTUAL_SHA" != "${AF_TARGET_VERSION}"* ]]; then
-                log_error "Checked-out SeedCross commit ($ACTUAL_SHA) does not match requested ${AF_TARGET_VERSION}"
-                exit 1
-            fi
-        else
-            TARGET_TAG="${AF_TARGET_VERSION}"
-            if ! git ls-remote --exit-code --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG}" >/dev/null 2>&1; then
-                if [[ "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG#v}" >/dev/null 2>&1; then
-                    TARGET_TAG="${TARGET_TAG#v}"
-                elif [[ ! "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$SEEDCROSS_REPO" "refs/tags/v${TARGET_TAG}" >/dev/null 2>&1; then
-                    TARGET_TAG="v${TARGET_TAG}"
-                else
-                    af_write_failure_receipt 1 "download" "invalid_target_tag" "Upstream tag refs/tags/${TARGET_TAG} not found in ${SEEDCROSS_REPO}"
-                    exit 1
-                fi
-            fi
-            EXPECTED_SHA="$(git ls-remote --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG}^{}" "refs/tags/${TARGET_TAG}" | tail -n1 | awk '{print $1}')"
-            af_logged git clone --branch "$TARGET_TAG" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
-            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
-            if [[ -n "$EXPECTED_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-                log_error "SeedCross tag ${TARGET_TAG} resolved to unexpected commit ${ACTUAL_SHA} (expected ${EXPECTED_SHA})"
-                exit 1
-            fi
-        fi
+        git_stage_exact_revision "$SEEDCROSS_REPO" "$BUILD_DIR" "${AF_TARGET_VERSION}"
+    elif git ls-remote --tags --refs "$SEEDCROSS_REPO" 2>/dev/null | sed 's#.*refs/tags/##' | grep -Eq '^(release-|Release-)?[vV]?[0-9]+(\.[0-9]+)+$'; then
+        git_stage_exact_revision "$SEEDCROSS_REPO" "$BUILD_DIR" ""
     else
-        TARGET_TAG="$(git ls-remote --tags --refs "$SEEDCROSS_REPO" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
-        if [[ -n "$TARGET_TAG" ]]; then
-            EXPECTED_SHA="$(git ls-remote --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG}^{}" "refs/tags/${TARGET_TAG}" | tail -n1 | awk '{print $1}')"
-            af_logged git clone --branch "$TARGET_TAG" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
-            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
-            if [[ -n "$EXPECTED_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-                log_error "SeedCross tag ${TARGET_TAG} resolved to unexpected commit ${ACTUAL_SHA} (expected ${EXPECTED_SHA})"
-                exit 1
-            fi
-        else
-            SYMREF_LINE="$(git ls-remote --symref "$SEEDCROSS_REPO" HEAD 2>/dev/null || true)"
-            TARGET_BRANCH="$(printf '%s\n' "$SYMREF_LINE" | sed -n 's#^ref: refs/heads/\([^\t[:space:]]*\)[[:space:]]*HEAD$#\1#p' | head -n1)"
-            TARGET_BRANCH="${TARGET_BRANCH:-${AF_SEEDCROSS_BRANCH:-main}}"
-            EXPECTED_SHA="$(printf '%s\n' "$SYMREF_LINE" | awk '$2 == "HEAD" {print $1; exit}')"
-            [[ -n "$EXPECTED_SHA" ]] || { log_error "Unable to verify upstream SeedCross ref for branch ${TARGET_BRANCH}"; exit 1; }
-            af_logged git clone --branch "$TARGET_BRANCH" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
-            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
-            if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-                log_error "SeedCross branch ${TARGET_BRANCH} resolved to unexpected commit ${ACTUAL_SHA} (expected ${EXPECTED_SHA})"
-                exit 1
-            fi
-        fi
+        git_stage_exact_revision "$SEEDCROSS_REPO" "$BUILD_DIR" "" head
+    fi
+    if [[ "${AF_STAGED_GIT_REF:-}" == refs/tags/* ]]; then
+        SEEDCROSS_VERSION="${AF_STAGED_GIT_VERSION#release-}"
+        SEEDCROSS_VERSION="${SEEDCROSS_VERSION#Release-}"
+        SEEDCROSS_VERSION="${SEEDCROSS_VERSION#[vV]}"
+    else
+        SEEDCROSS_VERSION="${AF_STAGED_GIT_COMMIT:-${AF_STAGED_GIT_VERSION}}"
     fi
 fi
 [[ -s "$BUILD_DIR/manage.py" && -s "$BUILD_DIR/csui/settings.py" ]]
@@ -139,8 +98,7 @@ elif [[ -f "$DATA_DIR/legacy-settings.py" ]]; then
     cp -a "$DATA_DIR/legacy-settings.py" "$BUILD_DIR/csui/settings.py"
 fi
 
-COMMIT_VER="$(git -C "$BUILD_DIR" rev-parse HEAD)"
-queue_app_version "/opt/seedcross/.af-version" "${COMMIT_VER}"
+queue_app_version "/opt/seedcross/.af-version" "${SEEDCROSS_VERSION}"
 
 report_progress 65 "Creating Python virtualenv and installing dependencies..."
 chown -hRP "${APP_USER}:${APP_USER}" "$BUILD_DIR" "$DATA_DIR"

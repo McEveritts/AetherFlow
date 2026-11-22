@@ -107,7 +107,7 @@ else
         log_error "Cannot identify a safe default network interface for VPN forwarding."
         exit 1
     fi
-    PUBLIC_IP="$(curl -4 -fsSL --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+    PUBLIC_IP="$(curl --proto '=https' --proto-redir '=https' -4 -fsSL --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
     if [[ ${#PUBLIC_IP} -gt 15 ]] || ! [[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         log_error "Cannot determine an IPv4 endpoint; no VPN identity was installed."
         exit 1

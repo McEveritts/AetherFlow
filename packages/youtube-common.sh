@@ -46,21 +46,37 @@ youtube_init() {
 youtube_abort_install() {
     local rc="$?"
     local msg="${1:-Installation failed; see ${LOGFILE:-/var/log/aetherflow/install.log}.}"
-    if [[ "$1" =~ ^[0-9]+$ && -n "${2:-}" ]]; then
+    if [[ "${1:-}" =~ ^[0-9]+$ && -n "${2:-}" ]]; then
         rc="$1"
         msg="$2"
     fi
     [[ "$rc" -ne 0 ]] || rc=1
-    af_write_failure_receipt "$rc" "${AF_CURRENT_STAGE:-build}" "installer" "$msg"
-    print_error "$msg"
+    if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+        af_write_failure_receipt "$rc" "${AF_CURRENT_STAGE:-build}" "installer" "$msg"
+    fi
+    if declare -F print_error >/dev/null 2>&1; then
+        print_error "$msg"
+    else
+        printf 'ERROR: %s\n' "$msg" >&2
+    fi
+}
+
+_youtube_git() {
+    if [[ -n "${APP_NAME:-}" ]] && id "$APP_NAME" >/dev/null 2>&1; then
+        runuser -u "$APP_NAME" -- git "$@"
+    else
+        git "$@"
+    fi
 }
 
 youtube_source() {
     local repo="$1" destination="$2" dir="$2"
+    local repo_url="https://github.com/${repo}.git"
+    local target_ref=""
     if [[ $# -ge 3 ]]; then
-        local target_ref="$3"
+        target_ref="$3"
     else
-        local target_ref="${AF_TARGET_VERSION:-}"
+        target_ref="${AF_TARGET_VERSION:-}"
         case "$repo" in
             iv-org/invidious|TeamPiped/*)
                 if [[ "$target_ref" == *","* || "$target_ref" == *":"* ]]; then
@@ -72,27 +88,223 @@ youtube_source() {
                 ;;
         esac
     fi
-    if [[ -d "${dir}/.git" ]]; then
-        if [[ -z "$target_ref" ]]; then
-            if [[ -n "${APP_NAME:-}" ]] && id "$APP_NAME" >/dev/null 2>&1; then
-                af_logged runuser -u "$APP_NAME" -- git -C "$dir" fetch --depth 1 origin HEAD && \
-                af_logged runuser -u "$APP_NAME" -- git -C "$dir" checkout --detach FETCH_HEAD && \
-                af_logged runuser -u "$APP_NAME" -- git -C "$dir" reset --hard FETCH_HEAD
-            else
-                af_logged git -C "$dir" fetch --depth 1 origin HEAD && af_logged git -C "$dir" checkout --detach FETCH_HEAD && af_logged git -C "$dir" reset --hard FETCH_HEAD
-            fi
+    if [[ -z "$target_ref" ]]; then
+        if [[ -d "${dir}/.git" ]]; then
+            af_logged _youtube_git -C "$dir" fetch --depth 1 origin HEAD && \
+            af_logged _youtube_git -C "$dir" checkout --detach FETCH_HEAD && \
+            af_logged _youtube_git -C "$dir" reset --hard FETCH_HEAD
+        else
+            af_logged _youtube_git clone --depth 1 "$repo_url" "$destination"
         fi
-    else
-        af_logged runuser -u "$APP_NAME" -- git clone --depth 1 "https://github.com/${repo}.git" "$destination"
+        return 0
     fi
-    if [[ -n "$target_ref" ]]; then
-        if ! af_logged runuser -u "$APP_NAME" -- git -C "$destination" fetch --depth 1 origin "$target_ref" || \
-           ! af_logged runuser -u "$APP_NAME" -- git -C "$destination" checkout --detach FETCH_HEAD; then
-            if ! af_logged runuser -u "$APP_NAME" -- git -C "$destination" checkout "$target_ref"; then
-                youtube_abort_install "Failed to check out requested target ref ${target_ref} for ${repo}"
+
+    if ! target_ref="$(python3 -c '
+import sys
+
+raw = sys.argv[1]
+trimmed = raw.strip()
+forbidden = frozenset((
+    "latest", "unknown", "none", "null", "undefined", "error", "n/a", "na",
+    "current", "installed", "pending", "default", "auto", "true", "false",
+    "head", "main", "master", "stable", "beta", "nightly", "edge", "dev",
+    "devel", "alpha", "rc", "release",
+))
+bad_chars = frozenset(";&|`$()<>\"'\''*?!{}[]^~:\\")
+
+if (
+    not trimmed
+    or trimmed != raw
+    or len(trimmed) > 256
+    or trimmed.startswith("-")
+    or ".." in trimmed
+    or "@{" in trimmed
+    or "/" in trimmed
+    or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F or ch in bad_chars for ch in trimmed)
+    or trimmed.lower() in forbidden
+):
+    sys.exit(1)
+print(trimmed)
+' "$target_ref")"; then
+        youtube_abort_install "Invalid requested target ref ${target_ref} for ${repo}"
+        exit 1
+    fi
+
+    local remote_tags="" resolved_output="" selected_kind="" selected_tag="" expected_commit=""
+    if ! remote_tags="$(_youtube_git ls-remote --tags "$repo_url")"; then
+        youtube_abort_install "Failed to query remote tags from ${repo_url}"
+        exit 1
+    fi
+
+    if ! resolved_output="$(python3 -c '
+import re, sys
+
+target = sys.argv[1]
+repo_url = sys.argv[2]
+
+direct = {}
+peeled = {}
+for line in sys.stdin.read().splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    parts = line.split()
+    if len(parts) < 2:
+        continue
+    sha, ref = parts[0].lower(), parts[1]
+    if not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+        continue
+    if not ref.startswith("refs/tags/"):
+        continue
+    if ref.endswith("^{}"):
+        name = ref[len("refs/tags/"):-3]
+        if name:
+            peeled[name] = sha
+    else:
+        name = ref[len("refs/tags/"):]
+        if name:
+            direct[name] = sha
+
+resolved = {name: peeled.get(name, sha) for name, sha in direct.items()}
+
+def strip_prefix(value):
+    clean = re.sub(r"^(?:[rR]elease-)", "", value)
+    clean = re.sub(r"^[vV]", "", clean)
+    return clean
+
+def valid_tag_name(name):
+    return (
+        bool(name)
+        and not name.startswith("-")
+        and ".." not in name
+        and "@{" not in name
+        and "/" not in name
+        and not any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name)
+    )
+
+if target in resolved and valid_tag_name(target):
+    print("tag")
+    print(target)
+    print(resolved[target])
+    sys.exit(0)
+
+clean = strip_prefix(target)
+candidates = []
+for candidate in (
+    f"v{clean}",
+    clean,
+    f"V{clean}",
+    f"release-{clean}",
+    f"release-v{clean}",
+    f"Release-{clean}",
+    f"Release-v{clean}",
+):
+    if candidate and candidate not in candidates and candidate in resolved and valid_tag_name(candidate):
+        candidates.append(candidate)
+
+if candidates:
+    commits = {resolved[c] for c in candidates}
+    if len(commits) > 1:
+        sys.stderr.write(f"Ambiguous remote tags for requested target {target!r} in {repo_url}: {candidates}\n")
+        sys.exit(2)
+    chosen = candidates[0]
+    print("tag")
+    print(chosen)
+    print(resolved[chosen])
+    sys.exit(0)
+
+is_hex = bool(re.fullmatch(r"[0-9a-fA-F]{7,64}", target))
+if is_hex and (not target.isdecimal() or len(target) in (40, 64)):
+    lower_sha = target.lower()
+    print("commit")
+    print("")
+    print(lower_sha)
+    sys.exit(0)
+
+sys.stderr.write(f"Requested target ref {target!r} was not found as a tag or commit SHA for {repo_url}\n")
+sys.exit(3)
+' "$target_ref" "$repo_url" <<< "$remote_tags")"; then
+        youtube_abort_install "Failed to resolve requested target ref ${target_ref} for ${repo}"
+        exit 1
+    fi
+
+    {
+        IFS= read -r selected_kind
+        IFS= read -r selected_tag
+        IFS= read -r expected_commit
+    } <<< "$resolved_output"
+
+    if [[ -z "$selected_kind" || -z "$expected_commit" || ! "$expected_commit" =~ ^[0-9a-f]{7,64}$ ]]; then
+        youtube_abort_install "Resolved Git revision metadata is invalid for ${repo} (${target_ref})"
+        exit 1
+    fi
+
+    local local_tag_commit="" resolved_commit="" actual_commit=""
+    if [[ "$selected_kind" == "tag" ]]; then
+        if [[ -z "$selected_tag" || "$selected_tag" == -* ]]; then
+            youtube_abort_install "Invalid resolved tag name ${selected_tag} for ${repo}"
+            exit 1
+        fi
+        if [[ ! -d "${destination}/.git" ]]; then
+            if ! af_logged _youtube_git clone --no-checkout --depth 1 --branch "$selected_tag" "$repo_url" "$destination"; then
+                youtube_abort_install "Failed to clone ${repo} at tag ${selected_tag}"
                 exit 1
             fi
         fi
+        local_tag_commit="$(_youtube_git -C "$destination" rev-parse --verify --quiet "refs/tags/${selected_tag}^{commit}" 2>/dev/null || true)"
+        if [[ "${local_tag_commit,,}" != "$expected_commit" ]]; then
+            if ! af_logged _youtube_git -C "$destination" fetch --force --depth 1 origin "refs/tags/${selected_tag}:refs/tags/${selected_tag}"; then
+                youtube_abort_install "Failed to fetch exact tag refs/tags/${selected_tag} for ${repo}"
+                exit 1
+            fi
+            local_tag_commit="$(_youtube_git -C "$destination" rev-parse --verify --quiet "refs/tags/${selected_tag}^{commit}" 2>/dev/null || true)"
+        fi
+        if [[ -z "$local_tag_commit" || "${local_tag_commit,,}" != "$expected_commit" ]]; then
+            youtube_abort_install "Fetched tag refs/tags/${selected_tag} resolved to ${local_tag_commit:-unknown} instead of ${expected_commit} for ${repo}"
+            exit 1
+        fi
+    elif [[ "$selected_kind" == "commit" ]]; then
+        if [[ ! -d "${destination}/.git" ]]; then
+            if ! af_logged _youtube_git clone --no-checkout "$repo_url" "$destination"; then
+                youtube_abort_install "Failed to clone ${repo} for commit ${expected_commit}"
+                exit 1
+            fi
+        fi
+        resolved_commit="$(_youtube_git -C "$destination" rev-parse --verify --quiet "${expected_commit}^{commit}" 2>/dev/null || true)"
+        if [[ -z "$resolved_commit" || "${resolved_commit,,}" != "${expected_commit}"* ]]; then
+            if (( ${#expected_commit} == 40 || ${#expected_commit} == 64 )); then
+                af_logged _youtube_git -C "$destination" fetch --depth 1 origin "$expected_commit" || true
+                resolved_commit="$(_youtube_git -C "$destination" rev-parse --verify --quiet "${expected_commit}^{commit}" 2>/dev/null || true)"
+            fi
+            if [[ -z "$resolved_commit" || "${resolved_commit,,}" != "${expected_commit}"* ]]; then
+                if [[ -f "${destination}/.git/shallow" ]]; then
+                    af_logged _youtube_git -C "$destination" fetch --unshallow origin || af_logged _youtube_git -C "$destination" fetch origin || true
+                else
+                    af_logged _youtube_git -C "$destination" fetch origin || true
+                fi
+                resolved_commit="$(_youtube_git -C "$destination" rev-parse --verify --quiet "${expected_commit}^{commit}" 2>/dev/null || true)"
+            fi
+        fi
+        if [[ -z "$resolved_commit" || ! "$resolved_commit" =~ ^[0-9a-fA-F]{7,64}$ || "${resolved_commit,,}" != "${expected_commit}"* ]]; then
+            youtube_abort_install "Requested commit ${target_ref} was not found in ${repo}"
+            exit 1
+        fi
+        expected_commit="${resolved_commit,,}"
+    else
+        youtube_abort_install "Unsupported resolved Git revision kind ${selected_kind} for ${repo}"
+        exit 1
+    fi
+
+    if ! af_logged _youtube_git -C "$destination" checkout --detach "$expected_commit" || \
+       ! af_logged _youtube_git -C "$destination" reset --hard "$expected_commit"; then
+        youtube_abort_install "Failed to check out requested target ref ${target_ref} for ${repo}"
+        exit 1
+    fi
+
+    actual_commit="$(_youtube_git -C "$destination" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || _youtube_git -C "$destination" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -z "$actual_commit" || "${actual_commit,,}" != "$expected_commit" ]]; then
+        youtube_abort_install "Checked-out HEAD (${actual_commit:-unknown}) does not match expected commit (${expected_commit}) for ${repo} (${target_ref})"
+        exit 1
     fi
 }
 
@@ -109,15 +321,25 @@ youtube_secret() {
 
 youtube_private_port() {
     local path="${CONFIG_DIR}/$1-port"
+    local existing_port="" allocated_port="" needs_alloc=false
     validate_config_paths "$path"
     if [[ ! -s "$path" ]]; then
-        python3 - "$APP_PORT" "$CONFIG_DIR" > "$path" <<'PY'
+        needs_alloc=true
+    else
+        existing_port="$(tr -d '[:space:]' < "$path")"
+        if [[ ! "$existing_port" =~ ^[0-9]{4,5}$ ]] || (( 10#$existing_port < 1024 || 10#$existing_port > 65535 )) || (( 10#$existing_port == 10#$APP_PORT )); then
+            needs_alloc=true
+        fi
+    fi
+    if [[ "$needs_alloc" == true ]]; then
+        allocated_port="$(python3 - "$APP_PORT" "$CONFIG_DIR" "$path" <<'PY'
 import pathlib
 import socket
 import sys
 
 used = {int(sys.argv[1])}
 config_dir = pathlib.Path(sys.argv[2])
+self_port_file = pathlib.Path(sys.argv[3]).resolve()
 etc_dir = config_dir.parent
 search_dirs = [config_dir]
 for sibling in ("piped", "invidious", "aetherflow"):
@@ -133,6 +355,8 @@ for directory in search_dirs:
         continue
     for port_file in directory.glob("*-port"):
         if not port_file.is_file() or not port_file.stat().st_size:
+            continue
+        if port_file.resolve() == self_port_file:
             continue
         raw = port_file.read_text().strip()
         if raw.isdecimal():
@@ -150,6 +374,8 @@ for port in range(20000, 30000):
 else:
     sys.exit('No available private service port')
 PY
+)"
+        printf '%s\n' "$allocated_port" > "$path"
     fi
     cat "$path"
 }

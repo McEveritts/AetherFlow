@@ -123,7 +123,7 @@ elif command == "git":
             (dest / "api/config").mkdir(parents=True, exist_ok=True)
             (dest / "api/config/default.php").write_text(f"<?php return '{ver}';\n")
             (dest / "index.php").write_text(f"<?php echo 'Organizr {ver}';\n")
-    elif "rev-parse" in args and any(".rutorrent-build." in arg for arg in args):
+    elif "rev-parse" in args and any(tok in arg for arg in args for tok in (".rutorrent-build.", ".organizr-build.")):
         print("abcdef123456")
     else:
         print("v" + os.environ.get("AF_FIXTURE_VERSION", "2.1.0"))
@@ -970,7 +970,7 @@ elif command == "git":
                 (dest / "index.php").write_text("<?php http_response_code(500); echo 'Organizr broken'; ?>\n")
             else:
                 (dest / "index.php").write_text(f"<?php echo '<!doctype html><title>Organizr {ver}</title>'; ?>\n")
-    elif "rev-parse" in args and any(".rutorrent-build." in arg for arg in args):
+    elif "rev-parse" in args and any(tok in arg for arg in args for tok in (".rutorrent-build.", ".organizr-build.")):
         print("abcdef123456")
     else:
         print("v" + ver)

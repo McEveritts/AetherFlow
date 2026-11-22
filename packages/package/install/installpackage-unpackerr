@@ -61,7 +61,7 @@ esac
 report_progress 35 "Resolving latest Unpackerr binary release..."
 UP_VERSION="$(github_latest_tag "Unpackerr/unpackerr" "1.0.0")"
 UP_TAR_URL="https://github.com/Unpackerr/unpackerr/releases/download/v${UP_VERSION}/unpackerr_${UP_VERSION}_linux_${UP_TAR_ARCH}.tar.gz"
-UP_GZ_URL="https://github.com/davidnewhall/unpackerr/releases/download/v${UP_VERSION}/unpackerr.${UP_GZ_ARCH}"
+UP_GZ_URL="https://github.com/Unpackerr/unpackerr/releases/download/v${UP_VERSION}/unpackerr.${UP_GZ_ARCH}"
 
 report_progress 60 "Downloading Unpackerr ${UP_VERSION}..."
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"

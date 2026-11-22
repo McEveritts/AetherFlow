@@ -113,16 +113,47 @@ esac
 
 report_progress 35 "Resolving latest Audiobookshelf debian release..."
 ABS_VERSION="$(github_latest_tag "advplyr/audiobookshelf" "2.37.2")"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    if [[ -z "$ABS_VERSION" || ! "$ABS_VERSION" =~ ^[0-9][0-9A-Za-z.+:~-]*$ || "$ABS_VERSION" == *..* ]]; then
+        if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+            af_write_failure_receipt 1 "download" "invalid_target_version" "Invalid requested Audiobookshelf version: ${AF_TARGET_VERSION}"
+        fi
+        print_error "Invalid requested Audiobookshelf version: ${AF_TARGET_VERSION}"
+        exit 1
+    fi
+fi
 ABS_URL="https://advplyr.github.io/audiobookshelf-ppa/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
 
 report_progress 60 "Downloading and installing Audiobookshelf ${ABS_VERSION}..."
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_DEB=$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/abs-XXXXXX.deb")
 if af_logged download_file "$ABS_URL" "$TMP_DEB"; then
+    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+        ABS_DEB_VER="$(dpkg-deb -f "$TMP_DEB" Version 2>/dev/null || true)"
+        ABS_TARGET_CLEAN="${AF_TARGET_VERSION#release-v}"
+        ABS_TARGET_CLEAN="${ABS_TARGET_CLEAN#[vV]}"
+        ABS_DEB_CLEAN="${ABS_DEB_VER#release-v}"
+        ABS_DEB_CLEAN="${ABS_DEB_CLEAN#[vV]}"
+        if [[ -z "$ABS_DEB_CLEAN" || "$ABS_DEB_CLEAN" != "$ABS_TARGET_CLEAN" ]]; then
+            rm -f "$TMP_DEB"
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt 1 "download" "version_mismatch" "Downloaded Audiobookshelf .deb version (${ABS_DEB_VER:-unknown}) does not match requested target (${AF_TARGET_VERSION})"
+            fi
+            print_error "Downloaded Audiobookshelf package version (${ABS_DEB_VER:-unknown}) does not match requested target (${AF_TARGET_VERSION})."
+            exit 1
+        fi
+    fi
     install_deb_verified "$TMP_DEB" audiobookshelf
     rm -f "$TMP_DEB"
 else
     rm -f "$TMP_DEB"
+    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+        if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+            af_write_failure_receipt 1 "download" "target_download_failed" "Failed to download requested Audiobookshelf package version ${AF_TARGET_VERSION} from ${ABS_URL}; refusing unversioned PPA fallback"
+        fi
+        print_error "Could not download requested Audiobookshelf package version ${AF_TARGET_VERSION} (${ABS_URL}); refusing unversioned PPA fallback."
+        exit 1
+    fi
     # Fallback to official Audiobookshelf PPA repository
     install -m 0755 -d /etc/apt/keyrings
     af_logged install_apt_signing_key https://advplyr.github.io/audiobookshelf-ppa/KEY.gpg /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg

@@ -610,125 +610,129 @@ PIPED_FRONTEND_REF=""
 PIPED_BACKEND_REF=""
 PIPED_PROXY_REF=""
 
+_piped_err() {
+    if declare -F print_error >/dev/null 2>&1; then
+        print_error "$*"
+    else
+        printf '%s\n' "$*" >&2
+    fi
+}
+
+_piped_validate_component_ref() {
+    local comp_name="$1"
+    local ref_val="$2"
+    local lower_ref="${ref_val,,}"
+    if [[ -z "$ref_val" || ${#ref_val} -gt 256 || "$ref_val" == -* || "$ref_val" == *".."* || ! "$ref_val" =~ ^[0-9A-Za-z._+-]+$ ]]; then
+        _piped_err "Invalid ${comp_name} ref in Piped target manifest: '${ref_val}'"
+        return 1
+    fi
+    case "$lower_ref" in
+        latest|unknown|none|null|undefined|error|n/a|na|current|installed|pending|default|auto|true|false|head|main|master|stable|beta|nightly|edge|dev|devel|alpha|rc|release)
+            _piped_err "Floating or reserved ${comp_name} ref in Piped target manifest: '${ref_val}'"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+_piped_parse_manifest() {
+    local manifest="$1"
+    local out_fe_var="$2" out_be_var="$3" out_pr_var="$4"
+    local seen_frontend=0 seen_backend=0 seen_proxy=0
+    local fe="" be="" pr="" part=""
+    local -a parts=()
+
+    if [[ "$manifest" == ,* || "$manifest" == *, || "$manifest" == *,,* ]]; then
+        _piped_err "Invalid Piped manifest: leading, trailing, or empty consecutive commas in '$manifest'"
+        return 1
+    fi
+    IFS=',' read -ra parts <<< "$manifest"
+    for part in "${parts[@]}"; do
+        part="$(printf '%s' "$part" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        if [[ -z "$part" ]]; then
+            _piped_err "Empty component in Piped manifest: '$manifest'"
+            return 1
+        fi
+        case "$part" in
+            frontend=*)
+                if [[ "$seen_frontend" -eq 1 ]]; then
+                    _piped_err "Duplicate component in Piped target manifest: frontend"
+                    return 1
+                fi
+                seen_frontend=1
+                fe="${part#frontend=}"
+                ;;
+            frontend:*)
+                if [[ "$seen_frontend" -eq 1 ]]; then
+                    _piped_err "Duplicate component in Piped target manifest: frontend"
+                    return 1
+                fi
+                seen_frontend=1
+                fe="${part#frontend:}"
+                ;;
+            backend=*)
+                if [[ "$seen_backend" -eq 1 ]]; then
+                    _piped_err "Duplicate component in Piped target manifest: backend"
+                    return 1
+                fi
+                seen_backend=1
+                be="${part#backend=}"
+                ;;
+            backend:*)
+                if [[ "$seen_backend" -eq 1 ]]; then
+                    _piped_err "Duplicate component in Piped target manifest: backend"
+                    return 1
+                fi
+                seen_backend=1
+                be="${part#backend:}"
+                ;;
+            proxy=*)
+                if [[ "$seen_proxy" -eq 1 ]]; then
+                    _piped_err "Duplicate component in Piped target manifest: proxy"
+                    return 1
+                fi
+                seen_proxy=1
+                pr="${part#proxy=}"
+                ;;
+            proxy:*)
+                if [[ "$seen_proxy" -eq 1 ]]; then
+                    _piped_err "Duplicate component in Piped target manifest: proxy"
+                    return 1
+                fi
+                seen_proxy=1
+                pr="${part#proxy:}"
+                ;;
+            *)
+                _piped_err "Invalid component in Piped manifest: '$part'. Piped target versions must specify all 3 components (frontend, backend, proxy)."
+                return 1
+                ;;
+        esac
+    done
+    if [[ -z "$fe" || -z "$be" || -z "$pr" ]]; then
+        _piped_err "Incomplete Piped manifest: '$manifest'. All 3 components (frontend, backend, proxy) must be specified and non-empty."
+        return 1
+    fi
+    _piped_validate_component_ref frontend "$fe" || return 1
+    _piped_validate_component_ref backend "$be" || return 1
+    _piped_validate_component_ref proxy "$pr" || return 1
+    printf -v "$out_fe_var" '%s' "$fe"
+    printf -v "$out_be_var" '%s' "$be"
+    printf -v "$out_pr_var" '%s' "$pr"
+}
+
 piped_target_raw="${PIPED_TARGET_VERSION:-${AF_TARGET_VERSION:-}}"
 raw_target="$piped_target_raw"
 if [[ -n "$raw_target" ]]; then
-    if [[ "$raw_target" == *","* || "$raw_target" == *"="* || "$raw_target" == *"frontend"* || "$raw_target" == *"backend"* || "$raw_target" == *"proxy"* ]]; then
-        if [[ "$raw_target" == ,* || "$raw_target" == *, || "$raw_target" == *,,* ]]; then
-            if declare -F print_error >/dev/null 2>&1; then
-                print_error "Invalid Piped manifest: leading, trailing, or empty consecutive commas in '$raw_target'"
-            else
-                printf "Invalid Piped manifest: leading, trailing, or empty consecutive commas in '%s'\n" "$raw_target" >&2
-            fi
+    _piped_parse_manifest "$raw_target" PIPED_FRONTEND_REF PIPED_BACKEND_REF PIPED_PROXY_REF || exit 1
+    if [[ -n "${PIPED_TARGET_VERSION:-}" && -n "${AF_TARGET_VERSION:-}" && "${PIPED_TARGET_VERSION}" != "${AF_TARGET_VERSION}" ]]; then
+        _af_fe=""
+        _af_be=""
+        _af_pr=""
+        _piped_parse_manifest "${AF_TARGET_VERSION}" _af_fe _af_be _af_pr || exit 1
+        if [[ "${PIPED_FRONTEND_REF,,}" != "${_af_fe,,}" || "${PIPED_BACKEND_REF,,}" != "${_af_be,,}" || "${PIPED_PROXY_REF,,}" != "${_af_pr,,}" ]]; then
+            _piped_err "Conflicting PIPED_TARGET_VERSION and AF_TARGET_VERSION manifests"
             exit 1
         fi
-        seen_frontend=0
-        seen_backend=0
-        seen_proxy=0
-        IFS=',' read -ra PARTS <<< "$raw_target"
-        for part in "${PARTS[@]}"; do
-            part="$(echo "$part" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            if [[ -z "$part" ]]; then
-                if declare -F print_error >/dev/null 2>&1; then
-                    print_error "Empty component in Piped manifest: '$raw_target'"
-                else
-                    printf "Empty component in Piped manifest: '%s'\n" "$raw_target" >&2
-                fi
-                exit 1
-            fi
-            case "$part" in
-                frontend=*)
-                    if [[ "$seen_frontend" -eq 1 ]]; then
-                        if declare -F print_error >/dev/null 2>&1; then
-                            print_error "Duplicate component in Piped target manifest: frontend"
-                        else
-                            printf "Duplicate component in Piped target manifest: frontend\n" >&2
-                        fi
-                        exit 1
-                    fi
-                    seen_frontend=1
-                    PIPED_FRONTEND_REF="${part#frontend=}"
-                    ;;
-                frontend:*)
-                    if [[ "$seen_frontend" -eq 1 ]]; then
-                        if declare -F print_error >/dev/null 2>&1; then
-                            print_error "Duplicate component in Piped target manifest: frontend"
-                        else
-                            printf "Duplicate component in Piped target manifest: frontend\n" >&2
-                        fi
-                        exit 1
-                    fi
-                    seen_frontend=1
-                    PIPED_FRONTEND_REF="${part#frontend:}"
-                    ;;
-                backend=*)
-                    if [[ "$seen_backend" -eq 1 ]]; then
-                        if declare -F print_error >/dev/null 2>&1; then
-                            print_error "Duplicate component in Piped target manifest: backend"
-                        else
-                            printf "Duplicate component in Piped target manifest: backend\n" >&2
-                        fi
-                        exit 1
-                    fi
-                    seen_backend=1
-                    PIPED_BACKEND_REF="${part#backend=}"
-                    ;;
-                backend:*)
-                    if [[ "$seen_backend" -eq 1 ]]; then
-                        if declare -F print_error >/dev/null 2>&1; then
-                            print_error "Duplicate component in Piped target manifest: backend"
-                        else
-                            printf "Duplicate component in Piped target manifest: backend\n" >&2
-                        fi
-                        exit 1
-                    fi
-                    seen_backend=1
-                    PIPED_BACKEND_REF="${part#backend:}"
-                    ;;
-                proxy=*)
-                    if [[ "$seen_proxy" -eq 1 ]]; then
-                        if declare -F print_error >/dev/null 2>&1; then
-                            print_error "Duplicate component in Piped target manifest: proxy"
-                        else
-                            printf "Duplicate component in Piped target manifest: proxy\n" >&2
-                        fi
-                        exit 1
-                    fi
-                    seen_proxy=1
-                    PIPED_PROXY_REF="${part#proxy=}"
-                    ;;
-                proxy:*)
-                    if [[ "$seen_proxy" -eq 1 ]]; then
-                        if declare -F print_error >/dev/null 2>&1; then
-                            print_error "Duplicate component in Piped target manifest: proxy"
-                        else
-                            printf "Duplicate component in Piped target manifest: proxy\n" >&2
-                        fi
-                        exit 1
-                    fi
-                    seen_proxy=1
-                    PIPED_PROXY_REF="${part#proxy:}"
-                    ;;
-                *)
-                    if declare -F print_error >/dev/null 2>&1; then
-                        print_error "Invalid component in Piped manifest: '$part'"
-                    else
-                        printf "Invalid component in Piped manifest: '%s'\n" "$part" >&2
-                    fi
-                    exit 1
-                    ;;
-            esac
-        done
-        if [[ -z "$PIPED_FRONTEND_REF" || -z "$PIPED_BACKEND_REF" || -z "$PIPED_PROXY_REF" ]]; then
-            if declare -F print_error >/dev/null 2>&1; then
-                print_error "Incomplete Piped manifest: '$raw_target'. All 3 components (frontend, backend, proxy) must be specified and non-empty."
-            else
-                printf "Incomplete Piped manifest: '%s'. All 3 components (frontend, backend, proxy) must be specified and non-empty.\n" "$raw_target" >&2
-            fi
-            exit 1
-        fi
-    else
-        PIPED_FRONTEND_REF="$raw_target"
     fi
 fi
 TARGET_FRONTEND_REF="$PIPED_FRONTEND_REF"
@@ -1210,21 +1214,35 @@ PYEOF
         esac
 
         if [[ -n "$expected_ref" ]]; then
-            local target_sha=""
-            target_sha="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse --short=12 "${expected_ref}^{commit}" 2>/dev/null || run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse --short=12 "$expected_ref" 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse --short=12 "${expected_ref}^{commit}" 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse --short=12 "$expected_ref" 2>/dev/null || git -C "$comp_dir" rev-parse --short=12 "${expected_ref}^{commit}" 2>/dev/null || git -C "$comp_dir" rev-parse --short=12 "$expected_ref" 2>/dev/null || true)"
-            if [[ -n "$target_sha" ]]; then
-                if [[ "$current_sha" != "$target_sha" ]]; then
+            local head_full="" target_full="" exp_clean="" tag_candidate=""
+            head_full="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse HEAD 2>/dev/null || git -C "$comp_dir" rev-parse HEAD 2>/dev/null || true)"
+            if [[ "$expected_ref" == -* || ! "$head_full" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+                if declare -F print_error >/dev/null 2>&1; then
+                    print_error "Piped certification failed: invalid $comp target ref '$expected_ref' or HEAD '${head_full:-unknown}'"
+                else
+                    printf "Piped certification failed: invalid %s target ref '%s' or HEAD '%s'\n" "$comp" "$expected_ref" "${head_full:-unknown}" >&2
+                fi
+                return 1
+            fi
+            exp_clean="${expected_ref#release-}"
+            exp_clean="${exp_clean#Release-}"
+            exp_clean="${exp_clean#[vV]}"
+            for tag_candidate in "$expected_ref" "v${exp_clean}" "${exp_clean}" "V${exp_clean}" "release-${exp_clean}" "release-v${exp_clean}"; do
+                [[ -n "$tag_candidate" && "$tag_candidate" != -* ]] || continue
+                target_full="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse --verify --quiet "refs/tags/${tag_candidate}^{commit}" 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse --verify --quiet "refs/tags/${tag_candidate}^{commit}" 2>/dev/null || git -C "$comp_dir" rev-parse --verify --quiet "refs/tags/${tag_candidate}^{commit}" 2>/dev/null || true)"
+                [[ -z "$target_full" ]] || break
+            done
+            if [[ -n "$target_full" ]]; then
+                if [[ "${head_full,,}" != "${target_full,,}" ]]; then
                     if declare -F print_error >/dev/null 2>&1; then
-                        print_error "Piped certification failed: $comp HEAD ($current_sha) does not match target ref $expected_ref ($target_sha)"
+                        print_error "Piped certification failed: $comp HEAD ($current_sha) does not match target ref $expected_ref ($target_full)"
                     else
-                        printf "Piped certification failed: %s HEAD (%s) does not match target ref %s (%s)\n" "$comp" "$current_sha" "$expected_ref" "$target_sha" >&2
+                        printf "Piped certification failed: %s HEAD (%s) does not match target ref %s (%s)\n" "$comp" "$current_sha" "$expected_ref" "$target_full" >&2
                     fi
                     return 1
                 fi
             else
-                local head_full=""
-                head_full="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse HEAD 2>/dev/null || git -C "$comp_dir" rev-parse HEAD 2>/dev/null || true)"
-                if [[ ! "$expected_ref" =~ ^[0-9a-fA-F]{7,40}$ || ! "$head_full" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                if [[ ! "$expected_ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
                     if declare -F print_error >/dev/null 2>&1; then
                         print_error "Piped certification failed: $comp expected ref '$expected_ref' is not a valid 7-40 hex SHA"
                     else
@@ -1234,7 +1252,7 @@ PYEOF
                 fi
                 local exp_lower="${expected_ref,,}"
                 local head_lower="${head_full,,}"
-                if [[ "$head_lower" != "$exp_lower"* && "$exp_lower" != "$head_lower"* ]]; then
+                if [[ "$head_lower" != "$exp_lower"* ]]; then
                     if declare -F print_error >/dev/null 2>&1; then
                         print_error "Piped certification failed: $comp HEAD ($current_sha) does not match target ref $expected_ref"
                     else
@@ -1357,17 +1375,62 @@ fi
 PIPED_CERTIFIED=1
 
 af_set_stage "record_version" 95
-FRONTEND_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || echo "${PIPED_FRONTEND_REF:-unknown}")"
-BACKEND_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || echo "${PIPED_BACKEND_REF:-unknown}")"
-PROXY_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || echo "${PIPED_PROXY_REF:-unknown}")"
+FRONTEND_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || true)"
+BACKEND_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || true)"
+PROXY_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || true)"
+FRONTEND_SHA="${FRONTEND_SHA,,}"
+BACKEND_SHA="${BACKEND_SHA,,}"
+PROXY_SHA="${PROXY_SHA,,}"
+
+if [[ ! "$FRONTEND_SHA" =~ ^[0-9a-f]{7,64}$ || ! "$BACKEND_SHA" =~ ^[0-9a-f]{7,64}$ || ! "$PROXY_SHA" =~ ^[0-9a-f]{7,64}$ ]]; then
+    _piped_err "Piped version recording failed: invalid component commit SHAs (frontend=${FRONTEND_SHA:-empty}, backend=${BACKEND_SHA:-empty}, proxy=${PROXY_SHA:-empty})"
+    exit 1
+fi
+
+PIPED_VERSION="frontend:${FRONTEND_SHA},backend:${BACKEND_SHA},proxy:${PROXY_SHA}"
+if [[ -n "${AF_TARGET_VERSION:-}" || -n "${PIPED_TARGET_VERSION:-}" ]]; then
+    if [[ -z "${PIPED_FRONTEND_REF:-}" || -z "${PIPED_BACKEND_REF:-}" || -z "${PIPED_PROXY_REF:-}" ]]; then
+        _piped_err "Piped target verification failed: incomplete component target refs"
+        exit 1
+    fi
+    for _comp_pair in "frontend:${FRONTEND_SHA}:${PIPED_FRONTEND_REF}" "backend:${BACKEND_SHA}:${PIPED_BACKEND_REF}" "proxy:${PROXY_SHA}:${PIPED_PROXY_REF}"; do
+        IFS=':' read -r _comp_name _comp_sha _comp_ref <<< "$_comp_pair"
+        _comp_dir="${INSTALL_DIR}/${_comp_name}"
+        _comp_tag_sha=""
+        _comp_clean="${_comp_ref#release-}"
+        _comp_clean="${_comp_clean#Release-}"
+        _comp_clean="${_comp_clean#[vV]}"
+        for _tag_cand in "$_comp_ref" "v${_comp_clean}" "${_comp_clean}" "V${_comp_clean}" "release-${_comp_clean}" "release-v${_comp_clean}"; do
+            [[ -n "$_tag_cand" && "$_tag_cand" != -* ]] || continue
+            _comp_tag_sha="$(run_as_piped_clean_env "$DATA_DIR" git -C "$_comp_dir" rev-parse --verify --quiet "refs/tags/${_tag_cand}^{commit}" 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$_comp_dir" rev-parse --verify --quiet "refs/tags/${_tag_cand}^{commit}" 2>/dev/null || git -C "$_comp_dir" rev-parse --verify --quiet "refs/tags/${_tag_cand}^{commit}" 2>/dev/null || true)"
+            [[ -z "$_comp_tag_sha" ]] || break
+        done
+        if [[ -n "$_comp_tag_sha" ]]; then
+            if [[ "${_comp_sha,,}" != "${_comp_tag_sha,,}" ]]; then
+                _piped_err "Piped version receipt mismatch for ${_comp_name}: HEAD ${_comp_sha} != tag ${_comp_ref} (${_comp_tag_sha})"
+                exit 1
+            fi
+        elif [[ "$_comp_ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            if [[ "${_comp_sha,,}" != "${_comp_ref,,}"* ]]; then
+                _piped_err "Piped version receipt mismatch for ${_comp_name}: HEAD ${_comp_sha} does not match requested SHA ${_comp_ref}"
+                exit 1
+            fi
+        else
+            _piped_err "Piped version receipt verification failed for ${_comp_name}: unable to verify ref ${_comp_ref}"
+            exit 1
+        fi
+    done
+    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+        AF_TARGET_VERSION="$PIPED_VERSION"
+    fi
+fi
+
+queue_app_version "${INSTALL_DIR}/.af-version" "$PIPED_VERSION"
+commit_app_versions
 
 printf '{"frontend":"%s","backend":"%s","proxy":"%s"}\n' "${FRONTEND_SHA}" "${BACKEND_SHA}" "${PROXY_SHA}" | \
     write_piped_receipt_safely "${INSTALL_DIR}" ".af-components.json" "root" "root" "0644"
 
-PIPED_VERSION="frontend:${FRONTEND_SHA},backend:${BACKEND_SHA},proxy:${PROXY_SHA}"
-printf '%s\n' "$PIPED_VERSION" | write_piped_receipt_safely "${INSTALL_DIR}" ".af-version" "root" "root" "0644"
-queue_app_version "${INSTALL_DIR}/.af-version" "$PIPED_VERSION"
-commit_app_versions
 write_lock piped
 RUNTIME_CHANGED=false
 PIPED_INSTALL_COMPLETED=1

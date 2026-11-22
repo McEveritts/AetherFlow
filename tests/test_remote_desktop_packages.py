@@ -121,7 +121,11 @@ chown() { :; }
 sleep() { :; }
 git() {
     record "git $*"
-    if [[ "${1:-}" == clone ]]; then
+    if [[ "${1:-}" == ls-remote ]]; then
+        printf 'abcdef123456\trefs/tags/v0.10.1\n'
+    elif [[ "${1:-}" == -C && " $* " == *' rev-parse '* ]]; then
+        printf 'abcdef123456\n'
+    elif [[ "${1:-}" == clone ]]; then
         local last
         for last; do :; done
         mkdir -p "$last/target/release"

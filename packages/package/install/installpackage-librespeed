@@ -56,7 +56,16 @@ case "$ARCH" in
 esac
 
 TARGET_VER_CLEAN="${AF_TARGET_VERSION:-}"
-TARGET_VER_CLEAN="${TARGET_VER_CLEAN#v}"
+TARGET_VER_CLEAN="${TARGET_VER_CLEAN#release-}"
+TARGET_VER_CLEAN="${TARGET_VER_CLEAN#Release-}"
+TARGET_VER_CLEAN="${TARGET_VER_CLEAN#[vV]}"
+if [[ -n "${AF_TARGET_VERSION:-}" && "$TARGET_VER_CLEAN" =~ ^[0-3]\. ]]; then
+    if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+        af_write_failure_receipt 1 "preflight" "unsupported_target_version" "LibreSpeed native Rust backend requires AetherFlow >= 4.0.0; refusing requested version ${AF_TARGET_VERSION}"
+    fi
+    print_error "LibreSpeed native Rust backend requires version >= 4.0.0; refusing requested AF_TARGET_VERSION=${AF_TARGET_VERSION}."
+    exit 1
+fi
 
 LOCAL_SPEEDTEST_BIN=""
 for candidate in \
@@ -115,7 +124,7 @@ else
         LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
         LS_VER_CLEAN="${LS_VERSION#v}"
     fi
-    if [[ -z "${AF_FIXTURE_VERSION:-}" && "$LS_VER_CLEAN" =~ ^[0-3]\. ]]; then
+    if [[ -z "${AF_TARGET_VERSION:-}" && -z "${AF_FIXTURE_VERSION:-}" && "$LS_VER_CLEAN" =~ ^[0-3]\. ]]; then
         V4_TAG="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/McEveritts/AetherFlow/releases?per_page=20" 2>/dev/null \
             | sed -n 's/.*"tag_name":[[:space:]]*"\(v\([4-9]\|[1-9][0-9]\{1,\}\)\.[0-9]\{1,\}\.[0-9]\{1,\}[^"]*\)".*/\1/p' | head -n1 || true)"
         if [[ -n "$V4_TAG" ]]; then
