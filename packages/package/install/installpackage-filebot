@@ -115,6 +115,7 @@ if ! af_logged download_file "${FB_URL}" "${TMP_FB}"; then
     FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
     af_logged download_file "${FB_URL}" "${TMP_FB}"
 fi
+af_validate_tar_archive "${TMP_FB}"
 af_logged tar -xJf "${TMP_FB}" -C "${FB_BUILD}"
 rm -f "${TMP_FB}"
 test -s "${FB_BUILD}/filebot.sh"
@@ -135,6 +136,7 @@ NODE_URL="https://github.com/filebot/filebot-node/releases/download/${NODE_TAG}/
 
 TMP_NODE="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/filebot-node-XXXXXX.tar.xz")"
 af_logged download_file "${NODE_URL}" "${TMP_NODE}"
+af_validate_tar_archive "${TMP_NODE}"
 af_logged tar -xJf "${TMP_NODE}" -C "${NODE_BUILD}"
 rm -f "${TMP_NODE}"
 
