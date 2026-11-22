@@ -3143,4 +3143,23 @@ fn test_cli_apt_exact_target_policy_parity() {
             "CLI APT policy must reject non-Debian token {bad:?}"
         );
     }
+
+    let fixture = TempTestDir::new("cli-apt-target-embedded-catalog");
+    let root = fixture.path().to_str().unwrap();
+    for (target, status) in [("v1.27.7", "error"), ("1:1.27.7-4+deb13u1", "ok")] {
+        let invocation = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            root,
+            "package",
+            "update",
+            "syncthing",
+            "--target-version",
+            target,
+        ])
+        .unwrap();
+        let response = execute_invocation(&invocation, &MockRunnerTransport::default());
+        assert_eq!(response.status, status, "{}", response.message);
+    }
 }

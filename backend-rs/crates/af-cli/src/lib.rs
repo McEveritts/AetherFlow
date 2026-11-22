@@ -1012,25 +1012,23 @@ fn validate_cli_package_target_policy(
     target_version: Option<&str>,
 ) -> CliResult<()> {
     let lock_name = resolve_package_lock_name(pkg_id);
-    let Ok(spec) = load_package_automation_spec(global, pkg_id) else {
-        if lock_name.eq_ignore_ascii_case("listenarr") {
-            af_runner::validate_package_target_policy(
-                lock_name,
-                "github",
-                "",
-                action,
-                target_version,
-            )
-            .map_err(CliError::Validation)?;
-        }
-        return Ok(());
+    let (source, update_package) = match load_package_automation_spec(global, pkg_id) {
+        Ok(spec) => (
+            spec_non_empty_str(&spec, "update_source")
+                .unwrap_or("")
+                .to_string(),
+            spec_non_empty_str(&spec, "update_package")
+                .unwrap_or("")
+                .to_string(),
+        ),
+        Err(_) => resolve_cli_package_definition(global, pkg_id)
+            .map(|package| (package.update_source, package.update_package))
+            .unwrap_or_default(),
     };
-    let source = spec_non_empty_str(&spec, "update_source").unwrap_or("");
-    let update_package = spec_non_empty_str(&spec, "update_package").unwrap_or("");
     af_runner::validate_package_target_policy(
         lock_name,
-        source,
-        update_package,
+        &source,
+        &update_package,
         action,
         target_version,
     )
