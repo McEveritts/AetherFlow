@@ -35,6 +35,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 ".version": b"v4.0.0\n",
                 "web/dist/index.html": b"<!doctype html><title>Fixture</title>\n",
                 "web/dist/app.wasm": b"\x00asm\x01\x00\x00\x00",
+                "web/dist/.keep": b"",
                 "web/dist/locales/en.json": b"{}\n",
                 "config/example.yml": b"fixture: true\n",
                 "config/openapi-v1.yaml": b"openapi: 3.1.0\n",
@@ -114,6 +115,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                             self.assertTrue(executable_names.issubset(member_names))
                             self.assertIn("./config/example.yml", member_names)
                             self.assertNotIn("./config/openapi-v1.yaml", member_names)
+                            self.assertNotIn("./web/dist/.keep", member_names)
                             for member in members:
                                 self.assertTrue(member.isdir() or member.isfile(), member.name)
                                 expected_mode = 0o755 if member.isdir() or member.name in executable_names else 0o644

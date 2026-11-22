@@ -239,7 +239,8 @@ build_target() {
     --exclude='.next' --exclude='target')
   if frontend_assets_present "${FRONTEND_DIST_DIR}"; then
     mkdir -p "${target_dir}/web/dist"
-    tar -C "${FRONTEND_DIST_DIR}" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/web/dist" -xpf -
+    tar -C "${FRONTEND_DIST_DIR}" "${runtime_excludes[@]}" --exclude='./.keep' -cf - . \
+      | tar -C "${target_dir}/web/dist" -xpf -
   fi
   if [[ "${PACKAGE_RELEASE}" == "1" ]] && ! frontend_assets_present "${target_dir}/web/dist"; then
     echo "error: packaged web/dist requires non-empty index.html and a .wasm file" >&2
