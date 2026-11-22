@@ -1678,7 +1678,7 @@ pub async fn process_next_mediaflow_job() -> bool {
     let flags = af_hardware::get_gpu_transcode_flags();
     let out_fname = mediaflow_output_name(src_path);
     let out_path = parent_dir.join(&out_fname);
-    if out_path != *src_path && fs::symlink_metadata(&out_path).is_ok() {
+    if fs::symlink_metadata(&out_path).is_ok() {
         let msg = format!(
             "Refusing to clobber existing output file: {}",
             out_path.display()
@@ -2235,74 +2235,35 @@ pub async fn process_next_mediaflow_job() -> bool {
                 let src_c = std::ffi::CString::new(pinned.source_fname.as_bytes()).unwrap();
                 let trash_entry_c = std::ffi::CString::new(trash_entry_name.as_bytes()).unwrap();
 
-                let publish_res: Result<(), String> = if out_fname != pinned.source_fname {
-                    let link_rc =
-                        unsafe { libc::linkat(dirfd, temp_c.as_ptr(), dirfd, out_c.as_ptr(), 0) };
-                    if link_rc < 0 {
-                        let err = std::io::Error::last_os_error();
-                        temp_guard.cleanup_now();
-                        Err(format!(
-                            "Failed to publish transcoded output without clobbering target: {err}"
-                        ))
-                    } else {
-                        let still_same = fstatat_nofollow(dirfd, &pinned.source_fname)
-                            .map(|st| pinned.matches_live_stat(&st))
-                            .unwrap_or(false);
-                        if !still_same {
-                            unlinkat_entry(dirfd, &out_fname);
-                            temp_guard.cleanup_now();
-                            Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string())
-                        } else if unsafe {
-                            libc::renameat(dirfd, src_c.as_ptr(), trash_fd, trash_entry_c.as_ptr())
-                        } < 0
-                        {
-                            let err = std::io::Error::last_os_error();
-                            unlinkat_entry(dirfd, &out_fname);
-                            temp_guard.cleanup_now();
-                            Err(format!(
-                                "Failed to move original media into .mediaflow_trash: {err}"
-                            ))
-                        } else {
-                            temp_guard.cleanup_now();
-                            Ok(())
-                        }
-                    }
+                let publish_res = if unsafe {
+                    libc::linkat(dirfd, temp_c.as_ptr(), dirfd, out_c.as_ptr(), 0)
+                } < 0
+                {
+                    let err = std::io::Error::last_os_error();
+                    Err(format!(
+                        "Failed to publish transcoded output without clobbering target: {err}"
+                    ))
                 } else {
-                    let still_same = fstatat_nofollow(dirfd, &pinned.source_fname)
+                    let source_still_matches = fstatat_nofollow(dirfd, &pinned.source_fname)
                         .map(|st| pinned.matches_live_stat(&st))
                         .unwrap_or(false);
-                    if !still_same {
-                        temp_guard.cleanup_now();
+                    if !source_still_matches {
+                        unlinkat_entry(dirfd, &out_fname);
                         Err(MEDIAFLOW_SOURCE_CHANGED_CONFLICT_MSG.to_string())
                     } else if unsafe {
                         libc::renameat(dirfd, src_c.as_ptr(), trash_fd, trash_entry_c.as_ptr())
                     } < 0
                     {
                         let err = std::io::Error::last_os_error();
-                        temp_guard.cleanup_now();
+                        unlinkat_entry(dirfd, &out_fname);
                         Err(format!(
                             "Failed to move original media into .mediaflow_trash: {err}"
                         ))
-                    } else if unsafe {
-                        libc::linkat(dirfd, temp_c.as_ptr(), dirfd, out_c.as_ptr(), 0)
-                    } < 0
-                    {
-                        let err = std::io::Error::last_os_error();
-                        unsafe {
-                            let _ = libc::renameat(
-                                trash_fd,
-                                trash_entry_c.as_ptr(),
-                                dirfd,
-                                src_c.as_ptr(),
-                            );
-                        }
-                        temp_guard.cleanup_now();
-                        Err(format!("Failed to publish transcoded output: {err}"))
                     } else {
-                        temp_guard.cleanup_now();
                         Ok(())
                     }
                 };
+                temp_guard.cleanup_now();
 
                 if let Err(msg) = publish_res {
                     unlinkat_entry(trash_fd, &intent_fname);
