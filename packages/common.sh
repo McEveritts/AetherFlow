@@ -17,7 +17,7 @@ else
 fi
 export LOCK_DIR="${LOCK_DIR:-/install}"
 export AF_REQUIRE_DOWNLOAD_SHA256="${AF_REQUIRE_DOWNLOAD_SHA256:-1}"
-declare -ag AF_PENDING_VERSION_PATHS=() AF_PENDING_VERSION_VALUES=() AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=()
+declare -ag AF_PENDING_VERSION_PATHS=() AF_PENDING_VERSION_VALUES=() AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=() AF_APT_LOCKSTEP_PACKAGES=()
 AF_APT_PRIMARY_PACKAGE=""
 AF_APT_TARGET_VERSION=""
 AF_APT_LOCAL_DEB=false
@@ -1348,6 +1348,39 @@ installed_apt_package_version() {
     fi
 }
 
+apt_package_raw_status() {
+    local observed="" status="" version="" extra=""
+    observed="$(dpkg-query -W -f='${db:Status-Status} ${Version}\n' "$1" 2>/dev/null || true)"
+    read -r status version extra <<< "$observed"
+    if [[ -n "$status" && -z "$extra" ]]; then
+        printf '%s\n' "$status"
+    else
+        printf 'not-installed\n'
+    fi
+}
+
+apt_package_has_active_or_transitional_payload() {
+    case "$(apt_package_raw_status "$1")" in
+        installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+apt_package_is_lockstep() {
+    local candidate="$1" package
+    [[ -v AF_APT_LOCKSTEP_PACKAGES ]] || return 1
+    for package in "${AF_APT_LOCKSTEP_PACKAGES[@]}"; do
+        if [[ "$package" == "$candidate" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 resolve_installed_apt_package_version() {
     local package="$1" fallback="${2:-}" expected="" installed=""
     if [[ "${AF_APT_LOCAL_DEB:-false}" != true ]]; then
@@ -1394,17 +1427,36 @@ record_apt_package_for_rollback() {
 }
 
 prepare_apt_package_transaction() {
-    local local_deb=false
-    if [[ "${1:-}" == "--local-deb" ]]; then
-        local_deb=true
-        shift
+    local local_deb=false lockstep=false
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --local-deb)
+                local_deb=true
+                shift
+                ;;
+            --lockstep)
+                lockstep=true
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    if [[ "$local_deb" == true && "$lockstep" == true ]]; then
+        print_error "prepare_apt_package_transaction cannot combine --local-deb and --lockstep"
+        return 1
     fi
-    local receipt="$1" package marker installed previous="" normalized target=""
-    shift
-    [[ "$#" -gt 0 ]] || {
+    [[ "$#" -ge 2 ]] || {
         print_error "prepare_apt_package_transaction requires at least one Debian package name"
         return 1
     }
+    local receipt="$1" package marker installed previous="" normalized target=""
+    shift
     validate_config_paths "$(dirname "$receipt")/.af-apt-receipt-check" || return 1
     if [[ -f "$receipt" && ! -L "$receipt" ]]; then
         previous="$(safe_config_python "$receipt" <<'PYEOF'
@@ -1414,10 +1466,13 @@ with ManagedConfig(sys.argv[1], create_parents=False) as config:
 PYEOF
 )" || return 1
     fi
-    declare -ag AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=()
+    declare -ag AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=() AF_APT_LOCKSTEP_PACKAGES=()
     AF_APT_PRIMARY_PACKAGE="$1"
     AF_APT_TARGET_VERSION=""
     AF_APT_LOCAL_DEB="$local_deb"
+    if [[ "$local_deb" != true && "$lockstep" == true ]]; then
+        AF_APT_LOCKSTEP_PACKAGES=("$@")
+    fi
     if [[ "$local_deb" != true && -n "${AF_TARGET_VERSION:-}" ]]; then
         target="$(af_validate_exact_apt_version "${AF_TARGET_VERSION}")" || return 1
         AF_APT_TARGET_VERSION="$target"
@@ -1425,11 +1480,17 @@ PYEOF
             write_app_version "$receipt" "$target" --check || return 1
         fi
         if [[ "${AF_ALLOW_DOWNGRADE:-0}" != "1" ]]; then
-            installed="$(installed_apt_package_version "$AF_APT_PRIMARY_PACKAGE")" || return 1
-            if [[ "$installed" != '<none>' && -n "$installed" ]] && ! deb_compare_versions "$target" ge "$installed"; then
-                print_error "Refusing to downgrade APT package ${AF_APT_PRIMARY_PACKAGE} from ${installed} to ${target}"
-                return 1
+            local -a downgrade_check_pkgs=("$AF_APT_PRIMARY_PACKAGE")
+            if [[ "$lockstep" == true ]]; then
+                downgrade_check_pkgs=("$@")
             fi
+            for package in "${downgrade_check_pkgs[@]}"; do
+                installed="$(installed_apt_package_version "$package")" || return 1
+                if [[ "$installed" != '<none>' && -n "$installed" ]] && ! deb_compare_versions "$target" ge "$installed"; then
+                    print_error "Refusing to downgrade APT package ${package} from ${installed} to ${target}"
+                    return 1
+                fi
+            done
         fi
     fi
     record_apt_package_for_rollback "$@" || return 1
@@ -1447,16 +1508,29 @@ PYEOF
 }
 
 apt-get() {
-    local package argument selected=false primary_selected=false present=false
+    local package argument arg_pkg="" selected=false primary_selected=false present=false skip_next=false
     local -a rewritten=() additional=() extra_flags=()
     [[ -v AF_APT_TRANSACTION_PACKAGES ]] || declare -ag AF_APT_TRANSACTION_PACKAGES=()
     [[ -v AF_APT_REINSTALL_PACKAGES ]] || declare -ag AF_APT_REINSTALL_PACKAGES=()
+    [[ -v AF_APT_LOCKSTEP_PACKAGES ]] || declare -ag AF_APT_LOCKSTEP_PACKAGES=()
     local primary="${AF_APT_PRIMARY_PACKAGE:-}"
     local target="${AF_APT_TARGET_VERSION:-}"
     local local_deb="${AF_APT_LOCAL_DEB:-false}"
 
     if [[ "${1:-}" == install ]]; then
         for argument in "${@:2}"; do
+            if [[ "$skip_next" == true ]]; then
+                skip_next=false
+                rewritten+=("$argument")
+                continue
+            fi
+            case "$argument" in
+                -o|--option|-t|--target-release|--default-release|-c|--config-file)
+                    skip_next=true
+                    rewritten+=("$argument")
+                    continue
+                    ;;
+            esac
             if [[ "$local_deb" != true && -n "$primary" && -n "$target" ]]; then
                 if [[ "$argument" == "$primary" ]]; then
                     argument="${primary}=${target}"
@@ -1470,6 +1544,24 @@ apt-get() {
                 elif [[ "$argument" == "${primary}/"* ]]; then
                     print_error "Refusing floating APT release target '$argument' for requested exact version '$target'"
                     return 1
+                elif [[ "$argument" != -* && "$argument" != /*.deb ]]; then
+                    if [[ "$argument" == *=* ]]; then
+                        arg_pkg="${argument%%=*}"
+                        if apt_package_is_lockstep "$arg_pkg"; then
+                            if [[ "${argument#*=}" != "$target" ]]; then
+                                print_error "Refusing conflicting APT package target '$argument' for requested exact version '$target'"
+                                return 1
+                            fi
+                        fi
+                    elif [[ "$argument" == */* ]]; then
+                        arg_pkg="${argument%%/*}"
+                        if apt_package_is_lockstep "$arg_pkg"; then
+                            print_error "Refusing floating APT release target '$argument' for requested exact version '$target'"
+                            return 1
+                        fi
+                    elif apt_package_is_lockstep "$argument"; then
+                        argument="${argument}=${target}"
+                    fi
                 fi
             fi
             rewritten+=("$argument")
@@ -1487,18 +1579,33 @@ apt-get() {
                     for argument in "${rewritten[@]}"; do
                         if [[ "$argument" == "$package" || "$argument" == "$package="* || "$argument" == /*.deb ]]; then
                             present=true
+                            break
                         fi
                     done
                     if [[ "$present" != true ]]; then
-                        if [[ "$local_deb" != true && -n "$target" && "$package" == "$primary" ]]; then
+                        if [[ "$local_deb" != true && -n "$target" ]] && { [[ "$package" == "$primary" ]] || apt_package_is_lockstep "$package"; }; then
                             additional+=("${package}=${target}")
-                            primary_selected=true
+                            [[ "$package" != "$primary" ]] || primary_selected=true
                         else
                             additional+=("$package")
                         fi
                     fi
                 done
                 extra_flags+=(--reinstall)
+            fi
+            if [[ "$primary_selected" == true && "$local_deb" != true && -n "$target" && "${#AF_APT_LOCKSTEP_PACKAGES[@]}" -gt 0 ]]; then
+                for package in "${AF_APT_LOCKSTEP_PACKAGES[@]}"; do
+                    present=false
+                    for argument in "${rewritten[@]}" "${additional[@]}"; do
+                        if [[ "$argument" == "$package" || "$argument" == "$package="* || "$argument" == /*.deb ]]; then
+                            present=true
+                            break
+                        fi
+                    done
+                    if [[ "$present" != true ]]; then
+                        additional+=("${package}=${target}")
+                    fi
+                done
             fi
             if [[ "$primary_selected" == true && "${AF_ALLOW_DOWNGRADE:-0}" == "1" ]]; then
                 local has_allow_downgrades=false
@@ -1509,7 +1616,13 @@ apt-get() {
             fi
             command apt-get install "${extra_flags[@]}" "${rewritten[@]}" "${additional[@]}" || return $?
             if [[ "$primary_selected" == true ]]; then
-                verify_apt_package_installed "$primary" "$target" || return 1
+                if [[ "${#AF_APT_LOCKSTEP_PACKAGES[@]}" -gt 0 ]]; then
+                    for package in "${AF_APT_LOCKSTEP_PACKAGES[@]}"; do
+                        verify_apt_package_installed "$package" "$target" || return 1
+                    done
+                else
+                    verify_apt_package_installed "$primary" "$target" || return 1
+                fi
             fi
             return 0
         fi
@@ -1518,7 +1631,7 @@ apt-get() {
 }
 
 rollback_apt_packages() {
-    local state package previous installed raw_status marker reconciled failed=false idx
+    local state package previous installed marker reconciled failed=false idx
     local -a remove_pkgs=() downgrade_pkgs=() downgrade_prevs=() downgrade_specs=()
     AF_APT_ROLLBACK_MUTATED=false
     [[ -d "${AF_TX_DIR:-}/apt-packages" ]] || return 0
@@ -1526,27 +1639,21 @@ rollback_apt_packages() {
         [[ -f "$state" && ! -L "$state" ]] || continue
         package="${state##*/}"
         previous="$(cat -- "$state")"
-        installed="$(installed_apt_package_version "$package")"
-        if [[ "$installed" == "$previous" ]]; then
-            if [[ "$previous" == '<none>' ]]; then
-                raw_status="$(dpkg-query -W -f='${db:Status-Status}\n' "$package" 2>/dev/null || true)"
-                case "$raw_status" in
-                    unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)
-                        AF_APT_ROLLBACK_MUTATED=true
-                        remove_pkgs+=("$package")
-                        ;;
-                esac
+        if [[ "$previous" == '<none>' ]]; then
+            if apt_package_has_active_or_transitional_payload "$package"; then
+                AF_APT_ROLLBACK_MUTATED=true
+                remove_pkgs+=("$package")
             fi
             continue
         fi
-        AF_APT_ROLLBACK_MUTATED=true
-        if [[ "$previous" == '<none>' ]]; then
-            remove_pkgs+=("$package")
-        else
-            downgrade_pkgs+=("$package")
-            downgrade_prevs+=("$previous")
-            downgrade_specs+=("${package}=${previous}")
+        installed="$(installed_apt_package_version "$package")"
+        if [[ "$installed" == "$previous" ]]; then
+            continue
         fi
+        AF_APT_ROLLBACK_MUTATED=true
+        downgrade_pkgs+=("$package")
+        downgrade_prevs+=("$previous")
+        downgrade_specs+=("${package}=${previous}")
     done
 
     if (( ${#remove_pkgs[@]} > 1 )); then
@@ -1554,12 +1661,10 @@ rollback_apt_packages() {
     fi
     for package in "${remove_pkgs[@]}"; do
         reconciled=true
-        installed="$(installed_apt_package_version "$package")"
-        if [[ "$installed" != '<none>' ]]; then
+        if apt_package_has_active_or_transitional_payload "$package"; then
             DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "$package" || reconciled=false
-            installed="$(installed_apt_package_version "$package")"
         fi
-        if [[ "$reconciled" != true || "$installed" != '<none>' ]]; then
+        if [[ "$reconciled" != true ]] || apt_package_has_active_or_transitional_payload "$package"; then
             marker="$(apt_reinstall_marker_path "$package")" || return 1
             printf '%s\n' '<none>' | write_config_file "$marker" 0600 || return 1
             print_warn "APT recovery for $package requires reinstallation on the next attempt"
@@ -2043,6 +2148,7 @@ begin_state_transaction() {
     AF_STATE_SNAPSHOT_READY=false
     AF_APT_REINSTALL_PACKAGES=()
     AF_APT_TRANSACTION_PACKAGES=()
+    AF_APT_LOCKSTEP_PACKAGES=()
     AF_APT_PRIMARY_PACKAGE=""
     AF_APT_TARGET_VERSION=""
     AF_APT_LOCAL_DEB=false

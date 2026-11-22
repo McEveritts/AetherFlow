@@ -80,7 +80,7 @@ wait_for_service_ready() {
 }
 begin_state_transaction "transmission-daemon" "$APP_PORT" "/transmission/rpc" "/var/lib/transmission" "/var/lib/transmission-daemon" "/etc/transmission-daemon" "/usr/share/transmission/web" "/etc/systemd/system/transmission-daemon.service" "/usr/bin/transmission-daemon" "/usr/bin/transmission-remote" "/usr/share/transmission" "/usr/lib/transmission"
 
-prepare_apt_package_transaction /var/lib/transmission-daemon/.af-version transmission-daemon transmission-common transmission-cli
+prepare_apt_package_transaction --lockstep /var/lib/transmission-daemon/.af-version transmission-daemon transmission-common transmission-cli
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing transmission-daemon and transmission-cli..."
 

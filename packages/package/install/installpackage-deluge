@@ -37,7 +37,7 @@ require_root
 PACKAGE_NAME="${PACKAGE_NAME:-deluge}"
 begin_state_transaction "deluged deluge-web" "$APP_PORT" "/" "/var/lib/deluge" "/etc/deluge" "/etc/systemd/system/deluged.service" "/etc/systemd/system/deluge-web.service" "/usr/bin/deluged" "/usr/bin/deluge-web" "/usr/bin/deluge-console" "/usr/lib/python3/dist-packages/deluge" "/usr/share/deluge"
 
-prepare_apt_package_transaction /var/lib/deluge/.af-version deluged deluge-web deluge-console
+prepare_apt_package_transaction --lockstep /var/lib/deluge/.af-version deluged deluge-web deluge-console deluge-common
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing deluged, deluge-web, and deluge-console..."
 

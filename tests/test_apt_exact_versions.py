@@ -36,27 +36,37 @@ class SyntheticAptEnvironment:
             "etc/apt/sources.list.d",
             "etc/apt/keyrings",
             "etc/default",
+            "etc/deluge",
             "etc/jellyfin",
             "etc/netdata",
             "etc/novnc",
             "etc/systemd/system",
+            "etc/transmission-daemon",
             "etc/wireguard",
             "opt/emby-server",
             "var/lib/aetherflow/apt-reinstall-required",
+            "var/lib/deluge",
             "var/lib/grafana",
             "var/lib/jellyfin",
             "var/lib/kasmvnc",
             "var/lib/quassel",
+            "var/lib/transmission",
             "var/lib/transmission-daemon",
             "var/log/aetherflow",
+            "var/log/deluge",
             "var/log/quassel",
             "usr/bin",
             "usr/sbin",
             "usr/lib/jellyfin",
-            "usr/share/jellyfin",
+            "usr/lib/python3/dist-packages/deluge",
             "usr/lib/quassel",
+            "usr/lib/transmission",
+            "usr/share/deluge",
+            "usr/share/jellyfin",
             "usr/share/quassel",
+            "usr/share/transmission/web",
             "tmp/tx-root",
+            "tmp/scratch",
         ):
             (self.root / rel).mkdir(parents=True, exist_ok=True)
 
@@ -99,16 +109,21 @@ class SyntheticAptEnvironment:
             "/var/lib/aetherflow/apt-reinstall-required": f"{root_str}/var/lib/aetherflow/apt-reinstall-required",
             "/var/lib/aetherflow": f"{root_str}/var/lib/aetherflow",
             "/var/log/aetherflow": f"{root_str}/var/log/aetherflow",
+            "/var/lib/deluge": f"{root_str}/var/lib/deluge",
+            "/var/log/deluge": f"{root_str}/var/log/deluge",
             "/var/lib/quassel": f"{root_str}/var/lib/quassel",
             "/var/log/quassel": f"{root_str}/var/log/quassel",
             "/var/lib/jellyfin": f"{root_str}/var/lib/jellyfin",
             "/var/lib/grafana": f"{root_str}/var/lib/grafana",
             "/var/lib/kasmvnc": f"{root_str}/var/lib/kasmvnc",
             "/var/lib/transmission-daemon": f"{root_str}/var/lib/transmission-daemon",
+            "/var/lib/transmission": f"{root_str}/var/lib/transmission",
             "/var/lib/netdata": f"{root_str}/var/lib/netdata",
+            "/etc/deluge": f"{root_str}/etc/deluge",
             "/etc/netdata": f"{root_str}/etc/netdata",
             "/etc/jellyfin": f"{root_str}/etc/jellyfin",
             "/etc/default/quasselcore": f"{root_str}/etc/default/quasselcore",
+            "/etc/transmission-daemon": f"{root_str}/etc/transmission-daemon",
             "/etc/wireguard": f"{root_str}/etc/wireguard",
             "/etc/novnc": f"{root_str}/etc/novnc",
             "/etc/apt/sources.list.d": f"{root_str}/etc/apt/sources.list.d",
@@ -117,12 +132,22 @@ class SyntheticAptEnvironment:
             "/etc/systemd/system": f"{root_str}/etc/systemd/system",
             "/opt/emby-server": f"{root_str}/opt/emby-server",
             "/opt/netdata": f"{root_str}/opt/netdata",
+            "/usr/bin/deluged": f"{root_str}/usr/bin/deluged",
+            "/usr/bin/deluge-web": f"{root_str}/usr/bin/deluge-web",
+            "/usr/bin/deluge-console": f"{root_str}/usr/bin/deluge-console",
+            "/usr/lib/python3/dist-packages/deluge": f"{root_str}/usr/lib/python3/dist-packages/deluge",
+            "/usr/share/deluge": f"{root_str}/usr/share/deluge",
             "/usr/bin/quasselcore": f"{root_str}/usr/bin/quasselcore",
             "/usr/lib/quassel": f"{root_str}/usr/lib/quassel",
             "/usr/share/quassel": f"{root_str}/usr/share/quassel",
             "/usr/bin/jellyfin": f"{root_str}/usr/bin/jellyfin",
             "/usr/lib/jellyfin": f"{root_str}/usr/lib/jellyfin",
             "/usr/share/jellyfin": f"{root_str}/usr/share/jellyfin",
+            "/usr/bin/transmission-daemon": f"{root_str}/usr/bin/transmission-daemon",
+            "/usr/bin/transmission-remote": f"{root_str}/usr/bin/transmission-remote",
+            "/usr/share/transmission/web": f"{root_str}/usr/share/transmission/web",
+            "/usr/share/transmission": f"{root_str}/usr/share/transmission",
+            "/usr/lib/transmission": f"{root_str}/usr/lib/transmission",
             "/usr/sbin/netdata": f"{root_str}/usr/sbin/netdata",
             "/usr/local/sbin/netdata": f"{root_str}/usr/local/sbin/netdata",
             "/usr/lib/netdata": f"{root_str}/usr/lib/netdata",
@@ -211,9 +236,34 @@ if subcmd == "update":
     sys.exit(0)
 
 if subcmd == "remove":
-    for spec in specs:
-        pkg = spec.split("=", 1)[0]
-        state.pop(pkg, None)
+    fail_remove = set(behavior.get("fail_remove_for", []))
+    remove_override = behavior.get("remove_override", {})
+    remove_pkgs = [spec.split("=", 1)[0] for spec in specs]
+    if len(remove_pkgs) > 1 and behavior.get("batch_remove_override"):
+        for pkg, entry in behavior["batch_remove_override"].items():
+            if pkg in remove_pkgs:
+                if entry is None:
+                    state.pop(pkg, None)
+                else:
+                    state[pkg] = dict(entry)
+        state_path.write_text(json.dumps(state))
+        if behavior.get("fail_batch_remove"):
+            sys.stderr.write("E: Simulated batch APT remove failure\n")
+            sys.exit(100)
+        sys.exit(0)
+    for pkg in remove_pkgs:
+        if pkg in fail_remove:
+            sys.stderr.write(f"E: Simulated APT remove failure for {pkg}\n")
+            sys.exit(100)
+    for pkg in remove_pkgs:
+        if pkg in remove_override:
+            override = remove_override[pkg]
+            if override is None:
+                state.pop(pkg, None)
+            else:
+                state[pkg] = dict(override)
+        else:
+            state.pop(pkg, None)
     state_path.write_text(json.dumps(state))
     sys.exit(0)
 
@@ -226,6 +276,7 @@ if subcmd == "install":
                 sys.exit(100)
 
     pending = {}
+    pinned_pkgs = set()
     for spec in specs:
         if spec.endswith(".deb"):
             continue
@@ -236,6 +287,7 @@ if subcmd == "install":
                 sys.stderr.write(f"E: Version '{req_ver}' for '{pkg}' was not found\n")
                 sys.exit(100)
             chosen = req_ver
+            pinned_pkgs.add(pkg)
             # Simulate a buggy repo/apt returning wrong version or non-installed status if configured
             override = behavior.get("install_override", {}).get(pkg)
             if override and not allow_downgrades:
@@ -256,6 +308,38 @@ if subcmd == "install":
             else:
                 # Auxiliary packages like curl/openssl/ca-certificates
                 pending[pkg] = {"status": "installed", "version": "1.0-1"}
+
+    # Enforce strict Debian exact-version Depends (`dep (= ver)`):
+    # - Fails if dep resolves to a different version than pkg
+    # - Fails if dep is not explicitly pinned and its Candidate != ver (real APT non-candidate boundary)
+    exact_depends = behavior.get("exact_depends", {})
+    for pkg, entry in list(pending.items()):
+        ver = entry["version"]
+        for dep in exact_depends.get(pkg, []):
+            dep_versions = repo.get(dep, [])
+            dep_candidate = dep_versions[-1] if dep_versions else None
+            if dep in pending:
+                if pending[dep]["version"] != ver:
+                    sys.stderr.write(
+                        f"E: Unmet dependencies: {pkg} : Depends: {dep} (= {ver}) "
+                        f"but {pending[dep]['version']} is to be installed\n"
+                    )
+                    sys.exit(100)
+            else:
+                if dep_candidate != ver and dep not in pinned_pkgs:
+                    sys.stderr.write(
+                        f"E: Unmet dependencies: {pkg} : Depends: {dep} (= {ver}) "
+                        f"but {dep_candidate} is to be installed\n"
+                    )
+                    sys.exit(100)
+                if ver not in dep_versions:
+                    sys.stderr.write(f"E: Version '{ver}' for '{dep}' was not found\n")
+                    sys.exit(100)
+                override = behavior.get("install_override", {}).get(dep)
+                if override and not allow_downgrades:
+                    pending[dep] = dict(override)
+                else:
+                    pending[dep] = {"status": "installed", "version": ver}
 
     # Optional lockstep companion simulation (e.g., jellyfin pulls jellyfin-server & jellyfin-web)
     for parent_pkg, companions in behavior.get("lockstep_companions", {}).items():
@@ -344,6 +428,28 @@ sys.exit(0)
             self.write_executable(self.bin_dir / noop, "#!/bin/bash\nexit 0\n")
 
         self.write_executable(
+            self.bin_dir / "git",
+            "#!/bin/bash\nexit 1\n",
+        )
+
+        self.write_executable(
+            self.bin_dir / "curl",
+            r"""#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+joined = " ".join(args)
+if "127.0.0.1" in joined or "localhost" in joined:
+    if "-w" in args:
+        sys.stdout.write("200")
+    sys.exit(0)
+if "api.github.com/repos/ronggang/transmission-web-control" in joined:
+    sys.stdout.write('{"tag_name":"v1.6.1-update1"}\n')
+    sys.exit(0)
+sys.exit(1)
+""",
+        )
+
+        self.write_executable(
             self.bin_dir / "id",
             r"""#!/bin/bash
 if [[ "${1:-}" == "-u" ]]; then
@@ -379,6 +485,9 @@ for flag in ("-out", "-keyout"):
             "AF_SYNTH_APT_BEHAVIOR": str(self.behavior_path),
             "AF_SYNTH_LOG": str(self.log_path),
             "AF_TRANSACTION_ROOT": str(self.root / "tmp/tx-root"),
+            "AF_JOB_SCRATCH_ROOT": str(self.root / "tmp/scratch"),
+            "MASTER_USER": "admin",
+            "MASTER_PASS": "test-pass-1234",
             "DEBIAN_FRONTEND": "noninteractive",
         }
         env.pop("AF_TARGET_VERSION", None)
@@ -448,10 +557,14 @@ class AptExactVersionTests(unittest.TestCase):
         self.assertEqual(len(apt_entries), 18, f"Expected 18 apt entries, found {sorted(apt_entries)}")
 
         prep_re = re.compile(
-            r"^\s*prepare_apt_package_transaction\s+(--local-deb\s+)?(\S+)\s+(.+?)\s*$",
+            r"^\s*prepare_apt_package_transaction\s+((?:--(?:local-deb|lockstep)\s+)*)(\S+)\s+(.+?)\s*$",
             re.MULTILINE,
         )
         resolve_re = re.compile(r"resolve_installed_apt_package_version\s+([a-z0-9][a-z0-9+.-]*)")
+        expected_lockstep = {
+            "deluge": ["deluged", "deluge-web", "deluge-console", "deluge-common"],
+            "transmission": ["transmission-daemon", "transmission-common", "transmission-cli"],
+        }
 
         for name, cfg in sorted(apt_entries.items()):
             expected_pkg = cfg["update_package"]
@@ -461,8 +574,10 @@ class AptExactVersionTests(unittest.TestCase):
 
             prep_match = prep_re.search(content)
             self.assertIsNotNone(prep_match, f"{name}: missing prepare_apt_package_transaction")
-            self.assertIsNone(
-                prep_match.group(1),
+            flags = prep_match.group(1).split()
+            self.assertNotIn(
+                "--local-deb",
+                flags,
                 f"{name}: update_source=apt installer must not pass --local-deb",
             )
             pkgs = prep_match.group(3).split()
@@ -471,6 +586,11 @@ class AptExactVersionTests(unittest.TestCase):
                 expected_pkg,
                 f"{name}: primary APT package '{pkgs[0]}' does not match package_automation.json update_package '{expected_pkg}'",
             )
+            if name in expected_lockstep:
+                self.assertIn("--lockstep", flags, f"{name}: lockstep APT installer must pass --lockstep")
+                self.assertEqual(pkgs, expected_lockstep[name], f"{name}: lockstep package set mismatch")
+            else:
+                self.assertNotIn("--lockstep", flags, f"{name}: non-lockstep APT installer must not pass --lockstep")
 
             resolve_matches = resolve_re.findall(content)
             self.assertIn(
@@ -487,8 +607,9 @@ class AptExactVersionTests(unittest.TestCase):
             content = (INSTALL_DIR / f"installpackage-{deb_app}").read_text()
             prep_match = prep_re.search(content)
             self.assertIsNotNone(prep_match, f"{deb_app}: missing prepare_apt_package_transaction")
-            self.assertIsNotNone(
-                prep_match.group(1),
+            self.assertIn(
+                "--local-deb",
+                prep_match.group(1).split(),
                 f"{deb_app}: local .deb installer must pass --local-deb",
             )
             self.assertEqual(prep_match.group(3).split()[0], deb_pkg)
@@ -804,6 +925,399 @@ fetch_and_run() {{ touch "{marker}"; return 0; }}
                 (env.root / "opt/emby-server/.af-version").read_text().strip(),
                 "4.8.10.0",
             )
+
+    def test_fresh_install_transitional_dpkg_states_invoke_individual_removal_and_clean_up(self):
+        repo = {"quassel-core": ["1:0.14.0-1+deb12u1", "1:0.14.0-2+deb12u1"]}
+        cases = (
+            ("half-installed->removed", "half-installed", None),
+            ("unpacked->removed", "unpacked", None),
+            ("half-configured->config-files", "half-configured", {"status": "config-files", "version": "1:0.14.0-1+deb12u1"}),
+            ("triggers-awaited->removed", "triggers-awaited", None),
+            ("triggers-pending->config-files", "triggers-pending", {"status": "config-files", "version": "1:0.14.0-1+deb12u1"}),
+        )
+        for label, bad_status, post_remove_entry in cases:
+            behavior = {
+                "install_override": {"quassel-core": {"status": bad_status, "version": "1:0.14.0-1+deb12u1"}},
+            }
+            if post_remove_entry is not None:
+                behavior["remove_override"] = {"quassel-core": post_remove_entry}
+            with self.subTest(case=label), SyntheticAptEnvironment(repo, apt_behavior=behavior) as env:
+                res = env.run_install_script("quassel", extra_env={"AF_TARGET_VERSION": "1:0.14.0-1+deb12u1"})
+                self.assertNotEqual(res.returncode, 0, f"{label}: install must fail on {bad_status}")
+                self.assertIn(
+                    ["apt-get", "remove", "-y", "--no-auto-remove", "quassel-core"],
+                    env.commands(),
+                    f"{label}: rollback must run individual apt-get remove for fresh {bad_status} package",
+                )
+                if post_remove_entry is None:
+                    self.assertNotIn("quassel-core", env.dpkg_state())
+                else:
+                    self.assertEqual(env.dpkg_state()["quassel-core"]["status"], "config-files")
+                marker = env.root / "var/lib/aetherflow/apt-reinstall-required/quassel-core"
+                self.assertFalse(marker.exists(), f"{label}: clean removal must not leave reinstall marker")
+                self.assertNotIn("incomplete_rollback", res.stdout + res.stderr)
+                self.assertEqual(list((env.root / "tmp/tx-root").glob("af-state-*")), [])
+
+    def test_fresh_install_transitional_removal_failure_or_residual_state_marks_incomplete_rollback(self):
+        repo = {"quassel-core": ["1:0.14.0-1+deb12u1", "1:0.14.0-2+deb12u1"]}
+        failure_cases = (
+            (
+                "remove-command-fails",
+                {
+                    "install_override": {"quassel-core": {"status": "half-installed", "version": "1:0.14.0-1+deb12u1"}},
+                    "fail_remove_for": ["quassel-core"],
+                },
+                "half-installed",
+            ),
+            (
+                "remove-exits-0-but-leaves-unpacked",
+                {
+                    "install_override": {"quassel-core": {"status": "unpacked", "version": "1:0.14.0-1+deb12u1"}},
+                    "remove_override": {"quassel-core": {"status": "unpacked", "version": "1:0.14.0-1+deb12u1"}},
+                },
+                "unpacked",
+            ),
+            (
+                "remove-exits-0-but-leaves-half-installed",
+                {
+                    "install_override": {"quassel-core": {"status": "installed", "version": "1:0.14.0-2+deb12u1"}},
+                    "remove_override": {"quassel-core": {"status": "half-installed", "version": "1:0.14.0-2+deb12u1"}},
+                },
+                "half-installed",
+            ),
+        )
+        for label, behavior, residual_status in failure_cases:
+            with self.subTest(case=label), SyntheticAptEnvironment(repo, apt_behavior=behavior) as env:
+                res = env.run_install_script("quassel", extra_env={"AF_TARGET_VERSION": "1:0.14.0-1+deb12u1"})
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn(
+                    ["apt-get", "remove", "-y", "--no-auto-remove", "quassel-core"],
+                    env.commands(),
+                    f"{label}: rollback must attempt individual apt-get remove",
+                )
+                self.assertEqual(env.dpkg_state()["quassel-core"]["status"], residual_status)
+                marker = env.root / "var/lib/aetherflow/apt-reinstall-required/quassel-core"
+                self.assertTrue(marker.is_file(), f"{label}: residual {residual_status} must write reinstall marker")
+                self.assertEqual(marker.read_text().strip(), "<none>")
+                self.assertIn("incomplete_rollback", res.stdout + res.stderr)
+                self.assertTrue(
+                    list((env.root / "tmp/tx-root").glob("af-state-*")),
+                    f"{label}: incomplete rollback must preserve recovery backup",
+                )
+
+        # Multi-package fresh-install batch removal partially leaves one package unpacked -> individual fallback runs
+        deluge_repo = {
+            "deluged": ["2.1.1-1", "2.2.0-1"],
+            "deluge-web": ["2.1.1-1", "2.2.0-1"],
+            "deluge-console": ["2.1.1-1", "2.2.0-1"],
+            "deluge-common": ["2.1.1-1", "2.2.0-1"],
+            "python3-libtorrent": ["2.0.11-1"],
+        }
+        deluge_behavior = {
+            "exact_depends": {
+                "deluged": ["deluge-common"],
+                "deluge-web": ["deluge-common"],
+                "deluge-console": ["deluge-common"],
+            },
+            "install_override": {
+                "deluged": {"status": "half-installed", "version": "2.1.1-1"},
+                "deluge-common": {"status": "unpacked", "version": "2.1.1-1"},
+            },
+            "fail_batch_remove": True,
+            "batch_remove_override": {
+                "deluged": None,
+                "deluge-web": None,
+                "deluge-console": None,
+                "deluge-common": {"status": "unpacked", "version": "2.1.1-1"},
+            },
+        }
+        with SyntheticAptEnvironment(deluge_repo, apt_behavior=deluge_behavior) as env:
+            res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.1.1-1"})
+            self.assertNotEqual(res.returncode, 0)
+            remove_cmds = [c for c in env.commands() if c[:2] == ["apt-get", "remove"]]
+            self.assertTrue(any(len(c) > 5 for c in remove_cmds), f"expected batch remove in {remove_cmds}")
+            self.assertIn(
+                ["apt-get", "remove", "-y", "--no-auto-remove", "deluge-common"],
+                remove_cmds,
+                f"expected individual fallback remove for unpacked deluge-common in {remove_cmds}",
+            )
+            self.assertNotIn("deluge-common", env.dpkg_state())
+            self.assertNotIn("incomplete_rollback", res.stdout + res.stderr)
+
+    def test_deluge_lockstep_non_candidate_target_pins_companions_preserves_auxiliary_and_snapshots_common(self):
+        repo = {
+            "deluged": ["2.1.1-1", "2.2.0-1"],
+            "deluge-web": ["2.1.1-1", "2.2.0-1"],
+            "deluge-console": ["2.1.1-1", "2.2.0-1"],
+            "deluge-common": ["2.1.1-1", "2.2.0-1"],
+            "python3-libtorrent": ["2.0.10-1", "2.0.11-1"],
+        }
+        strict_deps = {
+            "exact_depends": {
+                "deluged": ["deluge-common"],
+                "deluge-web": ["deluge-common"],
+                "deluge-console": ["deluge-common"],
+            }
+        }
+
+        # 1. Fresh install with exact non-candidate 2.1.1-1 pins all 4 lockstep pkgs and leaves python3-libtorrent unpinned
+        with SyntheticAptEnvironment(repo, apt_behavior=strict_deps) as env:
+            res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.1.1-1"})
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            install_cmd = [c for c in env.commands() if c[:2] == ["apt-get", "install"]][-1]
+            for pkg in ("deluged", "deluge-web", "deluge-console", "deluge-common"):
+                self.assertIn(f"{pkg}=2.1.1-1", install_cmd, f"missing lockstep pin for {pkg} in {install_cmd}")
+                self.assertEqual(env.dpkg_state()[pkg], {"status": "installed", "version": "2.1.1-1"})
+            self.assertIn("python3-libtorrent", install_cmd)
+            self.assertFalse(any(a.startswith("python3-libtorrent=") for a in install_cmd))
+            self.assertEqual(env.dpkg_state()["python3-libtorrent"]["version"], "2.0.11-1")
+            self.assertEqual((env.root / "var/lib/deluge/.af-version").read_text().strip(), "2.1.1-1")
+
+        # 2. Failed upgrade rolls back all 4 packages (including transitive deluge-common) atomically in one batch
+        installed = {
+            "deluged": "2.1.1-1",
+            "deluge-web": "2.1.1-1",
+            "deluge-console": "2.1.1-1",
+            "deluge-common": "2.1.1-1",
+            "python3-libtorrent": "2.0.11-1",
+        }
+        with SyntheticAptEnvironment(
+            repo,
+            installed=installed,
+            apt_behavior={**strict_deps, "fail_service": True},
+        ) as env:
+            (env.root / "var/lib/deluge/.af-version").write_text("2.1.1-1\n")
+            res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.2.0-1"})
+            self.assertNotEqual(res.returncode, 0)
+            batch_rollbacks = [
+                c
+                for c in env.commands()
+                if c[:2] == ["apt-get", "install"]
+                and "--allow-downgrades" in c
+                and all(f"{pkg}=2.1.1-1" in c for pkg in ("deluged", "deluge-web", "deluge-console", "deluge-common"))
+            ]
+            self.assertTrue(batch_rollbacks, f"expected batched 4-package deluge rollback in {env.commands()}")
+            for pkg in ("deluged", "deluge-web", "deluge-console", "deluge-common"):
+                self.assertEqual(env.dpkg_state()[pkg], {"status": "installed", "version": "2.1.1-1"})
+            self.assertEqual((env.root / "var/lib/deluge/.af-version").read_text().strip(), "2.1.1-1")
+
+        # 3. Pre-installed newer transitive deluge-common blocks downgrade without AF_ALLOW_DOWNGRADE=1
+        with SyntheticAptEnvironment(
+            repo,
+            installed={"deluge-common": "2.2.0-1"},
+            apt_behavior=strict_deps,
+        ) as env:
+            res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.1.1-1"})
+            self.assertNotEqual(res.returncode, 0)
+            self.assertEqual([c for c in env.commands() if c[:2] == ["apt-get", "install"]], [])
+            self.assertEqual(env.dpkg_state()["deluge-common"]["version"], "2.2.0-1")
+
+        # 4. Reinstall marker on transitive deluge-common keeps it pinned once with --reinstall
+        with SyntheticAptEnvironment(repo, apt_behavior=strict_deps) as env:
+            marker = env.root / "var/lib/aetherflow/apt-reinstall-required/deluge-common"
+            marker.write_text("<none>\n")
+            res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.1.1-1"})
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            install_cmd = [c for c in env.commands() if c[:2] == ["apt-get", "install"]][-1]
+            self.assertIn("--reinstall", install_cmd)
+            self.assertEqual(install_cmd.count("deluge-common=2.1.1-1"), 1, install_cmd)
+            self.assertNotIn("deluge-common", install_cmd)
+            self.assertFalse(marker.exists())
+
+        # 5. Post-install verification catches half-installed transitive deluge-common and cleans all 4 packages
+        with SyntheticAptEnvironment(
+            repo,
+            apt_behavior={
+                **strict_deps,
+                "install_override": {"deluge-common": {"status": "half-installed", "version": "2.1.1-1"}},
+            },
+        ) as env:
+            res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.1.1-1"})
+            self.assertNotEqual(res.returncode, 0)
+            self.assertFalse(any(c[:2] == ["systemctl", "enable"] for c in env.commands()))
+            for pkg in ("deluged", "deluge-web", "deluge-console", "deluge-common"):
+                self.assertNotIn(pkg, env.dpkg_state(), f"{pkg} must be removed on fresh rollback")
+            self.assertNotIn("incomplete_rollback", res.stdout + res.stderr)
+
+    def test_transmission_lockstep_non_candidate_target_pins_companions_preserves_auxiliary_and_rolls_back(self):
+        repo = {
+            "transmission-daemon": ["4.1.0~beta2+dfsg-3+deb13u2", "4.1.4+dfsg-1~bpo13+1"],
+            "transmission-common": ["4.1.0~beta2+dfsg-3+deb13u2", "4.1.4+dfsg-1~bpo13+1"],
+            "transmission-cli": ["4.1.0~beta2+dfsg-3+deb13u2", "4.1.4+dfsg-1~bpo13+1"],
+            "curl": ["8.14.1-2+deb13u7"],
+            "git": ["1:2.47.3-0+deb13u1"],
+            "ca-certificates": ["20250419+deb13u1"],
+        }
+        strict_deps = {
+            "exact_depends": {
+                "transmission-daemon": ["transmission-common"],
+                "transmission-cli": ["transmission-common"],
+            }
+        }
+
+        # 1. Fresh install with exact non-candidate pins all 3 lockstep packages and keeps curl/git/ca-certificates unpinned
+        with SyntheticAptEnvironment(repo, apt_behavior=strict_deps) as env:
+            res = env.run_install_script(
+                "transmission",
+                extra_env={"AF_TARGET_VERSION": "4.1.0~beta2+dfsg-3+deb13u2"},
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            install_cmd = [c for c in env.commands() if c[:2] == ["apt-get", "install"]][-1]
+            for pkg in ("transmission-daemon", "transmission-common", "transmission-cli"):
+                self.assertIn(f"{pkg}=4.1.0~beta2+dfsg-3+deb13u2", install_cmd)
+                self.assertEqual(
+                    env.dpkg_state()[pkg],
+                    {"status": "installed", "version": "4.1.0~beta2+dfsg-3+deb13u2"},
+                )
+            for aux in ("curl", "git", "ca-certificates"):
+                self.assertIn(aux, install_cmd)
+                self.assertFalse(any(a.startswith(f"{aux}=") for a in install_cmd))
+            self.assertEqual(
+                (env.root / "var/lib/transmission-daemon/.af-version").read_text().strip(),
+                "4.1.0~beta2+dfsg-3+deb13u2",
+            )
+
+        # 2. Failed upgrade rolls back all 3 lockstep packages atomically
+        installed = {
+            "transmission-daemon": "4.1.0~beta2+dfsg-3+deb13u2",
+            "transmission-common": "4.1.0~beta2+dfsg-3+deb13u2",
+            "transmission-cli": "4.1.0~beta2+dfsg-3+deb13u2",
+        }
+        with SyntheticAptEnvironment(
+            repo,
+            installed=installed,
+            apt_behavior={**strict_deps, "fail_service": True},
+        ) as env:
+            (env.root / "var/lib/transmission-daemon/.af-version").write_text("4.1.0~beta2+dfsg-3+deb13u2\n")
+            res = env.run_install_script(
+                "transmission",
+                extra_env={"AF_TARGET_VERSION": "4.1.4+dfsg-1~bpo13+1"},
+            )
+            self.assertNotEqual(res.returncode, 0)
+            batch_rollbacks = [
+                c
+                for c in env.commands()
+                if c[:2] == ["apt-get", "install"]
+                and "--allow-downgrades" in c
+                and all(
+                    f"{pkg}=4.1.0~beta2+dfsg-3+deb13u2" in c
+                    for pkg in ("transmission-daemon", "transmission-common", "transmission-cli")
+                )
+            ]
+            self.assertTrue(batch_rollbacks, f"expected batched 3-package transmission rollback in {env.commands()}")
+            for pkg in ("transmission-daemon", "transmission-common", "transmission-cli"):
+                self.assertEqual(
+                    env.dpkg_state()[pkg],
+                    {"status": "installed", "version": "4.1.0~beta2+dfsg-3+deb13u2"},
+                )
+            self.assertEqual(
+                (env.root / "var/lib/transmission-daemon/.af-version").read_text().strip(),
+                "4.1.0~beta2+dfsg-3+deb13u2",
+            )
+
+    def test_readonly_apt_simulate_verifies_real_debian_lockstep_and_jellyfin_solver_constraints(self):
+        if not (Path("/usr/bin/apt-get").exists() and Path("/usr/bin/apt-cache").exists()):
+            self.skipTest("Debian apt-get/apt-cache not available on host")
+
+        def parse_policy(pkg_name):
+            out = subprocess.run(
+                ["/usr/bin/apt-cache", "policy", pkg_name],
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            if out.returncode != 0:
+                return None, []
+            candidate = None
+            versions = []
+            in_table = False
+            for line in out.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Candidate:"):
+                    candidate = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("Version table:"):
+                    in_table = True
+                elif in_table:
+                    m = re.match(r"^(?:\*\*\*\s+)?(\S+)\s+\d+$", stripped)
+                    if m:
+                        versions.append(m.group(1))
+            return candidate, versions
+
+        # Read-only verification of real Transmission lockstep solver constraints when a non-candidate exists
+        tx_cand, tx_vers = parse_policy("transmission-daemon")
+        non_cands = [v for v in tx_vers if v != tx_cand]
+        if tx_cand and non_cands:
+            target = non_cands[0]
+            # 1. Pinning only transmission-daemon without lockstep companions MUST fail real apt-get -s
+            broken = subprocess.run(
+                [
+                    "/usr/bin/apt-get", "-s", "-q=2",
+                    "-o", "Dir::State::status=/dev/null",
+                    "install",
+                    "transmission-cli", "transmission-common", f"transmission-daemon={target}",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            self.assertNotEqual(
+                broken.returncode,
+                0,
+                f"expected unpinned transmission companions to fail real apt-get -s for {target}",
+            )
+
+            # 2. Pinning all 3 lockstep packages (as installpackage-transmission --lockstep produces) MUST succeed
+            fixed = subprocess.run(
+                [
+                    "/usr/bin/apt-get", "-s", "-q=2",
+                    "-o", "Dir::State::status=/dev/null",
+                    "install",
+                    f"transmission-cli={target}",
+                    f"transmission-common={target}",
+                    f"transmission-daemon={target}",
+                    "curl", "git", "ca-certificates",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            self.assertEqual(fixed.returncode, 0, fixed.stdout + fixed.stderr)
+            self.assertIn(f"Inst transmission-common ({target} ", fixed.stdout)
+            self.assertIn(f"Inst transmission-daemon ({target} ", fixed.stdout)
+            self.assertIn(f"Inst transmission-cli ({target} ", fixed.stdout)
+
+        # Read-only verification that Jellyfin metapackage resolves cleanly on both normal & marker reinstall
+        jf_cand, jf_vers = parse_policy("jellyfin")
+        jf_non_cands = [v for v in jf_vers if v != jf_cand]
+        if jf_cand and jf_non_cands:
+            jf_target = jf_non_cands[0]
+            jf_normal = subprocess.run(
+                [
+                    "/usr/bin/apt-get", "-s", "-q=2",
+                    "-o", "Dir::State::status=/dev/null",
+                    "install",
+                    f"jellyfin={jf_target}",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            self.assertEqual(jf_normal.returncode, 0, jf_normal.stdout + jf_normal.stderr)
+            self.assertIn(f"Inst jellyfin ({jf_target} ", jf_normal.stdout)
+
+            jf_marker = subprocess.run(
+                [
+                    "/usr/bin/apt-get", "-s", "-q=2",
+                    "-o", "Dir::State::status=/dev/null",
+                    "install", "--reinstall",
+                    f"jellyfin={jf_target}", "jellyfin-server",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            self.assertEqual(jf_marker.returncode, 0, jf_marker.stdout + jf_marker.stderr)
+            self.assertIn(f"Inst jellyfin ({jf_target} ", jf_marker.stdout)
 
 
 if __name__ == "__main__":
