@@ -43,7 +43,7 @@ if [[ "${0##*/}" == systemctl ]]; then
     if [[ "$1" == "${FAIL_ACTIVATION:-}" ]]; then exit 73; fi
     if [[ "$1" == show && "$*" == *rtorrent.service ]]; then
         if [[ -f "$TEST_ROOT/etc/systemd/system/rtorrent.service" ]]; then
-            printf 'LoadState=loaded\\nKillMode=control-group\\nExecStop=\\nExecStopPost=\\n'
+            printf 'LoadState=loaded\\nKillMode=control-group\\n'
         else
             printf 'LoadState=not-found\\nActiveState=inactive\\nMainPID=0\\n'
         fi

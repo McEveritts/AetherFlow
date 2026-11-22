@@ -6998,7 +6998,8 @@ systemd_unit_inactive() {
 
 prepare_rtorrent_scoped_stop() {
     local unit_file=/etc/systemd/system/rtorrent.service policy
-    local line load_state="" kill_mode="" exec_stop=unknown exec_stop_post=unknown
+    # systemctl show omits empty ExecStop and ExecStopPost command arrays.
+    local line load_state="" kill_mode="" exec_stop="" exec_stop_post=""
     if [[ -e "$unit_file" || -L "$unit_file" ]]; then
         # Migrate the exact stop hook written by older Marketplace installs.
         safe_config_python "$unit_file" <<'PYEOF' || return 1

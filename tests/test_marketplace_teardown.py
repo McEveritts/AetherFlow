@@ -37,7 +37,11 @@ if program == 'systemctl' and 'rtorrent.service' in arguments:
             stop_hook = next((line for line in unit_lines if line.startswith('ExecStop=')), 'ExecStop=')
             if os.environ.get('CUSTOM_STOP_HOOK') == '1':
                 stop_hook = 'ExecStop=/fixture/custom-stop'
-            print('LoadState=' + load_state + '\\nKillMode=control-group\\n' + stop_hook + '\\nExecStopPost=')
+            print('LoadState=' + load_state + '\\nKillMode=control-group')
+            if stop_hook != 'ExecStop=':
+                print(stop_hook)
+            if os.environ.get('CUSTOM_STOP_POST_HOOK') == '1':
+                print('ExecStopPost=/fixture/custom-stop-post')
         elif '--property=ControlGroup' in arguments:
             print('/system.slice/rtorrent.service' if unit.is_file() else '')
         else:
@@ -288,7 +292,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                 self.assertFalse(any(line.startswith(('killall ', 'pgrep ')) or 'independent-rtorrent' in line for line in commands))
 
     def test_rtorrent_refuses_teardown_if_managed_cgroup_is_populated_or_stop_is_unscoped(self):
-        for blocker in ('MANAGED_PROCESS_STAYS', 'CUSTOM_STOP_HOOK'):
+        for blocker in ('MANAGED_PROCESS_STAYS', 'CUSTOM_STOP_HOOK', 'CUSTOM_STOP_POST_HOOK'):
             with self.subTest(blocker=blocker):
                 managed, independent = self.seed_rtorrent()
                 result = self.run_remove('rtorrent', DELETE_DATA='true', **{blocker: '1'})
@@ -300,7 +304,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                 self.assertIn('Description=Retained description', (self.root / 'etc/systemd/system/rtorrent.service').read_text())
                 commands = (self.root / 'commands').read_text()
                 self.assertNotIn('apt-get ', commands)
-                if blocker == 'CUSTOM_STOP_HOOK':
+                if blocker.startswith('CUSTOM_STOP_'):
                     self.assertNotIn('systemctl stop ', commands)
 
     def test_rtorrent_retained_removal_with_missing_unit(self):
