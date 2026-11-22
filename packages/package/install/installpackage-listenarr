@@ -2,6 +2,8 @@
 #
 # [AetherFlow Install Script - Listenarr]
 # Installs Listenarr automated audiobook collection manager on bare-metal Linux.
+# Official Listenarrs/Listenarr releases currently publish Linux x64 (amd64)
+# prerelease ZIP archives only (no stable releases and no Linux ARM64 assets).
 #
 set -euo pipefail
 
@@ -24,9 +26,8 @@ APP_NAME="listenarr"
 APP_USER="listenarr"
 INSTALL_DIR="/opt/Listenarr"
 DATA_DIR="/var/lib/listenarr"
+CONFIG_DIR="${DATA_DIR}/config"
 SERVICE_FILE="/etc/systemd/system/listenarr.service"
-APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4546}}"
-export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p /install
 if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
@@ -34,17 +35,368 @@ if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
 elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
     echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
     exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
 fi
 if ! declare -F af_logged >/dev/null 2>&1; then
     af_logged() { local target="${LOGFILE:-/dev/null}"; if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; else "$@" >>"$target" 2>&1; fi; }
 fi
 
-log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+APP_PORT_SUPPLIED="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-}}"
+APP_PORT="${APP_PORT_SUPPLIED:-4546}"
+if [[ -z "$APP_PORT_SUPPLIED" && -f "$SERVICE_FILE" && ! -L "$SERVICE_FILE" ]]; then
+    RETAINED_PORT="$(safe_config_python "$SERVICE_FILE" <<'PYEOF'
+import re, sys
+match = re.search(r'ASPNETCORE_URLS=http://(?:\[[^\]]+\]|[^:\s"\'/]+):([0-9]{1,5})\b', safe_read_text(sys.argv[1]), re.MULTILINE)
+if match:
+    port = int(match.group(1))
+    if 1 <= port <= 65535:
+        print(port)
+PYEOF
+    )" || RETAINED_PORT=""
+    if [[ -n "$RETAINED_PORT" ]]; then
+        APP_PORT="$RETAINED_PORT"
+    fi
+fi
+if [[ ! "$APP_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$APP_PORT < 1 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid ${APP_NAME} port: ${APP_PORT}"
+    exit 1
+fi
+export AF_APP_PORT="$APP_PORT"
+
+ARCH="$(dpkg --print-architecture)"
+case "${ARCH}" in
+    amd64) L_ARCH="linux-x64" ;;
+    arm64)
+        print_error "Unsupported architecture for Listenarr: ${ARCH}. Official Listenarrs/Listenarr releases currently publish Linux x64 (amd64) ZIP archives only and provide zero Linux ARM64 assets."
+        exit 1
+        ;;
+    *)
+        print_error "Unsupported architecture for Listenarr: ${ARCH}. Official Listenarrs/Listenarr releases currently publish Linux x64 (amd64) ZIP archives only."
+        exit 1
+        ;;
+esac
+
+TARGET_VERSION_RAW=""
+TARGET_VERSION_CLEAN=""
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TARGET_VERSION_RAW="${AF_TARGET_VERSION#"${AF_TARGET_VERSION%%[![:space:]]*}"}"
+    TARGET_VERSION_RAW="${TARGET_VERSION_RAW%"${TARGET_VERSION_RAW##*[![:space:]]}"}"
+    if [[ -z "$TARGET_VERSION_RAW" || ${#TARGET_VERSION_RAW} -gt 128 || "$TARGET_VERSION_RAW" =~ [[:space:][:cntrl:]] || "$TARGET_VERSION_RAW" == *..* || "$TARGET_VERSION_RAW" == */* || "$TARGET_VERSION_RAW" == *\\* ]]; then
+        print_error "Invalid Listenarr target version: ${AF_TARGET_VERSION}"
+        exit 1
+    fi
+    TARGET_VERSION_CLEAN="$(af_strip_version_prefix "$TARGET_VERSION_RAW")"
+    case "${TARGET_VERSION_CLEAN,,}" in
+        ""|latest|next|canary|prerelease|stable|beta|alpha|rc|nightly|edge|dev|devel|unknown|none|null|undefined|current|installed|pending|default|auto|head|main|master|release|true|false)
+            print_error "Refusing non-concrete Listenarr target version: ${AF_TARGET_VERSION}"
+            exit 1
+            ;;
+    esac
+    if [[ ! "$TARGET_VERSION_CLEAN" =~ ^[0-9][0-9A-Za-z._+-]{0,127}$ ]]; then
+        print_error "Invalid Listenarr target version: ${AF_TARGET_VERSION}"
+        exit 1
+    fi
+fi
+
+log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT}, arch: ${ARCH}/${L_ARCH})..."
+log_info "Listenarr prerelease policy: Listenarrs/Listenarr publishes official Linux x64 prerelease ZIPs and zero stable releases; AetherFlow tracks the official Listenarr prerelease channel with SHA-256 verification."
 report_progress 10 "Preparing ${APP_NAME} installation..."
+
+if ! command -v curl >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ca-certificates
+fi
+
+listenarr_select_release() {
+    local l_arch="$1" arch="$2" target_raw="$3" target_clean="$4" has_external_sha="$5"
+    local py_script=""
+    IFS= read -r -d '' py_script <<'PYEOF' || true
+import json
+import re
+import sys
+import urllib.parse
+
+l_arch, host_arch, target_raw, target_clean, has_external_sha = sys.argv[1:6]
+allow_missing_digest = has_external_sha == "1"
+raw_text = sys.stdin.read().strip()
+if not raw_text:
+    sys.exit(3)
+
+try:
+    payload = json.loads(raw_text)
+except Exception as exc:
+    sys.stderr.write(f"Invalid GitHub release JSON for Listenarrs/Listenarr: {exc}\n")
+    sys.exit(5)
+
+if isinstance(payload, dict):
+    if "tag_name" not in payload:
+        sys.exit(3)
+    releases = [payload]
+elif isinstance(payload, list):
+    releases = [item for item in payload if isinstance(item, dict)]
+else:
+    sys.exit(3)
+
+SHA256_RE = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
+SAFE_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+ASSET_SUFFIX = f"{l_arch}.zip"
+REPO_DOWNLOAD_PREFIX = "https://github.com/Listenarrs/Listenarr/releases/download/"
+
+
+def strip_version_prefix(tag: str) -> str:
+    s = tag.strip()
+    if len(s) > 1 and s[0] in ("v", "V") and s[1].isdigit():
+        return s[1:]
+    return s
+
+
+def semver_sort_key(tag: str, is_prerelease: bool):
+    norm = strip_version_prefix(tag)
+    norm_no_build = norm.split("+", 1)[0]
+    if "-" in norm_no_build:
+        core_str, pre_str = norm_no_build.split("-", 1)
+    elif "~" in norm_no_build:
+        core_str, pre_str = norm_no_build.split("~", 1)
+    else:
+        core_str, pre_str = norm_no_build, ""
+    core_parts = core_str.split(".")
+    if not core_parts or not all(part.isdigit() for part in core_parts):
+        return None
+    nums = [int(part) for part in core_parts]
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    if not pre_str:
+        # Stable release outranks any prerelease with the same numeric core.
+        return (1, tuple(nums), 1, (), 0 if is_prerelease else 1, tag)
+    pre_ids = []
+    for part in pre_str.split("."):
+        if not part:
+            continue
+        if part.isdigit():
+            pre_ids.append((0, int(part), ""))
+        else:
+            pre_ids.append((1, 0, part))
+    return (1, tuple(nums), 0, tuple(pre_ids), 0 if is_prerelease else 1, tag)
+
+
+def is_official_asset_url(tag: str, asset_name: str, url: str) -> bool:
+    if not isinstance(url, str) or not url or "\n" in url or "\r" in url:
+        return False
+    quoted_tag = urllib.parse.quote(tag, safe="")
+    quoted_name = urllib.parse.quote(asset_name, safe="")
+    valid_prefixes = {
+        f"{REPO_DOWNLOAD_PREFIX}{tag}/",
+        f"{REPO_DOWNLOAD_PREFIX}{quoted_tag}/",
+    }
+    valid_names = {asset_name, quoted_name}
+    for prefix in valid_prefixes:
+        if url.startswith(prefix):
+            tail = url[len(prefix):]
+            if tail in valid_names:
+                return True
+    return False
+
+
+def has_checksum_companion(tag: str, assets: list) -> bool:
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        lower = name.lower()
+        if ("checksum" in lower or "sha256" in lower) and is_official_asset_url(tag, name, url):
+            return True
+    return False
+
+
+def inspect_release_asset(release: dict):
+    tag = str(release.get("tag_name") or "").strip()
+    if not tag or not SAFE_TAG_RE.match(tag):
+        return None, "invalid release tag"
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        assets = []
+    matching = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "").strip()
+        if name.endswith(ASSET_SUFFIX):
+            matching.append(asset)
+    if not matching:
+        return None, f"Official Listenarrs/Listenarr release '{tag}' does not provide a {ASSET_SUFFIX} asset for host architecture {host_arch}."
+    if len(matching) > 1:
+        return None, f"Official Listenarrs/Listenarr release '{tag}' has ambiguous {ASSET_SUFFIX} assets."
+    asset = matching[0]
+    name = str(asset.get("name") or "").strip()
+    url = str(asset.get("browser_download_url") or "").strip()
+    if not is_official_asset_url(tag, name, url):
+        return None, f"Refusing untrusted or cross-tag Listenarr asset URL for release '{tag}': {url}"
+    raw_digest = asset.get("digest")
+    sha256_hex = ""
+    if raw_digest is not None and str(raw_digest).strip() != "":
+        m = SHA256_RE.match(str(raw_digest).strip())
+        if not m:
+            return None, f"Official Listenarrs/Listenarr release '{tag}' asset '{name}' has unsupported or malformed digest metadata."
+        sha256_hex = m.group(1).lower()
+    elif not allow_missing_digest and not has_checksum_companion(tag, assets):
+        return None, f"Official Listenarrs/Listenarr release '{tag}' asset '{name}' is missing a required SHA-256 digest."
+    version = strip_version_prefix(tag)
+    if not version or "\n" in version or "\r" in version:
+        return None, f"Invalid Listenarr version derived from tag '{tag}'."
+    return {
+        "tag_name": tag,
+        "version": version,
+        "prerelease": bool(release.get("prerelease", False)),
+        "asset_name": name,
+        "asset_url": url,
+        "asset_sha256": sha256_hex,
+        "release": release,
+    }, None
+
+
+if target_raw:
+    accepted_tags = {target_raw, target_clean, f"v{target_clean}"}
+    matched_release = None
+    for rel in releases:
+        tag = str(rel.get("tag_name") or "").strip()
+        if tag in accepted_tags:
+            if rel.get("draft", False):
+                sys.stderr.write(f"Refusing draft Listenarrs/Listenarr release '{tag}'.\n")
+                sys.exit(5)
+            matched_release = rel
+            break
+    if matched_release is None:
+        sys.exit(3)
+    selected, err = inspect_release_asset(matched_release)
+    if selected is None:
+        sys.stderr.write(f"{err}\n")
+        sys.exit(4 if "does not provide a" in err else 5)
+else:
+    candidates = []
+    published_count = 0
+    last_reason = ""
+    for rel in releases:
+        if rel.get("draft", False):
+            continue
+        published_count += 1
+        tag = str(rel.get("tag_name") or "").strip()
+        key = semver_sort_key(tag, bool(rel.get("prerelease", False)))
+        if key is None:
+            continue
+        selected, err = inspect_release_asset(rel)
+        if selected is None:
+            last_reason = err or ""
+            continue
+        candidates.append((key, selected))
+    if not candidates:
+        if published_count == 0:
+            sys.stderr.write("No published releases found in Listenarrs/Listenarr.\n")
+        elif last_reason:
+            sys.stderr.write(f"No eligible official Listenarrs/Listenarr release found for {host_arch} ({ASSET_SUFFIX}): {last_reason}\n")
+        else:
+            sys.stderr.write(f"No eligible official Listenarrs/Listenarr release provides a {ASSET_SUFFIX} asset for {host_arch}.\n")
+        sys.exit(4)
+    candidates.sort(key=lambda item: item[0])
+    selected = candidates[-1][1]
+
+print(selected["tag_name"])
+print(selected["version"])
+print("true" if selected["prerelease"] else "false")
+print(selected["asset_name"])
+print(selected["asset_url"])
+print(selected["asset_sha256"])
+print(json.dumps(selected["release"], separators=(",", ":")))
+PYEOF
+    python3 -c "$py_script" "$l_arch" "$arch" "$target_raw" "$target_clean" "$has_external_sha"
+}
+
+HAS_EXTERNAL_SHA="0"
+if [[ -n "${AF_DOWNLOAD_SHA256:-}" || -n "${AF_LISTENARR_SHA256:-}" || -n "${AETHERFLOW_LISTENARR_SHA256:-}" || -n "${AF_DOWNLOAD_CHECKSUM_FILE:-}" ]]; then
+    HAS_EXTERNAL_SHA="1"
+fi
+
+report_progress 20 "Resolving official ${APP_NAME} release from GitHub..."
+SELECTION_OUT=""
+SELECTION_RC=0
+if [[ -n "$TARGET_VERSION_RAW" ]]; then
+    TAG_CANDIDATES=("$TARGET_VERSION_RAW")
+    if [[ "v${TARGET_VERSION_CLEAN}" != "$TARGET_VERSION_RAW" ]]; then
+        TAG_CANDIDATES+=("v${TARGET_VERSION_CLEAN}")
+    fi
+    if [[ "${TARGET_VERSION_CLEAN}" != "$TARGET_VERSION_RAW" ]]; then
+        TAG_CANDIDATES+=("${TARGET_VERSION_CLEAN}")
+    fi
+    SELECTION_RC=3
+    for _tag_candidate in "${TAG_CANDIDATES[@]}"; do
+        TAG_RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${_tag_candidate}" 2>/dev/null || true)"
+        if [[ -z "$TAG_RELEASE_JSON" ]]; then
+            continue
+        fi
+        set +e
+        SELECTION_OUT="$(printf '%s\n' "$TAG_RELEASE_JSON" | listenarr_select_release "$L_ARCH" "$ARCH" "$TARGET_VERSION_RAW" "$TARGET_VERSION_CLEAN" "$HAS_EXTERNAL_SHA")"
+        SELECTION_RC=$?
+        set -e
+        if [[ "$SELECTION_RC" -eq 0 ]]; then
+            break
+        elif [[ "$SELECTION_RC" -eq 4 || "$SELECTION_RC" -eq 5 ]]; then
+            exit 1
+        fi
+    done
+    if [[ "$SELECTION_RC" -ne 0 ]]; then
+        RELEASES_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
+        if [[ -n "$RELEASES_JSON" ]]; then
+            set +e
+            SELECTION_OUT="$(printf '%s\n' "$RELEASES_JSON" | listenarr_select_release "$L_ARCH" "$ARCH" "$TARGET_VERSION_RAW" "$TARGET_VERSION_CLEAN" "$HAS_EXTERNAL_SHA")"
+            SELECTION_RC=$?
+            set -e
+            if [[ "$SELECTION_RC" -eq 4 || "$SELECTION_RC" -eq 5 ]]; then
+                exit 1
+            fi
+        fi
+    fi
+    if [[ "$SELECTION_RC" -ne 0 ]]; then
+        print_error "Requested Listenarr release '${AF_TARGET_VERSION}' was not found or is unavailable in Listenarrs/Listenarr."
+        exit 1
+    fi
+else
+    RELEASES_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
+    if [[ -z "$RELEASES_JSON" ]]; then
+        print_error "Failed to discover GitHub release for Listenarrs/Listenarr"
+        exit 1
+    fi
+    set +e
+    SELECTION_OUT="$(printf '%s\n' "$RELEASES_JSON" | listenarr_select_release "$L_ARCH" "$ARCH" "" "" "$HAS_EXTERNAL_SHA")"
+    SELECTION_RC=$?
+    set -e
+    if [[ "$SELECTION_RC" -ne 0 ]]; then
+        exit 1
+    fi
+fi
+
+mapfile -t _listenarr_meta <<< "$SELECTION_OUT"
+LATEST_TAG="${_listenarr_meta[0]:-}"
+INSTALL_VERSION="${_listenarr_meta[1]:-}"
+IS_PRERELEASE="${_listenarr_meta[2]:-false}"
+ASSET_NAME="${_listenarr_meta[3]:-}"
+ASSET_URL="${_listenarr_meta[4]:-}"
+ASSET_SHA256="${_listenarr_meta[5]:-}"
+SELECTED_RELEASE_JSON="${_listenarr_meta[6]:-}"
+
+if [[ -z "$LATEST_TAG" || -z "$INSTALL_VERSION" || -z "$ASSET_URL" || -z "$SELECTED_RELEASE_JSON" ]]; then
+    print_error "Failed to resolve official Listenarr release metadata for ${L_ARCH}"
+    exit 1
+fi
+if [[ "$IS_PRERELEASE" == "true" ]]; then
+    log_info "Selected official Listenarr prerelease ${LATEST_TAG} (${ASSET_NAME})"
+else
+    log_info "Selected official Listenarr release ${LATEST_TAG} (${ASSET_NAME})"
+fi
 
 load_master_credentials
 
-report_progress 25 "Installing system dependencies..."
+report_progress 35 "Installing system dependencies..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3
@@ -55,53 +407,7 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
 fi
 mkdir -p /opt /var/lib /var/backups
 
-ARCH="$(dpkg --print-architecture)"
-case "${ARCH}" in
-    amd64) L_ARCH="linux-x64" ;;
-    arm64) L_ARCH="linux-arm64" ;;
-    *)
-        log_error "Unsupported architecture for Listenarr: ${ARCH}"
-        exit 1
-        ;;
-esac
-
-report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
-RELEASES_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
-
-if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) | .tag_name][0] // empty) elif (type == "object" and ((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' || true)"
-    ASSET_URL=""
-    if [[ -n "$LATEST_TAG" ]]; then
-        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and .tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) elif (type == "object" and ((.draft // false) | not) and .tag_name == $tag) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
-    fi
-    if [[ -z "$LATEST_TAG" || -z "$ASSET_URL" ]]; then
-        TARGET_TAG_LOOKUP="$AF_TARGET_VERSION"
-        TAG_RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
-        if [[ -z "$TAG_RELEASE_JSON" && ! "$TARGET_TAG_LOOKUP" =~ ^v ]]; then
-            TARGET_TAG_LOOKUP="v${TARGET_TAG_LOOKUP}"
-            TAG_RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
-        fi
-        if [[ -n "$TAG_RELEASE_JSON" ]]; then
-            LATEST_TAG="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r 'if type == "object" and ((.draft // false) | not) then (.tag_name // empty) else empty end' || true)"
-            ASSET_URL="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "object" and ((.draft // false) | not) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
-        fi
-    fi
-else
-    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and ((.prerelease // false) | not) and any(.assets[]?; .name | endswith($arch))) | .tag_name][]) elif (type == "object" and ((.draft // false) | not) and ((.prerelease // false) | not) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' | sort -V | tail -n1 || true)"
-    ASSET_URL=""
-    if [[ -n "$LATEST_TAG" ]]; then
-        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and ((.prerelease // false) | not) and .tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) elif (type == "object" and ((.draft // false) | not) and ((.prerelease // false) | not) and .tag_name == $tag) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
-    fi
-fi
-
-if [[ -z "${LATEST_TAG}" ]]; then
-    print_error "Failed to discover GitHub release for Listenarrs/Listenarr"
-    exit 1
-fi
-if [[ -z "${ASSET_URL}" ]]; then
-    log_error "Failed to locate Listenarr release asset for ${L_ARCH}"
-    exit 1
-fi
+validate_config_paths /var/backups/.af-backup-root "${SERVICE_FILE}" "${DATA_DIR}/.af-data-check" "${CONFIG_DIR}/.af-config-check"
 
 mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_ZIP="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/listenarr-XXXXXX.zip")"
@@ -147,24 +453,58 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-af_logged download_file "${ASSET_URL}" "${TMP_ZIP}"
+RELEASE_JSON="${SELECTED_RELEASE_JSON}" af_logged download_file "${ASSET_URL}" "${TMP_ZIP}" "${PACKAGE_NAME}" "${ASSET_SHA256}"
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
 af_logged unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}"
 rm -f "${TMP_ZIP}"
 
 STAGE_SRC="$TMP_EXTRACT"
-if [[ ! -s "$STAGE_SRC/Listenarr.Api" && ! -s "$STAGE_SRC/Listenarr.dll" ]]; then
+if [[ ! -s "$STAGE_SRC/Listenarr.Api" ]]; then
     mapfile -t RELEASE_DIRS < <(find "$TMP_EXTRACT" -mindepth 1 -maxdepth 1 -type d)
     [[ "${#RELEASE_DIRS[@]}" -eq 1 ]] || { print_error "Invalid Listenarr release layout"; exit 1; }
     STAGE_SRC="${RELEASE_DIRS[0]}"
 fi
-[[ -s "$STAGE_SRC/Listenarr.Api" || -s "$STAGE_SRC/Listenarr.dll" ]] || { print_error "Listenarr release is missing its runtime"; exit 1; }
-chmod 0755 "${STAGE_SRC}/Listenarr.Api" 2>/dev/null || true
-queue_app_version "$INSTALL_DIR/.af-version" "${LATEST_TAG#v}"
+[[ -s "$STAGE_SRC/Listenarr.Api" && ! -L "$STAGE_SRC/Listenarr.Api" ]] || { print_error "Listenarr release is missing Listenarr.Api runtime"; exit 1; }
+chmod 0755 "${STAGE_SRC}/Listenarr.Api"
+if [[ -f "${STAGE_SRC}/ffprobe" && ! -L "${STAGE_SRC}/ffprobe" ]]; then
+    chmod 0755 "${STAGE_SRC}/ffprobe"
+fi
+queue_app_version "$INSTALL_DIR/.af-version" "${INSTALL_VERSION}"
 
-validate_config_paths /var/backups/.af-backup-root
+LISTENARR_BIND_HOST="${AF_BIND_ADDRESS:-127.0.0.1}"
+EXTRA_ENV_LINES=""
+if [[ -f "$SERVICE_FILE" && ! -L "$SERVICE_FILE" ]]; then
+    if [[ -z "${AF_BIND_ADDRESS:-}" ]] && ! grep -Eq 'ASPNETCORE_URLS=http://\*:' "$SERVICE_FILE" 2>/dev/null; then
+        LISTENARR_BIND_HOST="$(retained_bind_address "$SERVICE_FILE" 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
+    fi
+    EXTRA_ENV_LINES="$(safe_config_python "$SERVICE_FILE" <<'PYEOF'
+import re, sys
+managed = {
+    "ASPNETCORE_URLS",
+    "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT",
+    "HOME",
+    "XDG_CONFIG_HOME",
+}
+in_service = False
+for line in safe_read_text(sys.argv[1]).splitlines():
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        in_service = stripped == "[Service]"
+        continue
+    if not in_service or not stripped.startswith("Environment="):
+        continue
+    m = re.match(r'^Environment\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_]*)=', stripped)
+    if m and m.group(1) not in managed:
+        if any(ord(ch) < 32 for ch in stripped):
+            continue
+        print(stripped)
+PYEOF
+    )" || EXTRA_ENV_LINES=""
+fi
+
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-listenarr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 if [[ -f "$SERVICE_FILE" ]]; then
@@ -183,16 +523,108 @@ if [[ -e "$INSTALL_DIR" ]]; then
     APP_MOVED=true
 fi
 mv -T "${STAGE_SRC}" "${INSTALL_DIR}"
+chmod 0755 "${INSTALL_DIR}"
 APP_ACTIVATED=true
-mkdir -p "${DATA_DIR}/config"
+mkdir -p "${CONFIG_DIR}"
+
+python3 - "${BACKUP_DIR}/app/config" "${INSTALL_DIR}/config" "${CONFIG_DIR}" <<'PYEOF'
+import filecmp
+import os
+import shutil
+import stat
+import sys
+
+old_config, new_config, target_config = sys.argv[1:4]
+
+target_st = os.lstat(target_config)
+if stat.S_ISLNK(target_st.st_mode) or not stat.S_ISDIR(target_st.st_mode):
+    raise SystemExit(f"Unsafe Listenarr configuration directory: {target_config}")
+
+
+def validate_tree(src_root: str, dst_root: str, allow_overwrite_check: bool) -> list:
+    entries = []
+    for root, dirs, files in os.walk(src_root, topdown=True, followlinks=False):
+        rel_dir = os.path.relpath(root, src_root)
+        if rel_dir != ".":
+            dst_dir = os.path.join(dst_root, rel_dir)
+            if os.path.lexists(dst_dir):
+                dst_st = os.lstat(dst_dir)
+                if stat.S_ISLNK(dst_st.st_mode) or not stat.S_ISDIR(dst_st.st_mode):
+                    raise SystemExit(f"Conflicting non-directory path at {dst_dir} during Listenarr config migration")
+            else:
+                entries.append(("dir", root, dst_dir, os.lstat(root).st_mode & 0o777))
+        for dname in list(dirs):
+            full = os.path.join(root, dname)
+            st = os.lstat(full)
+            if stat.S_ISLNK(st.st_mode):
+                raise SystemExit(f"Refusing symlink inside Listenarr configuration directory: {full}")
+            if not stat.S_ISDIR(st.st_mode):
+                raise SystemExit(f"Refusing special entry inside Listenarr configuration directory: {full}")
+        for fname in files:
+            full = os.path.join(root, fname)
+            st = os.lstat(full)
+            if stat.S_ISLNK(st.st_mode):
+                raise SystemExit(f"Refusing symlink inside Listenarr configuration directory: {full}")
+            if not stat.S_ISREG(st.st_mode):
+                raise SystemExit(f"Refusing non-regular file inside Listenarr configuration directory: {full}")
+            rel = os.path.relpath(full, src_root)
+            dst_file = os.path.join(dst_root, rel)
+            if os.path.lexists(dst_file):
+                dst_st = os.lstat(dst_file)
+                if stat.S_ISLNK(dst_st.st_mode) or not stat.S_ISREG(dst_st.st_mode):
+                    raise SystemExit(f"Conflicting non-regular path at {dst_file} during Listenarr config migration")
+                if allow_overwrite_check and not filecmp.cmp(full, dst_file, shallow=False):
+                    raise SystemExit(
+                        f"Conflicting Listenarr configuration file '{rel}' exists in both legacy install config and {dst_root}; reconcile manually before upgrading."
+                    )
+            else:
+                entries.append(("file", full, dst_file, st.st_mode & 0o777))
+    return entries
+
+
+def apply_entries(entries: list) -> None:
+    for kind, src, dst, mode in entries:
+        if kind == "dir":
+            os.makedirs(dst, exist_ok=True)
+            os.chmod(dst, mode | 0o700)
+        else:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst, follow_symlinks=False)
+
+
+if os.path.lexists(old_config):
+    old_st = os.lstat(old_config)
+    if stat.S_ISLNK(old_st.st_mode):
+        link_target = os.readlink(old_config)
+        resolved_target = os.path.normpath(
+            link_target if os.path.isabs(link_target) else os.path.join(os.path.dirname(new_config), link_target)
+        )
+        if resolved_target != os.path.normpath(target_config):
+            raise SystemExit(
+                f"Refusing to overwrite unexpected Listenarr config symlink {old_config} -> {link_target}; expected {target_config}."
+            )
+    elif stat.S_ISDIR(old_st.st_mode):
+        planned = validate_tree(old_config, target_config, allow_overwrite_check=True)
+        apply_entries(planned)
+    else:
+        raise SystemExit(f"Unexpected non-directory Listenarr legacy config path: {old_config}")
+
+if os.path.lexists(new_config):
+    new_st = os.lstat(new_config)
+    if stat.S_ISLNK(new_st.st_mode) or not stat.S_ISDIR(new_st.st_mode):
+        raise SystemExit(f"Unexpected Listenarr release config entry: {new_config}")
+    seed_entries = validate_tree(new_config, target_config, allow_overwrite_check=False)
+    apply_entries(seed_entries)
+    shutil.rmtree(new_config)
+
+os.symlink(target_config, new_config)
+PYEOF
+
 chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
-LISTENARR_BIND_HOST="${AF_BIND_ADDRESS:-127.0.0.1}"
-if [[ -f "$SERVICE_FILE" ]] && ! grep -Eq 'ASPNETCORE_URLS=http://\*:' "$SERVICE_FILE" 2>/dev/null; then
-    LISTENARR_BIND_HOST="$(retained_bind_address "$SERVICE_FILE" 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
-fi
-cat > "${SERVICE_FILE}" <<EOF
+{
+cat <<EOF
 [Unit]
 Description=Listenarr Audiobook Collection Manager
 After=network-online.target
@@ -206,7 +638,12 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="ASPNETCORE_URLS=http://${LISTENARR_BIND_HOST}:${APP_PORT}"
 Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false"
 Environment="HOME=${DATA_DIR}"
-Environment="XDG_CONFIG_HOME=${DATA_DIR}/config"
+Environment="XDG_CONFIG_HOME=${CONFIG_DIR}"
+EOF
+if [[ -n "$EXTRA_ENV_LINES" ]]; then
+    printf '%s\n' "$EXTRA_ENV_LINES"
+fi
+cat <<EOF
 ExecStart=${INSTALL_DIR}/Listenarr.Api
 Restart=on-failure
 RestartSec=5
@@ -214,6 +651,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+} > "${SERVICE_FILE}"
 chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload

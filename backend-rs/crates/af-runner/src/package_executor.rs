@@ -193,7 +193,94 @@ pub fn validate_threadfin_target_policy(
     Ok((resolved_version, sha_override))
 }
 
-/// Validates exact-version policy for pinned and multi-component vendor packages
+/// Maps a host architecture identifier to Listenarr's official Linux release ZIP suffix.
+/// Official `Listenarrs/Listenarr` releases currently publish Linux x64 (`amd64`) ZIPs only.
+pub fn listenarr_release_asset_suffix_for_arch(arch: &str) -> Result<&'static str, String> {
+    match arch.trim().to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => Ok("linux-x64.zip"),
+        "aarch64" | "arm64" => Err(
+            "Package 'listenarr' is unsupported on architecture 'arm64': official Listenarrs/Listenarr releases publish Linux x64 (amd64) ZIP archives only and currently provide zero Linux ARM64 assets."
+                .to_string(),
+        ),
+        other => Err(format!(
+            "Package 'listenarr' is unsupported on architecture '{}': official Listenarrs/Listenarr releases publish Linux x64 (amd64) ZIP archives only.",
+            other
+        )),
+    }
+}
+
+/// Validates that a Listenarr release asset download URL belongs to the official
+/// `Listenarrs/Listenarr` release download path for `tag_name` and `asset_name`.
+pub fn listenarr_is_official_download_url(
+    tag_name: &str,
+    asset_name: &str,
+    download_url: &str,
+) -> bool {
+    let clean_tag = tag_name.trim();
+    let clean_name = asset_name.trim();
+    let clean_url = download_url.trim();
+    if clean_tag.is_empty()
+        || clean_name.is_empty()
+        || clean_url.is_empty()
+        || clean_url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    let Some(rest) = clean_url.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let Some((owner_repo, after_download)) = rest.split_once("/releases/download/") else {
+        return false;
+    };
+    if !owner_repo.eq_ignore_ascii_case("Listenarrs/Listenarr") {
+        return false;
+    }
+    let Some((url_tag, url_asset)) = after_download.split_once('/') else {
+        return false;
+    };
+    !url_asset.contains('/') && url_tag == clean_tag && url_asset == clean_name
+}
+
+/// Returns whether a GitHub release asset entry is an official checksum companion
+/// for Listenarr release `tag_name`.
+pub fn listenarr_is_official_checksum_companion(
+    tag_name: &str,
+    asset_name: &str,
+    download_url: &str,
+) -> bool {
+    let lower = asset_name.trim().to_ascii_lowercase();
+    (lower.contains("checksum") || lower.contains("sha256"))
+        && listenarr_is_official_download_url(tag_name, asset_name, download_url)
+}
+
+/// Returns whether a GitHub release asset entry is an eligible official Listenarr archive
+/// for `asset_suffix` with an official download URL and either a valid `sha256:` digest
+/// or an official checksum companion.
+pub fn listenarr_release_asset_is_eligible(
+    tag_name: &str,
+    asset_name: &str,
+    download_url: &str,
+    digest: Option<&str>,
+    has_checksum_companion: bool,
+    asset_suffix: &str,
+) -> bool {
+    let clean_tag = tag_name.trim();
+    let clean_name = asset_name.trim();
+    if clean_tag.is_empty() || !clean_name.ends_with(asset_suffix) {
+        return false;
+    }
+    if !listenarr_is_official_download_url(clean_tag, clean_name, download_url) {
+        return false;
+    }
+    match digest.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(raw) => raw
+            .strip_prefix("sha256:")
+            .is_some_and(is_valid_sha256_hex),
+        None => has_checksum_companion,
+    }
+}
+
+/// Validates exact-version and architecture policy for pinned, vendor, and Listenarr packages
 /// before any lifecycle admission, sandbox write, or installer execution.
 pub fn validate_package_target_policy(
     package_id: &str,
@@ -201,6 +288,25 @@ pub fn validate_package_target_policy(
     update_package: &str,
     action: &str,
     expected_target_version: Option<&str>,
+) -> Result<(), String> {
+    validate_package_target_policy_for_arch(
+        package_id,
+        update_source,
+        update_package,
+        action,
+        expected_target_version,
+        env::consts::ARCH,
+    )
+}
+
+/// Architecture-parameterized variant of [`validate_package_target_policy`].
+pub fn validate_package_target_policy_for_arch(
+    package_id: &str,
+    update_source: &str,
+    update_package: &str,
+    action: &str,
+    expected_target_version: Option<&str>,
+    host_arch: &str,
 ) -> Result<(), String> {
     let action_lower = action.trim().to_ascii_lowercase();
     if action_lower == "remove" || action_lower == "uninstall" {
@@ -229,6 +335,21 @@ pub fn validate_package_target_policy(
         validate_threadfin_target_policy(expected_target_version)
             .map(|_| ())
             .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    if package_id.eq_ignore_ascii_case("listenarr") {
+        listenarr_release_asset_suffix_for_arch(host_arch)?;
+        if let Some(target) = expected_target_version
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !af_release::lifecycle::validate_target_version(target) {
+                return Err(format!(
+                    "Invalid target version '{}' for package '{}'",
+                    target, package_id
+                ));
+            }
+        }
         return Ok(());
     }
     if src == "pinned" {

@@ -820,6 +820,149 @@ fn discover_latest_github_tag(
         .ok_or_else(|| format!("invalid {invalid_label} {:?} for {repo}", tag))
 }
 
+fn discover_listenarr_github_target_for_arch(
+    api_base: &str,
+    repo: &str,
+    channel: &str,
+    host_arch: &str,
+) -> Result<String, String> {
+    let asset_suffix = af_runner::listenarr_release_asset_suffix_for_arch(host_arch)?;
+    let effective_channel = if channel.trim().eq_ignore_ascii_case("prerelease") {
+        "prerelease"
+    } else {
+        "stable"
+    };
+    let is_stable = effective_channel == "stable";
+
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 10;
+    let mut all_releases: Vec<serde_json::Value> = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let releases_url =
+            format!("{api_base}/repos/{repo}/releases?per_page={PAGE_SIZE}&page={page}");
+        let body = http_get_text(&releases_url)?;
+        let val: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("invalid JSON from {releases_url}: {e}"))?;
+        let page_items: Vec<serde_json::Value> = match val {
+            serde_json::Value::Array(arr) => arr,
+            obj @ serde_json::Value::Object(_) => vec![obj],
+            _ => {
+                return Err(format!(
+                    "unexpected GitHub releases JSON shape from {releases_url}"
+                ));
+            }
+        };
+        let page_len = page_items.len();
+        all_releases.extend(page_items);
+        if page == MAX_PAGES && page_len >= PAGE_SIZE {
+            return Err(format!(
+                "GitHub release pagination exceeded maximum page limit ({MAX_PAGES}) for '{repo}'"
+            ));
+        }
+        if page_len < PAGE_SIZE {
+            break;
+        }
+    }
+
+    let mut best_candidate: Option<(String, bool)> = None;
+    for rel in &all_releases {
+        if rel.get("draft").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let rel_prerelease = rel
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_stable && rel_prerelease {
+            continue;
+        }
+        let Some(tag_name) = rel
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let Some(version) = normalize_discovered_target_version(tag_name) else {
+            continue;
+        };
+        let is_pre = rel_prerelease || version.contains('-');
+        if is_stable && is_pre {
+            continue;
+        }
+
+        let Some(assets) = rel.get("assets").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let has_checksum_companion = assets.iter().any(|asset| {
+            let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let url = asset
+                .get("browser_download_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            af_runner::listenarr_is_official_checksum_companion(tag_name, name, url)
+        });
+        let matching_assets: Vec<&serde_json::Value> = assets
+            .iter()
+            .filter(|asset| {
+                asset
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .is_some_and(|name| name.ends_with(asset_suffix))
+            })
+            .collect();
+        if matching_assets.len() != 1 {
+            continue;
+        }
+        let asset = matching_assets[0];
+        let asset_name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let asset_url = asset
+            .get("browser_download_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let asset_digest = asset.get("digest").and_then(|v| v.as_str());
+        if !af_runner::listenarr_release_asset_is_eligible(
+            tag_name,
+            asset_name,
+            asset_url,
+            asset_digest,
+            has_checksum_companion,
+            asset_suffix,
+        ) {
+            continue;
+        }
+
+        match &best_candidate {
+            None => {
+                best_candidate = Some((version, is_pre));
+            }
+            Some((current_ver, current_is_pre)) => {
+                let ord = af_release::lifecycle::compare_versions(&version, current_ver);
+                let should_replace = match ord {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => !is_pre && *current_is_pre,
+                    std::cmp::Ordering::Less => false,
+                };
+                if should_replace {
+                    best_candidate = Some((version, is_pre));
+                }
+            }
+        }
+    }
+
+    best_candidate.map(|(ver, _)| ver).ok_or_else(|| {
+        format!(
+            "no eligible official Listenarr release found in '{}' on channel '{}' with a verified {} asset for host architecture '{}'",
+            repo,
+            effective_channel,
+            asset_suffix,
+            host_arch.trim()
+        )
+    })
+}
+
 fn discover_live_upstream_target_version(
     global: &GlobalOptions,
     pkg_id: &str,
@@ -840,6 +983,15 @@ fn discover_live_upstream_target_version(
         "github" | "github_release" => {
             let repo = spec_non_empty_str(&spec, "update_repo")
                 .ok_or_else(|| format!("missing update_repo for '{}'", pkg_id))?;
+            if resolve_package_lock_name(pkg_id).eq_ignore_ascii_case("listenarr") {
+                let channel = spec_non_empty_str(&spec, "update_channel").unwrap_or("prerelease");
+                return discover_listenarr_github_target_for_arch(
+                    &api_base,
+                    repo,
+                    channel,
+                    std::env::consts::ARCH,
+                );
+            }
             let release_url = format!("{api_base}/repos/{repo}/releases/latest");
             if let Ok(body) = http_get_text(&release_url) {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -958,13 +1110,24 @@ fn validate_cli_package_target_policy(
     action: &str,
     target_version: Option<&str>,
 ) -> CliResult<()> {
+    let lock_name = resolve_package_lock_name(pkg_id);
     let Ok(spec) = load_package_automation_spec(global, pkg_id) else {
+        if lock_name.eq_ignore_ascii_case("listenarr") {
+            af_runner::validate_package_target_policy(
+                lock_name,
+                "github",
+                "",
+                action,
+                target_version,
+            )
+            .map_err(CliError::Validation)?;
+        }
         return Ok(());
     };
     let source = spec_non_empty_str(&spec, "update_source").unwrap_or("");
     let update_package = spec_non_empty_str(&spec, "update_package").unwrap_or("");
     af_runner::validate_package_target_policy(
-        pkg_id,
+        lock_name,
         source,
         update_package,
         action,

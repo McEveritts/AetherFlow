@@ -19,6 +19,18 @@ Threadfin is pinned to exact release `1.2.37` with per-architecture SHA-256 dige
 `Threadfin_linux_arm`) across both the Bash installer and the Rust declarative
 runner, and fails closed before state mutation on unsupported or mismatched targets.
 
+Listenarr (`Listenarrs/Listenarr`) uses a Listenarr-scoped `prerelease` update
+channel because upstream currently publishes public GitHub prereleases only (zero
+stable releases) and Linux x64 (`amd64`) ZIP archives only (zero Linux ARM64 assets).
+Install, update discovery, and exact target dispatch bind each selected release tag
+to its official `Listenarrs/Listenarr` `linux-x64.zip` download URL and SHA-256
+digest, fail early before state mutation on unsupported architectures or unavailable
+targets, inspect installed versions via `/opt/Listenarr/.af-version` without executing
+the self-contained `Listenarr.Api` server binary, and persist runtime configuration
+and SQLite data in `/var/lib/listenarr/config` linked at `/opt/Listenarr/config`
+(with safe legacy migration and rollback for pre-existing `/opt/Listenarr/config`
+directories).
+
 NodeSource defaults to the scripts for Node 20, 22, and 24 at
 `nodesource/distributions` commit `42da07fa46a3e9649f47416743a5563f9f19028f`.
 Each major has its own SHA-256 pin. Setting `AF_NODESOURCE_BOOTSTRAP_SHA256`

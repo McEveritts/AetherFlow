@@ -3920,6 +3920,19 @@ pub fn candidate_version_marker_paths_with_env(
                 paths.push(p);
             }
         }
+        if prefix == "/opt" && package_id.eq_ignore_ascii_case("listenarr") {
+            let candidate = "/opt/Listenarr/.af-version";
+            let p = env_cfg.resolve_path(candidate).map_err(|e| {
+                format!(
+                    "Failed to resolve candidate receipt path {}: {}",
+                    candidate, e
+                )
+            })?;
+            verify_no_symlink_ancestors_with_root(&p, env_cfg.fs_root.as_deref())?;
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
         for candidate_name in [package_id, &package_id.to_lowercase()] {
             let candidate = format!("{}/{}/.af-version", prefix, candidate_name);
             let p = env_cfg.resolve_path(&candidate).map_err(|e| {
@@ -8180,6 +8193,25 @@ pub fn read_af_version_receipt(
         }
         return None;
     }
+    if package_id.eq_ignore_ascii_case("listenarr") {
+        for candidate in [
+            "/opt/Listenarr/.af-version",
+            "/var/lib/listenarr/.af-version",
+            "/etc/listenarr/.af-version",
+        ] {
+            if let Ok(p) = env_cfg.resolve_path(candidate) {
+                if let Ok(Some(bytes)) = read_receipt_bounded_nofollow(&p) {
+                    if let Ok(raw) = String::from_utf8(bytes) {
+                        let t = raw.trim().to_string();
+                        if !t.is_empty() {
+                            return Some(t);
+                        }
+                    }
+                }
+            }
+        }
+        return None;
+    }
     for prefix in ["/var/lib", "/etc", "/opt"] {
         let candidate = format!("{}/{}/.af-version", prefix, package_id);
         if let Ok(p) = env_cfg.resolve_path(&candidate) {
@@ -8575,7 +8607,11 @@ pub fn has_independent_runtime_evidence(
     }
 
     // Scan /opt/<pkg> and /opt/<lower_id> for executable regular files (excluding .af-*, *.lock, *.tmp, *.log, *.pid, *.bak)
-    for opt_name in [package_id, &lower_id] {
+    let mut opt_names = vec![package_id, lower_id.as_str()];
+    if lower_id == "listenarr" {
+        opt_names.push("Listenarr");
+    }
+    for opt_name in opt_names {
         for opt_sub in [
             format!("/opt/{}", opt_name),
             format!("/opt/{}/bin", opt_name),

@@ -1296,6 +1296,12 @@ pub(super) fn resolve_candidate_receipt_paths(pkg_name: &str) -> Vec<PathBuf> {
                 paths.push(p);
             }
         }
+        if prefix == "/opt" && pkg_name.eq_ignore_ascii_case("listenarr") {
+            let p = resolve("/opt/Listenarr/.af-version");
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
         for candidate_name in [pkg_name, &pkg_name.to_lowercase()] {
             let candidate = format!("{}/{}/.af-version", prefix, candidate_name);
             let p = resolve(&candidate);
@@ -2936,7 +2942,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
         }
     }
 
-    if is_vendor && action != "remove" {
+    if (is_vendor || clean_id.eq_ignore_ascii_case("listenarr")) && action != "remove" {
         if let Err(reason) = af_runner::validate_package_target_policy(
             &pkg.name,
             &pkg.update_source,

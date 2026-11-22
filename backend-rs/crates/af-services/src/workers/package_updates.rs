@@ -719,6 +719,16 @@ pub(super) static SYNTHETIC_COMMIT_VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9a-fA-F]{7,40})$").unwrap());
 
 #[derive(Debug, Deserialize)]
+pub(super) struct GitHubReleaseAsset {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct GitHubReleaseResponse {
     #[serde(default)]
     tag_name: String,
@@ -728,6 +738,8 @@ pub(super) struct GitHubReleaseResponse {
     prerelease: bool,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1380,8 +1392,11 @@ pub async fn probe_package_update(
         })
         .unwrap_or(false);
 
+    let listenarr_arch_unsupported = pkg.name.eq_ignore_ascii_case("listenarr")
+        && af_runner::listenarr_release_asset_suffix_for_arch(env::consts::ARCH).is_err();
     if record.latest_version.is_empty()
         && latest_res.is_err()
+        && !listenarr_arch_unsupported
         && (pkg.update_source == "github_release" || pkg.update_source == "github")
         && !pkg.update_repo.is_empty()
     {
@@ -1650,6 +1665,8 @@ pub(super) fn read_af_version_receipt(pkg: &Package) -> Option<String> {
     let is_filebot = pkg.name.eq_ignore_ascii_case("filebot");
     let opt_name = if is_filebot {
         "filebot-node"
+    } else if pkg.name.eq_ignore_ascii_case("listenarr") {
+        "Listenarr"
     } else {
         pkg.name.as_str()
     };
@@ -2190,12 +2207,15 @@ pub(super) fn has_independent_runtime_evidence(pkg: &Package) -> bool {
     }
 
     // 3. Install directory contains actual runtime files beyond .af-version and .af-components.json
-    let candidate_dirs = [
+    let mut candidate_dirs = vec![
         format!("/opt/{}", pkg.name),
         format!("/opt/{}/bin", pkg.name),
         format!("/var/lib/{}", pkg.name),
         format!("/etc/{}", pkg.name),
     ];
+    if pkg.name.eq_ignore_ascii_case("listenarr") {
+        candidate_dirs.push("/opt/Listenarr".to_string());
+    }
     for dir in &candidate_dirs {
         let resolved = resolve_fs_path(dir);
         if dir_has_runtime_files(&resolved) {
@@ -2433,96 +2453,107 @@ pub(super) fn build_package_update_record_for_source(
     let mut stale_cache_observed_at: Option<String> = None;
     let mut used_prev_latest = false;
 
+    let listenarr_arch_unsupported = pkg_name.eq_ignore_ascii_case("listenarr")
+        && af_runner::listenarr_release_asset_suffix_for_arch(env::consts::ARCH).is_err();
+
     let (latest_version, release_url) = match &latest_res {
         Ok((v, u)) => (v.clone(), u.clone()),
         Err(e) => {
             tracing::warn!(package = pkg_name, error = %e, "latest version observation failed");
-            err_parts.push("Latest version could not be confirmed");
-            let mut prev_ver = valid_prev_upstream
-                .filter(|r| {
-                    !r.latest_version.trim().is_empty()
-                        && tag_allowed_by_channel_for_source(
-                            &r.latest_version,
-                            current_channel,
-                            effective_update_source,
-                        )
-                })
-                .map(|r| r.latest_version.clone())
-                .unwrap_or_default();
-            let mut prev_url = if !prev_ver.is_empty() {
-                valid_prev_upstream
-                    .map(|r| r.release_url.clone())
-                    .unwrap_or_default()
+            if listenarr_arch_unsupported {
+                err_parts.push(
+                    "Package 'listenarr' is unsupported on this host architecture; official Listenarrs/Listenarr releases provide Linux x64 assets only",
+                );
+                (String::new(), String::new())
             } else {
-                String::new()
-            };
-            if !prev_ver.is_empty() {
-                used_prev_latest = true;
-            } else {
-                if let Ok(pkgs) = crate::get_packages() {
-                    if let Some(pkg) = pkgs.iter().find(|p| p.name == pkg_name) {
-                        if (pkg.update_source == "github_release" || pkg.update_source == "github")
-                            && !pkg.update_repo.is_empty()
-                        {
-                            let ch = if !pkg.update_channel.trim().is_empty() {
-                                &pkg.update_channel
-                            } else {
-                                current_channel
-                            };
-                            if let Some((cached_v, cached_u, cached_obs)) =
-                                get_cached_github_release_stale_for_channel(
-                                    github_api_base,
-                                    &pkg.update_repo,
-                                    ch,
-                                )
+                err_parts.push("Latest version could not be confirmed");
+                let mut prev_ver = valid_prev_upstream
+                    .filter(|r| {
+                        !r.latest_version.trim().is_empty()
+                            && tag_allowed_by_channel_for_source(
+                                &r.latest_version,
+                                current_channel,
+                                effective_update_source,
+                            )
+                    })
+                    .map(|r| r.latest_version.clone())
+                    .unwrap_or_default();
+                let mut prev_url = if !prev_ver.is_empty() {
+                    valid_prev_upstream
+                        .map(|r| r.release_url.clone())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if !prev_ver.is_empty() {
+                    used_prev_latest = true;
+                } else {
+                    if let Ok(pkgs) = crate::get_packages() {
+                        if let Some(pkg) = pkgs.iter().find(|p| p.name == pkg_name) {
+                            if (pkg.update_source == "github_release"
+                                || pkg.update_source == "github")
+                                && !pkg.update_repo.is_empty()
                             {
-                                if tag_allowed_by_channel_for_source(
-                                    &cached_v,
-                                    ch,
-                                    &pkg.update_source,
-                                ) {
-                                    prev_ver = cached_v;
-                                    if prev_url.is_empty() {
-                                        prev_url = cached_u;
+                                let ch = if !pkg.update_channel.trim().is_empty() {
+                                    &pkg.update_channel
+                                } else {
+                                    current_channel
+                                };
+                                if let Some((cached_v, cached_u, cached_obs)) =
+                                    get_cached_github_release_stale_for_channel(
+                                        github_api_base,
+                                        &pkg.update_repo,
+                                        ch,
+                                    )
+                                {
+                                    if tag_allowed_by_channel_for_source(
+                                        &cached_v,
+                                        ch,
+                                        &pkg.update_source,
+                                    ) {
+                                        prev_ver = cached_v;
+                                        if prev_url.is_empty() {
+                                            prev_url = cached_u;
+                                        }
+                                        stale_cache_observed_at = Some(cached_obs);
                                     }
-                                    stale_cache_observed_at = Some(cached_obs);
+                                }
+                            }
+                            if prev_ver.is_empty() && pkg.name == "threadfin" {
+                                let fallback = af_runner::resolve_threadfin_target_version();
+                                if !fallback.is_empty() {
+                                    prev_ver = fallback.clone();
+                                    if prev_url.is_empty() {
+                                        prev_url = format!("https://github.com/Threadfin/Threadfin/releases/tag/{fallback}");
+                                    }
                                 }
                             }
                         }
-                        if prev_ver.is_empty() && pkg.name == "threadfin" {
-                            let fallback = af_runner::resolve_threadfin_target_version();
-                            if !fallback.is_empty() {
-                                prev_ver = fallback.clone();
+                    }
+                    if prev_ver.is_empty() {
+                        if let Some((cached_v, cached_u, cached_obs)) =
+                            get_cached_github_release_stale_for_channel(
+                                github_api_base,
+                                pkg_name,
+                                current_channel,
+                            )
+                        {
+                            if tag_allowed_by_channel_for_source(
+                                &cached_v,
+                                current_channel,
+                                effective_update_source,
+                            ) {
+                                prev_ver = cached_v;
                                 if prev_url.is_empty() {
-                                    prev_url = format!("https://github.com/Threadfin/Threadfin/releases/tag/{fallback}");
+                                    prev_url = cached_u;
                                 }
+                                stale_cache_observed_at = Some(cached_obs);
                             }
                         }
                     }
                 }
-                if prev_ver.is_empty() {
-                    if let Some((cached_v, cached_u, cached_obs)) =
-                        get_cached_github_release_stale_for_channel(
-                            github_api_base,
-                            pkg_name,
-                            current_channel,
-                        )
-                    {
-                        if tag_allowed_by_channel_for_source(
-                            &cached_v,
-                            current_channel,
-                            effective_update_source,
-                        ) {
-                            prev_ver = cached_v;
-                            if prev_url.is_empty() {
-                                prev_url = cached_u;
-                            }
-                            stale_cache_observed_at = Some(cached_obs);
-                        }
-                    }
-                }
+                (prev_ver, prev_url)
             }
-            (prev_ver, prev_url)
         }
     };
 
@@ -3092,13 +3123,24 @@ pub(super) async fn detect_latest_version(
         }
         "apt" => detect_latest_apt_version(apt_package).await,
         "github" | "github_release" => {
-            detect_latest_github_release_for_channel(
-                client,
-                github_api_base,
-                &pkg.update_repo,
-                &pkg.update_channel,
-            )
-            .await
+            if pkg.name.eq_ignore_ascii_case("listenarr") {
+                detect_latest_listenarr_release_for_arch(
+                    client,
+                    github_api_base,
+                    &pkg.update_repo,
+                    &pkg.update_channel,
+                    env::consts::ARCH,
+                )
+                .await
+            } else {
+                detect_latest_github_release_for_channel(
+                    client,
+                    github_api_base,
+                    &pkg.update_repo,
+                    &pkg.update_channel,
+                )
+                .await
+            }
         }
         "git_tags" | "git" | "git_commit" | "git_head" => {
             let repo_url =
@@ -3280,38 +3322,12 @@ pub(super) fn parse_github_link_next_url(header_val: &str) -> Option<String> {
     None
 }
 
-pub async fn detect_latest_github_release_for_channel(
+async fn fetch_github_releases_paginated(
     client: &reqwest::Client,
     github_api_base: &str,
-    repo: &str,
-    channel: &str,
-) -> anyhow::Result<(String, String, String)> {
-    if repo.trim().is_empty() {
-        anyhow::bail!("missing GitHub repo");
-    }
-
-    let clean_repo = repo.trim();
-    let effective_channel_owned = normalize_update_channel(channel);
-    let effective_channel = effective_channel_owned.as_str();
-    let cache_key =
-        github_release_cache_key_for_channel(github_api_base, clean_repo, effective_channel);
-
-    if let Ok(cache) = GITHUB_RELEASE_CACHE.lock() {
-        if let Some((ver, url, timestamp, observed_at)) = cache.get(&cache_key) {
-            if timestamp.elapsed() < Duration::from_secs(15 * 60)
-                && tag_allowed_by_channel(ver, effective_channel)
-            {
-                return Ok((ver.clone(), url.clone(), observed_at.clone()));
-            }
-        }
-    }
-
-    let is_rate_limited = is_github_api_rate_limited(github_api_base, "releases");
-    if is_rate_limited {
-        anyhow::bail!("GitHub API rate limit backoff active for {clean_repo}");
-    }
-
-    let is_stable = effective_channel == "stable";
+    clean_repo: &str,
+    allow_latest_fallback: bool,
+) -> anyhow::Result<Vec<GitHubReleaseResponse>> {
     let mut all_releases: Vec<GitHubReleaseResponse> = Vec::new();
     let mut current_url = format!(
         "{}/repos/{}/releases?per_page={GITHUB_RELEASE_PAGE_SIZE}",
@@ -3328,7 +3344,7 @@ pub async fn detect_latest_github_release_for_channel(
             .await?;
         let status = resp.status();
 
-        if page_count == 1 && status == reqwest::StatusCode::NOT_FOUND {
+        if page_count == 1 && status == reqwest::StatusCode::NOT_FOUND && allow_latest_fallback {
             let fb_url = format!(
                 "{}/repos/{}/releases/latest",
                 github_api_base.trim_end_matches('/'),
@@ -3429,6 +3445,187 @@ pub async fn detect_latest_github_release_for_channel(
             break;
         }
     }
+
+    Ok(all_releases)
+}
+
+/// Discovers the newest eligible official Listenarr release for `host_arch`.
+/// Fails early before cache or network access on architectures without official assets
+/// (currently Linux ARM64 and other non-x64 hosts), and requires each candidate release
+/// to carry a single verified official archive asset matching the host architecture.
+pub async fn detect_latest_listenarr_release_for_arch(
+    client: &reqwest::Client,
+    github_api_base: &str,
+    repo: &str,
+    channel: &str,
+    host_arch: &str,
+) -> anyhow::Result<(String, String, String)> {
+    let asset_suffix = af_runner::listenarr_release_asset_suffix_for_arch(host_arch)
+        .map_err(anyhow::Error::msg)?;
+    if repo.trim().is_empty() {
+        anyhow::bail!("missing GitHub repo");
+    }
+
+    let clean_repo = repo.trim();
+    let effective_channel_owned = normalize_update_channel(channel);
+    let effective_channel = effective_channel_owned.as_str();
+    let cache_key =
+        github_release_cache_key_for_channel(github_api_base, clean_repo, effective_channel);
+
+    if let Ok(cache) = GITHUB_RELEASE_CACHE.lock() {
+        if let Some((ver, url, timestamp, observed_at)) = cache.get(&cache_key) {
+            if timestamp.elapsed() < Duration::from_secs(15 * 60)
+                && tag_allowed_by_channel(ver, effective_channel)
+            {
+                return Ok((ver.clone(), url.clone(), observed_at.clone()));
+            }
+        }
+    }
+
+    if is_github_api_rate_limited(github_api_base, "releases") {
+        anyhow::bail!("GitHub API rate limit backoff active for {clean_repo}");
+    }
+
+    let is_stable = effective_channel == "stable";
+    let all_releases =
+        fetch_github_releases_paginated(client, github_api_base, clean_repo, false).await?;
+
+    let mut best_candidate: Option<(String, String, bool)> = None;
+    for rel in all_releases {
+        if rel.draft {
+            continue;
+        }
+        if is_stable && rel.prerelease {
+            continue;
+        }
+        let version = extract_version_or_normalized(&rel.tag_name);
+        if version.is_empty() {
+            continue;
+        }
+        if !tag_allowed_by_channel_for_source(&version, effective_channel, "github")
+            || !tag_allowed_by_channel_for_source(&rel.tag_name, effective_channel, "github")
+        {
+            continue;
+        }
+
+        let has_checksum_companion = rel.assets.iter().any(|asset| {
+            af_runner::listenarr_is_official_checksum_companion(
+                &rel.tag_name,
+                &asset.name,
+                &asset.browser_download_url,
+            )
+        });
+        let matching_assets: Vec<&GitHubReleaseAsset> = rel
+            .assets
+            .iter()
+            .filter(|asset| asset.name.trim().ends_with(asset_suffix))
+            .collect();
+        if matching_assets.len() != 1 {
+            continue;
+        }
+        let asset = matching_assets[0];
+        if !af_runner::listenarr_release_asset_is_eligible(
+            &rel.tag_name,
+            &asset.name,
+            &asset.browser_download_url,
+            asset.digest.as_deref(),
+            has_checksum_companion,
+            asset_suffix,
+        ) {
+            continue;
+        }
+
+        let html_url = if rel.html_url.trim().is_empty() {
+            format!(
+                "https://github.com/{clean_repo}/releases/tag/{}",
+                rel.tag_name.trim()
+            )
+        } else {
+            rel.html_url
+        };
+        let is_pre =
+            rel.prerelease || !tag_allowed_by_channel_for_source(&rel.tag_name, "stable", "github");
+        match &best_candidate {
+            None => {
+                best_candidate = Some((version, html_url, is_pre));
+            }
+            Some((current_ver, _, current_is_pre)) => {
+                let ord = af_release::lifecycle::compare_versions(&version, current_ver);
+                let should_replace = match ord {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => !is_pre && *current_is_pre,
+                    std::cmp::Ordering::Less => false,
+                };
+                if should_replace {
+                    best_candidate = Some((version, html_url, is_pre));
+                }
+            }
+        }
+    }
+
+    let Some((version, html_url, _)) = best_candidate else {
+        anyhow::bail!(
+            "No eligible official Listenarr release found in '{}' on channel '{}' with a verified {} asset for host architecture '{}'",
+            clean_repo,
+            effective_channel,
+            asset_suffix,
+            host_arch.trim()
+        );
+    };
+
+    let result = (
+        af_release::lifecycle::sanitize_persisted_lifecycle_text(&version),
+        sanitize_git_remote_url_for_display(&html_url),
+    );
+    let now_rfc3339 = Utc::now().to_rfc3339();
+    if let Ok(mut cache) = GITHUB_RELEASE_CACHE.lock() {
+        cache.insert(
+            cache_key.clone(),
+            (
+                result.0.clone(),
+                result.1.clone(),
+                Instant::now(),
+                now_rfc3339.clone(),
+            ),
+        );
+    }
+    Ok((result.0, result.1, now_rfc3339))
+}
+
+pub async fn detect_latest_github_release_for_channel(
+    client: &reqwest::Client,
+    github_api_base: &str,
+    repo: &str,
+    channel: &str,
+) -> anyhow::Result<(String, String, String)> {
+    if repo.trim().is_empty() {
+        anyhow::bail!("missing GitHub repo");
+    }
+
+    let clean_repo = repo.trim();
+    let effective_channel_owned = normalize_update_channel(channel);
+    let effective_channel = effective_channel_owned.as_str();
+    let cache_key =
+        github_release_cache_key_for_channel(github_api_base, clean_repo, effective_channel);
+
+    if let Ok(cache) = GITHUB_RELEASE_CACHE.lock() {
+        if let Some((ver, url, timestamp, observed_at)) = cache.get(&cache_key) {
+            if timestamp.elapsed() < Duration::from_secs(15 * 60)
+                && tag_allowed_by_channel(ver, effective_channel)
+            {
+                return Ok((ver.clone(), url.clone(), observed_at.clone()));
+            }
+        }
+    }
+
+    let is_rate_limited = is_github_api_rate_limited(github_api_base, "releases");
+    if is_rate_limited {
+        anyhow::bail!("GitHub API rate limit backoff active for {clean_repo}");
+    }
+
+    let is_stable = effective_channel == "stable";
+    let all_releases =
+        fetch_github_releases_paginated(client, github_api_base, clean_repo, true).await?;
 
     let mut best_candidate: Option<(String, String, bool)> = None;
     for rel in all_releases {

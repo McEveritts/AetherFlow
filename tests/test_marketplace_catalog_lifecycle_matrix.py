@@ -511,6 +511,11 @@ elif command in ('curl', 'wget'):
             return (root / ('librespeed-src.tar.gz' if '/archive/' in source_url else 'release.tar.gz')).read_bytes()
         if app == 'notifiarr' and source_url.endswith('.linux.gz'):
             return (root / 'notifiarr.linux.gz').read_bytes()
+        if app == 'listenarr' and os.environ.get('AF_FIXTURE_LISTENARR_ASSET_MAP'):
+            asset_map = json.loads(pathlib.Path(os.environ['AF_FIXTURE_LISTENARR_ASSET_MAP']).read_text())
+            mapped = asset_map.get(source_url) or asset_map.get(source_url.rsplit('/', 1)[-1])
+            if mapped:
+                return pathlib.Path(mapped).read_bytes()
         if source_url.endswith('.tar.xz'): return (root / 'release.tar.xz').read_bytes()
         if source_url.endswith('.zip'): return (root / 'release.zip').read_bytes()
         if source_url.endswith('.run'):
@@ -598,6 +603,45 @@ elif command in ('curl', 'wget'):
             'name': name, 'digest': 'sha256:' + digest,
             'browser_download_url': 'https://github.com/Notifiarr/notifiarr/releases/download/v' + version + '/' + name,
         }]}))
+    elif app == 'listenarr' and '/repos/Listenarrs/Listenarr/releases' in url:
+        bare_url = url.split('?', 1)[0]
+        if os.environ.get('AF_FIXTURE_LISTENARR_RELEASES_FILE'):
+            releases = json.loads(pathlib.Path(os.environ['AF_FIXTURE_LISTENARR_RELEASES_FILE']).read_text())
+            if '/releases/tags/' in bare_url:
+                import urllib.parse
+                req_tag = urllib.parse.unquote(bare_url.split('/releases/tags/', 1)[1])
+                matched = next((item for item in releases if item.get('tag_name') == req_tag), None)
+                if matched is None:
+                    sys.exit(22)
+                print(json.dumps(matched))
+            else:
+                print(json.dumps(releases))
+        else:
+            digest = hashlib.sha256((root / 'release.zip').read_bytes()).hexdigest()
+            if failure in ('corrupt-checksum', 'corrupt-release-digest'):
+                digest = '0' * 64
+            def _make_listenarr_release(rel_tag):
+                ver_clean = rel_tag[1:] if rel_tag.startswith(('v', 'V')) else rel_tag
+                asset_name = 'listenarr-' + ver_clean + '-linux-x64.zip'
+                asset = {
+                    'name': asset_name,
+                    'browser_download_url': 'https://github.com/Listenarrs/Listenarr/releases/download/' + rel_tag + '/' + asset_name,
+                }
+                if failure not in ('checksum', 'missing-checksum'):
+                    asset['digest'] = 'sha256:' + digest
+                return {
+                    'tag_name': rel_tag,
+                    'prerelease': True,
+                    'draft': False,
+                    'html_url': 'https://github.com/Listenarrs/Listenarr/releases/tag/' + rel_tag,
+                    'assets': [asset],
+                }
+            if '/releases/tags/' in bare_url:
+                import urllib.parse
+                req_tag = urllib.parse.unquote(bare_url.split('/releases/tags/', 1)[1])
+                print(json.dumps(_make_listenarr_release(req_tag)))
+            else:
+                print(json.dumps([_make_listenarr_release('v' + version)]))
     elif any('ifconfig.me' in entry for entry in arguments): print('192.0.2.2')
     elif any('http_code' in entry for entry in arguments):
         bare_url = url.split('?', 1)[0]

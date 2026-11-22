@@ -58,6 +58,13 @@ Piped and Invidious are experimental and have [additional installation requireme
 - Uninstall removes the service and application bundle but retains the service account and data by default. `DELETE_DATA=true` explicitly removes the account and `/var/lib/maintainerr`; existing upgrade backups remain available for recovery.
 - **Review cleanup rules carefully:** Maintainerr can delete media through connected services. Installing it does not configure integrations or enable cleanup rules on your behalf.
 
+### Listenarr
+
+- **Listenarr** ([Listenarrs/Listenarr](https://github.com/Listenarrs/Listenarr)) tracks official GitHub prereleases (`update_channel: "prerelease"`, scoped strictly to Listenarr) because upstream currently publishes prereleases only and has zero stable releases. If upstream publishes a stable release in the future, standard SemVer precedence prefers it over a same-version prerelease.
+- **Linux x64 (`amd64`) only:** upstream currently provides `linux-x64.zip` archives only and zero Linux ARM64 assets. On ARM64 or other non-x64 hosts, install, update discovery, and dispatch fail early with an actionable architecture error before making host changes.
+- Every normal or exact-target install verifies the selected tag's official `Listenarrs/Listenarr` asset URL and SHA-256 digest before extracting the self-contained `Listenarr.Api` executable. Installed versions are read from `/opt/Listenarr/.af-version` without executing the server binary.
+- Listenarr stores its runtime database, `appsettings.json`, and keys under `/var/lib/listenarr/config` (linked from `/opt/Listenarr/config`), preserves its configured port, bind address, and custom service `Environment=` lines across updates/reinstalls, and safely migrates legacy `/opt/Listenarr/config` directories with rollback protection. Ordinary uninstall retains `/var/lib/listenarr`; explicit `DELETE_DATA=true` purges it.
+
 ### Mesh VPN & Subnet Routing
 - **Tailscale** installs the official upstream `tailscale` package and `tailscaled.service` daemon from `pkgs.tailscale.com` (verified via `/etc/apt/keyrings/tailscale-archive-keyring.gpg`) and enables IPv4/IPv6 packet forwarding (`/etc/sysctl.d/99-tailscale.conf`). Authenticate the node from **Network → Tailscale Mesh → Connect / Login** (or supply `AF_TAILSCALE_AUTHKEY` / `TAILSCALE_AUTHKEY` during installation). The Network page manages mesh peers, subnet routes, exit-node preferences and service diagnostics. See [Network VPN management](network-vpn.md).
 

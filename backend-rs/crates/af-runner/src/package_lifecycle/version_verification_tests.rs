@@ -5181,3 +5181,38 @@ fn rclone_legacy_version_probe_and_snapshot_have_distinct_ownership() {
         .any(|(path, _)| path == &root.join("usr/lib/systemd/system/rclone.service")));
     std::fs::remove_dir_all(scratch).unwrap();
 }
+
+#[test]
+fn listenarr_receipt_paths_and_runtime_evidence_recognize_capitalized_opt_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch =
+        std::env::temp_dir().join(format!("af-test-listenarr-receipt-{}", uuid::Uuid::new_v4()));
+    let root = scratch.as_path();
+    let opt_dir = root.join("opt/Listenarr");
+    std::fs::create_dir_all(&opt_dir).unwrap();
+    let receipt = opt_dir.join(".af-version");
+    std::fs::write(&receipt, "1.10.6-canary\n").unwrap();
+
+    let env_cfg = crate::PackageExecutionEnv::isolated(root);
+    let candidates = candidate_version_marker_paths_with_env("listenarr", &env_cfg).unwrap();
+    assert!(
+        candidates.contains(&receipt),
+        "expected {:?} in {candidates:?}",
+        receipt
+    );
+    assert_eq!(
+        read_af_version_receipt("listenarr", &env_cfg).as_deref(),
+        Some("1.10.6-canary")
+    );
+    // Receipt alone does not count as independent runtime evidence
+    assert!(!has_independent_runtime_evidence("listenarr", &env_cfg));
+
+    // Adding executable self-contained Listenarr.Api (without Listenarr.Api.dll) satisfies independent runtime evidence
+    let binary = opt_dir.join("Listenarr.Api");
+    std::fs::write(&binary, b"\x7fELF").unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(has_independent_runtime_evidence("listenarr", &env_cfg));
+
+    std::fs::remove_dir_all(scratch).unwrap();
+}

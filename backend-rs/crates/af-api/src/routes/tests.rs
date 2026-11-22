@@ -5833,3 +5833,148 @@ async fn account_endpoints_report_sqlite_failures() {
         StatusCode::OK
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn marketplace_supports_listenarr_prerelease_updates_and_capitalized_receipt_path() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, _connection) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    af_services::workers::ensure_app_updates_columns();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/install")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/remove")).unwrap();
+    std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+    std::env::set_var("AETHERFLOW_INSTALL_ROOT", &root);
+
+    // 1. resolve_candidate_receipt_paths includes /opt/Listenarr/.af-version
+    let receipt_candidates = super::marketplace::resolve_candidate_receipt_paths("listenarr");
+    assert!(
+        receipt_candidates.contains(&root.join("opt/Listenarr/.af-version")),
+        "expected /opt/Listenarr/.af-version in {receipt_candidates:?}"
+    );
+
+    let listenarr_pkg = af_models::Package {
+        name: "listenarr".into(),
+        label: "Listenarr".into(),
+        service_name: "listenarr".into(),
+        lock_file: "/install/.listenarr.lock".into(),
+        status: "installed".into(),
+        update_source: "github".into(),
+        update_repo: "Listenarrs/Listenarr".into(),
+        update_channel: "prerelease".into(),
+        version_command: vec!["cat".into(), "/opt/Listenarr/.af-version".into()],
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&vec![listenarr_pkg.clone()]).unwrap()).unwrap();
+    std::fs::write(
+        &automation,
+        serde_json::json!({
+            "listenarr": {
+                "update_source": "github",
+                "update_repo": "Listenarrs/Listenarr",
+                "update_channel": "prerelease",
+                "version_command": ["cat", "/opt/Listenarr/.af-version"],
+                "require_download_sha256": true
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+    std::env::set_var(
+        "AETHERFLOW_RUNNER_SOCK",
+        short_test_socket_path(&format!(
+            "afr-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )),
+    );
+
+    std::fs::write(root.join("install/.listenarr.lock"), "installed\n").unwrap();
+    let inst = root.join("packages/package/install/installpackage-listenarr");
+    let rem = root.join("packages/package/remove/removepackage-listenarr");
+    std::fs::write(&inst, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(&rem, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&inst, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&rem, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    af_services::clear_package_job_info("listenarr");
+
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let admin = progress_test_user("admin", None);
+
+    // 2. Floating non-concrete target fails closed before creating a job
+    let res_bad = dispatch_package_lifecycle_with_target(
+        "listenarr".into(),
+        "install",
+        "installing",
+        false,
+        Some("canary".into()),
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_bad.status(), StatusCode::BAD_REQUEST);
+    assert!(af_services::get_package_job_info("listenarr").is_none());
+
+    // 3. Stale stable-channel app_updates row is rejected with 409 CONFLICT
+    let stale_source = "github:https://api.github.com|listenarrs/listenarr|stable";
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_updates (package_name, installed_version, latest_version, update_available, checked_at, last_error, source_key) VALUES ('listenarr', '1.10.5-canary', '1.10.6-canary', 1, '2026-11-21T08:00:00Z', '', ?1)",
+            [stale_source],
+        )
+        .unwrap();
+    }
+    let res_stale = dispatch_package_lifecycle_with_target(
+        "listenarr".into(),
+        "update",
+        "updating",
+        false,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_stale.status(), StatusCode::CONFLICT);
+    assert!(af_services::get_package_job_info("listenarr").is_none());
+
+    // 4. Confirmed prerelease-channel update dispatches with expected_target_version = 1.10.6-canary
+    let expected_source =
+        af_services::workers::canonical_update_source_key("https://api.github.com", &listenarr_pkg);
+    assert!(expected_source.ends_with("|prerelease"), "{expected_source}");
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_updates (package_name, installed_version, latest_version, update_available, checked_at, last_error, source_key) VALUES ('listenarr', '1.10.5-canary', '1.10.6-canary', 1, '2026-11-21T08:00:00Z', '', ?1)",
+            [&expected_source],
+        )
+        .unwrap();
+    }
+    let res_ok = dispatch_package_lifecycle_with_target(
+        "listenarr".into(),
+        "update",
+        "updating",
+        false,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(res_ok.status(), StatusCode::OK);
+    let job = af_services::get_package_job_info("listenarr").unwrap();
+    assert_eq!(job.expected_target_version.as_deref(), Some("1.10.6-canary"));
+    af_services::clear_package_job_info("listenarr");
+
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

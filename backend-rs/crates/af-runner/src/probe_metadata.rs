@@ -994,9 +994,19 @@ pub fn extract_static_package_version(
             );
         }
         "listenarr" => {
+            let receipt = rebase_path("/opt/Listenarr/.af-version");
+            if let Ok(Some(text)) = read_text_nofollow(&receipt, 4096) {
+                let ver = normalize_stripped_v(text.lines().next().unwrap_or("").to_string());
+                if !ver.is_empty() {
+                    return Some(Ok(ver));
+                }
+            }
             let paths = [rebase_path("/opt/Listenarr/Listenarr.Api.dll")];
             return Some(read_dll_version_nofollow(&paths, false).and_then(|o| {
-                o.ok_or_else(|| "unable to read Listenarr.Api.dll version".to_string())
+                o.ok_or_else(|| {
+                    "unable to read Listenarr version from /opt/Listenarr/.af-version or legacy Listenarr.Api.dll"
+                        .to_string()
+                })
             }));
         }
         "requestrr" => {
@@ -1604,5 +1614,45 @@ mod tests {
         assert_eq!(out.stdout, b"");
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn listenarr_static_version_reads_af_version_receipt_without_dll_or_exec() {
+        let root = env::temp_dir().join(format!("af-meta-listenarr-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("opt/Listenarr")).unwrap();
+        // Self-contained v1.10.6-canary shape: Listenarr.Api present, NO Listenarr.Api.dll
+        fs::write(
+            root.join("opt/Listenarr/Listenarr.Api"),
+            b"#!/bin/sh\nexit 99\n",
+        )
+        .unwrap();
+        fs::write(root.join("opt/Listenarr/.af-version"), "1.10.6-canary\n").unwrap();
+
+        let rebase = |raw: &str| root.join(raw.trim_start_matches('/'));
+
+        let direct = extract_static_package_version(
+            "listenarr",
+            &["cat".into(), "/opt/Listenarr/.af-version".into()],
+            &rebase,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(direct, "1.10.6-canary");
+
+        // Legacy probe string also resolves cleanly from .af-version when Listenarr.Api.dll is absent
+        let legacy_fallback = extract_static_package_version(
+            "listenarr",
+            &[
+                "bash".into(),
+                "-lc".into(),
+                "strings /opt/Listenarr/Listenarr.Api.dll".into(),
+            ],
+            &rebase,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(legacy_fallback, "1.10.6-canary");
+
+        let _ = fs::remove_dir_all(root);
     }
 }

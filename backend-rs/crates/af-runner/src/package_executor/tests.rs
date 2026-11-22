@@ -6727,3 +6727,153 @@ async fn threadfin_and_pihole_exact_version_policy_fails_closed_before_mutation(
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn listenarr_target_policy_and_official_asset_eligibility() {
+    assert_eq!(
+        listenarr_release_asset_suffix_for_arch("x86_64").unwrap(),
+        "linux-x64.zip"
+    );
+    assert_eq!(
+        listenarr_release_asset_suffix_for_arch("amd64").unwrap(),
+        "linux-x64.zip"
+    );
+    let arm64_err = listenarr_release_asset_suffix_for_arch("aarch64").unwrap_err();
+    assert!(arm64_err.contains("arm64") && arm64_err.contains("Linux x64"));
+    assert!(listenarr_release_asset_suffix_for_arch("armv7l").is_err());
+
+    let valid_sha = "sha256:98ba3e01089554f632fa55f27bba4afe2393579061ca6aea9fb71658c72d2aac";
+    let official_url = "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip";
+
+    assert!(listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        official_url,
+        Some(valid_sha),
+        false,
+        "linux-x64.zip",
+    ));
+    // Companion checksum suffices when digest is omitted
+    assert!(listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        official_url,
+        None,
+        true,
+        "linux-x64.zip",
+    ));
+    // Missing digest and missing companion fails closed
+    assert!(!listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        official_url,
+        None,
+        false,
+        "linux-x64.zip",
+    ));
+    // Empty URL, untrusted host, cross-tag URL, malformed digest, or non-x64 asset all fail
+    assert!(!listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        "",
+        Some(valid_sha),
+        false,
+        "linux-x64.zip",
+    ));
+    assert!(!listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        "https://evil.example/listenarr-1.10.6-canary-linux-x64.zip",
+        Some(valid_sha),
+        false,
+        "linux-x64.zip",
+    ));
+    assert!(!listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.5-canary/listenarr-1.10.6-canary-linux-x64.zip",
+        Some(valid_sha),
+        false,
+        "linux-x64.zip",
+    ));
+    assert!(!listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-linux-x64.zip",
+        official_url,
+        Some("sha256:badhex"),
+        true,
+        "linux-x64.zip",
+    ));
+    assert!(!listenarr_release_asset_is_eligible(
+        "v1.10.6-canary",
+        "listenarr-1.10.6-canary-win-x64.zip",
+        "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-win-x64.zip",
+        Some(valid_sha),
+        false,
+        "linux-x64.zip",
+    ));
+
+    // Architecture & target policy validation
+    assert!(validate_package_target_policy_for_arch(
+        "listenarr",
+        "github",
+        "",
+        "install",
+        None,
+        "x86_64"
+    )
+    .is_ok());
+    assert!(validate_package_target_policy_for_arch(
+        "listenarr",
+        "github",
+        "",
+        "update",
+        Some("1.10.6-canary"),
+        "x86_64"
+    )
+    .is_ok());
+    assert!(validate_package_target_policy_for_arch(
+        "listenarr",
+        "github",
+        "",
+        "update",
+        Some("0.2.71"),
+        "x86_64"
+    )
+    .is_ok());
+    for bad in ["latest", "canary", "prerelease", "../v1.10.6-canary"] {
+        assert!(
+            validate_package_target_policy_for_arch(
+                "listenarr",
+                "github",
+                "",
+                "update",
+                Some(bad),
+                "x86_64"
+            )
+            .is_err(),
+            "target {bad} must fail policy validation"
+        );
+    }
+    for action in ["install", "update", "reinstall"] {
+        let err = validate_package_target_policy_for_arch(
+            "listenarr",
+            "github",
+            "",
+            action,
+            Some("1.10.6-canary"),
+            "aarch64",
+        )
+        .unwrap_err();
+        assert!(err.contains("arm64") && err.contains("Linux x64"), "{err}");
+    }
+    assert!(validate_package_target_policy_for_arch(
+        "listenarr",
+        "github",
+        "",
+        "remove",
+        None,
+        "aarch64"
+    )
+    .is_ok());
+}

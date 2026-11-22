@@ -5925,3 +5925,238 @@ async fn test_threadfin_pinned_and_pihole_vendor_discovery_do_not_query_github()
     assert!(!is_version_newer_for_source("6.8", &ph_ver, "vendor"));
     assert!(!is_version_newer_for_source("6.8", "6.9", "vendor"));
 }
+
+#[tokio::test]
+async fn listenarr_prerelease_channel_discovery_and_unsupported_arch_fail_early() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _env_guard = TEST_ENV_MUTEX.lock().await;
+    let prev_auto = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
+    let prev_pkgs = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    std::env::set_var(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        repo_root.join("config/package_automation.json"),
+    );
+    std::env::set_var(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        repo_root.join("config/packages.json"),
+    );
+
+    struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", v),
+                None => std::env::remove_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG"),
+            }
+            match self.1.take() {
+                Some(v) => std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", v),
+                None => std::env::remove_var("AETHERFLOW_PACKAGES_CONFIG"),
+            }
+        }
+    }
+    let _restore = Restore(prev_auto, prev_pkgs);
+
+    let catalog = crate::get_package_catalog().unwrap();
+    assert_eq!(catalog.len(), 77);
+    let prerelease_pkgs: Vec<&str> = catalog
+        .iter()
+        .filter(|p| p.update_channel.eq_ignore_ascii_case("prerelease"))
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(prerelease_pkgs, vec!["listenarr"]);
+
+    let listenarr = catalog.iter().find(|p| p.name == "listenarr").unwrap();
+    assert_eq!(listenarr.update_source, "github");
+    assert_eq!(listenarr.update_repo, "Listenarrs/Listenarr");
+    assert_eq!(listenarr.update_channel, "prerelease");
+    assert_eq!(
+        listenarr.version_command,
+        vec!["cat".to_string(), "/opt/Listenarr/.af-version".to_string()]
+    );
+    assert_eq!(
+        canonical_update_source_key("https://api.github.com", listenarr),
+        "github:https://api.github.com|listenarrs/listenarr|prerelease"
+    );
+
+    let valid_sha = "sha256:98ba3e01089554f632fa55f27bba4afe2393579061ca6aea9fb71658c72d2aac";
+    let releases_json = serde_json::json!([
+        {
+            "tag_name": "v1.11.0-canary",
+            "html_url": "https://github.com/Listenarrs/Listenarr/releases/tag/v1.11.0-canary",
+            "prerelease": true,
+            "draft": true,
+            "assets": [{
+                "name": "listenarr-1.11.0-canary-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.11.0-canary/listenarr-1.11.0-canary-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        },
+        {
+            "tag_name": "v1.10.7-canary",
+            "html_url": "https://github.com/Listenarrs/Listenarr/releases/tag/v1.10.7-canary",
+            "prerelease": true,
+            "draft": false,
+            "assets": [{
+                "name": "listenarr-1.10.7-canary-win-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.7-canary/listenarr-1.10.7-canary-win-x64.zip",
+                "digest": valid_sha
+            }]
+        },
+        {
+            "tag_name": "v1.10.5-canary",
+            "html_url": "https://github.com/Listenarrs/Listenarr/releases/tag/v1.10.5-canary",
+            "prerelease": true,
+            "draft": false,
+            "assets": [{
+                "name": "listenarr-1.10.5-canary-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.5-canary/listenarr-1.10.5-canary-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        },
+        {
+            "tag_name": "v1.10.6-canary",
+            "html_url": "https://github.com/Listenarrs/Listenarr/releases/tag/v1.10.6-canary",
+            "prerelease": true,
+            "draft": false,
+            "assets": [{
+                "name": "listenarr-1.10.6-canary-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        },
+        {
+            "tag_name": "0.2.71",
+            "html_url": "https://github.com/Listenarrs/Listenarr/releases/tag/0.2.71",
+            "prerelease": true,
+            "draft": false,
+            "assets": [{
+                "name": "listenarr-0.2.71-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/0.2.71/listenarr-0.2.71-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        }
+    ])
+    .to_string();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body_clone = releases_json.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 4096];
+                let _ = socket.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body_clone.len(),
+                    body_clone
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        }
+    });
+
+    let client = build_github_http_client();
+    let api_base = format!("http://{addr}");
+
+    // 1. Listenarr on x86_64 selects highest official Linux x64 prerelease, skipping draft & non-x64
+    let (latest_ver, latest_url, _) = detect_latest_listenarr_release_for_arch(
+        &client,
+        &api_base,
+        "Listenarrs/Listenarr",
+        "prerelease",
+        "x86_64",
+    )
+    .await
+    .expect("listenarr x86_64 prerelease discovery must succeed");
+    assert_eq!(latest_ver, "1.10.6-canary");
+    assert_eq!(
+        latest_url,
+        "https://github.com/Listenarrs/Listenarr/releases/tag/v1.10.6-canary"
+    );
+    assert!(is_version_newer_for_source("1.10.5-canary", &latest_ver, "github"));
+    assert!(is_version_newer_for_source("0.2.71", &latest_ver, "github"));
+    assert!(is_version_newer_for_source(&latest_ver, "1.10.6", "github"));
+    assert!(!is_version_newer_for_source("1.10.6-canary", &latest_ver, "github"));
+
+    // 2. Stable-channel packages still reject prerelease-only feeds
+    let stable_err = detect_latest_github_release_for_channel(
+        &client,
+        &api_base,
+        "Listenarrs/Listenarr",
+        "stable",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        stable_err.to_string().contains("No eligible GitHub release"),
+        "{stable_err}"
+    );
+
+    // 3. ARM64 fails early BEFORE cache/network access (even against unreachable port 1)
+    let arm64_err = detect_latest_listenarr_release_for_arch(
+        &client,
+        "http://127.0.0.1:1",
+        "Listenarrs/Listenarr",
+        "prerelease",
+        "aarch64",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        arm64_err.to_string().contains("arm64") && arm64_err.to_string().contains("Linux x64"),
+        "{arm64_err}"
+    );
+
+    // 4. Feed with zero linux-x64.zip assets returns an actionable error
+    let no_x64_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let no_x64_addr = no_x64_listener.local_addr().unwrap();
+    let no_x64_body = serde_json::json!([{
+        "tag_name": "v1.10.7-canary",
+        "html_url": "https://github.com/Listenarrs/Listenarr/releases/tag/v1.10.7-canary",
+        "prerelease": true,
+        "draft": false,
+        "assets": [{
+            "name": "listenarr-1.10.7-canary-osx-arm64.zip",
+            "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.7-canary/listenarr-1.10.7-canary-osx-arm64.zip",
+            "digest": valid_sha
+        }]
+    }])
+    .to_string();
+    let no_x64_server = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = no_x64_listener.accept().await {
+            let mut buf = vec![0; 4096];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                no_x64_body.len(),
+                no_x64_body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        }
+    });
+    let no_x64_err = detect_latest_listenarr_release_for_arch(
+        &client,
+        &format!("http://{no_x64_addr}"),
+        "Listenarrs/Listenarr",
+        "prerelease",
+        "x86_64",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        no_x64_err.to_string().contains("linux-x64.zip"),
+        "{no_x64_err}"
+    );
+
+    server.abort();
+    no_x64_server.abort();
+}

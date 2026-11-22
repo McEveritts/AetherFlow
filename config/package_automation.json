@@ -1315,13 +1315,13 @@
   },
   "listenarr": {
     "update_source": "github",
+    "update_channel": "prerelease",
     "require_download_sha256": true,
     "update_repo": "Listenarrs/Listenarr",
     "update_repo_url": "https://github.com/Listenarrs/Listenarr.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "strings /opt/Listenarr/Listenarr.Api.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
+      "cat",
+      "/opt/Listenarr/.af-version"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [

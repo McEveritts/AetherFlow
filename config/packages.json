@@ -658,7 +658,7 @@
     {
         "name": "listenarr",
         "label": "Listenarr",
-        "description": "Automated audiobook collection manager and request server for Usenet and BitTorrent.",
+        "description": "Automated audiobook collection manager and request server for Usenet and BitTorrent. Linux x64 only; uses official GitHub prerelease builds (upstream publishes no stable releases).",
         "lock_file": "/install/.listenarr.lock",
         "category": "Media",
         "service_type": "systemd",

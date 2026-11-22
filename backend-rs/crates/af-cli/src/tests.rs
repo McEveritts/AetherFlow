@@ -2465,3 +2465,201 @@ fn cli_enforces_threadfin_pinned_and_pihole_vendor_exact_version_policies() {
         assert_eq!(calls[1].expected_target_version, None);
     }
 }
+
+#[test]
+fn listenarr_cli_discovery_exact_target_and_early_arch_failure() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let valid_sha = "sha256:98ba3e01089554f632fa55f27bba4afe2393579061ca6aea9fb71658c72d2aac";
+    let releases_body = serde_json::json!([
+        {
+            "tag_name": "v1.11.0-canary",
+            "prerelease": true,
+            "draft": true,
+            "assets": [{
+                "name": "listenarr-1.11.0-canary-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.11.0-canary/listenarr-1.11.0-canary-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        },
+        {
+            "tag_name": "v1.10.6-canary",
+            "prerelease": true,
+            "draft": false,
+            "assets": [{
+                "name": "listenarr-1.10.6-canary-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/v1.10.6-canary/listenarr-1.10.6-canary-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        },
+        {
+            "tag_name": "0.2.71",
+            "prerelease": true,
+            "draft": false,
+            "assets": [{
+                "name": "listenarr-0.2.71-linux-x64.zip",
+                "browser_download_url": "https://github.com/Listenarrs/Listenarr/releases/download/0.2.71/listenarr-0.2.71-linux-x64.zip",
+                "digest": valid_sha
+            }]
+        }
+    ])
+    .to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv_body = releases_body.clone();
+    let srv = std::thread::spawn(move || {
+        for _ in 0..2 {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut req_buf = [0u8; 4096];
+                let n = stream.read(&mut req_buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&req_buf[..n]);
+                assert!(
+                    !req.contains("/tags"),
+                    "Listenarr discovery must never fall back to unverified /tags: {req}"
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    srv_body.len(),
+                    srv_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        }
+    });
+
+    let api_base = format!("http://{addr}");
+    // 1. x86_64 prerelease discovery selects v1.10.6-canary
+    let discovered = discover_listenarr_github_target_for_arch(
+        &api_base,
+        "Listenarrs/Listenarr",
+        "prerelease",
+        "x86_64",
+    )
+    .expect("Listenarr x86_64 CLI discovery must succeed");
+    assert_eq!(discovered, "1.10.6-canary");
+
+    // 2. aarch64 fails early before touching network
+    let arm_err = discover_listenarr_github_target_for_arch(
+        "http://127.0.0.1:1",
+        "Listenarrs/Listenarr",
+        "prerelease",
+        "aarch64",
+    )
+    .unwrap_err();
+    assert!(arm_err.contains("arm64") && arm_err.contains("Linux x64"), "{arm_err}");
+
+    // 3. Zero linux-x64.zip assets fails cleanly without falling back to /tags
+    let empty_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let empty_addr = empty_listener.local_addr().unwrap();
+    let empty_srv = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = empty_listener.accept() {
+            let mut req_buf = [0u8; 4096];
+            let _ = stream.read(&mut req_buf);
+            let body = "[]";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    let empty_err = discover_listenarr_github_target_for_arch(
+        &format!("http://{empty_addr}"),
+        "Listenarrs/Listenarr",
+        "prerelease",
+        "x86_64",
+    )
+    .unwrap_err();
+    assert!(empty_err.contains("linux-x64.zip"), "{empty_err}");
+    let _ = empty_srv.join();
+
+    // 4. End-to-end CLI update dispatch with live discovery & exact --target-version
+    let tmp = TempTestDir::new("listenarr-cli");
+    let root = tmp.path();
+    let root_str = root.to_string_lossy().into_owned();
+    let cfg_dir = root.join("opt/AetherFlow/config");
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(root.join("install/.listenarr.lock"), "installed\n").unwrap();
+    std::fs::write(
+        cfg_dir.join("package_automation.json"),
+        serde_json::json!({
+            "listenarr": {
+                "update_source": "github",
+                "update_repo": "Listenarrs/Listenarr",
+                "update_channel": "prerelease",
+                "api_base_url": api_base,
+                "require_download_sha256": true
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let transport = MockRunnerTransport::default();
+
+    // Auto-discovered update picks 1.10.6-canary
+    let inv_auto = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "package",
+        "update",
+        "listenarr",
+    ])
+    .unwrap();
+    let res_auto = execute_invocation(&inv_auto, &transport);
+    assert_eq!(res_auto.status, "ok", "{}", res_auto.message);
+
+    // Exact --target-version 1.10.5-canary dispatches cleanly
+    let inv_exact = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "package",
+        "update",
+        "listenarr",
+        "--target-version",
+        "1.10.5-canary",
+    ])
+    .unwrap();
+    let res_exact = execute_invocation(&inv_exact, &transport);
+    assert_eq!(res_exact.status, "ok", "{}", res_exact.message);
+
+    // Floating target token 'canary' fails closed at CLI parse/validation before calling runner
+    let err_bad = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "package",
+        "update",
+        "listenarr",
+        "--target-version",
+        "canary",
+    ])
+    .unwrap_err();
+    assert!(
+        matches!(err_bad, CliError::Validation(ref msg) if msg.contains("canary")),
+        "{err_bad:?}"
+    );
+
+    {
+        let calls = transport.package_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].package_id, "listenarr");
+        assert_eq!(
+            calls[0].expected_target_version.as_deref(),
+            Some("1.10.6-canary")
+        );
+        assert_eq!(calls[1].package_id, "listenarr");
+        assert_eq!(
+            calls[1].expected_target_version.as_deref(),
+            Some("1.10.5-canary")
+        );
+    }
+
+    let _ = srv.join();
+}
