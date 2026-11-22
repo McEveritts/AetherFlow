@@ -516,6 +516,42 @@ test.describe('WASM operator parity workflows', () => {
     expect(demoPosts).toBe(0);
   });
 
+  test('retained Marketplace data requires the exact package ID before purge', async ({ page }) => {
+    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+    const app = {
+      id: 'rclone', name: 'Rclone', desc: 'Cloud sync', category: 'Cloud',
+      status: 'uninstalled', inventory_known: true, inventory_authenticated: true,
+      retained_data_present: true,
+    };
+    let purgeRequests = 0;
+    await page.route(/\/api\/v1\/(?:public|auth)\/marketplace$/, route =>
+      json(route, [{ ...app, retained_data_present: purgeRequests === 0 }]),
+    );
+    await page.route('**/api/v1/admin/packages/rclone/uninstall?*', route => {
+      expect(route.request().method()).toBe('POST');
+      expect(new URL(route.request().url()).searchParams.get('purge')).toBe('true');
+      purgeRequests += 1;
+      return json(route, { job_id: 'purge-retained-fixture', status: 'uninstalling' }, 202);
+    });
+
+    await page.goto('/?tab=marketplace');
+    await expect(page.getByRole('button', { name: 'Install', exact: true })).toBeEnabled();
+    const purge = page.getByRole('button', { name: 'Purge retained data', exact: true });
+    await purge.click();
+    const dialog = page.getByRole('dialog', { name: 'Purge retained data for Rclone' });
+    const confirm = dialog.getByRole('button', { name: 'Confirm', exact: true });
+    await expect(confirm).toBeDisabled();
+    const packageId = dialog.getByRole('textbox', { name: 'Package ID to confirm data purge' });
+    await packageId.fill('RClone');
+    await expect(confirm).toBeDisabled();
+    expect(purgeRequests).toBe(0);
+    await packageId.fill('rclone');
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect.poll(() => purgeRequests).toBe(1);
+    await expect(purge).toHaveCount(0);
+  });
+
   test('never fabricates baseDomain Open App links for headless or loopback-only services in Services and Marketplace', async ({ page, baseURL }) => {
     const localOrigin = baseURL ?? 'http://127.0.0.1:18763';
     const localHost = new URL(localOrigin).hostname;

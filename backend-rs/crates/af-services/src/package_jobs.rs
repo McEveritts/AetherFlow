@@ -137,7 +137,6 @@ pub fn parse_diagnostic_markers(text: &str) -> (Option<String>, Option<i32>, Opt
 struct JobRegistry {
     active: HashMap<String, PackageJobInfo>,
     outcomes: HashMap<String, PackageJobOutcome>,
-    retained_packages: std::collections::HashSet<String>,
     db: Option<Connection>,
     leases: HashMap<String, af_release::lifecycle::OwnerLease>,
 }
@@ -160,7 +159,6 @@ impl JobRegistry {
             db: Some(conn),
             outcomes: HashMap::new(),
             active: HashMap::new(),
-            retained_packages: std::collections::HashSet::new(),
             leases: HashMap::new(),
         };
         registry.refresh()?;
@@ -223,8 +221,6 @@ impl JobRegistry {
                 }
             }
         }
-        self.retained_packages =
-            af_release::lifecycle::query_retained_lifecycle_packages(conn).unwrap_or_default();
         Ok(())
     }
 
@@ -398,22 +394,6 @@ impl JobRegistry {
             )?;
         }
         self.outcomes.insert(pkg.to_string(), outcome.clone());
-        if success {
-            let normalized_retention = af_release::lifecycle::normalize_retention_state(
-                success,
-                action,
-                retention_state.as_deref(),
-            );
-            let lock_key =
-                af_models::resolve_package_lock_name(&pkg.trim().to_ascii_lowercase()).to_string();
-            if normalized_retention == af_release::lifecycle::RETENTION_STATE_RETAINED {
-                if !lock_key.is_empty() {
-                    self.retained_packages.insert(lock_key);
-                }
-            } else {
-                self.retained_packages.remove(&lock_key);
-            }
-        }
         self.active.remove(pkg);
         self.leases.remove(pkg);
         Ok(Some(outcome))
@@ -492,7 +472,6 @@ pub fn initialize_package_jobs(conn: Connection) -> anyhow::Result<()> {
 pub struct PackageJobSnapshot {
     pub active: HashMap<String, PackageJobInfo>,
     pub outcomes: HashMap<String, PackageJobOutcome>,
-    pub retained_packages: std::collections::HashSet<String>,
 }
 
 pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
@@ -504,7 +483,6 @@ pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
             PackageJobSnapshot {
                 active: jobs.active.clone(),
                 outcomes: jobs.outcomes.clone(),
-                retained_packages: jobs.retained_packages.clone(),
             },
             jobs.db
                 .as_ref()
@@ -533,7 +511,6 @@ pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
     }
     snapshot.active = refreshed.active;
     snapshot.outcomes = refreshed.outcomes;
-    snapshot.retained_packages = refreshed.retained_packages;
     Ok(snapshot)
 }
 

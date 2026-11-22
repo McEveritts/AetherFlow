@@ -3609,6 +3609,10 @@ async fn test_public_unauthenticated_catalog_strips_all_private_fields() {
             "started_at must be omitted"
         );
         assert!(!obj.contains_key("job_id"), "job_id must be omitted");
+        assert!(
+            !obj.contains_key("retained_data_present"),
+            "retained_data_present must be omitted"
+        );
     }
 
     drop(connection);

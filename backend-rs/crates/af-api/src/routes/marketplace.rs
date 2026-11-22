@@ -191,6 +191,9 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         .into_iter()
         .map(|c| (c.app_name.clone(), c))
         .collect();
+    let retained_packages = af_db::get_read_conn()
+        .and_then(|conn| af_release::lifecycle::query_retained_lifecycle_packages(&conn))
+        .unwrap_or_default();
     let retained_ingress_keys: std::collections::HashSet<String> =
         af_db::list_retained_app_ingress_names()
             .unwrap_or_default()
@@ -221,8 +224,12 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
             public_domain = af_services::format_app_public_domain(&p.name, &base_domain);
         }
-        let retained_data_present =
-            package_has_retained_purge_evidence(&p, &jobs, &retained_ingress_keys);
+        let retained_data_present = package_has_retained_purge_evidence(
+            &p,
+            &jobs,
+            &retained_packages,
+            &retained_ingress_keys,
+        );
 
         let mut app = MarketplaceApp {
             id: p.name.clone(),
@@ -331,6 +338,7 @@ pub(super) fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bo
 fn package_has_retained_purge_evidence(
     pkg: &af_models::Package,
     jobs: &af_services::PackageJobSnapshot,
+    retained_packages: &std::collections::HashSet<String>,
     retained_ingress_keys: &std::collections::HashSet<String>,
 ) -> bool {
     if jobs.active.contains_key(&pkg.name)
@@ -354,7 +362,7 @@ fn package_has_retained_purge_evidence(
     let lock_key =
         af_models::resolve_package_lock_name(&pkg.name.trim().to_ascii_lowercase()).to_string();
     !lock_key.is_empty()
-        && (jobs.retained_packages.contains(&lock_key) || retained_ingress_keys.contains(&lock_key))
+        && (retained_packages.contains(&lock_key) || retained_ingress_keys.contains(&lock_key))
 }
 
 fn marketplace_unavailable() -> Response {

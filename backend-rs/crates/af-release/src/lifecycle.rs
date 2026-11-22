@@ -867,47 +867,38 @@ pub fn query_retained_lifecycle_packages(
 ) -> Result<std::collections::HashSet<String>> {
     let mut resolved = std::collections::HashSet::new();
     let mut retained = std::collections::HashSet::new();
-
-    let jobs_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')",
-        [],
-        |row| row.get(0),
-    )?;
-    if jobs_exists {
-        let has_retention: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='retention_state')",
-            [],
-            |row| row.get(0),
-        )?;
-        let has_finished: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='finished_at')",
-            [],
-            |row| row.get(0),
-        )?;
+    for table in ["package_lifecycle_jobs", "package_lifecycle_history"] {
+        let columns: std::collections::HashSet<String> = conn
+            .prepare("SELECT name FROM pragma_table_info(?1)")?
+            .query_map([table], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if columns.is_empty() {
+            continue;
+        }
+        let retention = if columns.contains("retention_state") {
+            "COALESCE(retention_state, '')"
+        } else {
+            "''"
+        };
+        let order = if table == "package_lifecycle_history" {
+            "id DESC"
+        } else if columns.contains("finished_at") {
+            "finished_at DESC, started_at DESC"
+        } else {
+            "started_at DESC"
+        };
         let sql = format!(
-            "SELECT package_id, action, {} \
-             FROM package_lifecycle_jobs \
-             WHERE status='completed' \
-             ORDER BY {}",
-            if has_retention {
-                "retention_state"
-            } else {
-                "''"
-            },
-            if has_finished {
-                "finished_at DESC, started_at DESC"
-            } else {
-                "started_at DESC"
-            },
+            "SELECT package_id, action, {retention} FROM {table}
+             WHERE status = 'completed' ORDER BY {order}"
         );
-        let mut stmt = conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
-            let pkg: String = row.get(0)?;
+            let package_id: String = row.get(0)?;
             let action: String = row.get(1)?;
             let retention_state: String = row.get(2)?;
             let key =
-                af_models::resolve_package_lock_name(&pkg.trim().to_ascii_lowercase()).to_string();
+                af_models::resolve_package_lock_name(&package_id.to_ascii_lowercase()).to_string();
             if !key.is_empty()
                 && resolved.insert(key.clone())
                 && action == "remove"
@@ -917,48 +908,6 @@ pub fn query_retained_lifecycle_packages(
             }
         }
     }
-
-    let hist_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_history')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !hist_exists {
-        return Ok(retained);
-    }
-    let has_hist_retention: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='retention_state')",
-        [],
-        |row| row.get(0),
-    )?;
-    let sql = format!(
-        "SELECT package_id, action, {} \
-         FROM package_lifecycle_history \
-         WHERE status='completed' \
-         ORDER BY id DESC",
-        if has_hist_retention {
-            "retention_state"
-        } else {
-            "''"
-        },
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let pkg: String = row.get(0)?;
-        let action: String = row.get(1)?;
-        let retention_state: String = row.get(2)?;
-        let key =
-            af_models::resolve_package_lock_name(&pkg.trim().to_ascii_lowercase()).to_string();
-        if !key.is_empty()
-            && resolved.insert(key.clone())
-            && action == "remove"
-            && retention_state == RETENTION_STATE_RETAINED
-        {
-            retained.insert(key);
-        }
-    }
-
     Ok(retained)
 }
 
@@ -1689,7 +1638,7 @@ pub fn validate_exact_apt_version(s: &str) -> bool {
 /// the exact full Debian version only when status is strictly `installed` and the version
 /// token is a valid Debian version.
 pub fn parse_installed_dpkg_status_version(stdout: &str) -> Option<&str> {
-    let mut parts = stdout.trim().split_whitespace();
+    let mut parts = stdout.split_whitespace();
     let status = parts.next()?;
     let version = parts.next()?;
     if parts.next().is_some() || status != "installed" {
