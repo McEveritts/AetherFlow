@@ -18,6 +18,9 @@ fi
 export LOCK_DIR="${LOCK_DIR:-/install}"
 export AF_REQUIRE_DOWNLOAD_SHA256="${AF_REQUIRE_DOWNLOAD_SHA256:-1}"
 declare -ag AF_PENDING_VERSION_PATHS=() AF_PENDING_VERSION_VALUES=() AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=()
+AF_APT_PRIMARY_PACKAGE=""
+AF_APT_TARGET_VERSION=""
+AF_APT_LOCAL_DEB=false
 
 af_github_curl() {
     local _gh_token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
@@ -1287,11 +1290,30 @@ sys.exit(0 if table[op] else 1)
 PYEOF
 }
 
+af_validate_exact_apt_version() {
+    local raw="${1:-}" trimmed="" msg=""
+    local apt_ver_re='^([0-9]+:)?[0-9][0-9A-Za-z.+~-]*$'
+    trimmed="${raw#"${raw%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" || ${#trimmed} -gt 256 || "$trimmed" =~ [[:space:][:cntrl:]] || "$trimmed" == *..* || "$trimmed" == *- || ! "$trimmed" =~ $apt_ver_re ]]; then
+        msg="Invalid exact Debian/APT target version: ${raw}"
+        if declare -F print_error >/dev/null 2>&1; then
+            print_error "$msg"
+        elif declare -F log_error >/dev/null 2>&1; then
+            log_error "$msg"
+        else
+            printf 'ERROR: %s\n' "$msg" >&2
+        fi
+        return 1
+    fi
+    printf '%s\n' "$trimmed"
+}
+
 verify_deb_installed() {
-    local package="$1" expected="${2:-}" observed status installed
+    local package="$1" expected="${2:-}" observed status installed extra=""
     observed="$(dpkg-query -W -f='${db:Status-Status} ${Version}\n' "$package" 2>/dev/null)" || return 1
-    read -r status installed <<< "$observed"
-    if [[ "$status" != installed || -z "$installed" ]]; then
+    read -r status installed extra <<< "$observed"
+    if [[ "$status" != installed || -z "$installed" || -n "$extra" ]]; then
         print_error "Package $package is not installed"
         return 1
     fi
@@ -1301,15 +1323,56 @@ verify_deb_installed() {
     fi
 }
 
+verify_apt_package_installed() {
+    local package="$1" expected="${2:-${AF_APT_TARGET_VERSION:-}}" observed="" status="" installed="" extra=""
+    observed="$(dpkg-query -W -f='${db:Status-Status} ${Version}\n' "$package" 2>/dev/null || true)"
+    read -r status installed extra <<< "$observed"
+    if [[ "$status" != installed || -z "$installed" || -n "$extra" ]]; then
+        print_error "APT package $package is not installed (dpkg status: ${status:-missing})"
+        return 1
+    fi
+    if [[ -n "$expected" && "$installed" != "$expected" ]]; then
+        print_error "APT package $package installed version ($installed) does not match requested exact version ($expected)"
+        return 1
+    fi
+}
+
 installed_apt_package_version() {
-    local observed status version
+    local observed status version extra=""
     observed="$(dpkg-query -W -f='${db:Status-Status} ${Version}\n' "$1" 2>/dev/null || true)"
-    read -r status version <<< "$observed"
-    if [[ "$status" == installed && -n "$version" ]]; then
+    read -r status version extra <<< "$observed"
+    if [[ "$status" == installed && -n "$version" && -z "$extra" ]]; then
         printf '%s\n' "$version"
     else
         printf '<none>\n'
     fi
+}
+
+resolve_installed_apt_package_version() {
+    local package="$1" fallback="${2:-}" expected="" installed=""
+    if [[ "${AF_APT_LOCAL_DEB:-false}" != true ]]; then
+        if [[ -n "${AF_APT_TARGET_VERSION:-}" ]]; then
+            expected="${AF_APT_TARGET_VERSION}"
+        elif [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+            expected="$(af_validate_exact_apt_version "${AF_TARGET_VERSION}")" || return 1
+        fi
+    fi
+    if [[ -n "$expected" ]]; then
+        verify_apt_package_installed "$package" "$expected" || return 1
+        printf '%s\n' "$expected"
+        return 0
+    fi
+    installed="$(installed_apt_package_version "$package")" || return 1
+    if [[ "$installed" != '<none>' && -n "$installed" ]]; then
+        printf '%s\n' "$installed"
+        return 0
+    fi
+    if [[ -n "$fallback" ]]; then
+        printf '%s\n' "$fallback"
+        return 0
+    fi
+    print_error "APT package $package is not installed"
+    return 1
 }
 
 apt_reinstall_marker_path() {
@@ -1331,8 +1394,17 @@ record_apt_package_for_rollback() {
 }
 
 prepare_apt_package_transaction() {
-    local receipt="$1" package marker installed previous="" normalized
+    local local_deb=false
+    if [[ "${1:-}" == "--local-deb" ]]; then
+        local_deb=true
+        shift
+    fi
+    local receipt="$1" package marker installed previous="" normalized target=""
     shift
+    [[ "$#" -gt 0 ]] || {
+        print_error "prepare_apt_package_transaction requires at least one Debian package name"
+        return 1
+    }
     validate_config_paths "$(dirname "$receipt")/.af-apt-receipt-check" || return 1
     if [[ -f "$receipt" && ! -L "$receipt" ]]; then
         previous="$(safe_config_python "$receipt" <<'PYEOF'
@@ -1343,6 +1415,23 @@ PYEOF
 )" || return 1
     fi
     declare -ag AF_APT_REINSTALL_PACKAGES=() AF_APT_TRANSACTION_PACKAGES=()
+    AF_APT_PRIMARY_PACKAGE="$1"
+    AF_APT_TARGET_VERSION=""
+    AF_APT_LOCAL_DEB="$local_deb"
+    if [[ "$local_deb" != true && -n "${AF_TARGET_VERSION:-}" ]]; then
+        target="$(af_validate_exact_apt_version "${AF_TARGET_VERSION}")" || return 1
+        AF_APT_TARGET_VERSION="$target"
+        if [[ -e "$receipt" || -L "$receipt" ]]; then
+            write_app_version "$receipt" "$target" --check || return 1
+        fi
+        if [[ "${AF_ALLOW_DOWNGRADE:-0}" != "1" ]]; then
+            installed="$(installed_apt_package_version "$AF_APT_PRIMARY_PACKAGE")" || return 1
+            if [[ "$installed" != '<none>' && -n "$installed" ]] && ! deb_compare_versions "$target" ge "$installed"; then
+                print_error "Refusing to downgrade APT package ${AF_APT_PRIMARY_PACKAGE} from ${installed} to ${target}"
+                return 1
+            fi
+        fi
+    fi
     record_apt_package_for_rollback "$@" || return 1
     for package in "$@"; do
         AF_APT_TRANSACTION_PACKAGES+=("$package")
@@ -1351,44 +1440,86 @@ PYEOF
         installed="$(installed_apt_package_version "$package")" || return 1
         normalized="${installed#*:}"
         normalized="${normalized%%-*}"
-        if [[ -f "$marker" || ( "$installed" != '<none>' && -z "$previous" ) || ( -n "$previous" && "$installed" != "$previous" && "$normalized" != "${previous#v}" ) ]]; then
+        if [[ -f "$marker" || ( "$installed" != '<none>' && -z "$previous" ) || ( "$package" == "$AF_APT_PRIMARY_PACKAGE" && -n "$previous" && "$installed" != "$previous" && "$normalized" != "${previous#v}" ) ]]; then
             AF_APT_REINSTALL_PACKAGES+=("$package")
         fi
     done
 }
 
 apt-get() {
-    local package argument selected=false present=false
-    local -a additional=()
+    local package argument selected=false primary_selected=false present=false
+    local -a rewritten=() additional=() extra_flags=()
     [[ -v AF_APT_TRANSACTION_PACKAGES ]] || declare -ag AF_APT_TRANSACTION_PACKAGES=()
     [[ -v AF_APT_REINSTALL_PACKAGES ]] || declare -ag AF_APT_REINSTALL_PACKAGES=()
+    local primary="${AF_APT_PRIMARY_PACKAGE:-}"
+    local target="${AF_APT_TARGET_VERSION:-}"
+    local local_deb="${AF_APT_LOCAL_DEB:-false}"
+
     if [[ "${1:-}" == install ]]; then
-        for package in "${AF_APT_TRANSACTION_PACKAGES[@]}"; do
-            for argument in "${@:2}"; do
+        for argument in "${@:2}"; do
+            if [[ "$local_deb" != true && -n "$primary" && -n "$target" ]]; then
+                if [[ "$argument" == "$primary" ]]; then
+                    argument="${primary}=${target}"
+                    primary_selected=true
+                elif [[ "$argument" == "${primary}="* ]]; then
+                    if [[ "${argument#*=}" != "$target" ]]; then
+                        print_error "Refusing conflicting APT package target '$argument' for requested exact version '$target'"
+                        return 1
+                    fi
+                    primary_selected=true
+                elif [[ "$argument" == "${primary}/"* ]]; then
+                    print_error "Refusing floating APT release target '$argument' for requested exact version '$target'"
+                    return 1
+                fi
+            fi
+            rewritten+=("$argument")
+            for package in "${AF_APT_TRANSACTION_PACKAGES[@]}"; do
                 if [[ "$argument" == "$package" || "$argument" == "$package="* || "$argument" == /*.deb ]]; then
                     selected=true
                 fi
             done
         done
+
+        if [[ "$selected" == true ]]; then
+            if [[ "${#AF_APT_REINSTALL_PACKAGES[@]}" -gt 0 ]]; then
+                for package in "${AF_APT_REINSTALL_PACKAGES[@]}"; do
+                    present=false
+                    for argument in "${rewritten[@]}"; do
+                        if [[ "$argument" == "$package" || "$argument" == "$package="* || "$argument" == /*.deb ]]; then
+                            present=true
+                        fi
+                    done
+                    if [[ "$present" != true ]]; then
+                        if [[ "$local_deb" != true && -n "$target" && "$package" == "$primary" ]]; then
+                            additional+=("${package}=${target}")
+                            primary_selected=true
+                        else
+                            additional+=("$package")
+                        fi
+                    fi
+                done
+                extra_flags+=(--reinstall)
+            fi
+            if [[ "$primary_selected" == true && "${AF_ALLOW_DOWNGRADE:-0}" == "1" ]]; then
+                local has_allow_downgrades=false
+                for argument in "${rewritten[@]}"; do
+                    [[ "$argument" != "--allow-downgrades" ]] || has_allow_downgrades=true
+                done
+                [[ "$has_allow_downgrades" == true ]] || extra_flags+=(--allow-downgrades)
+            fi
+            command apt-get install "${extra_flags[@]}" "${rewritten[@]}" "${additional[@]}" || return $?
+            if [[ "$primary_selected" == true ]]; then
+                verify_apt_package_installed "$primary" "$target" || return 1
+            fi
+            return 0
+        fi
     fi
-    if [[ "$selected" == true && "${#AF_APT_REINSTALL_PACKAGES[@]}" -gt 0 ]]; then
-        for package in "${AF_APT_REINSTALL_PACKAGES[@]}"; do
-            present=false
-            for argument in "${@:2}"; do
-                if [[ "$argument" == "$package" || "$argument" == "$package="* || "$argument" == /*.deb ]]; then
-                    present=true
-                fi
-            done
-            [[ "$present" == true ]] || additional+=("$package")
-        done
-        command apt-get install --reinstall "${@:2}" "${additional[@]}"
-    else
-        command apt-get "$@"
-    fi
+    command apt-get "$@"
 }
 
 rollback_apt_packages() {
-    local state package previous installed marker reconciled failed=false
+    local state package previous installed raw_status marker reconciled failed=false idx
+    local -a remove_pkgs=() downgrade_pkgs=() downgrade_prevs=() downgrade_specs=()
     AF_APT_ROLLBACK_MUTATED=false
     [[ -d "${AF_TX_DIR:-}/apt-packages" ]] || return 0
     for state in "$AF_TX_DIR/apt-packages/"*; do
@@ -1396,15 +1527,58 @@ rollback_apt_packages() {
         package="${state##*/}"
         previous="$(cat -- "$state")"
         installed="$(installed_apt_package_version "$package")"
-        [[ "$installed" != "$previous" ]] || continue
-        AF_APT_ROLLBACK_MUTATED=true
-        reconciled=true
-        if [[ "$previous" == '<none>' ]]; then
-            DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "$package" || reconciled=false
-        else
-            DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "$package=$previous" || reconciled=false
+        if [[ "$installed" == "$previous" ]]; then
+            if [[ "$previous" == '<none>' ]]; then
+                raw_status="$(dpkg-query -W -f='${db:Status-Status}\n' "$package" 2>/dev/null || true)"
+                case "$raw_status" in
+                    unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)
+                        AF_APT_ROLLBACK_MUTATED=true
+                        remove_pkgs+=("$package")
+                        ;;
+                esac
+            fi
+            continue
         fi
+        AF_APT_ROLLBACK_MUTATED=true
+        if [[ "$previous" == '<none>' ]]; then
+            remove_pkgs+=("$package")
+        else
+            downgrade_pkgs+=("$package")
+            downgrade_prevs+=("$previous")
+            downgrade_specs+=("${package}=${previous}")
+        fi
+    done
+
+    if (( ${#remove_pkgs[@]} > 1 )); then
+        DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "${remove_pkgs[@]}" || true
+    fi
+    for package in "${remove_pkgs[@]}"; do
+        reconciled=true
         installed="$(installed_apt_package_version "$package")"
+        if [[ "$installed" != '<none>' ]]; then
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "$package" || reconciled=false
+            installed="$(installed_apt_package_version "$package")"
+        fi
+        if [[ "$reconciled" != true || "$installed" != '<none>' ]]; then
+            marker="$(apt_reinstall_marker_path "$package")" || return 1
+            printf '%s\n' '<none>' | write_config_file "$marker" 0600 || return 1
+            print_warn "APT recovery for $package requires reinstallation on the next attempt"
+            failed=true
+        fi
+    done
+
+    if (( ${#downgrade_specs[@]} > 1 )); then
+        DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "${downgrade_specs[@]}" || true
+    fi
+    for idx in "${!downgrade_pkgs[@]}"; do
+        package="${downgrade_pkgs[$idx]}"
+        previous="${downgrade_prevs[$idx]}"
+        reconciled=true
+        installed="$(installed_apt_package_version "$package")"
+        if [[ "$installed" != "$previous" ]]; then
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "${package}=${previous}" || reconciled=false
+            installed="$(installed_apt_package_version "$package")"
+        fi
         if [[ "$reconciled" != true || "$installed" != "$previous" ]]; then
             marker="$(apt_reinstall_marker_path "$package")" || return 1
             printf '%s\n' "$previous" | write_config_file "$marker" 0600 || return 1
@@ -1869,6 +2043,9 @@ begin_state_transaction() {
     AF_STATE_SNAPSHOT_READY=false
     AF_APT_REINSTALL_PACKAGES=()
     AF_APT_TRANSACTION_PACKAGES=()
+    AF_APT_PRIMARY_PACKAGE=""
+    AF_APT_TARGET_VERSION=""
+    AF_APT_LOCAL_DEB=false
     INSTALL_COMMITTED=false
     local staging_root
     staging_root="$(af_prepare_recovery_root "${AF_TRANSACTION_ROOT:-}")" || return 1

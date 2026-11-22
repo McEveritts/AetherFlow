@@ -2297,7 +2297,7 @@ pub(super) fn recipe_primary_apt_package(
             }
         }
     }
-    packages.last().cloned()
+    None
 }
 
 // -----------------------------------------------------------------------------
@@ -3218,31 +3218,91 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
 
             DeclarativeStep::AptInstall { packages, .. } => {
                 let primary_pkg = recipe_primary_apt_package(recipe, packages);
-                let mut prior_pkg_version = None;
-                if journal.has_existing_installation {
-                    if let Some(pkg_name) = primary_pkg.as_deref() {
-                        let dpkg_args = vec![
-                            "-W".to_string(),
-                            "-f=${Version}".to_string(),
-                            pkg_name.to_string(),
-                        ];
-                        if let Ok(dpkg_out) = self
-                            .runner
-                            .run_command("dpkg-query", &dpkg_args, &[], cancel)
-                            .await
+                let exact_apt_target: Option<String> =
+                    if primary_pkg.is_some() && recipe.package_id != "prometheus" {
+                        match self
+                            .env_cfg
+                            .expected_target_version
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
                         {
-                            if dpkg_out.success() {
-                                let queried = dpkg_out.stdout.trim().to_string();
-                                if !queried.is_empty() {
-                                    prior_pkg_version = Some(queried);
+                            Some(target) => {
+                                if !af_release::lifecycle::validate_exact_apt_version(target) {
+                                    return Err(PackageExecutorError::Validation(format!(
+                                    "Invalid exact Debian/APT target version '{}' for package '{}'",
+                                    target, recipe.package_id
+                                )));
                                 }
+                                Some(target.to_string())
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                let mut prior_pkg_version = None;
+                let mut primary_was_absent = false;
+                if let Some(pkg_name) = primary_pkg.as_deref() {
+                    let dpkg_args = vec![
+                        "-W".to_string(),
+                        "-f=${db:Status-Status} ${Version}\n".to_string(),
+                        pkg_name.to_string(),
+                    ];
+                    match self
+                        .runner
+                        .run_command("dpkg-query", &dpkg_args, &[], cancel)
+                        .await
+                    {
+                        Ok(dpkg_out) if dpkg_out.success() => {
+                            if let Some(installed) =
+                                af_release::lifecycle::parse_installed_dpkg_status_version(
+                                    &dpkg_out.stdout,
+                                )
+                            {
+                                if journal.has_existing_installation {
+                                    prior_pkg_version = Some(installed.to_string());
+                                }
+                            } else if !journal.has_existing_installation {
+                                primary_was_absent = true;
                             }
                         }
+                        Ok(_) => {
+                            if !journal.has_existing_installation {
+                                primary_was_absent = true;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    if journal.has_existing_installation {
                         if let Some(pre_ver) = journal.pre_existing_version.as_ref() {
-                            if prior_pkg_version.is_none()
-                                || prior_pkg_version.as_deref() != Some(pre_ver.as_str())
-                            {
+                            let keep_full_live = prior_pkg_version.as_deref().is_some_and(|live| {
+                                live == pre_ver.as_str()
+                                    || af_release::lifecycle::apt_receipt_matches_live_debian_revision(
+                                        "apt", pre_ver, live,
+                                    )
+                            });
+                            if !keep_full_live {
                                 prior_pkg_version = Some(pre_ver.clone());
+                            }
+                        }
+                    }
+                }
+
+                if let (Some(pkg_name), Some(target)) =
+                    (primary_pkg.as_deref(), exact_apt_target.as_deref())
+                {
+                    if !is_downgrade_allowed() {
+                        if let Some(prev) = prior_pkg_version.as_deref() {
+                            if af_release::lifecycle::validate_exact_apt_version(prev)
+                                && af_release::lifecycle::compare_debian_versions_str(target, prev)
+                                    == std::cmp::Ordering::Less
+                            {
+                                return Err(PackageExecutorError::Validation(format!(
+                                    "refusing to downgrade APT package {} from installed version {} to {}",
+                                    pkg_name, prev, target
+                                )));
                             }
                         }
                     }
@@ -3259,7 +3319,24 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     "-y".to_string(),
                     "-qq".to_string(),
                 ];
-                args.extend(packages.iter().cloned());
+                if exact_apt_target.is_some() && is_downgrade_allowed() {
+                    args.push("--allow-downgrades".to_string());
+                }
+                let install_specs: Vec<String> =
+                    match (primary_pkg.as_deref(), exact_apt_target.as_deref()) {
+                        (Some(primary_name), Some(target)) => packages
+                            .iter()
+                            .map(|pkg| {
+                                if pkg == primary_name {
+                                    format!("{pkg}={target}")
+                                } else {
+                                    pkg.clone()
+                                }
+                            })
+                            .collect(),
+                        _ => packages.clone(),
+                    };
+                args.extend(install_specs.iter().cloned());
                 let out = self
                     .runner
                     .run_command("apt-get", &args, &apt_env, cancel)
@@ -3269,16 +3346,53 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         step: "apt_install".to_string(),
                         reason: format!(
                             "apt-get install {:?} exited with {}: {}",
-                            packages,
+                            install_specs,
                             out.exit_code,
                             out.combined_output()
                         ),
                     });
                 }
-                if let (Some(pkg_name), Some(old_ver)) = (primary_pkg, prior_pkg_version) {
-                    journal.record_apt_upgrade(&pkg_name, &old_ver);
+                if let Some(ref pkg_name) = primary_pkg {
+                    if let Some(old_ver) = prior_pkg_version {
+                        journal.record_apt_upgrade(pkg_name, &old_ver);
+                    } else if primary_was_absent {
+                        journal.record_apt_install(pkg_name);
+                    }
                     if !recipe.service_name.is_empty() {
                         journal.record_touched_service(&recipe.service_name);
+                    }
+                    if let Some(ref target) = exact_apt_target {
+                        let verify_args = vec![
+                            "-W".to_string(),
+                            "-f=${db:Status-Status} ${Version}\n".to_string(),
+                            pkg_name.clone(),
+                        ];
+                        let verify_out = self
+                            .runner
+                            .run_command("dpkg-query", &verify_args, &[], cancel)
+                            .await?;
+                        let installed = if verify_out.success() {
+                            af_release::lifecycle::parse_installed_dpkg_status_version(
+                                &verify_out.stdout,
+                            )
+                        } else {
+                            None
+                        };
+                        match installed {
+                            Some(ver) if ver == target => {}
+                            Some(ver) => {
+                                return Err(PackageExecutorError::VerificationFailed(format!(
+                                    "Installed APT package '{}' version '{}' does not match requested exact target version '{}'",
+                                    pkg_name, ver, target
+                                )));
+                            }
+                            None => {
+                                return Err(PackageExecutorError::VerificationFailed(format!(
+                                    "APT package '{}' is not in installed dpkg status after installing exact target '{}'",
+                                    pkg_name, target
+                                )));
+                            }
+                        }
                     }
                 }
                 if recipe.package_id == "prometheus" {
@@ -3732,7 +3846,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
 
             DeclarativeStep::CaptureDpkgVersion {
                 package,
-                fallback_version,
+                fallback_version: _,
                 version_file_path,
                 owner,
                 group,
@@ -3740,7 +3854,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             } => {
                 let args = vec![
                     "-W".to_string(),
-                    "-f=${Version}".to_string(),
+                    "-f=${db:Status-Status} ${Version}\n".to_string(),
                     package.clone(),
                 ];
                 let out = self
@@ -3761,21 +3875,46 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         ),
                     });
                 }
-                let resolved_ver = normalize_dpkg_version(&out.stdout, fallback_version);
-                if recipe.package_id == "prometheus" {
-                    if let Some(target) = self
-                        .env_cfg
-                        .expected_target_version
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        if !af_release::lifecycle::versions_match_target(&resolved_ver, target) {
-                            return Err(PackageExecutorError::VerificationFailed(format!(
-                                "APT prometheus package version '{}' does not satisfy expected upstream target version '{}'",
-                                resolved_ver, target
-                            )));
-                        }
+                let Some(resolved_ref) =
+                    af_release::lifecycle::parse_installed_dpkg_status_version(&out.stdout)
+                else {
+                    return Err(PackageExecutorError::StepFailed {
+                        step: "capture_dpkg_version".to_string(),
+                        reason: format!(
+                            "dpkg-query for '{}' did not report an installed package with a valid Debian version (got {:?})",
+                            package,
+                            out.stdout.trim()
+                        ),
+                    });
+                };
+                let resolved_ver = if recipe.package_id == "prometheus" {
+                    normalize_dpkg_version(resolved_ref, resolved_ref)
+                } else {
+                    resolved_ref.to_string()
+                };
+                if let Some(target) = self
+                    .env_cfg
+                    .expected_target_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let matches_target = if recipe.package_id == "prometheus" {
+                        resolved_ref == target
+                            || (!target.contains(':')
+                                && !target.contains('-')
+                                && af_release::lifecycle::versions_match_target(
+                                    &resolved_ver,
+                                    target,
+                                ))
+                    } else {
+                        resolved_ver == target
+                    };
+                    if !matches_target {
+                        return Err(PackageExecutorError::VerificationFailed(format!(
+                            "APT {} package version '{}' does not satisfy expected target version '{}'",
+                            package, resolved_ver, target
+                        )));
                     }
                 }
                 vars.insert("VERSION".to_string(), resolved_ver.clone());
@@ -3794,7 +3933,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         if let Ok(existing_raw) = fs::read_to_string(&resolved_path) {
                             let existing_ver = existing_raw.trim().trim_start_matches('v');
                             let clean_ver = resolved_ver.trim().trim_start_matches('v');
-                            if is_semver_strictly_greater(existing_ver, clean_ver) {
+                            if !existing_ver.is_empty()
+                                && af_release::lifecycle::compare_debian_versions_str(
+                                    existing_ver,
+                                    clean_ver,
+                                ) == std::cmp::Ordering::Greater
+                            {
                                 return Err(PackageExecutorError::Validation(format!(
                                     "refusing to downgrade {} from installed version {} to {}",
                                     recipe.package_id, existing_ver, clean_ver

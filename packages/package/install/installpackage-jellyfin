@@ -95,7 +95,7 @@ seed_jellyfin_master_user ${APP_PORT}
 
 mkdir -p /var/lib/jellyfin
 VERSION_FILE=/var/lib/jellyfin/.af-version
-queue_app_version "$VERSION_FILE" "$(dpkg-query -W -f='${Version}' jellyfin-server)"
+queue_app_version "$VERSION_FILE" "$(resolve_installed_apt_package_version jellyfin)"
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Jellyfin installed on port ${APP_PORT}."

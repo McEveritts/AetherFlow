@@ -68,7 +68,7 @@ af_logged systemctl enable --now plexmediaserver
 af_logged systemctl restart plexmediaserver
 systemctl is-active --quiet plexmediaserver
 mkdir -p /var/lib/plexmediaserver
-queue_app_version /var/lib/plexmediaserver/.af-version "$(dpkg-query -W -f='${Version}' plexmediaserver)"
+queue_app_version /var/lib/plexmediaserver/.af-version "$(resolve_installed_apt_package_version plexmediaserver)"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

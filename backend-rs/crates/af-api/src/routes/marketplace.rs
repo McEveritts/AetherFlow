@@ -3004,6 +3004,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
     let is_retired = pkg.update_source == "retired" || pkg.name == "readarr";
     let is_pinned = pkg.update_source.eq_ignore_ascii_case("pinned");
     let is_vendor = pkg.update_source.eq_ignore_ascii_case("vendor");
+    let is_apt = pkg.update_source.eq_ignore_ascii_case("apt");
 
     if let Some(ref target) = expected_target_version {
         if !af_runner::af_release::lifecycle::is_valid_target_version_token(target) {
@@ -3012,6 +3013,18 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                 "BAD_REQUEST",
                 "Invalid target version token format",
             );
+        }
+    }
+
+    if is_apt && action != "remove" {
+        if let Err(reason) = af_runner::validate_package_target_policy(
+            &pkg.name,
+            &pkg.update_source,
+            &pkg.update_package,
+            action,
+            expected_target_version.as_deref(),
+        ) {
+            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", reason);
         }
     }
 
@@ -3223,6 +3236,18 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                     );
                 }
             } else {
+                if is_apt
+                    && !af_runner::af_release::lifecycle::validate_exact_apt_version(db_latest)
+                {
+                    return api_error(
+                        StatusCode::CONFLICT,
+                        "CONFLICT",
+                        format!(
+                            "Cannot start update: confirmed APT latest version '{}' for '{}' is not an exact Debian version",
+                            db_latest, pkg.name
+                        ),
+                    );
+                }
                 expected_target_version = Some(db_latest.to_string());
             }
         }

@@ -16,7 +16,16 @@ async fn exercise_catalog_recipe(
         &recipe, PackageAction::Install, CancellationToken::new(), |_| {},
     ).await.unwrap();
     assert!(install.lock_present, "{package}");
-    assert_eq!(install.resolved_version.as_deref(), Some("0.14.2"));
+    let expected_ver = if package == "rclone" || package == "prometheus" {
+        "0.14.2"
+    } else {
+        "1:0.14.2-1ubuntu2"
+    };
+    assert_eq!(
+        install.resolved_version.as_deref(),
+        Some(expected_ver),
+        "{package}"
+    );
     let commands = runner.recorded_commands();
     let dependency = if package == "rclone" { "fuse3" } else { apt_package };
     assert!(commands.iter().any(|command| command.program == "apt-get"
@@ -977,9 +986,9 @@ async fn rollback_service_state() {
     let original_unit_body = "[Unit]\nDescription=Existing Active Quassel\n[Service]\nExecStart=/usr/bin/quasselcore --port=4242\n";
     fs::write(&existing_unit, original_unit_body).unwrap();
 
-    // Fail on call 9 (`systemctl enable --now -- quasselcore.service`) after overwriting unit
+    // Fail on call 10 (`systemctl enable --now -- quasselcore.service`) after overwriting unit
     let runner = MockCommandRunner {
-        fail_on_call: Some(9),
+        fail_on_call: Some(10),
         ..Default::default()
     };
     let executor = DeclarativePackageExecutor::with_runner(

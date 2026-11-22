@@ -54,7 +54,7 @@ if command -v x2godbadmin >/dev/null 2>&1; then
     af_logged x2godbadmin --createdb || true
 fi
 
-INSTALLED_VER="$(dpkg-query -W -f='${Version}' x2goserver 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '4.1.0')"
+INSTALLED_VER="$(resolve_installed_apt_package_version x2goserver)"
 queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting x2goserver.service..."

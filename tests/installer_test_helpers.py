@@ -19,6 +19,7 @@ def common_functions(*names):
     names = tuple(dict.fromkeys((
         'af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', 'af_github_curl', 'deb_compare_versions',
         'af_strip_version_prefix', 'af_normalize_exact_registry_version', 'af_read_npm_package_version',
+        'af_validate_exact_apt_version', 'installed_apt_package_version', 'verify_apt_package_installed', 'resolve_installed_apt_package_version',
         'af_resolve_recovery_root', 'af_prepare_recovery_root', 'af_create_recovery_backup_dir',
         *names,
     )))

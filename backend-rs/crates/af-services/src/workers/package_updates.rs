@@ -2231,26 +2231,11 @@ pub(super) fn apt_receipt_matches_live_debian_revision(
     receipt_ver: &str,
     live_ver: &str,
 ) -> bool {
-    if !matches!(
-        update_source.trim().to_ascii_lowercase().as_str(),
-        "apt" | "deb" | "dpkg"
-    ) {
-        return false;
-    }
-    let live_trimmed = live_ver.trim();
-    let without_epoch = match live_trimmed.split_once(':') {
-        Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) => {
-            rest
-        }
-        _ => live_trimmed,
-    };
-    let Some((live_upstream, deb_rev)) = without_epoch.rsplit_once('-') else {
-        return false;
-    };
-    !live_upstream.contains('~')
-        && af_release::lifecycle::is_valid_apt_debian_revision_suffix(deb_rev)
-        && (af_release::lifecycle::versions_match_target(receipt_ver, live_upstream)
-            || af_release::lifecycle::versions_match_target(live_upstream, receipt_ver))
+    af_release::lifecycle::apt_receipt_matches_live_debian_revision(
+        update_source,
+        receipt_ver,
+        live_ver,
+    )
 }
 
 pub async fn probe_installed_package_version_strict(pkg: &Package) -> anyhow::Result<String> {
@@ -2762,7 +2747,7 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                 }
             }
             dpkg_args.push("-W".to_string());
-            dpkg_args.push("-f=${Version}".to_string());
+            dpkg_args.push("-f=${db:Status-Status} ${Version}\n".to_string());
             dpkg_args.push(apt_package.to_string());
             let sandbox_spec = af_runner::probe_metadata::ProbeSandboxSpec {
                 drop_to_path_owner: false,
@@ -2787,16 +2772,17 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                 );
             }
 
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let version = extract_version(&combined, &pkg.version_regex);
-            if version.is_empty() {
-                anyhow::bail!("unable to parse installed apt version for {}", pkg.name);
-            }
-            Ok(version)
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let Some(version) = af_release::lifecycle::parse_installed_dpkg_status_version(&stdout)
+            else {
+                anyhow::bail!(
+                    "installed apt package '{}' for {} is not in installed dpkg state or returned invalid version (output: '{}')",
+                    apt_package,
+                    pkg.name,
+                    stdout.trim()
+                );
+            };
+            Ok(version.to_string())
         }
         _ => {
             if pkg.version_command.is_empty() {
@@ -3289,10 +3275,15 @@ pub(super) async fn detect_latest_apt_version(
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     if let Some(candidate) = af_release::lifecycle::parse_apt_policy_candidate(&stdout) {
-        let version = normalize_tag_or_version_prefix(candidate).trim();
-        if !version.is_empty() {
+        let version = candidate.trim();
+        if af_release::lifecycle::validate_exact_apt_version(version) {
             return Ok((version.to_string(), String::new(), Utc::now().to_rfc3339()));
         }
+        anyhow::bail!(
+            "apt-cache policy returned invalid Debian candidate version '{}' for '{}'",
+            version,
+            package_name
+        );
     }
 
     anyhow::bail!("candidate version not found")

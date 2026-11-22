@@ -107,8 +107,8 @@ if [[ -n "${AUTH_KEY}" ]]; then
 fi
 
 mkdir -p /var/lib/tailscale
-TS_VERSION="$(dpkg-query -W -f='${Version}' tailscale 2>/dev/null || true)"
-queue_app_version /var/lib/tailscale/.af-version "${TS_VERSION:-1.76.6}"
+TS_VERSION="$(resolve_installed_apt_package_version tailscale "1.76.6")"
+queue_app_version /var/lib/tailscale/.af-version "${TS_VERSION}"
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Tailscale Mesh VPN installed. Open Network > Tailscale Mesh to authenticate this node if not already enrolled."

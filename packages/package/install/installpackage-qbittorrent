@@ -111,7 +111,7 @@ af_logged systemctl enable --now qbittorrent
 af_logged systemctl restart qbittorrent
 
 systemctl is-active --quiet qbittorrent
-queue_app_version /var/lib/qbittorrent/.af-version "$(dpkg-query -W -f='${Version}' qbittorrent-nox)"
+queue_app_version /var/lib/qbittorrent/.af-version "$(resolve_installed_apt_package_version qbittorrent-nox)"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

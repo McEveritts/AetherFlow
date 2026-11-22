@@ -52,7 +52,7 @@ fi
 mkdir -p /var/lib/znc/configs /var/lib/znc/modules /var/lib/znc/users
 
 # Record version
-ZNC_VER="$(znc --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || dpkg-query -W -f='${Version}' znc 2>/dev/null || echo "1.8.2")"
+ZNC_VER="$(resolve_installed_apt_package_version znc)"
 queue_app_version /var/lib/znc/.af-version "$ZNC_VER"
 
 report_progress 50 "Generating initial ZNC configuration and SSL certificate..."
@@ -63,7 +63,7 @@ fi
 
 validate_config_paths /var/lib/znc/configs/znc.conf
 if [[ ! -f /var/lib/znc/configs/znc.conf ]]; then
-    ZNC_CFG_VER="$(printf '%s' "$ZNC_VER" | grep -oE '^[0-9]+\.[0-9]+' || echo "1.9")"
+    ZNC_CFG_VER="$(printf '%s' "${ZNC_VER#*:}" | grep -oE '^[0-9]+\.[0-9]+' || echo "1.9")"
     ZNC_CFG_VER="${ZNC_CFG_VER:-1.9}"
     ZNC_SALT="$(python3 -c 'import secrets; print(secrets.token_hex(16))' 2>/dev/null || openssl rand -hex 16)"
     ZNC_HASH="$(AF_SEED_PASS="$MASTER_PASS" AF_SEED_SALT="$ZNC_SALT" python3 -c 'import os,hashlib; print(hashlib.sha256((os.environ["AF_SEED_PASS"]+os.environ["AF_SEED_SALT"]).encode("utf-8")).hexdigest())')"

@@ -6280,3 +6280,73 @@ async fn uninstall_purge_addresses_retained_installation_and_refuses_ambiguous_o
     std::env::set_current_dir(previous_directory).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_api_apt_exact_target_policy_rejects_non_debian_tokens() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, _connection) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    af_services::workers::ensure_app_updates_columns();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/install")).unwrap();
+    let install_script = root.join("packages/package/install/installpackage-quassel");
+    std::fs::write(&install_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&install_script, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let quassel_pkg = af_models::Package {
+        name: "quassel".into(),
+        label: "Quassel Core".into(),
+        service_name: "quasselcore".into(),
+        lock_file: "/install/.quassel.lock".into(),
+        update_source: "apt".into(),
+        update_package: "quassel-core".into(),
+        default_port: 4242,
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&vec![quassel_pkg]).unwrap()).unwrap();
+    std::fs::write(
+        &automation,
+        r#"{"quassel":{"update_source":"apt","update_package":"quassel-core"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+    std::env::set_var("AETHERFLOW_INSTALL_ROOT", &root);
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+
+    let admin = progress_test_user("admin", None);
+    for bad_target in ["v1.2.3", "1.2.*", "deadbeef", "1.2_3", "1.2.3-"] {
+        let resp = dispatch_package_lifecycle_with_target(
+            "quassel".to_string(),
+            "install",
+            "installing",
+            false,
+            Some(bad_target.to_string()),
+            admin.clone(),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "APT install with non-Debian token {bad_target:?} must return 400 BAD_REQUEST"
+        );
+    }
+
+    std::env::set_current_dir(previous_directory).unwrap();
+    std::env::remove_var("AETHERFLOW_FS_ROOT");
+    std::env::remove_var("AETHERFLOW_INSTALL_ROOT");
+    std::env::remove_var("AETHERFLOW_PACKAGES_CONFIG");
+    std::env::remove_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
+    let _ = std::fs::remove_dir_all(&root);
+}

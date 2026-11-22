@@ -973,9 +973,18 @@ fn discover_live_upstream_target_version(
                 return Err(format!("apt-cache policy returned non-zero for {apt_pkg}"));
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
-            af_release::lifecycle::parse_apt_policy_candidate(&stdout)
-                .and_then(normalize_discovered_target_version)
-                .ok_or_else(|| format!("no apt candidate version available for {apt_pkg}"))
+            match af_release::lifecycle::parse_apt_policy_candidate(&stdout) {
+                Some(candidate)
+                    if af_release::lifecycle::validate_exact_apt_version(candidate.trim()) =>
+                {
+                    Ok(candidate.trim().to_string())
+                }
+                Some(candidate) => Err(format!(
+                    "invalid apt candidate version {:?} for {apt_pkg}",
+                    candidate.trim()
+                )),
+                None => Err(format!("no apt candidate version available for {apt_pkg}")),
+            }
         }
         "vendor" => Err(format!(
             "package '{}' uses a multi-component vendor installer and does not support exact-version updates; use reinstall or the vendor updater instead",

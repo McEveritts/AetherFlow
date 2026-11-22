@@ -7983,6 +7983,86 @@ pub fn probe_live_runtime_version(
         }
     };
 
+    let is_apt = pkg.update_source.eq_ignore_ascii_case("apt");
+    let fallback_sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
+        drop_to_path_owner: true,
+        fs_root: env_cfg.fs_root.clone(),
+        package_user: Some(package_id.to_string()),
+    };
+    let dpkg_prog = if let Some(root) = &env_cfg.fs_root {
+        [
+            "usr/bin/dpkg-query",
+            "usr/local/bin/dpkg-query",
+            "bin/dpkg-query",
+        ]
+        .into_iter()
+        .map(|rel| root.join(rel))
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dpkg-query".to_string())
+    } else if Path::new("/usr/bin/dpkg-query").exists() {
+        "/usr/bin/dpkg-query".to_string()
+    } else {
+        "dpkg-query".to_string()
+    };
+
+    if is_apt {
+        let apt_pkg = if !pkg.update_package.trim().is_empty() {
+            pkg.update_package.trim()
+        } else {
+            package_id
+        };
+        let mut dpkg_args: Vec<String> = Vec::new();
+        if let Some(root) = &env_cfg.fs_root {
+            let dpkg_dir = root.join("var/lib/dpkg");
+            if dpkg_dir.exists() {
+                dpkg_args.push(format!("--admindir={}", dpkg_dir.display()));
+            }
+        }
+        dpkg_args.push("-W".to_string());
+        dpkg_args.push("-f=${db:Status-Status} ${Version}\n".to_string());
+        dpkg_args.push(apt_pkg.to_string());
+
+        let mut cmd = std::process::Command::new(&dpkg_prog);
+        if let Err(err) = crate::probe_metadata::configure_sandboxed_std_command(
+            &mut cmd,
+            Path::new(&dpkg_prog),
+            &dpkg_args,
+            &fallback_sandbox_spec,
+        ) {
+            return LiveRuntimeProbeOutcome::Failed(format!(
+                "Refused unsafe dpkg-query probe for '{}': {}",
+                apt_pkg, err
+            ));
+        }
+        cmd.args(&dpkg_args);
+        return match run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(ver) =
+                    af_release::lifecycle::parse_installed_dpkg_status_version(&stdout)
+                {
+                    LiveRuntimeProbeOutcome::Verified(ver.to_string())
+                } else {
+                    LiveRuntimeProbeOutcome::Failed(format!(
+                        "Package '{}' APT package '{}' is not in installed dpkg state or has invalid version (output: '{}')",
+                        package_id,
+                        apt_pkg,
+                        stdout.trim()
+                    ))
+                }
+            }
+            Ok(output) => LiveRuntimeProbeOutcome::Failed(format!(
+                "Package '{}' APT dpkg-query for '{}' exited with status: {}",
+                package_id, apt_pkg, output.status
+            )),
+            Err(e) => LiveRuntimeProbeOutcome::Failed(format!(
+                "Package '{}' failed to execute dpkg-query for '{}': {}",
+                package_id, apt_pkg, e
+            )),
+        };
+    }
+
     let is_cat_receipt = pkg.version_command.len() == 2
         && pkg.version_command[0] == "cat"
         && pkg.version_command[1].ends_with("/.af-version");
@@ -8154,9 +8234,7 @@ pub fn probe_live_runtime_version(
         }
     }
 
-    // 3. Binary or dpkg version
-    let is_apt = pkg.update_source.eq_ignore_ascii_case("apt");
-
+    // 3. Binary or dpkg version (non-APT packages such as local .deb installs)
     let mut pkg_names = Vec::new();
     if !pkg.update_package.is_empty() {
         pkg_names.push(pkg.update_package.clone());
@@ -8164,28 +8242,6 @@ pub fn probe_live_runtime_version(
     pkg_names.push(package_id.to_string());
     pkg_names.push(pkg.name.clone());
     pkg_names.push(pkg.service_name.clone());
-
-    let fallback_sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
-        drop_to_path_owner: true,
-        fs_root: env_cfg.fs_root.clone(),
-        package_user: Some(package_id.to_string()),
-    };
-    let dpkg_prog = if let Some(root) = &env_cfg.fs_root {
-        [
-            "usr/bin/dpkg-query",
-            "usr/local/bin/dpkg-query",
-            "bin/dpkg-query",
-        ]
-        .into_iter()
-        .map(|rel| root.join(rel))
-        .find(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "dpkg-query".to_string())
-    } else if Path::new("/usr/bin/dpkg-query").exists() {
-        "/usr/bin/dpkg-query".to_string()
-    } else {
-        "dpkg-query".to_string()
-    };
 
     for name in &pkg_names {
         if name.is_empty() {
@@ -8199,7 +8255,7 @@ pub fn probe_live_runtime_version(
             }
         }
         dpkg_args.push("-W".to_string());
-        dpkg_args.push("-f=${Version}\n".to_string());
+        dpkg_args.push("-f=${db:Status-Status} ${Version}\n".to_string());
         dpkg_args.push(name.clone());
 
         let mut cmd = std::process::Command::new(&dpkg_prog);
@@ -8216,9 +8272,11 @@ pub fn probe_live_runtime_version(
         cmd.args(&dpkg_args);
         if let Ok(output) = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
             if output.status.success() {
-                let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !ver.is_empty() {
-                    return LiveRuntimeProbeOutcome::Verified(ver);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(ver) =
+                    af_release::lifecycle::parse_installed_dpkg_status_version(&stdout)
+                {
+                    return LiveRuntimeProbeOutcome::Verified(ver.to_string());
                 }
             }
         }
@@ -8293,13 +8351,6 @@ pub fn probe_live_runtime_version(
                 }
             }
         }
-    }
-
-    if is_apt {
-        return LiveRuntimeProbeOutcome::Failed(format!(
-            "Package '{}' is configured with apt update_source, but dpkg-query failed to resolve its version",
-            package_id
-        ));
     }
 
     LiveRuntimeProbeOutcome::NotConfigured
@@ -8858,8 +8909,19 @@ where
         }
         LiveRuntimeProbeOutcome::Verified(live_ver) => {
             if let Some(receipt_ver) = receipt_opt {
+                let apt_legacy_compat = package_definition(package_id)
+                    .ok()
+                    .map(|pkg| {
+                        af_release::lifecycle::apt_receipt_matches_live_debian_revision(
+                            &pkg.update_source,
+                            &receipt_ver,
+                            &live_ver,
+                        )
+                    })
+                    .unwrap_or(false);
                 if !af_release::lifecycle::versions_match_target(&receipt_ver, &live_ver)
                     && !af_release::lifecycle::versions_match_target(&live_ver, &receipt_ver)
+                    && !apt_legacy_compat
                 {
                     tracing::warn!(
                         package = %package_id,

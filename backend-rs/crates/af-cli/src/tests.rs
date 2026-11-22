@@ -3118,3 +3118,29 @@ fn cli_purge_handles_pre_fix_compatibility_ambiguous_markerless_and_never_manage
         assert_eq!(transport.package_calls.lock().unwrap().len(), 0);
     }
 }
+
+#[test]
+fn test_cli_apt_exact_target_policy_parity() {
+    let global = GlobalOptions::default();
+
+    for (pkg, valid_ver) in [
+        ("quassel", "1:0.14.0-1+deb12u1"),
+        ("transmission", "4.0.6+dfsg-3+deb13u1"),
+        ("wireguard", "1.0.20210914-1.1+b1"),
+        ("jellyfin", "10.10.3+deb12"),
+    ] {
+        validate_cli_package_target_policy(&global, pkg, "install", Some(valid_ver))
+            .unwrap_or_else(|e| {
+                panic!("APT package {pkg} must accept exact Debian version {valid_ver}: {e:?}")
+            });
+        validate_cli_package_target_policy(&global, pkg, "install", None)
+            .unwrap_or_else(|e| panic!("APT package {pkg} must allow unpinned install: {e:?}"));
+    }
+
+    for bad in ["v1.2.3", "latest", "1.2.*", "1.2_3", "deadbeef"] {
+        assert!(
+            validate_cli_package_target_policy(&global, "quassel", "update", Some(bad)).is_err(),
+            "CLI APT policy must reject non-Debian token {bad:?}"
+        );
+    }
+}

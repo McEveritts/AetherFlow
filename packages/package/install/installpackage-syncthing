@@ -120,7 +120,7 @@ af_logged systemctl enable --now syncthing
 
 af_logged systemctl restart syncthing
 systemctl is-active --quiet syncthing
-queue_app_version /var/lib/syncthing/.af-version "$(dpkg-query -W -f='${Version}' syncthing)"
+queue_app_version /var/lib/syncthing/.af-version "$(resolve_installed_apt_package_version syncthing)"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

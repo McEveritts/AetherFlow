@@ -70,7 +70,7 @@ cleanup_kasmvnc() {
 }
 trap cleanup_kasmvnc EXIT
 
-prepare_apt_package_transaction /var/lib/kasmvnc/.af-version kasmvncserver
+prepare_apt_package_transaction --local-deb /var/lib/kasmvnc/.af-version kasmvncserver
 report_progress 10 "Installing KasmVNC prerequisites and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
 af_logged apt-get update -qq

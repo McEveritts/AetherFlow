@@ -86,7 +86,7 @@ EOF
 fi
 chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
 
-INSTALLED_VER="$(dpkg-query -W -f='${Version}' novnc 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '1.5.0')"
+INSTALLED_VER="$(resolve_installed_apt_package_version novnc)"
 queue_app_version "${CONFIG_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 85 "Creating systemd units for TigerVNC (:1) and noVNC WebSocket proxy..."

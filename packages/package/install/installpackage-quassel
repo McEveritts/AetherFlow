@@ -84,7 +84,7 @@ set_config_value /etc/default/quasselcore ini PORT "\"${LISTEN_PORT}\""
 
 chown -hRP "${QUASSEL_USER}:${QUASSEL_USER}" "${DATA_DIR}" "${LOG_DIR}"
 
-INSTALLED_VER="$(dpkg-query -W -f='${Version}' quassel-core 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '0.14.0')"
+INSTALLED_VER="$(resolve_installed_apt_package_version quassel-core)"
 queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting quasselcore.service..."

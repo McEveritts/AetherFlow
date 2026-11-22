@@ -52,7 +52,7 @@ report_progress 55 "Configuring Deluge daemon and WebUI on port ${APP_PORT}..."
 af_logged systemctl stop deluge-web deluged || true
 validate_config_paths /var/lib/deluge/.config/deluge/auth /var/lib/deluge/.config/deluge/web.conf /var/log/deluge/.af-directory-check
 mkdir -p /var/lib/deluge/Downloads
-DELUGE_VER="$(deluged --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || dpkg-query -W -f='${Version}' deluged 2>/dev/null || echo "2.1.1")"
+DELUGE_VER="$(resolve_installed_apt_package_version deluged)"
 queue_app_version /var/lib/deluge/.af-version "$DELUGE_VER"
 AF_SEED_USER="${MASTER_USER}" AF_SEED_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}" safe_config_python <<'PYEOF'
 import os, hashlib, json

@@ -45,11 +45,17 @@ DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ca-certificates
 
 report_progress 45 "Installing Netdata from the package repository..."
+NETDATA_USED_BOOTSTRAP=false
 if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq netdata; then
+    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+        print_error "Could not install the requested Netdata APT version: ${AF_TARGET_VERSION}"
+        exit 1
+    fi
     if [[ ! "${NETDATA_KICKSTART_SHA256:-}" =~ ^[a-fA-F0-9]{64}$ ]]; then
         print_error "Netdata APT installation failed; a verified NETDATA_KICKSTART_SHA256 is required for bootstrap."
         exit 1
     fi
+    NETDATA_USED_BOOTSTRAP=true
     af_logged fetch_and_run "https://get.netdata.cloud/kickstart.sh" "$NETDATA_KICKSTART_SHA256" --non-interactive --stable-channel --disable-telemetry
 fi
 
@@ -71,8 +77,13 @@ af_logged systemctl daemon-reload
 af_logged systemctl enable --now netdata
 af_logged systemctl restart netdata
 systemctl is-active --quiet netdata
-NETDATA_VERSION="$("$NETDATA_BIN" -v 2>/dev/null | sed -n 's/^netdata v\{0,1\}//p' | head -n1)"
-[[ -n "$NETDATA_VERSION" ]] || NETDATA_VERSION="$(dpkg-query -W -f='${Version}' netdata)"
+if [[ "$NETDATA_USED_BOOTSTRAP" == true ]]; then
+    NETDATA_VERSION="$("$NETDATA_BIN" -v 2>/dev/null | sed -n 's/^netdata v\{0,1\}//p' | head -n1)"
+    [[ -n "$NETDATA_VERSION" ]] || NETDATA_VERSION="$(resolve_installed_apt_package_version netdata)"
+else
+    NETDATA_FALLBACK="$("$NETDATA_BIN" -v 2>/dev/null | sed -n 's/^netdata v\{0,1\}//p' | head -n1 || true)"
+    NETDATA_VERSION="$(resolve_installed_apt_package_version netdata "$NETDATA_FALLBACK")"
+fi
 queue_app_version /etc/netdata/.af-version "$NETDATA_VERSION"
 
 commit_app_versions

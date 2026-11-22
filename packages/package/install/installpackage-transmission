@@ -218,7 +218,7 @@ af_logged systemctl daemon-reload
 af_logged systemctl enable --now transmission-daemon
 af_logged systemctl restart transmission-daemon
 wait_for_service_ready transmission-daemon "$APP_PORT" "/transmission/rpc"
-queue_app_version /var/lib/transmission-daemon/.af-version "$(dpkg-query -W -f='${Version}' transmission-daemon)"
+queue_app_version /var/lib/transmission-daemon/.af-version "$(resolve_installed_apt_package_version transmission-daemon)"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

@@ -81,9 +81,9 @@ with ManagedConfig(path) as config:
         config.write_text(text)
 PYEOF
 
-GRAFANA_VER="$(dpkg-query -W -f='${Version}' grafana 2>/dev/null || echo "11.0.0")"
+GRAFANA_VER="$(resolve_installed_apt_package_version grafana)"
 mkdir -p /var/lib/grafana
-queue_app_version /var/lib/grafana/.af-version "${GRAFANA_VER%%-*}"
+queue_app_version /var/lib/grafana/.af-version "$GRAFANA_VER"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now grafana-server

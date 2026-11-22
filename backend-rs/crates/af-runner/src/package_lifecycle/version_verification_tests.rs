@@ -5218,3 +5218,68 @@ fn listenarr_receipt_paths_and_runtime_evidence_recognize_capitalized_opt_dir() 
 
     std::fs::remove_dir_all(scratch).unwrap();
 }
+
+#[test]
+fn test_probe_live_runtime_version_apt_uses_dpkg_status_and_update_package() {
+    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch =
+        std::env::temp_dir().join(format!("af-test-apt-live-probe-{}", uuid::Uuid::new_v4()));
+    let bin_dir = scratch.join("usr/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::create_dir_all(scratch.join("var/lib/quassel")).unwrap();
+
+    // Decoy quasselcore binary returning bare upstream version without Debian epoch/revision
+    let decoy = bin_dir.join("quasselcore");
+    std::fs::write(&decoy, "#!/bin/sh\necho 'Quassel IRC: 0.14.0'\n").unwrap();
+    std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Synthetic dpkg-query reporting full Debian versions for update_package targets
+    let dpkg_shim = bin_dir.join("dpkg-query");
+    std::fs::write(
+        &dpkg_shim,
+        r#"#!/bin/sh
+pkg=""
+for a in "$@"; do pkg="$a"; done
+case "$pkg" in
+    quassel-core) echo "installed 1:0.14.0-1+deb12u1" ;;
+    wireguard-tools) echo "installed 1.0.20210914-1.1+b1" ;;
+    wireguard) echo "installed 1.0.20210914-1" ;;
+    jellyfin) echo "config-files 10.10.3+deb12" ;;
+    *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&dpkg_shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let env_cfg = crate::PackageExecutionEnv::isolated(&scratch);
+
+    // 1. quassel queries quassel-core via dpkg-query (NOT decoy quasselcore binary)
+    assert_eq!(
+        probe_live_runtime_version("quassel", &env_cfg),
+        LiveRuntimeProbeOutcome::Verified("1:0.14.0-1+deb12u1".to_string())
+    );
+
+    // 2. Legacy stripped receipt ("0.14.0") stays compatible while returning live full Debian version
+    std::fs::write(scratch.join("var/lib/quassel/.af-version"), "0.14.0\n").unwrap();
+    assert_eq!(
+        resolve_verified_installed_version("quassel", &env_cfg).as_deref(),
+        Some("1:0.14.0-1+deb12u1")
+    );
+
+    // 3. wireguard queries wireguard-tools (NOT wireguard metapackage)
+    assert_eq!(
+        probe_live_runtime_version("wireguard", &env_cfg),
+        LiveRuntimeProbeOutcome::Verified("1.0.20210914-1.1+b1".to_string())
+    );
+
+    // 4. Non-installed dpkg state (config-files) fails closed
+    assert!(matches!(
+        probe_live_runtime_version("jellyfin", &env_cfg),
+        LiveRuntimeProbeOutcome::Failed(_)
+    ));
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}

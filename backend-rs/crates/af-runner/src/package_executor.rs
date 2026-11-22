@@ -352,6 +352,20 @@ pub fn validate_package_target_policy_for_arch(
         }
         return Ok(());
     }
+    if src == "apt" {
+        if let Some(target) = expected_target_version
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !af_release::lifecycle::validate_exact_apt_version(target) {
+                return Err(format!(
+                    "Invalid exact Debian/APT target version '{}' for package '{}'",
+                    target, package_id
+                ));
+            }
+        }
+        return Ok(());
+    }
     if src == "pinned" {
         let pinned = af_release::lifecycle::strip_version_prefix(update_package.trim());
         if let Some(target) = expected_target_version
@@ -2576,6 +2590,7 @@ pub(crate) struct RollbackJournal {
     touched_services: Vec<String>,
     dir_snapshots: Vec<DirectorySnapshot>,
     apt_downgrades: Vec<(String, String)>,
+    apt_removals: Vec<String>,
     pre_existing_version: Option<String>,
     has_existing_installation: bool,
     incomplete_rollback_error: Option<String>,
@@ -2598,6 +2613,7 @@ impl RollbackJournal {
             && self.touched_services.is_empty()
             && self.dir_snapshots.is_empty()
             && self.apt_downgrades.is_empty()
+            && self.apt_removals.is_empty()
             && self.temp_files.is_empty()
     }
 
@@ -2777,6 +2793,16 @@ impl RollbackJournal {
         }
     }
 
+    fn record_apt_install(&mut self, package: &str) {
+        let pkg = package.trim();
+        if !pkg.is_empty()
+            && !self.apt_downgrades.iter().any(|(p, _)| p == pkg)
+            && !self.apt_removals.iter().any(|p| p == pkg)
+        {
+            self.apt_removals.push(pkg.to_string());
+        }
+    }
+
     /// Prepares a file for mutation: validates all ancestors against symlinks, and if `target`
     /// already exists as a regular file, copies it once to `<target>.bak-af`; otherwise records
     /// it as a newly created file.
@@ -2872,6 +2898,7 @@ impl RollbackJournal {
         self.restorable_services.clear();
         self.touched_services.clear();
         self.apt_downgrades.clear();
+        self.apt_removals.clear();
         self.incomplete_rollback_error = None;
         for entry in self.entries.drain(..) {
             if let RollbackEntry::RestorableFile { backup, .. } = entry {
@@ -3154,6 +3181,46 @@ impl RollbackJournal {
                     let msg = format!(
                         "incomplete recovery: failed to downgrade APT package {}: {}",
                         pkg_spec, err
+                    );
+                    notes.push(msg.clone());
+                    incomplete_errors.push(msg);
+                }
+            }
+        }
+        let removals: Vec<String> = self.apt_removals.drain(..).rev().collect();
+        for pkg in removals {
+            let remove_args = vec![
+                "-o".to_string(),
+                "DPkg::Lock::Timeout=120".to_string(),
+                "remove".to_string(),
+                "-y".to_string(),
+                "-qq".to_string(),
+                "--no-auto-remove".to_string(),
+                pkg.clone(),
+            ];
+            let remove_res = runner
+                .run_command("apt-get", &remove_args, &apt_env, &noop_cancel)
+                .await;
+            match remove_res {
+                Ok(out) if out.success() => {
+                    notes.push(format!("removed newly installed APT package {}", pkg));
+                }
+                Ok(out) => {
+                    package_downgrade_failed = true;
+                    let msg = format!(
+                        "incomplete recovery: failed to remove newly installed APT package {} (exit {}): {}",
+                        pkg,
+                        out.exit_code,
+                        out.combined_output()
+                    );
+                    notes.push(msg.clone());
+                    incomplete_errors.push(msg);
+                }
+                Err(err) => {
+                    package_downgrade_failed = true;
+                    let msg = format!(
+                        "incomplete recovery: failed to remove newly installed APT package {}: {}",
+                        pkg, err
                     );
                     notes.push(msg.clone());
                     incomplete_errors.push(msg);
@@ -3724,10 +3791,16 @@ fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
 
 fn format_znc_major_minor(version: &str) -> String {
     let clean = version.trim().trim_start_matches('v');
-    let core = clean
-        .split(['-', '+', '~', ':'])
+    let without_epoch = match clean.split_once(':') {
+        Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) => {
+            rest
+        }
+        _ => clean,
+    };
+    let core = without_epoch
+        .split(['-', '+', '~'])
         .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .unwrap_or(clean);
+        .unwrap_or(without_epoch);
     let mut parts = core.split('.');
     match (parts.next(), parts.next()) {
         (Some(major), Some(minor))

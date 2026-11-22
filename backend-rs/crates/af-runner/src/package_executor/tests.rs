@@ -300,14 +300,21 @@ impl CommandRunner for MockCommandRunner {
                 });
             }
 
-            // Simulate `dpkg-query -W -f=${Version} <pkg>` returning a Debian epoch+revision version
+            // Simulate `dpkg-query -W -f=${db:Status-Status} ${Version}\n <pkg>` or `-f=${Version}` returning a Debian epoch+revision version
             if program == "dpkg-query" {
+                let raw = self
+                    .dpkg_version_stdout
+                    .clone()
+                    .unwrap_or_else(|| "1:0.14.2-1ubuntu2\n".to_string());
+                let wants_status = args.iter().any(|a| a.contains("db:Status-Status"));
+                let stdout = if wants_status && !raw.trim().contains(' ') {
+                    format!("installed {}\n", raw.trim())
+                } else {
+                    raw
+                };
                 return Ok(CommandOutput {
                     exit_code: 0,
-                    stdout: self
-                        .dpkg_version_stdout
-                        .clone()
-                        .unwrap_or_else(|| "1:0.14.2-1ubuntu2\n".to_string()),
+                    stdout,
                     stderr: String::new(),
                 });
             }
@@ -537,7 +544,7 @@ async fn test_quassel_install_update_remove_and_rollback_in_isolated_root() {
         fs::read_to_string(root.join("var/lib/quassel/.af-version"))
             .unwrap()
             .trim(),
-        "0.14.2"
+        "1:0.14.2-1ubuntu2"
     );
     let default_cfg = fs::read_to_string(root.join("etc/default/quasselcore")).unwrap();
     assert!(default_cfg.contains("PORT=\"4242\""));
@@ -588,7 +595,7 @@ async fn test_quassel_install_update_remove_and_rollback_in_isolated_root() {
     let fail_env = PackageExecutionEnv::isolated(&fail_root);
     // Fail on systemctl enable --now after TLS cert, .af-version, and /etc/default/quasselcore were written
     let fail_mock = MockCommandRunner {
-        fail_on_call: Some(8),
+        fail_on_call: Some(9),
         ..Default::default()
     };
     let fail_exec = DeclarativePackageExecutor::with_runner(fail_env, fail_mock);
@@ -904,7 +911,10 @@ async fn test_fail2ban_install_and_remove_parity_in_isolated_root() {
     assert!(!root.join("install/.fail2ban.lock").exists());
     assert!(root.join("etc/fail2ban/jail.local").is_file());
     assert!(!root.join("run/fail2ban").exists());
-    assert_eq!(outcome.resolved_version.as_deref(), Some("0.14.2"));
+    assert_eq!(
+        outcome.resolved_version.as_deref(),
+        Some("1:0.14.2-1ubuntu2")
+    );
     assert!(mock
         .recorded_commands()
         .iter()
@@ -1078,7 +1088,7 @@ async fn test_failure_triggers_rollback_and_preserves_prior_config_and_lock_abse
     fs::write(&jail_path, "# previous user custom config\nmaxretry = 9\n").unwrap();
 
     let mock = MockCommandRunner {
-        fail_on_call: Some(5),
+        fail_on_call: Some(6),
         ..Default::default()
     };
     let executor = DeclarativePackageExecutor::with_runner(env_cfg, mock);
@@ -1580,6 +1590,18 @@ async fn test_live_progress_stream_emits_events_before_step_completion() {
                 if cancel.is_cancelled() {
                     return Err(PackageExecutorError::Cancelled(program.to_string()));
                 }
+                if program == "dpkg-query" {
+                    let stdout = if args.iter().any(|a| a.contains("db:Status-Status")) {
+                        "installed 1.0.2-1\n".to_string()
+                    } else {
+                        "1.0.2-1\n".to_string()
+                    };
+                    return Ok(CommandOutput {
+                        exit_code: 0,
+                        stdout,
+                        stderr: String::new(),
+                    });
+                }
                 Ok(CommandOutput {
                     exit_code: 0,
                     stdout: format!("ok: {} {}", program, args.join(" ")),
@@ -1678,9 +1700,15 @@ async fn test_quassel_install_update_remove_and_cert_data_preservation() {
                     });
                 }
                 if program == "dpkg-query" {
+                    let wants_status = args.iter().any(|a| a.contains("db:Status-Status"));
+                    let stdout = if wants_status {
+                        "installed 1:0.14.0-1ubuntu2\n".to_string()
+                    } else {
+                        "1:0.14.0-1ubuntu2\n".to_string()
+                    };
                     return Ok(CommandOutput {
                         exit_code: 0,
-                        stdout: "1:0.14.0-1ubuntu2\n".to_string(),
+                        stdout,
                         stderr: String::new(),
                     });
                 }
@@ -1737,7 +1765,10 @@ async fn test_quassel_install_update_remove_and_cert_data_preservation() {
 
     assert!(outcome.lock_present);
     assert!(root.join("install/.quassel.lock").is_file());
-    assert_eq!(outcome.resolved_version.as_deref(), Some("0.14.0"));
+    assert_eq!(
+        outcome.resolved_version.as_deref(),
+        Some("1:0.14.0-1ubuntu2")
+    );
     let install_commands = runner.recorded.lock().unwrap().clone();
     let certificate_command = install_commands
         .iter()
@@ -1791,7 +1822,7 @@ async fn test_quassel_install_update_remove_and_cert_data_preservation() {
     assert!(cert_path.is_file());
 
     let version_marker = fs::read_to_string(root.join("var/lib/quassel/.af-version")).unwrap();
-    assert_eq!(version_marker.trim(), "0.14.0");
+    assert_eq!(version_marker.trim(), "1:0.14.0-1ubuntu2");
 
     // Verify bounded monotonic progress
     assert!(!install_events.is_empty());
@@ -2623,9 +2654,15 @@ async fn test_sol_03_inactive_systemd_service_after_start_or_restart_fails_and_r
                     });
                 }
                 if program == "dpkg-query" {
+                    let wants_status = args.iter().any(|a| a.contains("db:Status-Status"));
+                    let stdout = if wants_status {
+                        "installed 1.0.2-1\n".to_string()
+                    } else {
+                        "1.0.2-1\n".to_string()
+                    };
                     return Ok(CommandOutput {
                         exit_code: 0,
-                        stdout: "1.0.2-1\n".to_string(),
+                        stdout,
                         stderr: String::new(),
                     });
                 }
@@ -3258,9 +3295,15 @@ async fn test_afmp005_wait_for_http_ready_retries_transient_failure_and_succeeds
                     });
                 }
                 if program == "dpkg-query" {
+                    let wants_status = args.iter().any(|a| a.contains("db:Status-Status"));
+                    let stdout = if wants_status {
+                        "installed 1.27.0\n".to_string()
+                    } else {
+                        "1.27.0\n".to_string()
+                    };
                     return Ok(CommandOutput {
                         exit_code: 0,
-                        stdout: "1.27.0\n".to_string(),
+                        stdout,
                         stderr: String::new(),
                     });
                 }
@@ -3397,9 +3440,15 @@ async fn test_afmp002_native_failed_update_stops_service_restores_state_downgrad
                 }
 
                 if program == "dpkg-query" {
+                    let wants_status = args.iter().any(|a| a.contains("db:Status-Status"));
+                    let stdout = if wants_status {
+                        "installed 2.0.0\n".to_string()
+                    } else {
+                        "2.0.0\n".to_string()
+                    };
                     return Ok(CommandOutput {
                         exit_code: 0,
-                        stdout: "2.0.0\n".to_string(),
+                        stdout,
                         stderr: String::new(),
                     });
                 }
@@ -6887,4 +6936,309 @@ fn listenarr_target_policy_and_official_asset_eligibility() {
         "aarch64"
     )
     .is_ok());
+}
+
+#[tokio::test]
+async fn test_declarative_apt_exact_non_candidate_selection_and_rollback() {
+    use std::collections::HashMap;
+
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+
+    #[derive(Clone)]
+    struct StatefulAptRunner {
+        recorded: Arc<StdMutex<Vec<RecordedCommand>>>,
+        repo: HashMap<String, Vec<String>>,
+        dpkg: Arc<StdMutex<HashMap<String, (String, String)>>>,
+        override_install: Option<(String, String)>,
+    }
+
+    impl CommandRunner for StatefulAptRunner {
+        fn run_command<'a>(
+            &'a self,
+            program: &'a str,
+            args: &'a [String],
+            env_vars: &'a [(String, String)],
+            cancel: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                if cancel.is_cancelled() {
+                    return Err(PackageExecutorError::Cancelled(program.to_string()));
+                }
+                self.recorded.lock().unwrap().push(RecordedCommand {
+                    program: program.to_string(),
+                    args: args.to_vec(),
+                    env: env_vars.to_vec(),
+                });
+
+                if program == "id" {
+                    return Ok(CommandOutput {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: "no such user".to_string(),
+                    });
+                }
+
+                if program == "openssl" {
+                    if let Some(pos) = args.iter().position(|a| a == "-out") {
+                        if let Some(out_path) = args.get(pos + 1) {
+                            fs::write(out_path, b"SYNTH-CERT\n").unwrap();
+                        }
+                    }
+                    return Ok(CommandOutput {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+
+                if program == "dpkg-query" {
+                    let pkg = args.last().cloned().unwrap_or_default();
+                    let dpkg = self.dpkg.lock().unwrap();
+                    if let Some((status, ver)) = dpkg.get(&pkg) {
+                        let wants_status = args.iter().any(|a| a.contains("db:Status-Status"));
+                        let stdout = if wants_status {
+                            format!("{status} {ver}\n")
+                        } else {
+                            format!("{ver}\n")
+                        };
+                        return Ok(CommandOutput {
+                            exit_code: 0,
+                            stdout,
+                            stderr: String::new(),
+                        });
+                    }
+                    return Ok(CommandOutput {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: format!("dpkg-query: no packages found matching {pkg}\n"),
+                    });
+                }
+
+                if program == "apt-get" {
+                    let is_remove = args.iter().any(|a| a == "remove");
+                    let is_install = args.iter().any(|a| a == "install");
+                    let allow_downgrades = args.iter().any(|a| a == "--allow-downgrades");
+                    let mut dpkg = self.dpkg.lock().unwrap();
+                    if is_remove {
+                        for arg in args.iter().skip_while(|a| *a != "remove").skip(1) {
+                            if !arg.starts_with('-') {
+                                dpkg.remove(arg);
+                            }
+                        }
+                        return Ok(CommandOutput {
+                            exit_code: 0,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        });
+                    }
+                    if is_install {
+                        let mut skip_next = false;
+                        let mut specs = Vec::new();
+                        for arg in args.iter().skip_while(|a| *a != "install").skip(1) {
+                            if skip_next {
+                                skip_next = false;
+                                continue;
+                            }
+                            if arg == "-o" {
+                                skip_next = true;
+                                continue;
+                            }
+                            if arg.starts_with('-') {
+                                continue;
+                            }
+                            specs.push(arg.clone());
+                        }
+                        for spec in specs {
+                            if let Some((pkg, ver)) = spec.split_once('=') {
+                                let available = self
+                                    .repo
+                                    .get(pkg)
+                                    .map(|vs| vs.iter().any(|v| v == ver))
+                                    .unwrap_or(false);
+                                if !available {
+                                    return Ok(CommandOutput {
+                                        exit_code: 100,
+                                        stdout: String::new(),
+                                        stderr: format!(
+                                            "E: Version '{ver}' for '{pkg}' was not found\n"
+                                        ),
+                                    });
+                                }
+                                if let Some((ref st, ref ov)) = self.override_install {
+                                    if pkg == "quassel-core" && !allow_downgrades {
+                                        dpkg.insert(pkg.to_string(), (st.clone(), ov.clone()));
+                                        continue;
+                                    }
+                                }
+                                dpkg.insert(
+                                    pkg.to_string(),
+                                    ("installed".to_string(), ver.to_string()),
+                                );
+                            } else {
+                                let chosen = self
+                                    .repo
+                                    .get(&spec)
+                                    .and_then(|vs| vs.last())
+                                    .cloned()
+                                    .unwrap_or_else(|| "1.0-1".to_string());
+                                dpkg.insert(spec, ("installed".to_string(), chosen));
+                            }
+                        }
+                    }
+                    return Ok(CommandOutput {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+
+                Ok(CommandOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            })
+        }
+    }
+
+    let mut repo = HashMap::new();
+    repo.insert(
+        "quassel-core".to_string(),
+        vec![
+            "1:0.13.1-1".to_string(),
+            "1:0.14.0-1+deb12u1".to_string(),
+            "1:0.14.0-2+deb12u1".to_string(),
+        ],
+    );
+    repo.insert("openssl".to_string(), vec!["3.0.15-1~deb12u1".to_string()]);
+
+    let recipe = get_declarative_recipe("quassel").unwrap();
+
+    // 1. Non-candidate exact selection pins ONLY quassel-core, leaves openssl unpinned, writes full Debian version receipt
+    {
+        let root = create_isolated_test_dir("decl-apt-non-candidate");
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.expected_target_version = Some("1:0.14.0-1+deb12u1".to_string());
+        let runner = StatefulAptRunner {
+            recorded: Arc::new(StdMutex::new(Vec::new())),
+            repo: repo.clone(),
+            dpkg: Arc::new(StdMutex::new(HashMap::new())),
+            override_install: None,
+        };
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner.clone());
+        let outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("non-candidate exact APT install must succeed");
+
+        assert_eq!(
+            outcome.resolved_version.as_deref(),
+            Some("1:0.14.0-1+deb12u1")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("var/lib/quassel/.af-version"))
+                .unwrap()
+                .trim(),
+            "1:0.14.0-1+deb12u1"
+        );
+        let cmds = runner.recorded.lock().unwrap().clone();
+        assert!(cmds.iter().any(|c| c.program == "apt-get"
+            && c.args
+                .contains(&"quassel-core=1:0.14.0-1+deb12u1".to_string())));
+        assert!(!cmds
+            .iter()
+            .any(|c| c.program == "apt-get" && c.args.iter().any(|a| a.starts_with("openssl="))));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 2. Post-install version mismatch AND non-installed status reject BEFORE systemctl activation and roll back cleanly
+    for (label, override_state) in [
+        ("mismatch", ("installed", "1:0.14.0-2+deb12u1")),
+        ("half-installed", ("half-installed", "1:0.14.0-1+deb12u1")),
+    ] {
+        let root = create_isolated_test_dir(&format!("decl-apt-rollback-{label}"));
+        fs::create_dir_all(root.join("var/lib/quassel")).unwrap();
+        fs::write(root.join("var/lib/quassel/.af-version"), "1:0.13.1-1\n").unwrap();
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.expected_target_version = Some("1:0.14.0-1+deb12u1".to_string());
+        let mut initial_dpkg = HashMap::new();
+        initial_dpkg.insert(
+            "quassel-core".to_string(),
+            ("installed".to_string(), "1:0.13.1-1".to_string()),
+        );
+        let dpkg_arc = Arc::new(StdMutex::new(initial_dpkg));
+        let runner = StatefulAptRunner {
+            recorded: Arc::new(StdMutex::new(Vec::new())),
+            repo: repo.clone(),
+            dpkg: dpkg_arc.clone(),
+            override_install: Some((override_state.0.to_string(), override_state.1.to_string())),
+        };
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner.clone());
+        let err = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect_err("mismatched or non-installed APT state must fail closed");
+        assert!(
+            err.to_string().contains("quassel-core"),
+            "{label}: unexpected error: {err}"
+        );
+        let cmds = runner.recorded.lock().unwrap().clone();
+        assert!(
+            !cmds.iter().any(|c| c.program == "systemctl"
+                && c.args.iter().any(|a| a == "restart" || a == "enable")),
+            "{label}: service must not be activated before dpkg verification succeeds"
+        );
+        assert_eq!(
+            dpkg_arc.lock().unwrap().get("quassel-core"),
+            Some(&("installed".to_string(), "1:0.13.1-1".to_string())),
+            "{label}: APT rollback must restore prior version 1:0.13.1-1"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("var/lib/quassel/.af-version"))
+                .unwrap()
+                .trim(),
+            "1:0.13.1-1"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 3. Epoch-aware ZNC config version extraction
+    assert_eq!(format_znc_major_minor("1:1.9.1-2+deb13u1"), "1.9");
+    assert_eq!(format_znc_major_minor("1.8.2-3.1+deb12u1"), "1.8");
+
+    // 4. Policy validation parity for APT exact Debian versions
+    assert!(validate_package_target_policy(
+        "quassel",
+        "apt",
+        "quassel-core",
+        "install",
+        Some("1:0.14.0-1+deb12u1")
+    )
+    .is_ok());
+    assert!(
+        validate_package_target_policy("quassel", "apt", "quassel-core", "install", None).is_ok()
+    );
+    for bad in ["v1.2.3", "latest", "1.2.*", "1.2_3", "deadbeef"] {
+        assert!(
+            validate_package_target_policy("quassel", "apt", "quassel-core", "install", Some(bad))
+                .is_err(),
+            "APT policy must reject {bad:?}"
+        );
+    }
 }

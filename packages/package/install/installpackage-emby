@@ -37,7 +37,7 @@ require_root
 PACKAGE_NAME="${PACKAGE_NAME:-emby}"
 begin_state_transaction "emby-server" "$APP_PORT" "/" "/var/lib/emby" "/var/lib/emby-server" "/etc/emby-server" "/etc/emby" "/opt/emby-server" "/etc/systemd/system/emby-server.service" "/usr/lib/emby-server" "/usr/share/emby-server" "/usr/bin/emby-server"
 
-prepare_apt_package_transaction /opt/emby-server/.af-version emby-server
+prepare_apt_package_transaction --local-deb /opt/emby-server/.af-version emby-server
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Emby Server..."
 

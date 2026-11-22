@@ -40,11 +40,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing mergerfs and FUSE3 packages..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-MFS_APT_PACKAGE=mergerfs
-if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    MFS_APT_PACKAGE="mergerfs=${AF_TARGET_VERSION}"
-fi
-if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq "$MFS_APT_PACKAGE" fuse3; then
+if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq mergerfs fuse3; then
     if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
         print_error "Could not install the requested MergerFS APT version: ${AF_TARGET_VERSION}"
         exit 1
@@ -74,13 +70,9 @@ mkdir -p /mnt/local /mnt/remote /mnt/unionfs
 chmod 775 /mnt/local /mnt/remote /mnt/unionfs
 
 # Keep the Debian revision and epoch in the same version format as APT discovery.
-MFS_VER="$(installed_apt_package_version mergerfs)"
-if [[ "$MFS_VER" == '<none>' || ! -x /usr/bin/mergerfs ]]; then
+MFS_VER="$(resolve_installed_apt_package_version mergerfs)"
+if [[ ! -x /usr/bin/mergerfs ]]; then
     print_error "Could not verify the installed MergerFS package and executable."
-    exit 1
-fi
-if [[ -n "${AF_TARGET_VERSION:-}" && "$MFS_VER" != "$AF_TARGET_VERSION" ]]; then
-    print_error "Installed MergerFS APT version does not match the requested version."
     exit 1
 fi
 mkdir -p /var/lib/mergerfs

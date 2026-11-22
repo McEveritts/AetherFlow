@@ -55,7 +55,7 @@ af_logged systemctl enable xrdp-sesman.service xrdp.service
 af_logged systemctl restart xrdp-sesman.service xrdp.service
 systemctl is-active --quiet xrdp-sesman.service xrdp.service
 mkdir -p /var/lib/xrdp
-queue_app_version /var/lib/xrdp/.af-version "$(dpkg-query -W -f='${Version}' xrdp)"
+queue_app_version /var/lib/xrdp/.af-version "$(resolve_installed_apt_package_version xrdp)"
 commit_app_versions
 write_lock xrdp
 report_progress 100 "XRDP installed. Connect using an RDP client on TCP 3389 (or your existing configured port) with an existing Linux account. Restrict access with a firewall or VPN."

@@ -128,7 +128,7 @@ af_logged systemctl enable --now rtorrent
 
 af_logged systemctl restart rtorrent
 systemctl is-active --quiet rtorrent
-queue_app_version /var/lib/rtorrent/.af-version "$(dpkg-query -W -f='${Version}' rtorrent)"
+queue_app_version /var/lib/rtorrent/.af-version "$(resolve_installed_apt_package_version rtorrent)"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

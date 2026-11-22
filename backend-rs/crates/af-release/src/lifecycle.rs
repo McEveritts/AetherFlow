@@ -1537,6 +1537,89 @@ pub fn parse_apt_policy_candidate(stdout: &str) -> Option<&str> {
     (!candidate.is_empty() && candidate != "(none)").then_some(candidate)
 }
 
+/// Validates an exact Debian/APT package version token per Debian Policy §5.6.12
+/// (`[epoch:]upstream_version[-debian_revision]`), rejecting floating tags, globs,
+/// release selectors, `v`-prefixed tags, Git SHAs, component manifests, and unsafe characters.
+pub fn validate_exact_apt_version(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return false;
+    }
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    if trimmed.contains("..") || trimmed.contains('/') || trimmed.contains('\\') {
+        return false;
+    }
+    let rest = if let Some((epoch, rem)) = trimmed.split_once(':') {
+        if epoch.is_empty() || !epoch.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        rem
+    } else {
+        trimmed
+    };
+    if rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_digit()) || rest.contains(':') {
+        return false;
+    }
+    if let Some((upstream, rev)) = rest.rsplit_once('-') {
+        if upstream.is_empty() || rev.is_empty() {
+            return false;
+        }
+        return upstream
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'~' | b'-'))
+            && rev
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'~'));
+    }
+    rest.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'~'))
+}
+
+/// Parses `dpkg-query -W -f=${db:Status-Status} ${Version}\n <pkg>` output, returning
+/// the exact full Debian version only when status is strictly `installed` and the version
+/// token is a valid Debian version.
+pub fn parse_installed_dpkg_status_version(stdout: &str) -> Option<&str> {
+    let mut parts = stdout.trim().split_whitespace();
+    let status = parts.next()?;
+    let version = parts.next()?;
+    if parts.next().is_some() || status != "installed" {
+        return None;
+    }
+    validate_exact_apt_version(version).then_some(version)
+}
+
+/// Returns whether a legacy stripped `.af-version` receipt (e.g. `0.14.0` or `1.9.1`)
+/// is compatible with a live full Debian version (`1:0.14.0-1+deb12u1` or `1.9.1-2+deb13u1`).
+/// Exact target certification still requires full-version equality via `versions_match_target`.
+pub fn apt_receipt_matches_live_debian_revision(
+    update_source: &str,
+    receipt_ver: &str,
+    live_ver: &str,
+) -> bool {
+    if !matches!(
+        update_source.trim().to_ascii_lowercase().as_str(),
+        "apt" | "deb" | "dpkg"
+    ) {
+        return false;
+    }
+    let live_trimmed = live_ver.trim();
+    let without_epoch = match live_trimmed.split_once(':') {
+        Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) => {
+            rest
+        }
+        _ => live_trimmed,
+    };
+    let Some((live_upstream, deb_rev)) = without_epoch.rsplit_once('-') else {
+        return false;
+    };
+    !live_upstream.contains('~')
+        && is_valid_apt_debian_revision_suffix(deb_rev)
+        && (versions_match_target(receipt_ver, live_upstream)
+            || versions_match_target(live_upstream, receipt_ver))
+}
+
 pub fn single_version_matches(achieved: &str, expected: &str) -> bool {
     let exp = expected.trim();
     let ach = achieved.trim();
@@ -4400,5 +4483,85 @@ mod tests {
 
         drop(conn);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_exact_apt_version_validation_and_dpkg_status_parsing() {
+        for valid in [
+            "1:0.14.0-1+deb12u1",
+            "4.0.6+dfsg-3+deb13u1",
+            "1.0.20210914-1.1+b1",
+            "10.10.3+deb12",
+            "0.9.21.1-1~bpo12+1",
+            "2.0.3-4",
+            "11.0.0",
+        ] {
+            assert!(
+                validate_exact_apt_version(valid),
+                "valid Debian version {valid:?} must be accepted"
+            );
+        }
+
+        for invalid in [
+            "",
+            "latest",
+            "v1.2.3",
+            "V1.2.3",
+            "1.2.*",
+            "1.2.3-",
+            "1.2_3",
+            "deadbeef",
+            "quassel-core=1:0.14.0-1",
+            "1:0.14.0-1/bookworm",
+            "1::0.14.0-1",
+            "epoch:1.0-1",
+            "1.0..2",
+            "1.0 2",
+        ] {
+            assert!(
+                !validate_exact_apt_version(invalid),
+                "invalid APT target {invalid:?} must be rejected"
+            );
+        }
+
+        assert_eq!(
+            parse_installed_dpkg_status_version("installed 4.0.6+dfsg-3+deb13u1\n"),
+            Some("4.0.6+dfsg-3+deb13u1")
+        );
+        assert_eq!(
+            parse_installed_dpkg_status_version("installed 1:0.14.0-1+deb12u1\n"),
+            Some("1:0.14.0-1+deb12u1")
+        );
+        for bad_dpkg in [
+            "config-files 4.0.6+dfsg-3+deb13u1\n",
+            "half-installed 1:0.14.0-1+deb12u1\n",
+            "unpacked 1:0.14.0-1+deb12u1\n",
+            "not-installed \n",
+            "installed 1:0.14.0-1 extra\n",
+            "installed v1.2.3\n",
+            "",
+        ] {
+            assert_eq!(
+                parse_installed_dpkg_status_version(bad_dpkg),
+                None,
+                "non-installed or malformed dpkg output {bad_dpkg:?} must fail closed"
+            );
+        }
+
+        assert!(apt_receipt_matches_live_debian_revision(
+            "apt",
+            "0.14.0",
+            "1:0.14.0-1+deb12u1"
+        ));
+        assert!(!apt_receipt_matches_live_debian_revision(
+            "apt",
+            "0.14.1",
+            "1:0.14.0-1+deb12u1"
+        ));
+        assert!(!apt_receipt_matches_live_debian_revision(
+            "apt",
+            "0.14.0",
+            "1:0.14.0~rc1-1"
+        ));
     }
 }

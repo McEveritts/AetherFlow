@@ -6170,3 +6170,49 @@ async fn listenarr_prerelease_channel_discovery_and_unsupported_arch_fail_early(
     server.abort();
     no_x64_server.abort();
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_run_live_version_command_apt_preserves_full_debian_revision_and_rejects_config_files()
+{
+    use crate::inventory_regressions::{isolated, Fixture};
+    let name = "workers::tests::test_run_live_version_command_apt_preserves_full_debian_revision_and_rejects_config_files";
+    if !isolated(name) {
+        return;
+    }
+
+    let fixture = Fixture::new();
+    fixture.command(
+        "dpkg-query",
+        r#"#!/bin/sh
+pkg=""
+for a in "$@"; do pkg="$a"; done
+case "$pkg" in
+    transmission-daemon) echo "installed 4.0.6+dfsg-3+deb13u1" ;;
+    jellyfin) echo "config-files 10.10.3+deb12" ;;
+    *) exit 1 ;;
+esac
+"#,
+    );
+
+    let mut tx_json = Fixture::package("transmission", "systemd", "transmission-daemon");
+    tx_json["update_source"] = serde_json::json!("apt");
+    tx_json["update_package"] = serde_json::json!("transmission-daemon");
+    let tx_pkg: Package = serde_json::from_value(tx_json).unwrap();
+    let live_ver = run_live_version_command(&tx_pkg, Duration::from_secs(5))
+        .await
+        .expect("installed APT package must return full Debian revision");
+    assert_eq!(live_ver, "4.0.6+dfsg-3+deb13u1");
+
+    let mut jf_json = Fixture::package("jellyfin", "systemd", "jellyfin");
+    jf_json["update_source"] = serde_json::json!("apt");
+    jf_json["update_package"] = serde_json::json!("jellyfin");
+    let jf_pkg: Package = serde_json::from_value(jf_json).unwrap();
+    let err = run_live_version_command(&jf_pkg, Duration::from_secs(5))
+        .await
+        .expect_err("config-files dpkg status must be rejected");
+    assert!(
+        err.to_string().contains("not in installed dpkg state"),
+        "unexpected error: {err}"
+    );
+}

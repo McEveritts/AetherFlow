@@ -75,6 +75,9 @@ trap rollback_runtime EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export AF_TX_DIR="$BACKUP_DIR"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    af_validate_exact_apt_version "${AF_TARGET_VERSION}" >/dev/null
+fi
 stop_systemd_unit fail2ban
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
     runtime_path="${RUNTIME_PATHS[$runtime_index]}"
@@ -125,10 +128,8 @@ af_logged systemctl restart fail2ban
 systemctl is-active --quiet fail2ban
 verify_systemd_service_active fail2ban
 
-FAIL2BAN_VER="$(dpkg-query -W -f='${Version}' fail2ban 2>/dev/null || true)"
-if [[ -n "$FAIL2BAN_VER" ]]; then
-    queue_app_version /etc/fail2ban/.af-version "$FAIL2BAN_VER"
-fi
+FAIL2BAN_VER="$(resolve_installed_apt_package_version fail2ban)"
+queue_app_version /etc/fail2ban/.af-version "$FAIL2BAN_VER"
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Fail2ban intrusion prevention installed and active."
