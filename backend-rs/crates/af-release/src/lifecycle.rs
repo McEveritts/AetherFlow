@@ -198,6 +198,27 @@ fn retire_finished_owners(conn: &Connection, database: &Path) -> Result<()> {
 
 pub const RECOVERY_STATE_PRIOR_VERIFIED: &str = "prior_state_verified";
 pub const RECOVERY_STATE_UNVERIFIED: &str = "unverified";
+pub const RETENTION_STATE_RETAINED: &str = "retained";
+pub const RETENTION_STATE_PURGED: &str = "purged";
+
+/// Enforces the persistence invariant for package removal retention outcomes:
+/// only a completed `remove` job may persist `"retained"` (ordinary remove
+/// leaving managed config/data behind) or `"purged"` (explicit destructive
+/// purge). All other actions and failed removals record `""`.
+pub fn normalize_retention_state(
+    success: bool,
+    action: &str,
+    retention_state: Option<&str>,
+) -> &'static str {
+    if !success || action != "remove" {
+        return "";
+    }
+    match retention_state.map(str::trim) {
+        Some(RETENTION_STATE_RETAINED) => RETENTION_STATE_RETAINED,
+        Some(RETENTION_STATE_PURGED) => RETENTION_STATE_PURGED,
+        _ => "",
+    }
+}
 
 /// Enforces the persistence invariant for failed-operation recovery receipts:
 /// only a failed in-place operation (`install`, `reinstall`, `update`) that did
@@ -232,7 +253,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         failure_category TEXT NOT NULL DEFAULT '', failed_stage TEXT NOT NULL DEFAULT '',
         exit_code INTEGER, sanitized_summary TEXT NOT NULL DEFAULT '',
         expected_target_version TEXT NOT NULL DEFAULT '', achieved_version TEXT NOT NULL DEFAULT '',
-        recovery_state TEXT NOT NULL DEFAULT ''
+        recovery_state TEXT NOT NULL DEFAULT '',
+        retention_state TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS package_lifecycle_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,7 +264,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         failure_category TEXT NOT NULL DEFAULT '', failed_stage TEXT NOT NULL DEFAULT '',
         exit_code INTEGER, sanitized_summary TEXT NOT NULL DEFAULT '',
         expected_target_version TEXT NOT NULL DEFAULT '', achieved_version TEXT NOT NULL DEFAULT '',
-        recovery_state TEXT NOT NULL DEFAULT ''
+        recovery_state TEXT NOT NULL DEFAULT '',
+        retention_state TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_lifecycle_history_pkg ON package_lifecycle_history(package_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_lifecycle_history_job ON package_lifecycle_history(job_id);
@@ -262,6 +285,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         ("expected_target_version", "TEXT NOT NULL DEFAULT ''"),
         ("achieved_version", "TEXT NOT NULL DEFAULT ''"),
         ("recovery_state", "TEXT NOT NULL DEFAULT ''"),
+        ("retention_state", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute_batch(&format!(
@@ -283,6 +307,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         ("expected_target_version", "TEXT NOT NULL DEFAULT ''"),
         ("achieved_version", "TEXT NOT NULL DEFAULT ''"),
         ("recovery_state", "TEXT NOT NULL DEFAULT ''"),
+        ("retention_state", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !hist_columns.iter().any(|column| column == name) {
             conn.execute_batch(&format!(
@@ -519,17 +544,44 @@ pub fn admit_job_with_target(
     let normalized_json = serde_json::to_string(&normalized)?;
     let target_ver_raw = expected_target_version.unwrap_or("");
     let target_ver = sanitize_persisted_lifecycle_text(target_ver_raw);
-    tx.execute(
-        "INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
-        VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','') ON CONFLICT(package_id) DO UPDATE SET
-        job_id=excluded.job_id,action=excluded.action,status=excluded.status,started_at=excluded.started_at,finished_at='',owner_id=excluded.owner_id,service_units=excluded.service_units,failure_category='',failed_stage='',exit_code=NULL,sanitized_summary='',expected_target_version=excluded.expected_target_version,achieved_version='',recovery_state=''",
-        params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
+    let has_jobs_retention: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='retention_state')",
+        [],
+        |row| row.get(0),
     )?;
-    tx.execute(
-        "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
-        VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','')",
-        params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
+    let has_hist_retention: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='retention_state')",
+        [],
+        |row| row.get(0),
     )?;
+    if has_jobs_retention {
+        tx.execute(
+            "INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state,retention_state)
+            VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','','') ON CONFLICT(package_id) DO UPDATE SET
+            job_id=excluded.job_id,action=excluded.action,status=excluded.status,started_at=excluded.started_at,finished_at='',owner_id=excluded.owner_id,service_units=excluded.service_units,failure_category='',failed_stage='',exit_code=NULL,sanitized_summary='',expected_target_version=excluded.expected_target_version,achieved_version='',recovery_state='',retention_state=''",
+            params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
+            VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','') ON CONFLICT(package_id) DO UPDATE SET
+            job_id=excluded.job_id,action=excluded.action,status=excluded.status,started_at=excluded.started_at,finished_at='',owner_id=excluded.owner_id,service_units=excluded.service_units,failure_category='',failed_stage='',exit_code=NULL,sanitized_summary='',expected_target_version=excluded.expected_target_version,achieved_version='',recovery_state=''",
+            params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
+        )?;
+    }
+    if has_hist_retention {
+        tx.execute(
+            "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state,retention_state)
+            VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','','')",
+            params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
+            VALUES (?1,?2,?3,?4,?5,'',?6,?7,'','',NULL,'',?8,'','')",
+            params![package, job_id, action, status, started_at, lease.id, normalized_json, target_ver],
+        )?;
+    }
     tx.commit()?;
     Ok(lease)
 }
@@ -565,6 +617,7 @@ pub struct LifecycleJobDiagnostics<'a> {
     pub achieved_version: Option<&'a str>,
     pub finished_at: Option<&'a str>,
     pub recovery_state: Option<&'a str>,
+    pub retention_state: Option<&'a str>,
 }
 
 pub fn finish_job_with_diagnostics(
@@ -584,6 +637,7 @@ pub fn finish_job_with_diagnostics(
         achieved_version,
         finished_at,
         recovery_state,
+        retention_state,
     } = diagnostics;
     let status = if success { "completed" } else { "failed" };
     let finished_at_owned = finished_at
@@ -592,6 +646,7 @@ pub fn finish_job_with_diagnostics(
     let finished_at = finished_at_owned.as_str();
     let cat = if success { "" } else { failure_category };
     let recovery = normalize_recovery_state(success, action, cat, recovery_state);
+    let retention = normalize_retention_state(success, action, retention_state);
     let stage = sanitize_persisted_lifecycle_text(failed_stage.unwrap_or(""));
     let summary = sanitize_persisted_lifecycle_text(sanitized_summary.unwrap_or(""));
     let achieved = sanitize_persisted_lifecycle_text(achieved_version.unwrap_or(""));
@@ -602,17 +657,43 @@ pub fn finish_job_with_diagnostics(
         conn.execute_batch("BEGIN IMMEDIATE;")?;
     }
     let run = || -> Result<()> {
-        let updated = conn.execute(
-            "UPDATE package_lifecycle_jobs SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9
-             WHERE package_id=?10 AND job_id=?11 AND action=?12 AND status IN ('installing','updating','uninstalling')",
-            params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, package, job_id, action],
+        let has_jobs_retention: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='retention_state')",
+            [],
+            |row| row.get(0),
         )?;
+        let has_hist_retention: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='retention_state')",
+            [],
+            |row| row.get(0),
+        )?;
+        let updated = if has_jobs_retention {
+            conn.execute(
+                "UPDATE package_lifecycle_jobs SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9,retention_state=?10
+                 WHERE package_id=?11 AND job_id=?12 AND action=?13 AND status IN ('installing','updating','uninstalling')",
+                params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, retention, package, job_id, action],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE package_lifecycle_jobs SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9
+                 WHERE package_id=?10 AND job_id=?11 AND action=?12 AND status IN ('installing','updating','uninstalling')",
+                params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, package, job_id, action],
+            )?
+        };
         anyhow::ensure!(updated == 1, "lifecycle receipt identity changed");
-        let hist_updated = conn.execute(
-            "UPDATE package_lifecycle_history SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9
-             WHERE package_id=?10 AND job_id=?11 AND action=?12 AND status IN ('installing','updating','uninstalling')",
-            params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, package, job_id, action],
-        )?;
+        let hist_updated = if has_hist_retention {
+            conn.execute(
+                "UPDATE package_lifecycle_history SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9,retention_state=?10
+                 WHERE package_id=?11 AND job_id=?12 AND action=?13 AND status IN ('installing','updating','uninstalling')",
+                params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, retention, package, job_id, action],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE package_lifecycle_history SET status=?1,finished_at=?2,failure_category=?3,failed_stage=?4,exit_code=?5,sanitized_summary=?6,expected_target_version=CASE WHEN ?7 != '' THEN ?7 ELSE expected_target_version END,achieved_version=?8,recovery_state=?9
+                 WHERE package_id=?10 AND job_id=?11 AND action=?12 AND status IN ('installing','updating','uninstalling')",
+                params![status, finished_at, cat, stage, exit_code, summary, expected, achieved, recovery, package, job_id, action],
+            )?
+        };
         if hist_updated == 0 {
             let (started_at, owner_id, service_units): (String, String, String) = conn
                 .query_row(
@@ -621,11 +702,19 @@ pub fn finish_job_with_diagnostics(
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .unwrap_or_else(|_| (finished_at.to_string(), String::new(), "[]".to_string()));
-            conn.execute(
-                "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-                params![package, job_id, action, status, started_at, finished_at, owner_id, service_units, cat, stage, exit_code, summary, expected, achieved, recovery],
-            )?;
+            if has_hist_retention {
+                conn.execute(
+                    "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state,retention_state)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                    params![package, job_id, action, status, started_at, finished_at, owner_id, service_units, cat, stage, exit_code, summary, expected, achieved, recovery, retention],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at,finished_at,owner_id,service_units,failure_category,failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,recovery_state)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                    params![package, job_id, action, status, started_at, finished_at, owner_id, service_units, cat, stage, exit_code, summary, expected, achieved, recovery],
+                )?;
+            }
         }
         Ok(())
     };
@@ -643,6 +732,122 @@ pub fn finish_job_with_diagnostics(
             Err(e)
         }
     }
+}
+
+/// Summary of the most recently completed lifecycle job for a package, used to
+/// prove retained-removal provenance and survive failed retry attempts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageLifecycleRetentionRecord {
+    pub package_id: String,
+    pub job_id: String,
+    pub action: String,
+    pub status: String,
+    pub retention_state: String,
+    pub finished_at: String,
+}
+
+/// Queries the most recently completed lifecycle record for `package_id` (or its
+/// canonical lock alias) across `package_lifecycle_jobs` and
+/// `package_lifecycle_history`, tolerating older databases that predate the
+/// `retention_state` column or `package_lifecycle_history` table.
+pub fn query_package_retention_history(
+    conn: &Connection,
+    package_id: &str,
+) -> Result<Option<PackageLifecycleRetentionRecord>> {
+    let trimmed = package_id.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let lock_alias = af_models::resolve_package_lock_name(trimmed);
+
+    let jobs_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if jobs_exists {
+        let has_retention: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='retention_state')",
+            [],
+            |row| row.get(0),
+        )?;
+        let has_finished: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='finished_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        let sql = format!(
+            "SELECT package_id, job_id, action, status, {}, {} \
+             FROM package_lifecycle_jobs \
+             WHERE (LOWER(package_id)=LOWER(?1) OR LOWER(package_id)=LOWER(?2)) \
+               AND status='completed' \
+             LIMIT 1",
+            if has_retention { "retention_state" } else { "''" },
+            if has_finished { "finished_at" } else { "''" },
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![trimmed, lock_alias])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(PackageLifecycleRetentionRecord {
+                package_id: row.get(0)?,
+                job_id: row.get(1)?,
+                action: row.get(2)?,
+                status: row.get(3)?,
+                retention_state: row.get(4)?,
+                finished_at: row.get(5)?,
+            }));
+        }
+    }
+
+    let hist_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_history')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !hist_exists {
+        return Ok(None);
+    }
+    let has_hist_retention: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='retention_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_hist_finished: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_history') WHERE name='finished_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    let sql = format!(
+        "SELECT package_id, job_id, action, status, {}, {} \
+         FROM package_lifecycle_history \
+         WHERE (LOWER(package_id)=LOWER(?1) OR LOWER(package_id)=LOWER(?2)) \
+           AND status='completed' \
+         ORDER BY id DESC \
+         LIMIT 1",
+        if has_hist_retention {
+            "retention_state"
+        } else {
+            "''"
+        },
+        if has_hist_finished {
+            "finished_at"
+        } else {
+            "''"
+        },
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params![trimmed, lock_alias])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some(PackageLifecycleRetentionRecord {
+            package_id: row.get(0)?,
+            job_id: row.get(1)?,
+            action: row.get(2)?,
+            status: row.get(3)?,
+            retention_state: row.get(4)?,
+            finished_at: row.get(5)?,
+        }));
+    }
+    Ok(None)
 }
 
 pub fn record_completed_lifecycle_job(
@@ -4066,5 +4271,132 @@ mod tests {
             parse_apt_policy_candidate("pkg:\n  Candidate: (none)\n  Candidate: 1.2.3\n"),
             None
         );
+    }
+
+    #[test]
+    fn retention_state_persists_survives_failed_purge_and_clears_on_purge_or_reinstall() {
+        let root = std::env::temp_dir().join(format!(
+            "af-lifecycle-retention-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("aetherflow.db");
+        let mut conn = Connection::open(&db).unwrap();
+        initialize_schema(&conn).unwrap();
+
+        // 1. Retained remove records retention_state='retained'
+        let lease1 = admit_job(
+            &mut conn,
+            "rclone",
+            "job-remove-retained",
+            "remove",
+            "2026-11-22T00:00:01Z",
+            &[],
+        )
+        .unwrap();
+        finish_job_with_diagnostics(
+            &conn,
+            "rclone",
+            "job-remove-retained",
+            "remove",
+            true,
+            LifecycleJobDiagnostics {
+                retention_state: Some(RETENTION_STATE_RETAINED),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(lease1);
+
+        let rec = query_package_retention_history(&conn, "rclone")
+            .unwrap()
+            .expect("retained removal record");
+        assert_eq!(rec.action, "remove");
+        assert_eq!(rec.retention_state, RETENTION_STATE_RETAINED);
+
+        // 2. A subsequent failed purge overwrites package_lifecycle_jobs with status='failed',
+        //    but history query still recovers the prior completed retained removal.
+        let lease2 = admit_job(
+            &mut conn,
+            "rclone",
+            "job-purge-failed",
+            "remove",
+            "2026-11-22T00:01:00Z",
+            &[],
+        )
+        .unwrap();
+        finish_job_with_diagnostics(
+            &conn,
+            "rclone",
+            "job-purge-failed",
+            "remove",
+            false,
+            LifecycleJobDiagnostics {
+                failure_category: "runtime",
+                retention_state: Some(RETENTION_STATE_PURGED),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(lease2);
+
+        let after_failed = query_package_retention_history(&conn, "rclone")
+            .unwrap()
+            .expect("prior completed retained removal preserved in history");
+        assert_eq!(after_failed.job_id, "job-remove-retained");
+        assert_eq!(after_failed.retention_state, RETENTION_STATE_RETAINED);
+
+        // 3. A successful purge records retention_state='purged'.
+        let lease3 = admit_job(
+            &mut conn,
+            "rclone",
+            "job-purge-ok",
+            "remove",
+            "2026-11-22T00:02:00Z",
+            &[],
+        )
+        .unwrap();
+        finish_job_with_diagnostics(
+            &conn,
+            "rclone",
+            "job-purge-ok",
+            "remove",
+            true,
+            LifecycleJobDiagnostics {
+                retention_state: Some(RETENTION_STATE_PURGED),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(lease3);
+
+        let after_purge = query_package_retention_history(&conn, "rclone")
+            .unwrap()
+            .expect("completed purge record");
+        assert_eq!(after_purge.job_id, "job-purge-ok");
+        assert_eq!(after_purge.retention_state, RETENTION_STATE_PURGED);
+
+        // 4. Older schema without retention_state column is tolerated gracefully.
+        let legacy_conn = Connection::open_in_memory().unwrap();
+        legacy_conn
+            .execute_batch(
+                "CREATE TABLE package_lifecycle_jobs (
+                    package_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL
+                );
+                INSERT INTO package_lifecycle_jobs VALUES ('rclone','old-rm','remove','completed','2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        let legacy_rec = query_package_retention_history(&legacy_conn, "rclone")
+            .unwrap()
+            .expect("legacy remove record");
+        assert_eq!(legacy_rec.action, "remove");
+        assert_eq!(legacy_rec.retention_state, "");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

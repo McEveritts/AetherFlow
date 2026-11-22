@@ -62,6 +62,11 @@ pub mod network;
 pub mod package_executor;
 pub use package_executor::check_domain_tls_ready;
 pub mod package_lifecycle;
+pub mod package_purge;
+pub use package_purge::{
+    candidate_package_sqlite_dbs, format_ambiguous_purge_error, inspect_package_purge_state,
+    inspect_package_purge_state_with_conn, PackagePurgeEligibility, PackagePurgeInspection,
+};
 pub mod plugins;
 pub use plugins::PluginRunnerError;
 pub mod probe_metadata;

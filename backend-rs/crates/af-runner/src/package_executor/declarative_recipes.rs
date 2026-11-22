@@ -2810,12 +2810,14 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         // Persist or remove completion receipt BEFORE committing the rollback journal so any
         // receipt write/remove failure triggers compensating rollback of prior config/service mutations.
         if exec_err.is_none() {
-            let legacy_lock_path = af_models::resolve_package_lock_paths(
+            let resolved_locks = af_models::resolve_package_lock_paths(
                 &recipe.package_id,
                 (!recipe.lock_file.trim().is_empty()).then_some(recipe.lock_file.as_str()),
                 self.env_cfg.fs_root.as_deref(),
-            )
-            .legacy_swizzin;
+            );
+            let retained_lock_path =
+                af_models::retained_receipt_path_for_canonical(&lock_file_path);
+            let legacy_lock_path = resolved_locks.legacy_swizzin;
             let finalize_res: Result<(), PackageExecutorError> = (|| {
                 match action {
                     PackageAction::Install | PackageAction::Reinstall | PackageAction::Update => {
@@ -2837,6 +2839,25 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             0o644,
                             self.env_cfg.fs_root.as_deref(),
                         )?;
+                        if !retained_lock_path.as_os_str().is_empty() {
+                            let retained_present = af_models::inspect_receipt_file(
+                                &retained_lock_path,
+                                self.env_cfg.fs_root.as_deref(),
+                            )
+                            .map_err(PackageExecutorError::SecurityViolation)?;
+                            if retained_present {
+                                validate_filesystem_path(
+                                    &retained_lock_path,
+                                    self.env_cfg.fs_root.as_deref(),
+                                )?;
+                                journal.stage_file_mutation(&retained_lock_path)?;
+                                match fs::remove_file(&retained_lock_path) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                        }
                         if let Some(ref legacy_path) = legacy_lock_path {
                             let legacy_present = af_models::inspect_receipt_file(
                                 legacy_path,
@@ -2859,6 +2880,69 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                     PackageAction::Remove => {
                         validate_filesystem_path(&lock_file_path, self.env_cfg.fs_root.as_deref())?;
+                        let had_canonical = af_models::inspect_receipt_file(
+                            &lock_file_path,
+                            self.env_cfg.fs_root.as_deref(),
+                        )
+                        .map_err(PackageExecutorError::SecurityViolation)?;
+                        let had_legacy = match &legacy_lock_path {
+                            Some(legacy_path) => af_models::inspect_receipt_file(
+                                legacy_path,
+                                self.env_cfg.fs_root.as_deref(),
+                            )
+                            .map_err(PackageExecutorError::SecurityViolation)?,
+                            None => false,
+                        };
+                        let had_retained = if !retained_lock_path.as_os_str().is_empty() {
+                            af_models::inspect_receipt_file(
+                                &retained_lock_path,
+                                self.env_cfg.fs_root.as_deref(),
+                            )
+                            .map_err(PackageExecutorError::SecurityViolation)?
+                        } else {
+                            false
+                        };
+
+                        if !self.env_cfg.delete_data {
+                            if (had_canonical || had_legacy || had_retained)
+                                && !retained_lock_path.as_os_str().is_empty()
+                            {
+                                validate_filesystem_path(
+                                    &retained_lock_path,
+                                    self.env_cfg.fs_root.as_deref(),
+                                )?;
+                                if let Some(parent) = retained_lock_path.parent() {
+                                    validate_filesystem_path(
+                                        parent,
+                                        self.env_cfg.fs_root.as_deref(),
+                                    )?;
+                                    crate::create_package_lock_directory(parent)?;
+                                }
+                                journal.stage_file_mutation(&retained_lock_path)?;
+                                let retained_payload = af_models::format_retained_package_receipt(
+                                    &recipe.package_id,
+                                    &Utc::now().to_rfc3339(),
+                                );
+                                write_file_atomic_with_mode_bounded(
+                                    &retained_lock_path,
+                                    retained_payload.as_bytes(),
+                                    0o644,
+                                    self.env_cfg.fs_root.as_deref(),
+                                )?;
+                            }
+                        } else if had_retained {
+                            validate_filesystem_path(
+                                &retained_lock_path,
+                                self.env_cfg.fs_root.as_deref(),
+                            )?;
+                            journal.stage_file_mutation(&retained_lock_path)?;
+                            match fs::remove_file(&retained_lock_path) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
+
                         journal.stage_file_mutation(&lock_file_path)?;
                         match fs::remove_file(&lock_file_path) {
                             Ok(()) => {}
@@ -2866,12 +2950,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             Err(error) => return Err(error.into()),
                         }
                         if let Some(ref legacy_path) = legacy_lock_path {
-                            let legacy_present = af_models::inspect_receipt_file(
-                                legacy_path,
-                                self.env_cfg.fs_root.as_deref(),
-                            )
-                            .map_err(PackageExecutorError::SecurityViolation)?;
-                            if legacy_present {
+                            if had_legacy {
                                 validate_filesystem_path(
                                     legacy_path,
                                     self.env_cfg.fs_root.as_deref(),

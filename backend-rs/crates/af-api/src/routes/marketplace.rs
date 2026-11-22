@@ -711,6 +711,36 @@ pub(super) fn finish_package_lifecycle(
 pub(super) fn finish_package_lifecycle_with_recovery(
     pkg_id: &str,
     action: &str,
+    failure: Option<af_services::PackageJobFailure>,
+    progress: i32,
+    message: &str,
+    started_at: &str,
+    job_id: &str,
+    expected_target_version: Option<&str>,
+    achieved_version: Option<&str>,
+    stopped_units: &[String],
+    prior_state_recovered: bool,
+) {
+    finish_package_lifecycle_with_recovery_and_retention(
+        pkg_id,
+        action,
+        failure,
+        progress,
+        message,
+        started_at,
+        job_id,
+        expected_target_version,
+        achieved_version,
+        stopped_units,
+        prior_state_recovered,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_package_lifecycle_with_recovery_and_retention(
+    pkg_id: &str,
+    action: &str,
     mut failure: Option<af_services::PackageJobFailure>,
     progress: i32,
     message: &str,
@@ -720,6 +750,7 @@ pub(super) fn finish_package_lifecycle_with_recovery(
     achieved_version: Option<&str>,
     stopped_units: &[String],
     mut prior_state_recovered: bool,
+    retention_state: Option<&str>,
 ) {
     let mut message_buf = message.to_string();
 
@@ -789,7 +820,7 @@ pub(super) fn finish_package_lifecycle_with_recovery(
         (None, None, None)
     };
 
-    let outcome = af_services::finish_package_job_with_recovery(
+    let outcome = af_services::finish_package_job_with_recovery_and_retention(
         pkg_id,
         action,
         succeeded,
@@ -801,6 +832,7 @@ pub(super) fn finish_package_lifecycle_with_recovery(
         expected_target_version.map(|s| s.to_string()),
         achieved_version.map(|s| s.to_string()),
         recovery_state,
+        retention_state.map(|s| s.to_string()),
     );
     let Some(outcome) = outcome else {
         return;
@@ -2884,6 +2916,47 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
         );
     }
 
+    if action == "remove" && delete_data {
+        let fs_root_override = env::var("AETHERFLOW_FS_ROOT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let root_path = fs_root_override.as_deref().map(std::path::Path::new);
+        let conn_guard = af_db::get_read_conn().ok();
+        let inspection = af_runner::inspect_package_purge_state_with_conn(
+            &pkg.name,
+            (!pkg.lock_file.trim().is_empty()).then_some(pkg.lock_file.as_str()),
+            root_path,
+            conn_guard.as_deref(),
+        );
+        match inspection {
+            Ok(insp) => match insp.eligibility {
+                af_runner::PackagePurgeEligibility::Installed
+                | af_runner::PackagePurgeEligibility::RetainedProven => {}
+                af_runner::PackagePurgeEligibility::AmbiguousMarkerless => {
+                    return api_error(
+                        StatusCode::CONFLICT,
+                        "AMBIGUOUS_RETAINED_OWNERSHIP",
+                        af_runner::format_ambiguous_purge_error(&insp),
+                    );
+                }
+                af_runner::PackagePurgeEligibility::NotPresent => {
+                    return api_error(
+                        StatusCode::CONFLICT,
+                        "PACKAGE_NOT_INSTALLED",
+                        format!(
+                            "Package '{}' is not installed and has no recognized retained AetherFlow installation to purge",
+                            pkg.name
+                        ),
+                    );
+                }
+            },
+            Err(err) => {
+                return api_error(StatusCode::CONFLICT, "UNSAFE_INSTALLATION_LOCK", err);
+            }
+        }
+    }
+
     if let Some(message) = system_update_lifecycle_block().await {
         return message.into_response();
     }
@@ -3472,11 +3545,42 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                                     root_path,
                                 );
                                 if action == "remove" {
-                                    let _ = fs::remove_file(&lock_paths.canonical);
-                                    if let Some(ref legacy_path) = lock_paths.legacy_swizzin {
-                                        if af_models::inspect_receipt_file(legacy_path, root_path)
-                                            .unwrap_or(false)
+                                    let had_canonical = af_models::inspect_receipt_file(
+                                        &lock_paths.canonical,
+                                        root_path,
+                                    )
+                                    .unwrap_or(false);
+                                    let had_legacy = lock_paths.legacy_swizzin.as_ref().is_some_and(
+                                        |legacy_path| {
+                                            af_models::inspect_receipt_file(legacy_path, root_path)
+                                                .unwrap_or(false)
+                                        },
+                                    );
+                                    let had_retained = !lock_paths.retained.as_os_str().is_empty()
+                                        && af_models::inspect_receipt_file(
+                                            &lock_paths.retained,
+                                            root_path,
+                                        )
+                                        .unwrap_or(false);
+                                    if !delete_data {
+                                        if (had_canonical || had_legacy || had_retained)
+                                            && !lock_paths.retained.as_os_str().is_empty()
                                         {
+                                            if let Some(parent) = lock_paths.retained.parent() {
+                                                let _ = fs::create_dir_all(parent);
+                                            }
+                                            let payload = af_models::format_retained_package_receipt(
+                                                &clean_id,
+                                                &chrono::Utc::now().to_rfc3339(),
+                                            );
+                                            let _ = fs::write(&lock_paths.retained, payload);
+                                        }
+                                    } else if had_retained {
+                                        let _ = fs::remove_file(&lock_paths.retained);
+                                    }
+                                    let _ = fs::remove_file(&lock_paths.canonical);
+                                    if had_legacy {
+                                        if let Some(ref legacy_path) = lock_paths.legacy_swizzin {
                                             let _ = fs::remove_file(legacy_path);
                                         }
                                     }
@@ -3485,6 +3589,15 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
                                         let _ = fs::create_dir_all(parent);
                                     }
                                     let _ = fs::write(&lock_paths.canonical, b"installed\n");
+                                    if !lock_paths.retained.as_os_str().is_empty()
+                                        && af_models::inspect_receipt_file(
+                                            &lock_paths.retained,
+                                            root_path,
+                                        )
+                                        .unwrap_or(false)
+                                    {
+                                        let _ = fs::remove_file(&lock_paths.retained);
+                                    }
                                     if let Some(ref legacy_path) = lock_paths.legacy_swizzin {
                                         if af_models::inspect_receipt_file(legacy_path, root_path)
                                             .unwrap_or(false)
@@ -4024,7 +4137,7 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
         af_services::clear_service_status_cache();
         af_services::mutators::clear_app_runtime_meta_cache();
 
-        finish_package_lifecycle(
+        finish_package_lifecycle_with_recovery_and_retention(
             &clean_id,
             action,
             None,
@@ -4036,6 +4149,12 @@ pub(super) async fn dispatch_package_lifecycle_with_target(
             achieved_ver.as_deref(),
             // Final service verification already ran before ingress persistence.
             &[],
+            false,
+            (action == "remove").then_some(if delete_data {
+                af_runner::af_release::lifecycle::RETENTION_STATE_PURGED
+            } else {
+                af_runner::af_release::lifecycle::RETENTION_STATE_RETAINED
+            }),
         );
     }));
 

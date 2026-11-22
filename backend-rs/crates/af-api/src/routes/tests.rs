@@ -5978,3 +5978,287 @@ async fn marketplace_supports_listenarr_prerelease_updates_and_capitalized_recei
     std::env::set_current_dir(previous_directory).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn uninstall_purge_addresses_retained_installation_and_refuses_ambiguous_or_unmanaged() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    async fn settle_dispatched_job(response: axum::response::Response, package: &str) {
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let job_id = body["job_id"].as_str().unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(5));
+            loop {
+                if let Some(outcome) = af_services::get_package_job_outcome(package) {
+                    if outcome.job_id == job_id {
+                        break outcome;
+                    }
+                }
+                interval.tick().await;
+            }
+        })
+        .await
+        .expect("dispatched lifecycle job did not finish");
+        assert_eq!(outcome.status, "completed", "{outcome:?}");
+    }
+    let (root, _connection) = lifecycle_status_fixture();
+    af_db::init_db().unwrap();
+    af_services::workers::ensure_app_updates_columns();
+    std::fs::create_dir_all(root.join("install")).unwrap();
+    std::fs::create_dir_all(root.join("etc")).unwrap();
+    let hosts_file = root.join("etc/hosts");
+    std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+    std::fs::create_dir_all(root.join("packages/package/install")).unwrap();
+    std::fs::create_dir_all(root.join("packages/package/remove")).unwrap();
+    std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+    std::env::set_var("AETHERFLOW_INSTALL_ROOT", &root);
+    std::env::set_var("AF_HOSTS_FILE", &hosts_file);
+
+    let rclone_pkg = af_models::Package {
+        name: "rclone".into(),
+        label: "Rclone".into(),
+        service_name: "rclone".into(),
+        lock_file: "/install/.rclone.lock".into(),
+        default_port: 5572,
+        status: "installed".into(),
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&vec![rclone_pkg]).unwrap()).unwrap();
+    std::fs::write(&automation, "{}").unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+
+    let sock_path = short_test_socket_path(&format!(
+        "afr-{}.sock",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let _ = std::fs::remove_file(&sock_path);
+    std::env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    let runner_root = root.clone();
+    let fake_runner = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buffer = [0u8; 8192];
+            let Ok(count) = stream.read(&mut buffer).await else {
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+            let req_text = String::from_utf8_lossy(&buffer[..count]);
+            let path = req_text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("");
+            let body_str = req_text.split("\r\n\r\n").nth(1).unwrap_or("");
+            if path == "/v1/package" {
+                let delete_data = serde_json::from_str::<serde_json::Value>(body_str)
+                    .ok()
+                    .and_then(|v| v.get("delete_data").and_then(|b| b.as_bool()))
+                    .unwrap_or(false);
+                let lock_path = runner_root.join("install/.rclone.lock");
+                let retained_path = runner_root.join("install/.rclone.retained");
+                if delete_data {
+                    let _ = std::fs::remove_file(&retained_path);
+                    let _ = std::fs::remove_file(&lock_path);
+                } else {
+                    let _ = std::fs::write(
+                        &retained_path,
+                        af_models::format_retained_package_receipt(
+                            "rclone",
+                            "2026-11-22T00:00:00Z",
+                        ),
+                    );
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                let out = "[PROGRESS:100] Package removal completed\n";
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                            out.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            } else if path.ends_with("/v1/self-update/status") {
+                let resp = af_models::RunnerResponse {
+                    success: true,
+                    output: serde_json::json!({
+                        "status": "succeeded",
+                        "completed": true,
+                        "success": true,
+                        "job_unit": "",
+                        "error": "",
+                        "exit_code": null
+                    })
+                    .to_string(),
+                    error: String::new(),
+                };
+                let body = serde_json::to_string(&resp).unwrap();
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            } else {
+                let resp = af_models::RunnerResponse {
+                    success: true,
+                    output: "ok".to_string(),
+                    error: String::new(),
+                };
+                let body = serde_json::to_string(&resp).unwrap();
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        }
+    });
+
+    let remove_script = root.join("packages/package/remove/removepackage-rclone");
+    std::fs::write(&remove_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&remove_script, std::fs::Permissions::from_mode(0o755));
+    }
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+
+    // Seed installed rclone receipt
+    std::fs::write(root.join("install/.rclone.lock"), b"installed\n").unwrap();
+    let admin = progress_test_user("admin", None);
+
+    // 1. Retained remove (delete_data=false) clears .rclone.lock, creates .rclone.retained,
+    //    and records retention_state='retained'.
+    let retained_res = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        false,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(retained_res.status(), StatusCode::OK);
+    settle_dispatched_job(retained_res, "rclone").await;
+    assert!(!root.join("install/.rclone.lock").exists());
+    assert!(root.join("install/.rclone.retained").is_file());
+    {
+        let conn = af_db::get_read_conn().unwrap();
+        let rec = af_runner::af_release::lifecycle::query_package_retention_history(&conn, "rclone")
+            .unwrap()
+            .expect("retained remove record");
+        assert_eq!(
+            rec.retention_state,
+            af_runner::af_release::lifecycle::RETENTION_STATE_RETAINED
+        );
+    }
+
+    // 2. Explicit purge (delete_data=true) after retained remove MUST succeed (200 OK),
+    //    clear .rclone.retained, and record retention_state='purged'.
+    let purge_res = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        true,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(purge_res.status(), StatusCode::OK);
+    settle_dispatched_job(purge_res, "rclone").await;
+    assert!(!root.join("install/.rclone.retained").exists());
+    {
+        let conn = af_db::get_read_conn().unwrap();
+        let rec = af_runner::af_release::lifecycle::query_package_retention_history(&conn, "rclone")
+            .unwrap()
+            .expect("purged remove record");
+        assert_eq!(
+            rec.retention_state,
+            af_runner::af_release::lifecycle::RETENTION_STATE_PURGED
+        );
+    }
+
+    // 3. Subsequent purge when neither installed nor retained MUST return 409 PACKAGE_NOT_INSTALLED.
+    let second_purge = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        true,
+        None,
+        admin.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(second_purge.status(), StatusCode::CONFLICT);
+    let second_body = axum::body::to_bytes(second_purge.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(second_json["code"], "PACKAGE_NOT_INSTALLED", "{second_json}");
+
+    // 4. Ambiguous markerless config on disk MUST fail closed with 409 AMBIGUOUS_RETAINED_OWNERSHIP
+    //    and preserve the unmanaged file.
+    std::fs::create_dir_all(root.join("etc/rclone")).unwrap();
+    std::fs::write(
+        root.join("etc/rclone/rclone.conf"),
+        b"[manual-remote]\ntype = s3\n",
+    )
+    .unwrap();
+    let ambiguous_purge = dispatch_package_lifecycle_with_target(
+        "rclone".into(),
+        "remove",
+        "uninstalling",
+        true,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(ambiguous_purge.status(), StatusCode::CONFLICT);
+    let amb_body = axum::body::to_bytes(ambiguous_purge.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let amb_json: serde_json::Value = serde_json::from_slice(&amb_body).unwrap();
+    assert_eq!(amb_json["code"], "AMBIGUOUS_RETAINED_OWNERSHIP", "{amb_json}");
+    assert!(
+        amb_json["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Refusing to purge 'rclone'"),
+        "{amb_json}"
+    );
+    assert_eq!(
+        std::fs::read(root.join("etc/rclone/rclone.conf")).unwrap(),
+        b"[manual-remote]\ntype = s3\n"
+    );
+
+    fake_runner.abort();
+    let _ = std::fs::remove_file(&sock_path);
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

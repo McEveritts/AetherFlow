@@ -310,6 +310,7 @@ impl JobRegistry {
             expected_target_version,
             achieved_version,
             None,
+            None,
         )
     }
 
@@ -327,6 +328,7 @@ impl JobRegistry {
         expected_target_version: Option<String>,
         achieved_version: Option<String>,
         recovery_state: Option<String>,
+        retention_state: Option<String>,
     ) -> anyhow::Result<Option<PackageJobOutcome>> {
         let Some(job) = self
             .active
@@ -387,6 +389,7 @@ impl JobRegistry {
                     achieved_version: outcome.achieved_version.as_deref(),
                     finished_at: Some(outcome.finished_at.as_str()),
                     recovery_state: recovery_state_opt.as_deref(),
+                    retention_state: retention_state.as_deref(),
                 },
             )?;
         }
@@ -726,6 +729,37 @@ pub fn finish_package_job_with_recovery(
     achieved_version: Option<String>,
     recovery_state: Option<String>,
 ) -> Option<PackageJobOutcome> {
+    finish_package_job_with_recovery_and_retention(
+        pkg,
+        action,
+        success,
+        failure,
+        job_id,
+        failed_stage,
+        exit_code,
+        sanitized_summary,
+        expected_target_version,
+        achieved_version,
+        recovery_state,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn finish_package_job_with_recovery_and_retention(
+    pkg: &str,
+    action: &str,
+    success: bool,
+    failure: Option<PackageJobFailure>,
+    job_id: &str,
+    failed_stage: Option<String>,
+    exit_code: Option<i32>,
+    sanitized_summary: Option<String>,
+    expected_target_version: Option<String>,
+    achieved_version: Option<String>,
+    recovery_state: Option<String>,
+    retention_state: Option<String>,
+) -> Option<PackageJobOutcome> {
     match JOBS.lock().map(|mut jobs| {
         jobs.finish_with_diagnostics_and_recovery(
             pkg,
@@ -739,6 +773,7 @@ pub fn finish_package_job_with_recovery(
             expected_target_version,
             achieved_version,
             recovery_state,
+            retention_state,
         )
     }) {
         Ok(Ok(outcome)) => outcome,

@@ -87,6 +87,10 @@ pub struct PackageListEntry {
     pub lock_path: PathBuf,
     pub installed: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retained_receipt_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_lock_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub legacy_receipt_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_lock_path: Option<PathBuf>,
@@ -526,38 +530,7 @@ fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> O
 }
 
 fn candidate_cli_sqlite_dbs(global: &GlobalOptions) -> Vec<PathBuf> {
-    let mut candidate_dbs = Vec::new();
-    let mut push_unique = |path: PathBuf| {
-        if !candidate_dbs.contains(&path) {
-            candidate_dbs.push(path);
-        }
-    };
-    if let Some(ref r) = global.root {
-        push_unique(r.join("var/lib/aetherflow/aetherflow.sqlite"));
-        push_unique(r.join("opt/AetherFlow/backend/data/aetherflow.sqlite"));
-        push_unique(r.join("data/aetherflow.sqlite"));
-    } else {
-        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
-            if let Ok(db_env) = std::env::var(key) {
-                let trimmed = db_env.trim();
-                if !trimmed.is_empty() && trimmed != ":memory:" && !trimmed.starts_with("file:") {
-                    push_unique(PathBuf::from(trimmed));
-                }
-            }
-        }
-        if let Ok(data_dir) = std::env::var("DATA_DIR") {
-            let trimmed = data_dir.trim();
-            if !trimmed.is_empty() {
-                push_unique(PathBuf::from(trimmed).join("aetherflow.sqlite"));
-            }
-        }
-        push_unique(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"));
-        push_unique(PathBuf::from(
-            "/opt/AetherFlow/backend/data/aetherflow.sqlite",
-        ));
-        push_unique(PathBuf::from("data/aetherflow.sqlite"));
-    }
-    candidate_dbs
+    af_runner::candidate_package_sqlite_dbs(global.root.as_deref())
 }
 
 fn query_app_update_target_version_from_sqlite(db_path: &Path, pkg_id: &str) -> Option<String> {
@@ -1213,7 +1186,7 @@ fn resolve_cli_package_port(
         }
     }
 
-    if global.root.is_none() {
+    if af_models::resolve_package_fs_root(global.root.as_deref()).is_none() {
         let runtime_meta = af_runner::extract_app_runtime_meta_local(lock_name);
         if (1024..=65535).contains(&runtime_meta.configured_port) {
             return Some(runtime_meta.configured_port);
@@ -1359,65 +1332,135 @@ fn execute_package_command(
             ))
         }
         PackageCommand::Remove { packages, purge } => {
+            let fs_root = af_models::resolve_package_fs_root(global.root.as_deref());
             let mut receipts = Vec::new();
             let mut skipped_not_installed = Vec::new();
+            let mut retained_purge_targets = Vec::new();
             let mut requests = Vec::new();
 
+            // Preflight all requested packages (allowlist, confinement, receipt & retained
+            // ownership checks) before executing any live runner mutation.
             for pkg in packages {
-                let receipt = inspect_cli_package_receipts(global, pkg)?;
-                // If an isolated root was explicitly supplied or a lock directory
-                // exists on disk and neither canonical nor legacy receipt is present,
-                // report `skipped_not_installed`.
-                let has_lock_root = global.root.is_some()
-                    || install_dir.is_dir()
-                    || swizzin_dir.is_dir()
-                    || receipt
-                        .canonical_path
-                        .parent()
-                        .is_some_and(|parent| parent.is_dir());
-                if has_lock_root && !receipt.has_any_receipt() {
-                    skipped_not_installed.push(pkg.clone());
-                    continue;
-                }
                 let mut req = build_package_runner_request("remove", pkg, None)?;
                 req.delete_data = *purge;
-                if global.dry_run {
+
+                let def = resolve_cli_package_definition(global, pkg);
+                let explicit_lock = def
+                    .as_ref()
+                    .map(|d| d.lock_file.as_str())
+                    .filter(|s| !s.trim().is_empty());
+
+                if !*purge {
+                    let receipt =
+                        inspect_cli_package_receipts_for_def(global, pkg, def.as_ref())?;
+                    // If an isolated root was explicitly supplied or a lock directory
+                    // exists on disk and neither canonical nor legacy receipt is present,
+                    // report `skipped_not_installed`.
+                    let has_lock_root = fs_root.is_some()
+                        || install_dir.is_dir()
+                        || swizzin_dir.is_dir()
+                        || receipt
+                            .canonical_path
+                            .parent()
+                            .is_some_and(|parent| parent.is_dir());
+                    if has_lock_root && !receipt.has_any_receipt() {
+                        skipped_not_installed.push(pkg.clone());
+                        continue;
+                    }
                     requests.push(req);
                 } else {
-                    let receipt = transport.execute_package_streaming(&req, emit_human_progress)?;
-                    receipts.push(receipt);
+                    let inspection = af_runner::inspect_package_purge_state(
+                        pkg,
+                        explicit_lock,
+                        global.root.as_deref(),
+                    )
+                    .map_err(CliError::PreflightOrIntegrity)?;
+                    match inspection.eligibility {
+                        af_runner::PackagePurgeEligibility::Installed => {
+                            requests.push(req);
+                        }
+                        af_runner::PackagePurgeEligibility::RetainedProven => {
+                            retained_purge_targets.push(json!({
+                                "package": pkg,
+                                "ownership_evidence": inspection.ownership_evidence,
+                            }));
+                            requests.push(req);
+                        }
+                        af_runner::PackagePurgeEligibility::AmbiguousMarkerless => {
+                            return Err(CliError::PreflightOrIntegrity(
+                                af_runner::format_ambiguous_purge_error(&inspection),
+                            ));
+                        }
+                        af_runner::PackagePurgeEligibility::NotPresent => {
+                            skipped_not_installed.push(pkg.clone());
+                        }
+                    }
                 }
             }
 
             if global.dry_run {
-                return Ok(CliResponseEnvelope::success(
-                    "package",
-                    "remove",
+                let msg = if *purge && !retained_purge_targets.is_empty() {
+                    format!(
+                        "[DRY-RUN] Planned purge for {} package(s) ({} retained, {} not installed)",
+                        requests.len(),
+                        retained_purge_targets.len(),
+                        skipped_not_installed.len()
+                    )
+                } else {
                     format!(
                         "[DRY-RUN] Planned remove for {} package(s) ({} not installed)",
                         requests.len(),
                         skipped_not_installed.len()
-                    ),
-                    Some(json!({
-                        "dry_run": true,
-                        "planned_requests": requests,
-                        "skipped_not_installed": skipped_not_installed,
-                    })),
+                    )
+                };
+                let mut payload = json!({
+                    "dry_run": true,
+                    "planned_requests": requests,
+                    "skipped_not_installed": skipped_not_installed,
+                });
+                if !retained_purge_targets.is_empty() {
+                    payload["retained_purge_targets"] = json!(retained_purge_targets);
+                }
+                return Ok(CliResponseEnvelope::success(
+                    "package",
+                    "remove",
+                    msg,
+                    Some(payload),
                 ));
+            }
+
+            for req in &requests {
+                let receipt = transport.execute_package_streaming(req, emit_human_progress)?;
+                receipts.push(receipt);
+            }
+
+            let msg = if *purge && !retained_purge_targets.is_empty() {
+                format!(
+                    "Purged {} package(s) ({} retained, {} skipped as not installed)",
+                    receipts.len(),
+                    retained_purge_targets.len(),
+                    skipped_not_installed.len()
+                )
+            } else {
+                format!(
+                    "Removed {} package(s) ({} skipped as not installed)",
+                    receipts.len(),
+                    skipped_not_installed.len()
+                )
+            };
+            let mut payload = json!({
+                "receipts": receipts,
+                "skipped_not_installed": skipped_not_installed,
+            });
+            if !retained_purge_targets.is_empty() {
+                payload["retained_purge_targets"] = json!(retained_purge_targets);
             }
 
             Ok(CliResponseEnvelope::success(
                 "package",
                 "remove",
-                format!(
-                    "Removed {} package(s) ({} skipped as not installed)",
-                    receipts.len(),
-                    skipped_not_installed.len()
-                ),
-                Some(json!({
-                    "receipts": receipts,
-                    "skipped_not_installed": skipped_not_installed,
-                })),
+                msg,
+                Some(payload),
             ))
         }
         PackageCommand::Update {
@@ -1530,6 +1573,9 @@ fn execute_package_command(
                     let lock_name = resolve_package_lock_name(id).to_string();
                     let receipt = inspect_cli_package_receipts_for_def(global, id, Some(&def))?;
                     let installed = receipt.is_installed();
+                    let retained_lock_path = receipt
+                        .retained_receipt_present
+                        .then_some(receipt.retained_path.clone());
                     let legacy_lock_path = receipt
                         .legacy_receipt_present
                         .then_some(receipt.legacy_path)
@@ -1542,6 +1588,8 @@ fn execute_package_command(
                         lock_name,
                         lock_path: receipt.canonical_path,
                         installed,
+                        retained_receipt_present: receipt.retained_receipt_present,
+                        retained_lock_path,
                         legacy_receipt_present: receipt.legacy_receipt_present,
                         legacy_lock_path,
                         service_name: def.service_name,
@@ -1567,6 +1615,11 @@ fn execute_package_command(
                         "  {:<13} {:<20} (service: {}, legacy receipt pending upgrade)",
                         badge, item.package_id, item.service_name
                     ));
+                } else if !item.installed && item.retained_receipt_present {
+                    lines.push(format!(
+                        "  {:<13} {:<20} (service: {}, retained config/data; use --purge to delete)",
+                        badge, item.package_id, item.service_name
+                    ));
                 } else {
                     lines.push(format!(
                         "  {:<13} {:<20} (service: {})",
@@ -1589,15 +1642,30 @@ fn execute_package_command(
         PackageCommand::Info { package } => {
             let def = resolve_cli_package_definition(global, package)
                 .ok_or_else(|| CliError::Validation(format!("unknown package {:?}", package)))?;
-            let receipt = inspect_cli_package_receipts_for_def(global, package, Some(&def))?;
+            let explicit_lock = (!def.lock_file.trim().is_empty()).then_some(def.lock_file.as_str());
+            let inspection = af_runner::inspect_package_purge_state(
+                package,
+                explicit_lock,
+                global.root.as_deref(),
+            )
+            .map_err(CliError::PreflightOrIntegrity)?;
+            let receipt = &inspection.receipt_status;
             let installed = receipt.is_installed();
+            let retained_lock_path = receipt
+                .retained_receipt_present
+                .then_some(receipt.retained_path.clone());
             let legacy_lock_path = receipt
                 .legacy_receipt_present
-                .then_some(receipt.legacy_path)
+                .then_some(receipt.legacy_path.clone())
                 .flatten();
             let msg = if !installed && receipt.legacy_receipt_present {
                 format!(
                     "Package: {} (installed: false, legacy_receipt: true, service: {}, sandbox_profile: {})",
+                    def.name, def.service_name, def.sandbox_profile
+                )
+            } else if !installed && inspection.is_retained_purge() {
+                format!(
+                    "Package: {} (installed: false, retained: true, service: {}, sandbox_profile: {})",
                     def.name, def.service_name, def.sandbox_profile
                 )
             } else {
@@ -1606,17 +1674,27 @@ fn execute_package_command(
                     def.name, installed, def.service_name, def.sandbox_profile
                 )
             };
+            let mut payload = json!({
+                "package": def,
+                "lock_path": receipt.canonical_path,
+                "installed": installed,
+                "retained_receipt_present": receipt.retained_receipt_present,
+                "retained_lock_path": retained_lock_path,
+                "legacy_receipt_present": receipt.legacy_receipt_present,
+                "legacy_lock_path": legacy_lock_path,
+                "purge_eligibility": inspection.eligibility,
+            });
+            if !inspection.ownership_evidence.is_empty() {
+                payload["retained_ownership_evidence"] = json!(inspection.ownership_evidence);
+            }
+            if !inspection.ambiguous_paths.is_empty() {
+                payload["ambiguous_markerless_paths"] = json!(inspection.ambiguous_paths);
+            }
             Ok(CliResponseEnvelope::success(
                 "package",
                 "info",
                 msg,
-                Some(json!({
-                    "package": def,
-                    "lock_path": receipt.canonical_path,
-                    "installed": installed,
-                    "legacy_receipt_present": receipt.legacy_receipt_present,
-                    "legacy_lock_path": legacy_lock_path,
-                })),
+                Some(payload),
             ))
         }
         PackageCommand::Cancel { package } => {

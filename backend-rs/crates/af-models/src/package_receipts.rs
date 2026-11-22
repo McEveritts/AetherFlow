@@ -64,11 +64,41 @@ pub fn resolve_path_for_fs_root(path_str: &str, fs_root: Option<&Path>) -> PathB
     PathBuf::from(trimmed)
 }
 
-/// Resolved canonical and optional legacy Swizzin lockfile paths for a package.
+/// Resolved canonical, retained-removal, and optional legacy Swizzin receipt
+/// paths for a package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageLockPaths {
     pub canonical: PathBuf,
+    pub retained: PathBuf,
     pub legacy_swizzin: Option<PathBuf>,
+}
+
+/// Derives the companion retained-removal receipt path alongside a canonical
+/// installation lock (e.g. `/install/.rclone.lock` -> `/install/.rclone.retained`).
+pub fn retained_receipt_path_for_canonical(canonical: &Path) -> PathBuf {
+    if canonical.as_os_str().is_empty() {
+        return PathBuf::new();
+    }
+    let Some(file_name) = canonical.file_name().and_then(|name| name.to_str()) else {
+        return PathBuf::new();
+    };
+    let retained_name = match file_name.strip_suffix(".lock") {
+        Some(stem) if !stem.is_empty() => format!("{stem}.retained"),
+        _ => format!("{file_name}.retained"),
+    };
+    canonical.with_file_name(retained_name)
+}
+
+/// Formats the canonical retained-removal receipt payload written after an
+/// ordinary (non-purge) removal that preserves managed configuration/data.
+pub fn format_retained_package_receipt(pkg_id: &str, updated_at: &str) -> String {
+    let pkg = pkg_id.trim().to_ascii_lowercase();
+    let ts = updated_at.trim();
+    if ts.is_empty() {
+        format!("package={pkg}\nstate=retained\n")
+    } else {
+        format!("package={pkg}\nstate=retained\nupdated_at={ts}\n")
+    }
 }
 
 fn legacy_swizzin_filename_for_canonical(
@@ -87,9 +117,9 @@ fn legacy_swizzin_filename_for_canonical(
     Some(file_name.to_string())
 }
 
-/// Resolves the canonical lockfile path and (when the canonical lock uses the
-/// standard `/install/.<pkg>.lock` layout) the matching legacy `/etc/Swizzin`
-/// upgrade-input receipt path.
+/// Resolves the canonical lockfile path, its companion retained-removal receipt
+/// path, and (when the canonical lock uses the standard `/install/.<pkg>.lock`
+/// layout) the matching legacy `/etc/Swizzin` upgrade-input receipt path.
 ///
 /// Explicit custom catalog lock paths outside `/install/` are preserved as-is
 /// without synthesizing a `/etc/Swizzin` fallback.
@@ -106,6 +136,7 @@ pub fn resolve_package_lock_paths(
             resolve_path_for_fs_root(&format!("/install/.{lock_name}.lock"), fs_root.as_deref())
         }
     };
+    let retained = retained_receipt_path_for_canonical(&canonical);
 
     let legacy_swizzin =
         legacy_swizzin_filename_for_canonical(&canonical, fs_root.as_deref()).map(|file_name| {
@@ -114,6 +145,7 @@ pub fn resolve_package_lock_paths(
 
     PackageLockPaths {
         canonical,
+        retained,
         legacy_swizzin,
     }
 }
@@ -189,12 +221,98 @@ pub fn inspect_receipt_file(path: &Path, fs_root: Option<&Path>) -> Result<bool,
     }
 }
 
-/// Inspected canonical and legacy receipt status for a package.
+/// Validates a retained-removal receipt file for `pkg_id`, enforcing symlink,
+/// confinement, regular-file, bounded-read, and package-ownership invariants.
+/// Returns `Ok(true)` iff the file exists and proves retained ownership for
+/// `pkg_id`, `Ok(false)` when absent, and `Err(...)` for unsafe or mismatched
+/// retained receipt files.
+pub fn inspect_retained_receipt_file(
+    path: &Path,
+    pkg_id: &str,
+    fs_root: Option<&Path>,
+) -> Result<bool, String> {
+    let Some(raw) = read_receipt_file_bounded(path, fs_root, MAX_PACKAGE_RECEIPT_BYTES)? else {
+        return Ok(false);
+    };
+
+    let expected_pkg = pkg_id.trim().to_ascii_lowercase();
+    let expected_lock = resolve_package_lock_name(pkg_id).to_ascii_lowercase();
+    if expected_pkg.is_empty() {
+        return Err(format!(
+            "cannot validate retained package receipt {} without package id",
+            path.display()
+        ));
+    }
+
+    let mut seen_pkg: Option<String> = None;
+    let mut seen_state: Option<String> = None;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            return Err(format!(
+                "retained package receipt {} contains malformed line",
+                path.display()
+            ));
+        };
+        let key = lhs.trim();
+        let value = rhs.trim().trim_matches('"').trim_matches('\'').trim();
+        match key {
+            "package" => {
+                if seen_pkg.is_some() {
+                    return Err(format!(
+                        "retained package receipt {} declares duplicate package field",
+                        path.display()
+                    ));
+                }
+                seen_pkg = Some(value.to_ascii_lowercase());
+            }
+            "state" => {
+                if seen_state.is_some() {
+                    return Err(format!(
+                        "retained package receipt {} declares duplicate state field",
+                        path.display()
+                    ));
+                }
+                seen_state = Some(value.to_ascii_lowercase());
+            }
+            _ => {}
+        }
+    }
+
+    let Some(actual_pkg) = seen_pkg else {
+        return Err(format!(
+            "retained package receipt {} is missing package ownership metadata",
+            path.display()
+        ));
+    };
+    if actual_pkg != expected_pkg && actual_pkg != expected_lock {
+        return Err(format!(
+            "retained package receipt {} belongs to package '{}', not '{}'",
+            path.display(),
+            actual_pkg,
+            expected_pkg
+        ));
+    }
+    if seen_state.as_deref() != Some("retained") {
+        return Err(format!(
+            "retained package receipt {} has unexpected state (expected 'retained')",
+            path.display()
+        ));
+    }
+    Ok(true)
+}
+
+/// Inspected canonical, retained-removal, and legacy receipt status for a package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageReceiptStatus {
     pub canonical_path: PathBuf,
+    pub retained_path: PathBuf,
     pub legacy_path: Option<PathBuf>,
     pub canonical_installed: bool,
+    pub retained_receipt_present: bool,
     pub legacy_receipt_present: bool,
 }
 
@@ -212,6 +330,17 @@ impl PackageReceiptStatus {
     /// Returns `true` iff either the canonical receipt or a legacy receipt exists.
     pub fn has_any_receipt(&self) -> bool {
         self.canonical_installed || self.legacy_receipt_present
+    }
+
+    /// Returns `true` iff a verified AetherFlow retained-removal receipt is present.
+    pub fn has_retained_receipt(&self) -> bool {
+        self.retained_receipt_present
+    }
+
+    /// Returns `true` iff no active or legacy install receipt exists, but a verified
+    /// retained-removal receipt is present.
+    pub fn is_retained_only(&self) -> bool {
+        !self.has_any_receipt() && self.retained_receipt_present
     }
 }
 
@@ -234,8 +363,9 @@ pub fn inspect_canonical_package_receipt(
     inspect_receipt_file(&paths.canonical, fs_root.as_deref())
 }
 
-/// Inspects both canonical and (when applicable) legacy `/etc/Swizzin` receipts
-/// for a package, rejecting unsafe lock types on either path.
+/// Inspects canonical, retained-removal, and (when applicable) legacy
+/// `/etc/Swizzin` receipts for a package, rejecting unsafe lock types or
+/// mismatched retained ownership on any path.
 pub fn inspect_package_receipts(
     pkg_id: &str,
     explicit_lock_file: Option<&str>,
@@ -246,8 +376,10 @@ pub fn inspect_package_receipts(
         if raw.trim().is_empty() {
             return Ok(PackageReceiptStatus {
                 canonical_path: PathBuf::new(),
+                retained_path: PathBuf::new(),
                 legacy_path: None,
                 canonical_installed: false,
+                retained_receipt_present: false,
                 legacy_receipt_present: false,
             });
         }
@@ -255,6 +387,8 @@ pub fn inspect_package_receipts(
 
     let paths = resolve_package_lock_paths(pkg_id, explicit_lock_file, explicit_root);
     let canonical_installed = inspect_receipt_file(&paths.canonical, fs_root.as_deref())?;
+    let retained_receipt_present =
+        inspect_retained_receipt_file(&paths.retained, pkg_id, fs_root.as_deref())?;
     let legacy_receipt_present = match &paths.legacy_swizzin {
         Some(legacy_path) => inspect_receipt_file(legacy_path, fs_root.as_deref())?,
         None => false,
@@ -262,8 +396,10 @@ pub fn inspect_package_receipts(
 
     Ok(PackageReceiptStatus {
         canonical_path: paths.canonical,
+        retained_path: paths.retained,
         legacy_path: paths.legacy_swizzin,
         canonical_installed,
+        retained_receipt_present,
         legacy_receipt_present,
     })
 }
@@ -584,6 +720,81 @@ mod tests {
             traversal_err.contains("parent traversal"),
             "{traversal_err}"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn retained_receipt_paths_and_ownership_validation_work_and_fail_closed() {
+        let root = temp_root("retained");
+        let rclone = resolve_package_lock_paths("rclone", None, Some(&root));
+        assert_eq!(rclone.canonical, root.join("install/.rclone.lock"));
+        assert_eq!(rclone.retained, root.join("install/.rclone.retained"));
+
+        let custom = resolve_package_lock_paths(
+            "sonarr",
+            Some("/custom/locks/.sonarr.receipt"),
+            Some(&root),
+        );
+        assert_eq!(
+            custom.retained,
+            root.join("custom/locks/.sonarr.receipt.retained")
+        );
+
+        let install_dir = root.join("install");
+        fs::create_dir_all(&install_dir).unwrap();
+        let payload = format_retained_package_receipt("rclone", "2026-11-22T00:00:00Z");
+        fs::write(&rclone.retained, payload).unwrap();
+
+        let status =
+            inspect_package_receipts("rclone", Some("/install/.rclone.lock"), Some(&root)).unwrap();
+        assert!(!status.is_installed());
+        assert!(!status.has_any_receipt());
+        assert!(status.has_retained_receipt());
+        assert!(status.is_retained_only());
+
+        // Alias lock stem is accepted (e.g. Bash writing lock stem autodlirssi for autodl)
+        let autodl = resolve_package_lock_paths("autodl", None, Some(&root));
+        fs::write(
+            &autodl.retained,
+            format_retained_package_receipt("autodlirssi", "2026-11-22T00:00:00Z"),
+        )
+        .unwrap();
+        let autodl_status = inspect_package_receipts("autodl", None, Some(&root)).unwrap();
+        assert!(autodl_status.is_retained_only());
+
+        // Mismatched package ownership fails closed
+        fs::write(
+            &rclone.retained,
+            format_retained_package_receipt("sonarr", "2026-11-22T00:00:00Z"),
+        )
+        .unwrap();
+        let err = inspect_package_receipts("rclone", Some("/install/.rclone.lock"), Some(&root))
+            .unwrap_err();
+        assert!(err.contains("belongs to package 'sonarr'"), "{err}");
+
+        // Unexpected state fails closed
+        fs::write(&rclone.retained, "package=rclone\nstate=purged\n").unwrap();
+        let err = inspect_package_receipts("rclone", Some("/install/.rclone.lock"), Some(&root))
+            .unwrap_err();
+        assert!(err.contains("unexpected state"), "{err}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::remove_file(&rclone.retained).unwrap();
+            let outside = root.join("outside-retained");
+            fs::write(
+                &outside,
+                format_retained_package_receipt("rclone", "2026-11-22T00:00:00Z"),
+            )
+            .unwrap();
+            symlink(&outside, &rclone.retained).unwrap();
+            let err =
+                inspect_package_receipts("rclone", Some("/install/.rclone.lock"), Some(&root))
+                    .unwrap_err();
+            assert!(err.contains("not a regular file"), "{err}");
+        }
 
         let _ = fs::remove_dir_all(&root);
     }

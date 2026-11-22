@@ -724,6 +724,149 @@ async fn rclone_legacy_credentials_survive_retained_remove_and_are_erased_on_pur
 }
 
 #[tokio::test]
+async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_rollback_keeps_retained() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    let root = create_isolated_test_dir("rclone-retained-then-purge");
+    let fixture = |logical: &str| root.join(logical.trim_start_matches('/'));
+
+    let unrelated: [(&str, &[u8]); 7] = [
+        ("/usr/bin/rclone", b"distro binary"),
+        ("/usr/local/bin/rclone", b"operator binary"),
+        ("/etc/rclone/custom.conf", b"[operator-custom]\n"),
+        ("/etc/aetherflow/aetherflow.env", b"GLOBAL_SECRET=keep\n"),
+        ("/mnt/remote/sentinel", b"operator mount data"),
+        ("/usr/bin/rclone.af-backup.foreign/sentinel", b"unclaimed archive"),
+        (
+            "/install/.sonarr.retained",
+            b"package=sonarr\nstate=retained\nupdated_at=2026-11-22T00:00:00Z\n",
+        ),
+    ];
+    for (logical, content) in unrelated {
+        let p = fixture(logical);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, content).unwrap();
+    }
+
+    let recipe = get_declarative_recipe("rclone").unwrap();
+    let runner = MockCommandRunner::default();
+    let base_env = PackageExecutionEnv::isolated(&root);
+
+    // 1. Install rclone -> writes .rclone.lock, no .rclone.retained
+    DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
+        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert!(fixture("/install/.rclone.lock").is_file());
+    assert!(!fixture("/install/.rclone.retained").exists());
+    assert!(fixture("/etc/rclone/rclone.conf").is_file());
+    assert!(fixture("/etc/rclone/rclone.env").is_file());
+    assert!(fixture("/var/lib/rclone").is_dir());
+
+    // 2. Ordinary retained remove (delete_data=false) removes .rclone.lock, writes .rclone.retained,
+    //    and preserves managed config/state.
+    DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
+        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert!(!fixture("/install/.rclone.lock").exists());
+    assert!(fixture("/install/.rclone.retained").is_file());
+    assert!(fixture("/etc/rclone/rclone.conf").is_file());
+    assert!(fixture("/etc/rclone/rclone.env").is_file());
+    assert!(fixture("/var/lib/rclone").is_dir());
+
+    let retained_insp =
+        crate::inspect_package_purge_state("rclone", Some("/install/.rclone.lock"), Some(&root))
+            .unwrap();
+    assert_eq!(
+        retained_insp.eligibility,
+        crate::PackagePurgeEligibility::RetainedProven
+    );
+    assert!(retained_insp.receipt_status.is_retained_only());
+
+    // 3. A failed purge preserves .rclone.retained so the operator can retry safely.
+    let mut failing_recipe = recipe.clone();
+    failing_recipe.remove_steps.push(DeclarativeStep::RunCommand {
+        program: "/bin/false".into(),
+        args: vec!["purge-fail".into()],
+        only_if_delete_data: true,
+        ignore_errors: false,
+        progress_pct: 99,
+        description: "Inject purge failure before receipt commit".into(),
+    });
+    let mut purge_env = base_env.clone();
+    purge_env.delete_data = true;
+    let failing_runner = MockCommandRunner {
+        fail_program: Some("/bin/false".into()),
+        ..Default::default()
+    };
+    let err = DeclarativePackageExecutor::with_runner(purge_env.clone(), failing_runner)
+        .execute_recipe(
+            &failing_recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("/bin/false"), "{err}");
+    assert!(fixture("/install/.rclone.retained").is_file());
+
+    // 4. Successful explicit purge removes .rclone.retained and managed data while preserving
+    //    every unrelated file and other packages' retained receipts.
+    DeclarativePackageExecutor::with_runner(purge_env, runner.clone())
+        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    for removed in [
+        "/install/.rclone.lock",
+        "/install/.rclone.retained",
+        "/etc/rclone/rclone.conf",
+        "/etc/rclone/rclone.env",
+        "/var/lib/rclone",
+        crate::package_executor::RCLONE_BIN,
+        crate::package_executor::RCLONE_BIN_OWNER,
+    ] {
+        assert!(!fixture(removed).exists(), "{removed} should be purged");
+    }
+    for (logical, content) in unrelated {
+        assert_eq!(
+            fs::read(fixture(logical)).unwrap(),
+            content,
+            "unrelated path {logical} must be preserved"
+        );
+    }
+
+    // 5. After purge, rclone is NotPresent even though unrelated files remain on disk.
+    let after_purge =
+        crate::inspect_package_purge_state("rclone", Some("/install/.rclone.lock"), Some(&root))
+            .unwrap();
+    assert_eq!(
+        after_purge.eligibility,
+        crate::PackagePurgeEligibility::NotPresent
+    );
+    assert!(!after_purge.allows_purge());
+
+    // 6. Reinstalling after retained removal clears .rclone.retained.
+    DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
+        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
+        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert!(fixture("/install/.rclone.retained").is_file());
+    DeclarativePackageExecutor::with_runner(base_env, runner)
+        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert!(fixture("/install/.rclone.lock").is_file());
+    assert!(!fixture("/install/.rclone.retained").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn rclone_failed_migration_restores_unit_and_credentials() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let root = create_isolated_test_dir("rclone-migration-rollback");

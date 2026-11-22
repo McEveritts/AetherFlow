@@ -491,6 +491,68 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                     if line.startswith(('purge_systemd_unit ', 'systemctl daemon-reload', 'DEBIAN_FRONTEND=')):
                         self.assertNotIn('|| true', line)
 
+    def test_common_sh_retained_receipt_lifecycle_and_symlink_safety(self):
+        install_dir = self.root / 'install'
+        install_dir.mkdir(parents=True, exist_ok=True)
+        common_sh = ROOT / 'packages/common.sh'
+
+        def run_common(snippet: str, extra_env=None):
+            env = {
+                'PATH': '/usr/bin:/bin',
+                'LOCK_DIR': str(install_dir),
+                'LOGFILE': str(self.root / 'install.log'),
+                'AETHERFLOW_FS_ROOT': str(self.root),
+                'AETHERFLOW_SKIP_ENV_FILES': '1',
+            }
+            if extra_env:
+                env.update(extra_env)
+            return subprocess.run(
+                [
+                    'bash',
+                    '-c',
+                    f'set -euo pipefail\nsource "{common_sh}"\npurge_app_backups() {{ :; }}\n{snippet}',
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        # 1. Retained remove writes .rclone.retained when .rclone.lock existed, and clears .rclone.lock
+        (install_dir / '.rclone.lock').write_text('installed\n')
+        res = run_common('DELETE_DATA=false remove_lock rclone')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertFalse((install_dir / '.rclone.lock').exists())
+        retained_file = install_dir / '.rclone.retained'
+        self.assertTrue(retained_file.is_file())
+        retained_text = retained_file.read_text()
+        self.assertIn('package=rclone\n', retained_text)
+        self.assertIn('state=retained\n', retained_text)
+
+        # 2. Explicit purge clears .rclone.retained
+        res = run_common('DELETE_DATA=true remove_lock rclone')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertFalse(retained_file.exists())
+
+        # 3. Retained remove on a never-managed package (no lock) does NOT create a spurious .retained
+        res = run_common('DELETE_DATA=false remove_lock nevermanaged')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertFalse((install_dir / '.nevermanaged.retained').exists())
+
+        # 4. write_lock clears any prior .retained receipt
+        retained_file.write_text('package=rclone\nstate=retained\n')
+        res = run_common('write_lock rclone')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue((install_dir / '.rclone.lock').is_file())
+        self.assertFalse(retained_file.exists())
+
+        # 5. Symlinked .retained receipt is refused fail-closed
+        outside = self.root / 'outside-retained'
+        outside.write_text('package=rclone\nstate=retained\n')
+        retained_file.symlink_to(outside)
+        res = run_common('DELETE_DATA=true remove_lock rclone')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('Refusing unsafe retained installation receipt path', res.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

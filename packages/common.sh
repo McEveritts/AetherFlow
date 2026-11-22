@@ -5021,6 +5021,11 @@ lock_path() {
     printf '%s/.%s.lock\n' "$LOCK_DIR" "$package_name"
 }
 
+retained_lock_path() {
+    local package_name="$1"
+    printf '%s/.%s.retained\n' "$LOCK_DIR" "$package_name"
+}
+
 legacy_swizzin_lock_path() {
     local package_name="$1"
     local fs_root="${AETHERFLOW_FS_ROOT:-${AETHERFLOW_INSTALL_ROOT:-}}"
@@ -5076,7 +5081,7 @@ launch_detached_helper() (
 )
 
 write_lock() {
-    local package_name="$1" lp=""
+    local package_name="$1" lp="" rp=""
     if [[ -n "${AF_STATE_BACKUP:-}" && -n "${AF_STATE_UNIT:-}" ]]; then
         verify_systemd_service_active "$AF_STATE_UNIT" || return 1
         if [[ "${AF_STATE_PORT:-0}" != 0 ]]; then
@@ -5087,8 +5092,13 @@ write_lock() {
         clear_apt_reinstall_markers || return 1
     fi
     lp="$(lock_path "$package_name")"
+    rp="$(retained_lock_path "$package_name")"
     if [[ -L "$LOCK_DIR" || -L "$lp" || ( -e "$lp" && ! -f "$lp" ) ]]; then
         print_error "Refusing unsafe installation lock path: $lp"
+        return 1
+    fi
+    if [[ -L "$rp" || ( -e "$rp" && ! -f "$rp" ) ]]; then
+        print_error "Refusing unsafe retained installation receipt path: $rp"
         return 1
     fi
     local new_lock=false
@@ -5097,6 +5107,12 @@ write_lock() {
     if ! remove_legacy_swizzin_lock "$package_name"; then
         [[ "$new_lock" != true ]] || rm -f -- "$lp"
         return 1
+    fi
+    if [[ -f "$rp" ]]; then
+        rm -f -- "$rp" || {
+            [[ "$new_lock" != true ]] || rm -f -- "$lp"
+            return 1
+        }
     fi
     INSTALL_COMMITTED=true
     if [[ -n "${AF_ARCHIVE_BACKUP:-}" ]]; then
@@ -5216,14 +5232,46 @@ PYEOF
 }
 
 remove_lock() {
-    local package_name="$1" lp=""
-    if [[ "${DELETE_DATA:-false}" == true ]]; then
-        purge_app_backups "$package_name" || return 1
-    fi
+    local package_name="$1" lp="" rp="" legacy_lock="" legacy_dir="" legacy_etc="" had_receipt=false tmp_retained=""
     lp="$(lock_path "$package_name")"
+    rp="$(retained_lock_path "$package_name")"
     if [[ -L "$LOCK_DIR" || -L "$lp" || ( -e "$lp" && ! -f "$lp" ) ]]; then
         print_error "Refusing unsafe installation lock path: $lp"
         return 1
+    fi
+    if [[ -L "$rp" || ( -e "$rp" && ! -f "$rp" ) ]]; then
+        print_error "Refusing unsafe retained installation receipt path: $rp"
+        return 1
+    fi
+    if legacy_lock="$(legacy_swizzin_lock_path "$package_name" 2>/dev/null)"; then
+        legacy_dir="${legacy_lock%/*}"
+        legacy_etc="${legacy_dir%/*}"
+        if [[ -L "$legacy_etc" || -L "$legacy_dir" ]]; then
+            print_error "Refusing symlinked legacy lock directory: $legacy_dir"
+            return 1
+        fi
+        if [[ -L "$legacy_lock" || ( -e "$legacy_lock" && ! -f "$legacy_lock" ) ]]; then
+            print_error "Refusing unsafe legacy installation lock: $legacy_lock"
+            return 1
+        fi
+    fi
+    if [[ "${DELETE_DATA:-false}" == true ]]; then
+        purge_app_backups "$package_name" || return 1
+    fi
+    if [[ -f "$lp" || -f "$rp" || ( -n "$legacy_lock" && -f "$legacy_lock" ) ]]; then
+        had_receipt=true
+    fi
+    if [[ "${DELETE_DATA:-false}" == true ]]; then
+        rm -f -- "$rp" || return 1
+    elif [[ "$had_receipt" == true ]]; then
+        mkdir -p -- "$LOCK_DIR" || return 1
+        tmp_retained="$(mktemp "${LOCK_DIR}/.af-retained.XXXXXX")" || return 1
+        if ! printf 'package=%s\nstate=retained\nupdated_at=%s\n' "${package_name,,}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp_retained" ||
+            ! chmod 0644 "$tmp_retained" ||
+            ! mv -f -- "$tmp_retained" "$rp"; then
+            rm -f -- "$tmp_retained"
+            return 1
+        fi
     fi
     remove_legacy_swizzin_lock "$package_name" || return 1
     rm -f -- "$lp"
