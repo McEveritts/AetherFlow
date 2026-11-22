@@ -16,7 +16,7 @@ async fn exercise_catalog_recipe(
         &recipe, PackageAction::Install, CancellationToken::new(), |_| {},
     ).await.unwrap();
     assert!(install.lock_present, "{package}");
-    let expected_ver = if package == "rclone" || package == "prometheus" {
+    let expected_ver = if package == "rclone" {
         "0.14.2"
     } else {
         "1:0.14.2-1ubuntu2"
@@ -88,25 +88,34 @@ catalog_recipe_lifecycle_test!(catalog_znc_lifecycle, "znc", "znc", "znc.service
     "/var/lib/znc/configs/znc.conf", "fixture IRC credentials and custom modules\n");
 catalog_recipe_lifecycle_test!(catalog_xrdp_lifecycle, "xrdp", "xrdp", "xrdp.service",
     "/etc/xrdp/startwm.sh", "#!/bin/sh\nexec operator-desktop\n");
-catalog_recipe_lifecycle_test!(catalog_novnc_lifecycle, "novnc", "novnc", "novnc.service",
-    "/var/lib/novnc/operator-password", "fixture retained desktop password\n");
 catalog_recipe_lifecycle_test!(catalog_x2go_lifecycle, "x2go", "x2goserver", "x2goserver.service",
     "/etc/x2go/operator-session.conf", "fixture custom session settings\n");
-catalog_recipe_lifecycle_test!(catalog_prometheus_lifecycle, "prometheus", "prometheus", "prometheus.service",
-    "/etc/prometheus/prometheus.yml", "scrape_configs: []\n# retained fixture scrape credentials\n");
 catalog_recipe_lifecycle_test!(catalog_netdata_lifecycle, "netdata", "netdata", "netdata.service",
     "/etc/netdata/netdata.conf", "[global]\n    history = 86400\n[plugins]\n    fixture = retained\n");
 catalog_recipe_lifecycle_test!(catalog_mergerfs_lifecycle, "mergerfs", "mergerfs", "mergerfs.service",
     "/etc/mergerfs/mergerfs.conf", "BRANCHES=\"/mnt/operator-source\"\n");
 catalog_recipe_lifecycle_test!(catalog_rclone_lifecycle, "rclone", "rclone", "rclone.service",
     "/etc/rclone/rclone.conf", "[fixture]\ntype = drive\ntoken = retained-fixture-token\n");
-catalog_recipe_lifecycle_test!(catalog_syncthing_lifecycle, "syncthing", "syncthing", "syncthing.service",
-    "/var/lib/syncthing/.config/syncthing/config.xml", "<configuration>fixture existing identity</configuration>\n");
+
+#[test]
+fn drifted_recipes_defer_cleanly_to_legacy_bash_fallback() {
+    for package in ["prometheus", "syncthing", "novnc"] {
+        assert!(
+            get_declarative_recipe(package).is_none(),
+            "{package} must not expose a drifted declarative recipe"
+        );
+        assert_eq!(
+            select_package_engine_with_flags(package, true, false),
+            PackageEngineMode::LegacyBashFallback,
+            "{package} must fall back cleanly to LegacyBashFallback even when Rust packages are enabled"
+        );
+    }
+}
 
 #[tokio::test]
 async fn catalog_apt_failure_preserves_receipts_and_existing_configuration() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    for package in ["znc", "xrdp", "novnc", "x2go", "prometheus", "netdata", "mergerfs", "rclone", "syncthing"] {
+    for package in ["znc", "xrdp", "x2go", "netdata", "mergerfs", "rclone"] {
         let root = create_isolated_test_dir(package);
         let recipe = get_declarative_recipe(package).unwrap();
         let marker = root.join(recipe.lock_file.trim_start_matches('/'));
@@ -209,7 +218,7 @@ async fn catalog_znc_generates_unique_non_static_credentials_and_persists_receip
 }
 
 #[tokio::test]
-async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and_port_updates() {
+async fn catalog_all_retained_recipes_have_af_version_receipts_companion_units_and_port_updates() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let expected_version_paths = [
         ("fail2ban", "etc/fail2ban/.af-version"),
@@ -217,13 +226,10 @@ async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and
         ("threadfin", "var/lib/threadfin/.af-version"),
         ("znc", "var/lib/znc/.af-version"),
         ("xrdp", "var/lib/xrdp/.af-version"),
-        ("novnc", "etc/novnc/.af-version"),
         ("x2go", "var/lib/x2go/.af-version"),
-        ("prometheus", "etc/prometheus/.af-version"),
         ("netdata", "etc/netdata/.af-version"),
         ("mergerfs", "var/lib/mergerfs/.af-version"),
         ("rclone", "var/lib/rclone/.af-version"),
-        ("syncthing", "var/lib/syncthing/.af-version"),
     ];
     for (pkg, expected_rel_path) in expected_version_paths {
         let recipe = get_declarative_recipe(pkg).unwrap();
@@ -284,65 +290,9 @@ async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and
             assert!(!root.join("etc/systemd/system/rclone.service").exists());
             assert!(!root.join("etc/systemd/system/rclone-vfs.service").exists());
         }
-        if pkg == "novnc" {
-            assert!(root.join("etc/systemd/system/novnc-xvnc.service").is_file());
-            env_cfg.delete_data = true;
-            let purge_runner = MockCommandRunner::default();
-            let purge_exec =
-                DeclarativePackageExecutor::with_runner(env_cfg.clone(), purge_runner.clone());
-            purge_exec
-                .execute_recipe(
-                    &recipe_to_run,
-                    PackageAction::Remove,
-                    CancellationToken::new(),
-                    |_| {},
-                )
-                .await
-                .unwrap();
-            assert!(purge_runner.recorded_commands().iter().any(|cmd| {
-                cmd.program == "userdel" && cmd.args.contains(&"novnc".to_string())
-            }));
-        }
-        if pkg == "prometheus" {
-            assert!(root.join("etc/systemd/system/node_exporter.service").is_file());
-            let cmds = runner.recorded_commands();
-            assert!(cmds.iter().any(|cmd| {
-                cmd.program == "systemctl"
-                    && cmd.args.contains(&"stop".to_string())
-                    && cmd.args.contains(&"prometheus-node-exporter.service".to_string())
-            }));
-            assert!(!cmds.iter().any(|cmd| {
-                cmd.program == "systemctl"
-                    && cmd.args.contains(&"enable".to_string())
-                    && cmd.args.contains(&"--now".to_string())
-                    && cmd.args.contains(&"prometheus-node-exporter.service".to_string())
-            }));
-            assert!(cmds.iter().any(|cmd| {
-                cmd.program == "systemctl"
-                    && cmd.args.contains(&"enable".to_string())
-                    && cmd.args.contains(&"--now".to_string())
-                    && cmd.args.contains(&"node_exporter.service".to_string())
-            }));
-            assert!(cmds.iter().any(|cmd| {
-                cmd.program == "systemctl"
-                    && cmd.args.contains(&"enable".to_string())
-                    && cmd.args.contains(&"--now".to_string())
-                    && cmd.args.contains(&"prometheus.service".to_string())
-            }));
-            executor
-                .execute_recipe(
-                    &recipe_to_run,
-                    PackageAction::Remove,
-                    CancellationToken::new(),
-                    |_| {},
-                )
-                .await
-                .unwrap();
-            assert!(!root.join("etc/systemd/system/node_exporter.service").exists());
-        }
         if matches!(
             pkg,
-            "netdata" | "xrdp" | "fail2ban" | "znc" | "x2go" | "mergerfs" | "rclone" | "syncthing"
+            "netdata" | "xrdp" | "fail2ban" | "znc" | "x2go" | "mergerfs" | "rclone"
         ) {
             executor
                 .execute_recipe(
@@ -377,6 +327,9 @@ async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and
         }
         if pkg == "mergerfs" {
             assert!(root.join("mnt/unionfs").is_dir());
+            assert!(root.join("mnt/mergerfs").is_dir());
+            fs::write(root.join("mnt/unionfs/operator-data.txt"), b"keep").unwrap();
+            fs::write(root.join("mnt/mergerfs/operator-data.txt"), b"keep").unwrap();
             env_cfg.delete_data = true;
             let purge_exec =
                 DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
@@ -389,15 +342,16 @@ async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and
                 )
                 .await
                 .unwrap();
-            assert!(!root.join("mnt/unionfs").exists());
-            assert!(!root.join("mnt/mergerfs").exists());
+            assert!(root.join("mnt/unionfs/operator-data.txt").is_file());
+            assert!(root.join("mnt/mergerfs/operator-data.txt").is_file());
             assert!(!root.join("var/lib/mergerfs").exists());
+            assert!(!root.join("etc/mergerfs").exists());
         }
         let _ = fs::remove_dir_all(root);
     }
 
-    // Verify port updates on existing configs for quassel, znc, and prometheus
-    for (pkg, new_port) in [("quassel", 14242), ("znc", 16501), ("prometheus", 19090)] {
+    // Verify port updates on existing configs for quassel and znc
+    for (pkg, new_port) in [("quassel", 14242), ("znc", 16501)] {
         let root = create_isolated_test_dir(&format!("port-update-{pkg}"));
         let recipe = get_declarative_recipe(pkg).unwrap();
         let mut env_cfg = PackageExecutionEnv::isolated(&root);
@@ -461,107 +415,10 @@ async fn catalog_all_twelve_recipes_have_af_version_receipts_companion_units_and
                     fs::read_to_string(root.join("var/lib/znc/configs/znc.conf")).unwrap();
                 assert!(znc_cfg.contains("Port = 16501"));
             }
-            "prometheus" => {
-                let default_cfg =
-                    fs::read_to_string(root.join("etc/default/prometheus")).unwrap();
-                let yml_cfg =
-                    fs::read_to_string(root.join("etc/prometheus/prometheus.yml")).unwrap();
-                assert!(default_cfg.contains("--web.listen-address=127.0.0.1:19090"));
-                assert!(yml_cfg.contains("127.0.0.1:19090"));
-                assert!(yml_cfg.contains("127.0.0.1:9100"));
-            }
             _ => unreachable!(),
         }
         let _ = fs::remove_dir_all(root);
     }
-}
-
-#[tokio::test]
-async fn novnc_auth_downgrade() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    let prev_pass = env::var_os("MASTER_PASS");
-    env::set_var("MASTER_PASS", "S3cr3tVncPass!2026");
-
-    let root = create_isolated_test_dir("novnc-auth-probe");
-    let recipe = get_declarative_recipe("novnc").unwrap();
-    let executor = DeclarativePackageExecutor::with_runner(
-        PackageExecutionEnv::isolated(&root),
-        MockCommandRunner::default(),
-    );
-    executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-
-    let vnc_dir = root.join("var/lib/novnc/.vnc");
-    assert!(vnc_dir.is_dir());
-    let passwd_path = vnc_dir.join("passwd");
-    assert!(passwd_path.is_file());
-    let bytes = fs::read(&passwd_path).unwrap();
-    assert_eq!(bytes.len(), 8);
-    assert_ne!(bytes.as_slice(), b"S3cr3tVncPass!2026\n");
-    assert_eq!(
-        decode_tigervnc_passwd(&bytes).as_deref(),
-        Some("S3cr3tVn")
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&vnc_dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(&passwd_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    // Verify a valid retained 8-byte obfuscated VNC password is preserved on update/reinstall
-    env::set_var("MASTER_PASS", "DifferentPass!2026");
-    executor
-        .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-    let retained_bytes = fs::read(&passwd_path).unwrap();
-    assert_eq!(retained_bytes.len(), 8);
-    assert_ne!(retained_bytes.as_slice(), b"S3cr3tVncPass!2026\n");
-    assert_eq!(
-        decode_tigervnc_passwd(&retained_bytes).as_deref(),
-        Some("S3cr3tVn")
-    );
-
-    // Verify a legacy plaintext /var/lib/novnc/.vnc/passwd is upgraded to 8-byte obfuscated format
-    env::set_var("MASTER_PASS", "S3cr3tVncPass!2026");
-    fs::write(&passwd_path, b"S3cr3tVncPass!2026\n").unwrap();
-    executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-    let upgraded_bytes = fs::read(&passwd_path).unwrap();
-    assert_eq!(upgraded_bytes.len(), 8);
-    assert_ne!(upgraded_bytes.as_slice(), b"S3cr3tVncPass!2026\n");
-    assert_eq!(
-        decode_tigervnc_passwd(&upgraded_bytes).as_deref(),
-        Some("S3cr3tVn")
-    );
-
-    let xvnc_unit =
-        fs::read_to_string(root.join("etc/systemd/system/novnc-xvnc.service")).unwrap();
-    assert!(!xvnc_unit.contains("-SecurityTypes None"));
-    assert!(xvnc_unit.contains("-PasswordFile /var/lib/novnc/.vnc/passwd"));
-    assert!(xvnc_unit.contains("-SecurityTypes VncAuth,TLSVnc"));
-    assert!(!xvnc_unit.contains("ExecStartPost="));
-    let session_unit =
-        fs::read_to_string(root.join("etc/systemd/system/novnc-session.service")).unwrap();
-    assert!(session_unit.contains("ExecStart=/var/lib/novnc/.vnc/xstartup"));
-    assert!(session_unit.contains("DISPLAY=:1"));
-
-    match prev_pass {
-        Some(v) => env::set_var("MASTER_PASS", v),
-        None => env::remove_var("MASTER_PASS"),
-    }
-    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -1028,64 +885,8 @@ async fn rollback_service_state() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[tokio::test]
-async fn prometheus_version_path() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    let root = create_isolated_test_dir("prometheus-bin-parity");
-    let usr_bin = root.join("usr/bin");
-    fs::create_dir_all(&usr_bin).unwrap();
-    fs::write(usr_bin.join("prometheus"), b"#!/bin/sh\necho 'prometheus, version 2.53.0'\n")
-        .unwrap();
-    fs::write(
-        usr_bin.join("prometheus-node-exporter"),
-        b"#!/bin/sh\necho 'node_exporter, version 1.8.2'\n",
-    )
-    .unwrap();
-
-    let recipe = get_declarative_recipe("prometheus").unwrap();
-    let env_cfg = PackageExecutionEnv::isolated(&root);
-    let executor =
-        DeclarativePackageExecutor::with_runner(env_cfg.clone(), MockCommandRunner::default());
-    executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-
-    let local_prom = root.join("usr/local/bin/prometheus");
-    let local_node = root.join("usr/local/bin/node_exporter");
-    assert!(local_prom.is_file());
-    assert!(local_node.is_file());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&local_prom).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        assert_eq!(
-            fs::metadata(&local_node).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-    }
-
-    executor
-        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-    assert!(!local_prom.exists());
-    assert!(!local_node.exists());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn novnc_credential_format_is_obfuscated_and_roundtrips() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    let prev_user = env::var_os("MASTER_USER");
-    let prev_pass = env::var_os("MASTER_PASS");
-    let prev_af_pass = env::var_os("AETHERFLOW_MASTER_PASS");
-    let prev_vnc_pass = env::var_os("AETHERFLOW_VNC_PASSWORD");
-
+#[test]
+fn novnc_credential_format_is_obfuscated_and_roundtrips() {
     // Verify standard RFB/vncpasswd DES test vector ("password" -> [0xdb, 0xd8, 0x3c, 0xfd, 0x72, 0x7a, 0x14, 0x58])
     assert_eq!(
         encode_tigervnc_passwd("password"),
@@ -1099,49 +900,6 @@ async fn novnc_credential_format_is_obfuscated_and_roundtrips() {
         decode_tigervnc_passwd(&encode_tigervnc_passwd("short")).as_deref(),
         Some("short")
     );
-
-    env::remove_var("AETHERFLOW_MASTER_PASS");
-    env::set_var("MASTER_USER", "audit-fixture");
-    env::set_var("MASTER_PASS", "test-test-test-test");
-    env::set_var("AETHERFLOW_VNC_PASSWORD", "test-test-test-test");
-
-    let root = create_isolated_test_dir("novnc-credential-format");
-    let recipe = get_declarative_recipe("novnc").unwrap();
-    let executor = DeclarativePackageExecutor::with_runner(
-        PackageExecutionEnv::isolated(&root),
-        MockCommandRunner::default(),
-    );
-    executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-
-    let passwd_path = root.join("var/lib/novnc/.vnc/passwd");
-    let bytes = fs::read(&passwd_path).unwrap();
-    assert_eq!(bytes.len(), 8);
-    assert_ne!(bytes.as_slice(), b"test-test-test-test\n");
-    assert_eq!(
-        decode_tigervnc_passwd(&bytes).as_deref(),
-        Some("test-tes")
-    );
-
-    match prev_user {
-        Some(v) => env::set_var("MASTER_USER", v),
-        None => env::remove_var("MASTER_USER"),
-    }
-    match prev_pass {
-        Some(v) => env::set_var("MASTER_PASS", v),
-        None => env::remove_var("MASTER_PASS"),
-    }
-    match prev_af_pass {
-        Some(v) => env::set_var("AETHERFLOW_MASTER_PASS", v),
-        None => env::remove_var("AETHERFLOW_MASTER_PASS"),
-    }
-    match prev_vnc_pass {
-        Some(v) => env::set_var("AETHERFLOW_VNC_PASSWORD", v),
-        None => env::remove_var("AETHERFLOW_VNC_PASSWORD"),
-    }
-    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
@@ -1181,162 +939,6 @@ async fn native_fail2ban_succeeds_when_prometheus_compatibility_symlink_exists()
 }
 
 #[tokio::test]
-async fn prometheus_mixed_engine_update_syncs_usr_local_bin_runtime() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    let prev_prom_ver = env::var_os("PROMETHEUS_VERSION");
-    env::set_var("PROMETHEUS_VERSION", "3.0.0");
-
-    let root = create_isolated_test_dir("prometheus-mixed-engine-update");
-    fs::create_dir_all(root.join("usr/local/bin")).unwrap();
-    fs::create_dir_all(root.join("usr/bin")).unwrap();
-    fs::create_dir_all(root.join("etc/systemd/system")).unwrap();
-    fs::create_dir_all(root.join("etc/prometheus")).unwrap();
-
-    let unit = "[Service]\nExecStart=/usr/local/bin/prometheus --storage.tsdb.path=/var/lib/prometheus\n";
-    fs::write(root.join("etc/systemd/system/prometheus.service"), unit).unwrap();
-    fs::write(
-        root.join("usr/local/bin/prometheus"),
-        b"fixture existing runtime 2.0.0\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("usr/local/bin/node_exporter"),
-        b"fixture existing node runtime 2.0.0\n",
-    )
-    .unwrap();
-    fs::write(root.join("etc/prometheus/.af-version"), b"2.0.0\n").unwrap();
-    fs::write(
-        root.join("usr/bin/prometheus"),
-        b"fixture apt runtime 3.0.0\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("usr/bin/prometheus-node-exporter"),
-        b"fixture apt node runtime 3.0.0\n",
-    )
-    .unwrap();
-
-    let recipe = get_declarative_recipe("prometheus").unwrap();
-    let env_cfg = PackageExecutionEnv::isolated(&root);
-
-    // 1. Test forced failure after AptInstall during Update rolls back /usr/local/bin/prometheus to 2.0.0
-    let failing_runner = MockCommandRunner {
-        dpkg_version_stdout: Some("3.0.0-1\n".to_string()),
-        fail_systemctl_is_active: true,
-        ..Default::default()
-    };
-    let failing_exec = DeclarativePackageExecutor::with_runner(env_cfg.clone(), failing_runner);
-    let err = failing_exec
-        .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
-        .await;
-    assert!(err.is_err(), "forced failure after AptInstall must return Err");
-    assert_eq!(
-        fs::read_to_string(root.join("usr/local/bin/prometheus")).unwrap(),
-        "fixture existing runtime 2.0.0\n",
-        "/usr/local/bin/prometheus must roll back to 2.0.0 when a later step fails"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("etc/prometheus/.af-version")).unwrap(),
-        "2.0.0\n",
-        "/etc/prometheus/.af-version must roll back to 2.0.0 when a later step fails"
-    );
-
-    // 2. Test Update succeeds and syncs /usr/local/bin/prometheus and /etc/prometheus/.af-version to 3.0.0
-    let runner = MockCommandRunner {
-        dpkg_version_stdout: Some("3.0.0-1\n".to_string()),
-        ..Default::default()
-    };
-    let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
-    executor
-        .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(root.join("etc/prometheus/.af-version")).unwrap(),
-        "3.0.0\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("usr/local/bin/prometheus")).unwrap(),
-        "fixture apt runtime 3.0.0\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("usr/local/bin/node_exporter")).unwrap(),
-        "fixture apt node runtime 3.0.0\n"
-    );
-
-    // 3. Test Install (retained reinstall) also syncs /usr/local/bin/prometheus to 3.0.0
-    fs::write(
-        root.join("usr/local/bin/prometheus"),
-        b"fixture existing runtime 2.0.0\n",
-    )
-    .unwrap();
-    executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(root.join("etc/prometheus/.af-version")).unwrap(),
-        "3.0.0\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("usr/local/bin/prometheus")).unwrap(),
-        "fixture apt runtime 3.0.0\n"
-    );
-
-    match prev_prom_ver {
-        Some(v) => env::set_var("PROMETHEUS_VERSION", v),
-        None => env::remove_var("PROMETHEUS_VERSION"),
-    }
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn sol_04_prometheus_preserved_default_injects_listen_address_when_missing() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
-    let root = create_isolated_test_dir("sol-04-prometheus-preserved-default");
-    let default_path = root.join("etc/default/prometheus");
-    fs::create_dir_all(default_path.parent().unwrap()).unwrap();
-
-    // Case 1: existing /etc/default/prometheus has ARGS="" without --web.listen-address
-    fs::write(&default_path, "ARGS=\"\"\n").unwrap();
-
-    let recipe = get_declarative_recipe("prometheus").unwrap();
-    let mut env_cfg = PackageExecutionEnv::isolated(&root);
-    env_cfg.app_port = 19876;
-    let executor =
-        DeclarativePackageExecutor::with_runner(env_cfg.clone(), MockCommandRunner::default());
-    executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-
-    let updated = fs::read_to_string(&default_path).unwrap();
-    assert!(
-        updated.contains("--web.listen-address=127.0.0.1:19876"),
-        "expected /etc/default/prometheus with ARGS=\"\" to gain --web.listen-address=127.0.0.1:19876, got: {updated}"
-    );
-
-    // Case 2: existing /etc/default/prometheus has custom flags in ARGS without --web.listen-address
-    fs::write(&default_path, "ARGS=\"--storage.tsdb.retention.time=15d\"\n").unwrap();
-    env_cfg.app_port = 19877;
-    let executor2 =
-        DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
-    executor2
-        .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
-        .await
-        .unwrap();
-
-    let updated2 = fs::read_to_string(&default_path).unwrap();
-    assert!(
-        updated2.contains("--storage.tsdb.retention.time=15d")
-            && updated2.contains("--web.listen-address=127.0.0.1:19877"),
-        "expected existing ARGS flags to be preserved alongside injected --web.listen-address, got: {updated2}"
-    );
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn af_aud_002_mergerfs_and_rclone_purge_preflight_and_mountpoint_guard() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let root = create_isolated_test_dir("af-aud-002-fuse-preflight");
@@ -1347,24 +949,43 @@ async fn af_aud_002_mergerfs_and_rclone_purge_preflight_and_mountpoint_guard() {
     let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
 
     let mergerfs_recipe = get_declarative_recipe("mergerfs").unwrap();
-    let run_cmd_idx = mergerfs_recipe
+    let unmount_idx = mergerfs_recipe
         .remove_steps
         .iter()
-        .position(|s| matches!(s, DeclarativeStep::RunCommand { .. }))
-        .expect("mergerfs DELETE_DATA=true uninstall must emit DeclarativeStep::RunCommand preflight");
+        .position(|s| matches!(
+            s,
+            DeclarativeStep::UnmountPaths { paths, .. }
+                if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
+        ))
+        .expect("mergerfs uninstall must emit shell-free DeclarativeStep::UnmountPaths preflight");
+    assert!(
+        !mergerfs_recipe
+            .remove_steps
+            .iter()
+            .any(|s| matches!(s, DeclarativeStep::RunCommand { .. })),
+        "mergerfs uninstall must not shell out via RunCommand"
+    );
     let remove_idx = mergerfs_recipe
         .remove_steps
         .iter()
         .position(|s| {
             matches!(
                 s,
-                DeclarativeStep::RemovePaths { paths, .. }
-                    if paths.iter().any(|p| p == "/mnt/unionfs" || p == "/mnt/mergerfs")
+                DeclarativeStep::RemovePaths { paths, only_if_delete_data: true, .. }
+                    if paths.iter().any(|p| p == "/var/lib/mergerfs")
             )
         })
-        .expect("mergerfs DELETE_DATA=true uninstall must remove /mnt/unionfs and /mnt/mergerfs");
+        .expect("mergerfs DELETE_DATA=true uninstall must remove /var/lib/mergerfs");
     assert!(
-        run_cmd_idx < remove_idx,
+        !mergerfs_recipe.remove_steps.iter().any(|s| matches!(
+            s,
+            DeclarativeStep::RemovePaths { paths, .. }
+                if paths.iter().any(|p| p == "/mnt/unionfs" || p == "/mnt/mergerfs")
+        )),
+        "mergerfs DELETE_DATA=true uninstall must preserve /mnt/unionfs and /mnt/mergerfs"
+    );
+    assert!(
+        unmount_idx < remove_idx,
         "mergerfs unmount preflight must run before RemovePaths"
     );
 
@@ -1617,11 +1238,9 @@ async fn afm03_native_rclone_honors_keep_existing_secrets() {
 async fn afm05_native_recipes_verify_http_readiness_and_reject_missing_listener() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let expected = [
-        ("syncthing", "/rest/noauth/health"),
-        ("prometheus", "/-/healthy"),
+        ("znc", "/"),
         ("rclone", "/metrics"),
         ("netdata", "/api/v1/info"),
-        ("novnc", "/vnc.html"),
         ("threadfin", "/status"),
     ];
 
@@ -1668,14 +1287,14 @@ async fn afm05_native_recipes_verify_http_readiness_and_reject_missing_listener(
         }
     }
 
-    let root = create_isolated_test_dir("afm05-syncthing-no-listener");
-    let syncthing_recipe = get_declarative_recipe("syncthing").unwrap();
+    let root = create_isolated_test_dir("afm05-netdata-no-listener");
+    let netdata_recipe = get_declarative_recipe("netdata").unwrap();
     let mut env_cfg = PackageExecutionEnv::isolated(&root);
     env_cfg.app_port = 19989;
     let executor = DeclarativePackageExecutor::with_runner(env_cfg, SilentSuccessRunner);
     let err = executor
         .execute_recipe(
-            &syncthing_recipe,
+            &netdata_recipe,
             PackageAction::Install,
             CancellationToken::new(),
             |_| {},
@@ -1683,11 +1302,11 @@ async fn afm05_native_recipes_verify_http_readiness_and_reject_missing_listener(
         .await;
     assert!(
         err.is_err(),
-        "syncthing install without a live listener on port 19989 must fail readiness verification"
+        "netdata install without a live listener on port 19989 must fail readiness verification"
     );
     assert!(
-        !root.join("install/.syncthing.lock").exists(),
-        "failed syncthing readiness check must not leave lock file behind"
+        !root.join("install/.netdata.lock").exists(),
+        "failed netdata readiness check must not leave lock file behind"
     );
 
     let _ = fs::remove_dir_all(root);

@@ -5,9 +5,9 @@ async fn teardown_success_respects_explicit_purge_and_only_then_clears_marker() 
     for purge in [false, true] {
         let fixture = TeardownFixture::new("");
         assert!(fixture.remove(purge).await.is_ok());
-        assert!(!fixture.root.join("install/.syncthing.lock").exists());
+        assert!(!fixture.root.join("install/.znc.lock").exists());
         assert_eq!(
-            fixture.root.join("var/lib/syncthing/config.xml").is_file(),
+            fixture.root.join("var/lib/znc/configs/znc.conf").is_file(),
             !purge
         );
         assert!(fixture
@@ -36,14 +36,14 @@ async fn teardown_success_respects_explicit_purge_and_only_then_clears_marker() 
 #[tokio::test]
 async fn teardown_data_path_failure_does_not_clear_marker_or_follow_symlink() {
     let fixture = TeardownFixture::new("");
-    let data = fixture.root.join("var/lib/syncthing");
+    let data = fixture.root.join("var/lib/znc");
     let unrelated = fixture.root.join("var/lib/unrelated");
     fs::create_dir_all(&unrelated).unwrap();
     fs::write(unrelated.join("sentinel"), "unrelated data").unwrap();
     fs::remove_dir_all(&data).unwrap();
     std::os::unix::fs::symlink(&unrelated, &data).unwrap();
     assert!(fixture.remove(true).await.is_err());
-    assert!(fixture.root.join("install/.syncthing.lock").is_file());
+    assert!(fixture.root.join("install/.znc.lock").is_file());
     assert!(unrelated.join("sentinel").is_file());
     assert!(!fixture
         .events
@@ -135,19 +135,19 @@ impl TeardownFixture {
         let root = env::temp_dir().join(format!("af-teardown-{}", uuid::Uuid::new_v4()));
         for directory in [
             "install",
-            "etc/systemd/system/syncthing.service.d",
-            "var/lib/syncthing",
+            "etc/systemd/system/znc.service.d",
+            "var/lib/znc/configs",
         ] {
             fs::create_dir_all(root.join(directory)).unwrap();
         }
         for (path, content) in [
-            ("install/.syncthing.lock", "installed"),
-            ("etc/systemd/system/syncthing.service", "fixture unit"),
+            ("install/.znc.lock", "installed"),
+            ("etc/systemd/system/znc.service", "fixture unit"),
             (
-                "etc/systemd/system/syncthing.service.d/sandbox.conf",
+                "etc/systemd/system/znc.service.d/sandbox.conf",
                 "fixture sandbox",
             ),
-            ("var/lib/syncthing/config.xml", "retained configuration"),
+            ("var/lib/znc/configs/znc.conf", "retained configuration"),
         ] {
             fs::write(root.join(path), content).unwrap();
         }
@@ -167,7 +167,7 @@ impl TeardownFixture {
         environment.delete_data = purge;
         DeclarativePackageExecutor::with_runner(environment, self.runner.clone())
             .execute_recipe(
-                &get_declarative_recipe("syncthing").unwrap(),
+                &get_declarative_recipe("znc").unwrap(),
                 PackageAction::Remove,
                 CancellationToken::new(),
                 |event| self.events.lock().unwrap().push(event),
@@ -202,9 +202,9 @@ async fn assert_failed_stop_preserves_state(purge: bool) {
         "an unproven stop must not report successful removal"
     );
     for path in [
-        "install/.syncthing.lock",
-        "etc/systemd/system/syncthing.service",
-        "var/lib/syncthing/config.xml",
+        "install/.znc.lock",
+        "etc/systemd/system/znc.service",
+        "var/lib/znc/configs/znc.conf",
     ] {
         assert!(fixture.root.join(path).is_file(), "must retain {path}");
     }
@@ -228,8 +228,8 @@ async fn teardown_known_inactive_or_absent_stop_is_idempotent() {
         let mut fixture = TeardownFixture::new("stop");
         fixture.runner.unit_state = state.to_string();
         assert!(fixture.remove(false).await.is_ok());
-        assert!(!fixture.root.join("install/.syncthing.lock").exists());
-        assert!(fixture.root.join("var/lib/syncthing/config.xml").is_file());
+        assert!(!fixture.root.join("install/.znc.lock").exists());
+        assert!(fixture.root.join("var/lib/znc/configs/znc.conf").is_file());
     }
 }
 
@@ -246,8 +246,8 @@ async fn teardown_unknown_active_failed_or_unreadable_state_fails_closed() {
         fixture.runner.unit_state = state.to_string();
         fixture.runner.state_exit_code = exit_code;
         assert!(fixture.remove(true).await.is_err());
-        assert!(fixture.root.join("var/lib/syncthing/config.xml").is_file());
-        assert!(fixture.root.join("install/.syncthing.lock").is_file());
+        assert!(fixture.root.join("var/lib/znc/configs/znc.conf").is_file());
+        assert!(fixture.root.join("install/.znc.lock").is_file());
     }
 }
 
@@ -268,7 +268,7 @@ async fn teardown_required_command_failures_never_complete_or_remove_marker() {
             "must reject {operation} failure"
         );
         assert!(
-            fixture.root.join("install/.syncthing.lock").is_file(),
+            fixture.root.join("install/.znc.lock").is_file(),
             "must retain marker after {operation} failure"
         );
         assert!(!fixture
@@ -278,7 +278,7 @@ async fn teardown_required_command_failures_never_complete_or_remove_marker() {
             .iter()
             .any(|event| event.progress_pct == 100));
         if !["userdel", "groupdel", "daemon-reload"].contains(&operation) {
-            assert!(fixture.root.join("var/lib/syncthing/config.xml").is_file());
+            assert!(fixture.root.join("var/lib/znc/configs/znc.conf").is_file());
         }
     }
 }
@@ -311,8 +311,8 @@ async fn teardown_absent_accounts_are_idempotent_but_lookup_failure_is_not() {
 #[tokio::test]
 async fn teardown_unit_or_dropin_filesystem_error_gates_data_and_marker() {
     for (relative, directory) in [
-        ("etc/systemd/system/syncthing.service", true),
-        ("etc/systemd/system/syncthing.service.d", false),
+        ("etc/systemd/system/znc.service", true),
+        ("etc/systemd/system/znc.service.d", false),
     ] {
         let fixture = TeardownFixture::new("");
         let path = fixture.root.join(relative);
@@ -324,23 +324,23 @@ async fn teardown_unit_or_dropin_filesystem_error_gates_data_and_marker() {
             fs::write(&path, "not a drop-in directory").unwrap();
         }
         assert!(fixture.remove(true).await.is_err());
-        assert!(fixture.root.join("var/lib/syncthing/config.xml").is_file());
-        assert!(fixture.root.join("install/.syncthing.lock").is_file());
+        assert!(fixture.root.join("var/lib/znc/configs/znc.conf").is_file());
+        assert!(fixture.root.join("install/.znc.lock").is_file());
     }
 }
 
 #[tokio::test]
 async fn teardown_missing_unit_and_dropin_paths_are_idempotent() {
     let fixture = TeardownFixture::new("");
-    fs::remove_file(fixture.root.join("etc/systemd/system/syncthing.service")).unwrap();
-    fs::remove_dir_all(fixture.root.join("etc/systemd/system/syncthing.service.d")).unwrap();
+    fs::remove_file(fixture.root.join("etc/systemd/system/znc.service")).unwrap();
+    fs::remove_dir_all(fixture.root.join("etc/systemd/system/znc.service.d")).unwrap();
     assert!(fixture.remove(false).await.is_ok());
 }
 
 #[tokio::test]
 async fn teardown_final_marker_unlink_failure_never_emits_complete() {
     let fixture = TeardownFixture::new("");
-    let marker = fixture.root.join("install/.syncthing.lock");
+    let marker = fixture.root.join("install/.znc.lock");
     fs::remove_file(&marker).unwrap();
     fs::create_dir(&marker).unwrap();
     assert!(fixture.remove(false).await.is_err());
@@ -385,7 +385,7 @@ async fn teardown_preflight_gates_apt_first_and_companion_recipes() {
     }
     let mut fixture = TeardownFixture::new("stop");
     fixture.runner.fail_unit = "z-companion.service".to_string();
-    let mut recipe = get_declarative_recipe("syncthing").unwrap();
+    let mut recipe = get_declarative_recipe("znc").unwrap();
     recipe.remove_steps.push(DeclarativeStep::PurgeSystemdUnit {
         unit_name: "z-companion.service".to_string(),
         progress_pct: 96,
@@ -404,11 +404,8 @@ async fn teardown_preflight_gates_apt_first_and_companion_recipes() {
         )
         .await
         .is_err());
-    assert!(fixture
-        .root
-        .join("etc/systemd/system/syncthing.service")
-        .is_file());
-    assert!(fixture.root.join("install/.syncthing.lock").is_file());
+    assert!(fixture.root.join("etc/systemd/system/znc.service").is_file());
+    assert!(fixture.root.join("install/.znc.lock").is_file());
 }
 
 #[tokio::test]
@@ -419,7 +416,7 @@ async fn teardown_ignore_errors_cannot_bypass_a_required_stop() {
         fixture.runner.clone(),
     );
     let step = DeclarativeStep::Systemctl {
-        unit: Some("syncthing.service".to_string()),
+        unit: Some("znc.service".to_string()),
         operation: SystemctlOp::Stop,
         ignore_errors: true,
         progress_pct: 10,
@@ -427,7 +424,7 @@ async fn teardown_ignore_errors_cannot_bypass_a_required_stop() {
     };
     assert!(executor
         .run_single_step(
-            &get_declarative_recipe("syncthing").unwrap(),
+            &get_declarative_recipe("znc").unwrap(),
             &step,
             &mut HashMap::new(),
             &mut RollbackJournal::new(Some(fixture.root.clone())),
@@ -451,13 +448,41 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
     }
     fs::write(fixture.root.join("install/.novnc.lock"), "installed").unwrap();
 
+    // Explicit multi-unit teardown fixture verifying proxy -> session -> xvnc stop ordering.
+    let multi_unit_recipe = DeclarativePackageRecipe {
+        package_id: "novnc".to_string(),
+        label: "noVNC Fixture".to_string(),
+        default_port: 6080,
+        service_name: "novnc".to_string(),
+        lock_file: "/install/.novnc.lock".to_string(),
+        apply_systemd_sandbox: false,
+        install_steps: vec![],
+        update_steps: vec![],
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "novnc-xvnc.service".to_string(),
+                progress_pct: 20,
+                description: "stop xvnc".to_string(),
+            },
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "novnc-session.service".to_string(),
+                progress_pct: 40,
+                description: "stop session".to_string(),
+            },
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "novnc.service".to_string(),
+                progress_pct: 60,
+                description: "stop proxy".to_string(),
+            },
+        ],
+    };
     let executor = DeclarativePackageExecutor::with_runner(
         PackageExecutionEnv::isolated(&fixture.root),
         fixture.runner.clone(),
     );
     executor
         .execute_recipe(
-            &get_declarative_recipe("novnc").unwrap(),
+            &multi_unit_recipe,
             PackageAction::Remove,
             CancellationToken::new(),
             |_| {},
@@ -488,9 +513,9 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
 
     // Also verify a recipe with a .socket stops the socket before its worker service
     let fixture2 = TeardownFixture::new("");
-    let mut recipe = get_declarative_recipe("syncthing").unwrap();
+    let mut recipe = get_declarative_recipe("znc").unwrap();
     recipe.remove_steps.push(DeclarativeStep::PurgeSystemdUnit {
-        unit_name: "syncthing.socket".to_string(),
+        unit_name: "znc.socket".to_string(),
         progress_pct: 25,
         description: "fixture socket".to_string(),
     });
@@ -522,6 +547,6 @@ async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
         stops2.len() >= 2,
         "expected socket-first pre-teardown stops: {stops2:?}"
     );
-    assert_eq!(stops2[0], "syncthing.socket");
-    assert_eq!(stops2[1], "syncthing.service");
+    assert_eq!(stops2[0], "znc.socket");
+    assert_eq!(stops2[1], "znc.service");
 }
