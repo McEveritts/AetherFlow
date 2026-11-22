@@ -487,6 +487,12 @@ elif command == "systemctl":
             sys.exit(1)
         for unit in units:
             (root / ("active-" + unit)).touch()
+elif command == "curl":
+    if failure == "readiness":
+        sys.exit(22)
+    print('{"version":"0.33.0","timestamp":null}')
+elif command == "sleep":
+    pass
 elif command not in ("apt-get", "chown", "id", "useradd"):
     raise RuntimeError((command, args))
 '''
@@ -512,7 +518,7 @@ class DispatcharrUpgradeTests(unittest.TestCase):
         self.target = self.git(self.upstream, "rev-parse", "HEAD").stdout.strip()
         commands = self.root / "bin"
         commands.mkdir()
-        for name in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "apt-get", "chown", "id", "useradd"):
+        for name in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "curl", "sleep", "apt-get", "chown", "id", "useradd"):
             binary = commands / name
             binary.write_text(UPGRADE_MOCK)
             binary.chmod(0o755)
@@ -600,7 +606,7 @@ lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
         self.assertIn("-Q celery,dvr", (self.units / "dispatcharr-celery.service").read_text())
 
     def test_every_failed_stage_restores_tree_environment_database_and_services(self):
-        for stage in ("clone", "venv", "pip", "npm", "build", "migrate", "collectstatic", "systemctl"):
+        for stage in ("clone", "venv", "pip", "npm", "build", "migrate", "collectstatic", "systemctl", "readiness"):
             with self.subTest(stage=stage):
                 result = self.run_install(FAIL_STAGE=stage)
                 self.assertNotEqual(result.returncode, 0)

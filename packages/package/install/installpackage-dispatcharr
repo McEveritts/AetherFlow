@@ -774,8 +774,177 @@ WantedBy=multi-user.target
 EOF
 chmod 0644 "${BEAT_SERVICE_FILE}"
 
+DISPATCHARR_READY_META="$(python3 - "${DISPATCHARR_BIND_HOST}" "${APP_PORT}" <<'PYEOF'
+import ipaddress
+import os
+import pathlib
+import socket
+import sys
+
+bind_host = sys.argv[1].strip().strip('"').strip("'")
+port = sys.argv[2].strip()
+unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
+
+
+def emit(mode: str, url: str = "", reason: str = "") -> None:
+    print(mode)
+    print(url)
+    print(reason)
+    sys.exit(0)
+
+
+def is_local_interface_ip(target_ip: ipaddress._BaseAddress) -> bool:
+    proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
+    if target_ip.version == 4:
+        fib = proc_root / "net" / "fib_trie"
+        if not fib.is_file():
+            return False
+        try:
+            lines = fib.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return False
+        in_local = False
+        prev_ip = None
+        for line in lines:
+            if line.startswith("Local:"):
+                in_local = True
+                prev_ip = None
+                continue
+            if line and not line[0].isspace():
+                in_local = False
+                prev_ip = None
+                continue
+            if not in_local:
+                continue
+            stripped = line.strip()
+            if stripped.startswith("|-- "):
+                try:
+                    prev_ip = ipaddress.IPv4Address(stripped[4:].strip())
+                except ValueError:
+                    prev_ip = None
+            elif stripped.startswith("+-- "):
+                prev_ip = None
+            elif prev_ip is not None and "/32 host LOCAL" in stripped and prev_ip == target_ip:
+                return True
+        return False
+
+    if6 = proc_root / "net" / "if_inet6"
+    if not if6.is_file():
+        return False
+    try:
+        lines = if6.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        parts = line.split()
+        if parts and len(parts[0]) == 32:
+            try:
+                if ipaddress.IPv6Address(bytes.fromhex(parts[0])) == target_ip:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+if bind_host in ("", "*", "0.0.0.0"):
+    emit("probe", f"http://127.0.0.1:{port}/api/core/version/")
+
+if bind_host in ("::", "[::]"):
+    emit("probe", f"http://[::1]:{port}/api/core/version/")
+
+if bind_host.lower() == "localhost":
+    try:
+        infos = socket.getaddrinfo("localhost", int(port), type=socket.SOCK_STREAM)
+    except OSError:
+        emit("skip", "", "localhost did not resolve locally")
+    resolved = []
+    for info in infos:
+        addr = info[4][0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            emit("skip", "", "localhost resolved to a non-IP address")
+        ip_check = getattr(ip, "ipv4_mapped", None) or ip
+        if not ip_check.is_loopback:
+            emit("skip", "", f"localhost resolved to non-loopback address '{addr}'")
+        resolved.append(ip_check)
+    if not resolved:
+        emit("skip", "", "localhost did not resolve to any loopback address")
+    emit("probe", f"http://localhost:{port}/api/core/version/")
+
+try:
+    ip = ipaddress.ip_address(unbracketed)
+except ValueError:
+    emit(
+        "skip",
+        "",
+        f"retained bind address '{bind_host}' is a non-loopback hostname that cannot be proved local without risking an external probe",
+    )
+
+mapped = getattr(ip, "ipv4_mapped", None)
+if ip.is_unspecified:
+    probe_host = "127.0.0.1" if ip.version == 4 else "[::1]"
+    emit("probe", f"http://{probe_host}:{port}/api/core/version/")
+
+if ip.is_loopback or (mapped is not None and mapped.is_loopback):
+    probe_host = str(ip) if ip.version == 4 else f"[{ip}]"
+    emit("probe", f"http://{probe_host}:{port}/api/core/version/")
+
+if ip.version == 6 and ip.is_link_local:
+    emit(
+        "skip",
+        "",
+        f"retained bind address '{bind_host}' is a link-local IPv6 address without an unambiguous HTTP URL",
+    )
+
+if is_local_interface_ip(ip):
+    probe_host = str(ip) if ip.version == 4 else f"[{ip}]"
+    emit("probe", f"http://{probe_host}:{port}/api/core/version/")
+
+emit(
+    "skip",
+    "",
+    f"retained bind address '{bind_host}' is not assigned to a local interface on this host",
+)
+PYEOF
+)"
+mapfile -t DISPATCHARR_READY_FIELDS <<< "${DISPATCHARR_READY_META}"
+DISPATCHARR_READY_MODE="${DISPATCHARR_READY_FIELDS[0]:-skip}"
+DISPATCHARR_READY_URL="${DISPATCHARR_READY_FIELDS[1]:-}"
+DISPATCHARR_READY_REASON="${DISPATCHARR_READY_FIELDS[2]:-}"
+
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now dispatcharr.service dispatcharr-celery.service dispatcharr-celerybeat.service
+
+DISPATCHARR_READY_ATTEMPTS="${AF_READINESS_ATTEMPTS:-30}"
+if [[ ! "${DISPATCHARR_READY_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]] || (( 10#${DISPATCHARR_READY_ATTEMPTS} > 300 )); then
+    DISPATCHARR_READY_ATTEMPTS=30
+fi
+if [[ "${DISPATCHARR_READY_MODE}" == "probe" ]]; then
+    DISPATCHARR_READY=0
+    for ((attempt = 1; attempt <= DISPATCHARR_READY_ATTEMPTS; attempt++)); do
+        if systemctl is-active --quiet dispatcharr.service; then
+            if curl --disable --noproxy '*' --proto '=http' -fsS --connect-timeout 2 --max-time 5 "${DISPATCHARR_READY_URL}" >/dev/null 2>&1; then
+                DISPATCHARR_READY=1
+                break
+            fi
+        fi
+        if (( attempt < DISPATCHARR_READY_ATTEMPTS )); then
+            sleep 1
+        fi
+    done
+    if [[ "${DISPATCHARR_READY}" -ne 1 ]]; then
+        log_error "Dispatcharr web service did not become HTTP-ready at ${DISPATCHARR_READY_URL}; rolling back."
+        exit 1
+    fi
+else
+    if declare -F print_warn >/dev/null 2>&1; then
+        print_warn "Skipping direct HTTP readiness probe for dispatcharr.service: ${DISPATCHARR_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
+    else
+        log_warn "Skipping direct HTTP readiness probe for dispatcharr.service: ${DISPATCHARR_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
+    fi
+fi
+
 systemctl is-active --quiet dispatcharr.service
 systemctl is-active --quiet dispatcharr-celery.service
 systemctl is-active --quiet dispatcharr-celerybeat.service
@@ -784,5 +953,9 @@ queue_app_version "${INSTALL_DIR}/.af-version" "${LATEST_TAG#v}"
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+if [[ "${DISPATCHARR_READY_MODE}" == "probe" && -n "${DISPATCHARR_READY_URL}" ]] \
+    && declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "dispatcharr.service" "${DISPATCHARR_READY_URL}" false false
+fi
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

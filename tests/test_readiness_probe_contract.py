@@ -299,6 +299,28 @@ class LocalInstallerReadinessRecordTests(unittest.TestCase):
                 }
             ],
         ),
+        "calibreweb": (
+            8083,
+            [
+                {
+                    "unit": "calibreweb.service",
+                    "url": "http://127.0.0.1:8083/login",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
+        "dispatcharr": (
+            19191,
+            [
+                {
+                    "unit": "dispatcharr.service",
+                    "url": "http://127.0.0.1:19191/api/core/version/",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
         "invidious": (
             18281,
             [
@@ -365,6 +387,17 @@ class LocalInstallerReadinessRecordTests(unittest.TestCase):
                 }
             ],
         ),
+        "paperless-ngx": (
+            18010,
+            [
+                {
+                    "unit": "paperless-webserver.service",
+                    "url": "http://127.0.0.1:18010/accounts/login/",
+                    "accept_auth": False,
+                    "accept_409": False,
+                }
+            ],
+        ),
         "piped": (
             18280,
             [
@@ -396,10 +429,7 @@ class LocalInstallerReadinessRecordTests(unittest.TestCase):
     }
 
     SYSTEMD_ONLY_INSTALLERS = (
-        "calibreweb",
-        "dispatcharr",
         "homeassistant",
-        "paperless-ngx",
         "pyload",
         "znc",
     )
@@ -575,12 +605,15 @@ class LocalInstallerReadinessRecordTests(unittest.TestCase):
     def test_local_http_installers_never_emit_records_on_failure(self):
         failure_modes = (
             ("audiobookshelf", "bootstrap-python"),
+            ("calibreweb", "readiness"),
+            ("dispatcharr", "readiness"),
             ("invidious", "readiness"),
             ("jellyseerr", "readiness"),
             ("kasmvnc", "service"),
             ("maintainerr", "readiness"),
             ("mcvnc", "service"),
             ("palate", "readiness"),
+            ("paperless-ngx", "readiness"),
             ("piped", "readiness"),
             ("thelounge", "readiness"),
         )

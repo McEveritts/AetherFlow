@@ -30,6 +30,10 @@ fi
 if ! declare -F af_logged >/dev/null 2>&1; then
     af_logged() { local target="${LOGFILE:-/dev/null}"; if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; else "$@" >>"$target" 2>&1; fi; }
 fi
+if [[ ! "${APP_PORT}" =~ ^[0-9]{1,5}$ ]] || (( 10#${APP_PORT} < 1 || 10#${APP_PORT} > 65535 )); then
+    log_error "Invalid Calibre-Web port: ${APP_PORT}"
+    exit 1
+fi
 exec 9>/run/lock/aetherflow-calibreweb.lock
 flock -n 9 || { log_error "Another Calibre-Web installation is running."; exit 1; }
 
@@ -243,6 +247,54 @@ BUILD_DIR=""
 cd /opt/calibre-web
 
 report_progress 85 "Configuring and starting calibreweb.service on port ${APP_PORT}..."
+CALIBRE_BIND_HOST=""
+if [[ -f /etc/systemd/system/calibreweb.service ]]; then
+    CALIBRE_BIND_HOST="$(safe_config_python /etc/systemd/system/calibreweb.service <<'PYEOF'
+import ipaddress
+import shlex
+import sys
+
+text = safe_read_text(sys.argv[1])
+bind_host = ""
+for raw_line in text.splitlines():
+    stripped = raw_line.strip()
+    if not stripped.startswith("ExecStart="):
+        continue
+    cmd = stripped.split("=", 1)[1].strip()
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        continue
+    if not any("cps.py" in tok for tok in tokens):
+        continue
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx]
+        candidate = None
+        if tok == "-i" and idx + 1 < len(tokens):
+            candidate = tokens[idx + 1]
+            idx += 1
+        elif tok.startswith("-i=") and len(tok) > 3:
+            candidate = tok[3:]
+        elif tok.startswith("-i") and not tok.startswith("--") and len(tok) > 2:
+            candidate = tok[2:]
+        if candidate is not None:
+            raw_ip = candidate.strip()
+            unbracketed = raw_ip[1:-1] if raw_ip.startswith("[") and raw_ip.endswith("]") else raw_ip
+            try:
+                ip = ipaddress.ip_address(unbracketed)
+            except ValueError:
+                raise ValueError(f"Invalid retained Calibre-Web bind IP: {candidate!r}")
+            bind_host = str(ip)
+        idx += 1
+print(bind_host)
+PYEOF
+)"
+fi
+CALIBRE_EXEC_START="/opt/calibre-web/.venv/bin/python /opt/calibre-web/cps.py -p /var/lib/calibre-web/app.db -g /var/lib/calibre-web/gdrive.db"
+if [[ -n "$CALIBRE_BIND_HOST" ]]; then
+    CALIBRE_EXEC_START="${CALIBRE_EXEC_START} -i ${CALIBRE_BIND_HOST}"
+fi
 cat <<EOF > /etc/systemd/system/calibreweb.service
 [Unit]
 Description=Calibre-Web E-Book Library Server
@@ -255,7 +307,7 @@ User=calibreweb
 Group=calibreweb
 WorkingDirectory=/opt/calibre-web
 Environment=CALIBRE_PORT=${APP_PORT}
-ExecStart=/opt/calibre-web/.venv/bin/python /opt/calibre-web/cps.py -p /var/lib/calibre-web/app.db -g /var/lib/calibre-web/gdrive.db
+ExecStart=${CALIBRE_EXEC_START}
 Restart=on-failure
 RestartSec=10
 
@@ -265,25 +317,248 @@ EOF
 chmod 0644 /etc/systemd/system/calibreweb.service
 UNIT_WRITTEN=1
 
+CALIBRE_READY_META="$(safe_config_python /var/lib/calibre-web/app.db "$APP_PORT" "$CALIBRE_BIND_HOST" /opt/calibre-web <<'PYEOF'
+import contextlib
+import ipaddress
+import os
+import pathlib
+import sqlite3
+import sys
+
+db_path = pathlib.Path(sys.argv[1])
+default_port = sys.argv[2].strip()
+bind_host = sys.argv[3].strip()
+work_dir = pathlib.Path(sys.argv[4])
+
+
+def emit(mode, primary_url="", fallback_url="", scheme="http", tls_insecure="0", reason=""):
+    for val in (mode, primary_url, fallback_url, scheme, tls_insecure, reason):
+        print(val)
+    sys.exit(0)
+
+
+def is_local_interface_ip(target_ip):
+    proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
+    if target_ip.version == 4:
+        fib = proc_root / "net" / "fib_trie"
+        if not fib.is_file():
+            return False
+        try:
+            lines = fib.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return False
+        in_local = False
+        prev_ip = None
+        for line in lines:
+            if line.startswith("Local:"):
+                in_local = True
+                prev_ip = None
+                continue
+            if line and not line[0].isspace():
+                in_local = False
+                prev_ip = None
+                continue
+            if not in_local:
+                continue
+            stripped = line.strip()
+            if stripped.startswith("|-- "):
+                try:
+                    prev_ip = ipaddress.IPv4Address(stripped[4:].strip())
+                except ValueError:
+                    prev_ip = None
+            elif stripped.startswith("+-- "):
+                prev_ip = None
+            elif prev_ip is not None and "/32 host LOCAL" in stripped and prev_ip == target_ip:
+                return True
+        return False
+
+    if6 = proc_root / "net" / "if_inet6"
+    if not if6.is_file():
+        return False
+    try:
+        lines = if6.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        parts = line.split()
+        if parts and len(parts[0]) == 32:
+            try:
+                if ipaddress.IPv6Address(bytes.fromhex(parts[0])) == target_ip:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+probe_port = default_port
+scheme = "http"
+
+if os.path.lexists(db_path):
+    with ManagedConfig(db_path, create_parents=False) as config:
+        if config.metadata is not None:
+            config.check_target()
+            try:
+                with contextlib.closing(
+                    sqlite3.connect(f"file:/proc/self/fd/{config.directory}/{config.name}?mode=ro", uri=True)
+                ) as conn:
+                    cols = {
+                        row[1]
+                        for row in conn.execute("PRAGMA table_info(settings)").fetchall()
+                    }
+                    wanted = [c for c in ("config_port", "config_certfile", "config_keyfile") if c in cols]
+                    if wanted:
+                        row = conn.execute(f"SELECT {', '.join(wanted)} FROM settings LIMIT 1").fetchone()
+                        if row:
+                            values = dict(zip(wanted, row))
+                            raw_port = values.get("config_port")
+                            if raw_port is not None and str(raw_port).strip().isdecimal():
+                                parsed_port = int(str(raw_port).strip())
+                                if 1 <= parsed_port <= 65535:
+                                    probe_port = str(parsed_port)
+                            cert = str(values.get("config_certfile") or "").strip()
+                            key = str(values.get("config_keyfile") or "").strip()
+                            if cert and key:
+                                cert_path = pathlib.Path(cert)
+                                key_path = pathlib.Path(key)
+                                if not cert_path.is_absolute():
+                                    cert_path = work_dir / cert_path
+                                if not key_path.is_absolute():
+                                    key_path = work_dir / key_path
+                                if cert_path.is_file() and key_path.is_file():
+                                    scheme = "https"
+            except sqlite3.Error:
+                pass
+
+if not bind_host:
+    tls_insecure = "1" if scheme == "https" else "0"
+    emit(
+        "probe",
+        f"{scheme}://127.0.0.1:{probe_port}/login",
+        f"{scheme}://[::1]:{probe_port}/login",
+        scheme,
+        tls_insecure,
+        "",
+    )
+
+ip = ipaddress.ip_address(bind_host)
+mapped = getattr(ip, "ipv4_mapped", None)
+if ip.is_unspecified:
+    host_for_url = "127.0.0.1" if ip.version == 4 else "[::1]"
+    emit(
+        "probe",
+        f"{scheme}://{host_for_url}:{probe_port}/login",
+        "",
+        scheme,
+        "1" if scheme == "https" else "0",
+        "",
+    )
+
+if ip.is_loopback or (mapped is not None and mapped.is_loopback):
+    host_for_url = str(ip) if ip.version == 4 else f"[{ip}]"
+    emit(
+        "probe",
+        f"{scheme}://{host_for_url}:{probe_port}/login",
+        "",
+        scheme,
+        "1" if scheme == "https" else "0",
+        "",
+    )
+
+if ip.version == 6 and ip.is_link_local:
+    emit(
+        "skip",
+        reason=f"retained Calibre-Web bind address '{bind_host}' is a link-local IPv6 address without an unambiguous HTTP URL",
+    )
+
+if is_local_interface_ip(ip):
+    host_for_url = str(ip) if ip.version == 4 else f"[{ip}]"
+    emit(
+        "probe",
+        f"{scheme}://{host_for_url}:{probe_port}/login",
+        "",
+        scheme,
+        "0",
+        "",
+    )
+
+emit(
+    "skip",
+    reason=f"retained Calibre-Web bind address '{bind_host}' is not assigned to a local interface on this host",
+)
+PYEOF
+)"
+mapfile -t CALIBRE_READY_FIELDS <<< "$CALIBRE_READY_META"
+CALIBRE_READY_MODE="${CALIBRE_READY_FIELDS[0]:-skip}"
+CALIBRE_PRIMARY_URL="${CALIBRE_READY_FIELDS[1]:-}"
+CALIBRE_FALLBACK_URL="${CALIBRE_READY_FIELDS[2]:-}"
+CALIBRE_READY_SCHEME="${CALIBRE_READY_FIELDS[3]:-http}"
+CALIBRE_TLS_INSECURE="${CALIBRE_READY_FIELDS[4]:-0}"
+CALIBRE_READY_REASON="${CALIBRE_READY_FIELDS[5]:-}"
+
+CALIBRE_CURL_ARGS=(--proto "=${CALIBRE_READY_SCHEME}")
+if [[ "$CALIBRE_TLS_INSECURE" == "1" ]]; then
+    CALIBRE_CURL_ARGS+=(-k)
+fi
+
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now calibreweb
 
-HEALTHY=0
-for attempt in {1..15}; do
-    if systemctl is-active --quiet calibreweb; then
-        HEALTHY=1
-        break
+CALIBRE_READY_ATTEMPTS="${AF_READINESS_ATTEMPTS:-30}"
+if [[ ! "$CALIBRE_READY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || (( 10#$CALIBRE_READY_ATTEMPTS > 300 )); then
+    CALIBRE_READY_ATTEMPTS=30
+fi
+if [[ "$CALIBRE_READY_MODE" != "probe" ]]; then
+    if declare -F print_warn >/dev/null 2>&1; then
+        print_warn "Skipping direct HTTP readiness probe for calibreweb.service: ${CALIBRE_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
+    else
+        log_warn "Skipping direct HTTP readiness probe for calibreweb.service: ${CALIBRE_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
     fi
-    sleep 1
+fi
+
+HEALTHY=0
+CALIBRE_VERIFIED_URL=""
+for ((attempt = 1; attempt <= CALIBRE_READY_ATTEMPTS; attempt++)); do
+    if systemctl is-active --quiet calibreweb; then
+        if [[ "$CALIBRE_READY_MODE" != "probe" ]]; then
+            HEALTHY=1
+            break
+        fi
+        probe_rc=0
+        curl --disable --noproxy '*' "${CALIBRE_CURL_ARGS[@]}" -fsS --connect-timeout 2 --max-time 5 "$CALIBRE_PRIMARY_URL" >/dev/null 2>&1 || probe_rc=$?
+        if [[ "$probe_rc" -eq 0 ]]; then
+            CALIBRE_VERIFIED_URL="$CALIBRE_PRIMARY_URL"
+            HEALTHY=1
+            break
+        fi
+        if [[ "$probe_rc" -eq 7 && -n "$CALIBRE_FALLBACK_URL" ]]; then
+            if curl --disable --noproxy '*' "${CALIBRE_CURL_ARGS[@]}" -fsS --connect-timeout 2 --max-time 5 "$CALIBRE_FALLBACK_URL" >/dev/null 2>&1; then
+                CALIBRE_VERIFIED_URL="$CALIBRE_FALLBACK_URL"
+                HEALTHY=1
+                break
+            fi
+        fi
+    fi
+    if (( attempt < CALIBRE_READY_ATTEMPTS )); then
+        sleep 1
+    fi
 done
 if [[ "$HEALTHY" -ne 1 ]]; then
-    log_error "Calibre-Web service did not become active; rolling back."
+    if [[ "$CALIBRE_READY_MODE" == "probe" ]]; then
+        log_error "Calibre-Web service did not become HTTP-ready at ${CALIBRE_PRIMARY_URL}; rolling back."
+    else
+        log_error "Calibre-Web service did not become active; rolling back."
+    fi
     exit 1
 fi
+systemctl is-active --quiet calibreweb
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+if [[ "$CALIBRE_READY_MODE" == "probe" && -n "$CALIBRE_VERIFIED_URL" ]] \
+    && declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "calibreweb.service" "$CALIBRE_VERIFIED_URL" false false
+fi
 rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Calibre-Web installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

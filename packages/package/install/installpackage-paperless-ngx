@@ -30,6 +30,10 @@ fi
 if ! declare -F af_logged >/dev/null 2>&1; then
     af_logged() { local target="${LOGFILE:-/dev/null}"; if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; else "$@" >>"$target" 2>&1; fi; }
 fi
+if [[ ! "${APP_PORT}" =~ ^[0-9]{1,5}$ ]] || (( 10#${APP_PORT} < 1 || 10#${APP_PORT} > 65535 )); then
+    log_error "Invalid Paperless-ngx port: ${APP_PORT}"
+    exit 1
+fi
 exec 9>/run/lock/aetherflow-paperless.lock
 flock -n 9 || { log_error "Another Paperless-ngx installation is running."; exit 1; }
 
@@ -401,27 +405,402 @@ WantedBy=multi-user.target
 EOF
 
 chmod 0644 /etc/systemd/system/paperless-webserver.service /etc/systemd/system/paperless-worker.service /etc/systemd/system/paperless-scheduler.service
+
+PAPERLESS_READY_META="$(safe_config_python /etc/paperless.conf "$PAPERLESS_BIND_HOST" "$APP_PORT" <<'PYEOF'
+import ipaddress
+import os
+import pathlib
+import re
+import shlex
+import socket
+import sys
+import urllib.parse
+
+conf_path, bind_host, port = sys.argv[1], sys.argv[2].strip().strip('"').strip("'"), sys.argv[3].strip()
+unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
+
+
+def emit(mode, url="", scheme="http", host_header="", emit_record="0", tls_insecure="0", reason=""):
+    for val in (mode, url, scheme, host_header, emit_record, tls_insecure, reason):
+        print(val)
+    sys.exit(0)
+
+
+def is_local_interface_ip(target_ip):
+    proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
+    if target_ip.version == 4:
+        fib = proc_root / "net" / "fib_trie"
+        if not fib.is_file():
+            return False
+        try:
+            lines = fib.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return False
+        in_local = False
+        prev_ip = None
+        for line in lines:
+            if line.startswith("Local:"):
+                in_local = True
+                prev_ip = None
+                continue
+            if line and not line[0].isspace():
+                in_local = False
+                prev_ip = None
+                continue
+            if not in_local:
+                continue
+            stripped = line.strip()
+            if stripped.startswith("|-- "):
+                try:
+                    prev_ip = ipaddress.IPv4Address(stripped[4:].strip())
+                except ValueError:
+                    prev_ip = None
+            elif stripped.startswith("+-- "):
+                prev_ip = None
+            elif prev_ip is not None and "/32 host LOCAL" in stripped and prev_ip == target_ip:
+                return True
+        return False
+
+    if6 = proc_root / "net" / "if_inet6"
+    if not if6.is_file():
+        return False
+    try:
+        lines = if6.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        parts = line.split()
+        if parts and len(parts[0]) == 32:
+            try:
+                if ipaddress.IPv6Address(bytes.fromhex(parts[0])) == target_ip:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def parse_env(text):
+    values = {}
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export ") and "=" in stripped[7:]:
+            stripped = stripped[7:].strip()
+        key, sep, value = stripped.partition("=")
+        key = key.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        val = value.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        elif val and val[0] in ("'", '"'):
+            q = val[0]
+            end_q = val.find(q, 1)
+            if end_q != -1:
+                val = val[1:end_q]
+        else:
+            val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
+        values[key] = val
+    return values
+
+
+def resolve_localhost_loopback_ips():
+    try:
+        infos = socket.getaddrinfo("localhost", int(port), type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    ips = set()
+    for info in infos:
+        addr = info[4][0].split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(addr)
+        except ValueError:
+            return None
+        mapped = getattr(ip_obj, "ipv4_mapped", None) or ip_obj
+        if not mapped.is_loopback:
+            return None
+        ips.add(mapped)
+    return ips if ips else None
+
+
+def host_allowed(candidate, allowed):
+    c = candidate.lower().rstrip(".")
+    for pat in allowed:
+        p = pat.lower()
+        if p == "*":
+            return True
+        if p.startswith("."):
+            if c == p[1:] or c.endswith(p):
+                return True
+        elif c == p:
+            return True
+    return False
+
+
+env = parse_env(safe_read_text(conf_path))
+
+# Inspect Gunicorn overrides that could alter bind target, config, or TLS/mTLS.
+scheme = "http"
+gunicorn_args = env.get("GUNICORN_CMD_ARGS", "").strip()
+if gunicorn_args:
+    try:
+        tokens = shlex.split(gunicorn_args)
+    except ValueError:
+        emit("skip", reason="retained GUNICORN_CMD_ARGS could not be parsed safely")
+    has_cert = False
+    has_key = False
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok in ("-c", "--config", "-b", "--bind", "--paste", "--wsgi-app") or tok.startswith(
+            ("--config=", "--bind=", "--paste=", "--wsgi-app=", "-c", "-b")
+        ):
+            if tok != "--check-config":
+                emit(
+                    "skip",
+                    reason=f"retained GUNICORN_CMD_ARGS option '{tok}' overrides Gunicorn listener/config behavior",
+                )
+        elif tok == "--certfile" or tok.startswith("--certfile="):
+            val = tok.split("=", 1)[1] if "=" in tok else (tokens[idx + 1] if idx + 1 < len(tokens) else "")
+            if tok == "--certfile":
+                idx += 1
+            if val.strip():
+                has_cert = True
+        elif tok == "--keyfile" or tok.startswith("--keyfile="):
+            val = tok.split("=", 1)[1] if "=" in tok else (tokens[idx + 1] if idx + 1 < len(tokens) else "")
+            if tok == "--keyfile":
+                idx += 1
+            if val.strip():
+                has_key = True
+        elif tok == "--cert-reqs" or tok.startswith("--cert-reqs="):
+            val = tok.split("=", 1)[1] if "=" in tok else (tokens[idx + 1] if idx + 1 < len(tokens) else "")
+            if tok == "--cert-reqs":
+                idx += 1
+            if val not in ("", "0"):
+                emit("skip", reason="retained GUNICORN_CMD_ARGS enables TLS client certificate verification")
+        idx += 1
+    if has_cert != has_key:
+        emit("skip", reason="retained GUNICORN_CMD_ARGS specifies incomplete TLS certfile/keyfile settings")
+    if has_cert and has_key:
+        scheme = "https"
+
+# Gunicorn strips only SCRIPT_NAME (not PAPERLESS_FORCE_SCRIPT_NAME) from PATH_INFO.
+script_name = env.get("SCRIPT_NAME", "").strip()
+prefix = script_name.rstrip("/")
+if prefix:
+    if (
+        not prefix.startswith("/")
+        or not re.fullmatch(r"/[A-Za-z0-9._/-]*", prefix)
+        or "//" in prefix
+        or any(part in (".", "..") for part in prefix.split("/"))
+    ):
+        emit("skip", reason=f"retained SCRIPT_NAME '{script_name}' is not a safe HTTP path prefix")
+probe_path = f"{prefix}/accounts/login/"
+
+# Resolve local bind host without probing external hosts.
+connect_host = ""
+strict_loopback = False
+localhost_need = None  # "v4", "v6", "v6_dual", "any", or None
+
+if bind_host in ("", "*", "0.0.0.0"):
+    connect_host = "127.0.0.1"
+    strict_loopback = True
+    localhost_need = "v4"
+elif bind_host in ("::", "[::]"):
+    connect_host = "[::1]"
+    strict_loopback = True
+    localhost_need = "v6_dual"
+elif bind_host.lower() == "localhost":
+    lb_ips = resolve_localhost_loopback_ips()
+    if not lb_ips:
+        emit("skip", reason="retained PAPERLESS_BIND_ADDR 'localhost' did not resolve strictly to loopback addresses")
+    connect_host = "localhost"
+    strict_loopback = True
+    localhost_need = "any"
+else:
+    try:
+        ip = ipaddress.ip_address(unbracketed)
+    except ValueError:
+        emit(
+            "skip",
+            reason=f"retained PAPERLESS_BIND_ADDR '{bind_host}' is a non-loopback hostname that cannot be proved local without risking an external probe",
+        )
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if ip.is_unspecified:
+        if ip.version == 4:
+            connect_host = "127.0.0.1"
+            localhost_need = "v4"
+        else:
+            connect_host = "[::1]"
+            localhost_need = "v6_dual"
+        strict_loopback = True
+    elif ip.is_loopback or (mapped is not None and mapped.is_loopback):
+        connect_host = str(ip) if ip.version == 4 else f"[{ip}]"
+        strict_loopback = True
+        if str(ip) == "127.0.0.1":
+            localhost_need = "v4"
+        elif str(ip) == "::1":
+            localhost_need = "v6"
+        else:
+            localhost_need = None
+    elif ip.version == 6 and ip.is_link_local:
+        emit(
+            "skip",
+            reason=f"retained PAPERLESS_BIND_ADDR '{bind_host}' is a link-local IPv6 address without an unambiguous HTTP URL",
+        )
+    elif is_local_interface_ip(ip):
+        connect_host = str(ip) if ip.version == 4 else f"[{ip}]"
+        strict_loopback = False
+        localhost_need = None
+    else:
+        emit(
+            "skip",
+            reason=f"retained PAPERLESS_BIND_ADDR '{bind_host}' is not assigned to a local interface on this host",
+        )
+
+# Compute Paperless-ngx's effective Django ALLOWED_HOSTS (matching upstream settings).
+has_allowed = "PAPERLESS_ALLOWED_HOSTS" in env
+paperless_url = env.get("PAPERLESS_URL", "").strip()
+if has_allowed or paperless_url:
+    allowed_hosts = [h.strip() for h in env.get("PAPERLESS_ALLOWED_HOSTS", "").split(",") if h.strip()]
+else:
+    allowed_hosts = ["*"]
+if allowed_hosts != ["*"]:
+    allowed_hosts.append("localhost")
+if paperless_url:
+    parsed_url = urllib.parse.urlparse(paperless_url)
+    u_host = (parsed_url.hostname or "").removesuffix(".")
+    if u_host and u_host != "*" and not u_host.startswith("."):
+        if ":" in u_host and not u_host.startswith("["):
+            u_host = f"[{u_host}]"
+        allowed_hosts.append(u_host)
+
+tls_insecure = "1" if (scheme == "https" and strict_loopback) else "0"
+
+if host_allowed(connect_host, allowed_hosts):
+    emit("probe", f"{scheme}://{connect_host}:{port}{probe_path}", scheme, "", "1", tls_insecure, "")
+
+# Paperless-ngx always appends "localhost" to ALLOWED_HOSTS. Prefer http(s)://localhost:<port>
+# when localhost strictly resolves to the bound loopback address so runner replay works too.
+if localhost_need is not None:
+    lb_ips = resolve_localhost_loopback_ips()
+    if lb_ips:
+        can_use_localhost = False
+        if localhost_need == "any":
+            can_use_localhost = True
+        elif localhost_need == "v4":
+            can_use_localhost = ipaddress.IPv4Address("127.0.0.1") in lb_ips
+        elif localhost_need == "v6":
+            can_use_localhost = ipaddress.IPv6Address("::1") in lb_ips
+        elif localhost_need == "v6_dual":
+            if ipaddress.IPv6Address("::1") in lb_ips:
+                can_use_localhost = True
+            elif ipaddress.IPv4Address("127.0.0.1") in lb_ips:
+                proc_root = pathlib.Path(os.environ.get("AF_PROC_ROOT") or "/proc")
+                try:
+                    v6only = (proc_root / "sys/net/ipv6/bindv6only").read_text(encoding="utf-8").strip()
+                except OSError:
+                    v6only = "1"
+                can_use_localhost = v6only == "0"
+        if can_use_localhost:
+            emit(
+                "probe",
+                f"{scheme}://localhost:{port}{probe_path}",
+                scheme,
+                "",
+                "1",
+                "1" if scheme == "https" else "0",
+                "",
+            )
+
+emit(
+    "probe",
+    f"{scheme}://{connect_host}:{port}{probe_path}",
+    scheme,
+    "localhost",
+    "0",
+    tls_insecure,
+    f"retained PAPERLESS_ALLOWED_HOSTS excludes '{connect_host}' so direct local readiness requires Host: localhost, which af_emit_readiness_record cannot encode",
+)
+PYEOF
+)"
+mapfile -t PAPERLESS_READY_FIELDS <<< "$PAPERLESS_READY_META"
+PAPERLESS_READY_MODE="${PAPERLESS_READY_FIELDS[0]:-skip}"
+PAPERLESS_READY_URL="${PAPERLESS_READY_FIELDS[1]:-}"
+PAPERLESS_READY_SCHEME="${PAPERLESS_READY_FIELDS[2]:-http}"
+PAPERLESS_HOST_HEADER="${PAPERLESS_READY_FIELDS[3]:-}"
+PAPERLESS_EMIT_RECORD="${PAPERLESS_READY_FIELDS[4]:-0}"
+PAPERLESS_TLS_INSECURE="${PAPERLESS_READY_FIELDS[5]:-0}"
+PAPERLESS_READY_REASON="${PAPERLESS_READY_FIELDS[6]:-}"
+
+PAPERLESS_CURL_ARGS=(--proto "=${PAPERLESS_READY_SCHEME}")
+if [[ "$PAPERLESS_TLS_INSECURE" == "1" ]]; then
+    PAPERLESS_CURL_ARGS+=(-k)
+fi
+if [[ -n "$PAPERLESS_HOST_HEADER" ]]; then
+    PAPERLESS_CURL_ARGS+=(-H "Host: ${PAPERLESS_HOST_HEADER}")
+fi
+
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now paperless-webserver
 af_logged systemctl enable --now paperless-worker
 af_logged systemctl enable --now paperless-scheduler
 
-HEALTHY=0
-for attempt in {1..15}; do
-    if systemctl is-active --quiet paperless-webserver && systemctl is-active --quiet paperless-worker && systemctl is-active --quiet paperless-scheduler; then
-        HEALTHY=1
-        break
+PAPERLESS_READY_ATTEMPTS="${AF_READINESS_ATTEMPTS:-30}"
+if [[ ! "$PAPERLESS_READY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || (( 10#$PAPERLESS_READY_ATTEMPTS > 300 )); then
+    PAPERLESS_READY_ATTEMPTS=30
+fi
+if [[ "$PAPERLESS_READY_MODE" != "probe" ]]; then
+    if declare -F print_warn >/dev/null 2>&1; then
+        print_warn "Skipping direct HTTP readiness probe for paperless-webserver.service: ${PAPERLESS_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
+    else
+        log_warn "Skipping direct HTTP readiness probe for paperless-webserver.service: ${PAPERLESS_READY_REASON:-unproven retained listener}; keeping systemd-only readiness check."
     fi
-    sleep 1
+fi
+
+HEALTHY=0
+for ((attempt = 1; attempt <= PAPERLESS_READY_ATTEMPTS; attempt++)); do
+    if systemctl is-active --quiet paperless-webserver && systemctl is-active --quiet paperless-worker && systemctl is-active --quiet paperless-scheduler; then
+        if [[ "$PAPERLESS_READY_MODE" != "probe" ]]; then
+            HEALTHY=1
+            break
+        fi
+        if curl --disable --noproxy '*' "${PAPERLESS_CURL_ARGS[@]}" -fsS --connect-timeout 2 --max-time 5 "$PAPERLESS_READY_URL" >/dev/null 2>&1; then
+            HEALTHY=1
+            break
+        fi
+    fi
+    if (( attempt < PAPERLESS_READY_ATTEMPTS )); then
+        sleep 1
+    fi
 done
 if [[ "$HEALTHY" -ne 1 ]]; then
-    log_error "Paperless-ngx services did not become active; rolling back."
+    if [[ "$PAPERLESS_READY_MODE" == "probe" ]]; then
+        log_error "Paperless-ngx web service did not become HTTP-ready at ${PAPERLESS_READY_URL} or companion units were not active; rolling back."
+    else
+        log_error "Paperless-ngx services did not become active; rolling back."
+    fi
     exit 1
+fi
+systemctl is-active --quiet paperless-webserver
+systemctl is-active --quiet paperless-worker
+systemctl is-active --quiet paperless-scheduler
+if [[ "$PAPERLESS_READY_MODE" == "probe" && "$PAPERLESS_EMIT_RECORD" != "1" && -n "$PAPERLESS_READY_REASON" ]]; then
+    if declare -F print_warn >/dev/null 2>&1; then
+        print_warn "Verified local HTTP readiness for paperless-webserver.service without emitting af_emit_readiness_record: ${PAPERLESS_READY_REASON}"
+    else
+        log_warn "Verified local HTTP readiness for paperless-webserver.service without emitting af_emit_readiness_record: ${PAPERLESS_READY_REASON}"
+    fi
 fi
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+if [[ "$PAPERLESS_READY_MODE" == "probe" && "$PAPERLESS_EMIT_RECORD" == "1" && -n "$PAPERLESS_READY_URL" ]] \
+    && declare -F af_emit_readiness_record >/dev/null 2>&1; then
+    af_emit_readiness_record "paperless-webserver.service" "$PAPERLESS_READY_URL" false false
+fi
 rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Paperless-ngx installed on port ${APP_PORT} (multi-unit companion stack active)."
 log_info "${PACKAGE_NAME} installed successfully"

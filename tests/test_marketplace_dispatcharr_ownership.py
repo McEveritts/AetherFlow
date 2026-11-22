@@ -32,7 +32,7 @@ class DispatcharrOwnershipTests(unittest.TestCase):
         mock = UPGRADE_MOCK.replace('sys.exit(subprocess.run(["/usr/bin/git", *args]).returncode)', 'shutil.copytree(root / "upstream", pathlib.Path(args[-1]), dirs_exist_ok=True)')
         mock = mock.replace('if args[:2] == ["-", "postgres"]:', 'if os.environ.get("FAIL_SQL") and os.environ["FAIL_SQL"] in args[-1]:\n        sys.exit(42)\n    if args[:2] == ["-", "postgres"]:')
         mock = mock.replace('"chown", "id", "useradd"):', '"chown", "id", "useradd", "getent", "userdel", "groupdel"):')
-        for command in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "apt-get", "chown", "id", "useradd", "getent", "userdel", "groupdel"):
+        for command in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "curl", "sleep", "apt-get", "chown", "id", "useradd", "getent", "userdel", "groupdel"):
             self.file("fake-bin/" + command, mock).chmod(0o755)
         self.file("fake-bin/rm", FAKE_COMMAND).chmod(0o755)
         self.file("database", "old-schema")
