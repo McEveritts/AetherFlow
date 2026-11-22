@@ -245,14 +245,18 @@ fn cleanup_journal_error(error: anyhow::Error) -> McBrowserError {
     McBrowserError::Internal("Account storage cleanup could not be recorded".to_owned())
 }
 
-fn finish_account_deletion(target_user_id: i64, deleted: AccountDeletion) -> usize {
+fn finish_account_deletion(
+    target_user_id: i64,
+    deleted: AccountDeletion,
+    shared_guard: tokio::sync::OwnedMutexGuard<()>,
+) -> usize {
     crate::auth::finalize_user_credential_revocation(target_user_id, &deleted.revoked_jtis);
     super::media::invalidate_thumbnail_cache(target_user_id, "");
     crate::storage::discard_fileshare_uploads(target_user_id);
     if deleted.pending_cleanup_count == 0 {
         return 0;
     }
-    account_cleanup::settle(target_user_id).unwrap_or_else(|error| {
+    account_cleanup::settle(target_user_id, shared_guard).unwrap_or_else(|error| {
         tracing::warn!(%error, user_id = target_user_id, "Could not reconcile account storage cleanup");
         deleted.pending_cleanup_count
     })
@@ -336,7 +340,6 @@ pub(crate) async fn delete_account(
     let shared_guard = crate::storage::lock_fileshare_mutations().await;
     let mutation_guard = user_mutation_stripe(target_user_id).lock_owned().await;
     tokio::task::spawn_blocking(move || {
-        let _shared_guard = shared_guard;
         let _mutation_guard = mutation_guard;
         let mut connection = af_db::get_conn().map_err(|_| {
             McBrowserError::Internal("Account deletion database unavailable".to_owned())
@@ -349,7 +352,11 @@ pub(crate) async fn delete_account(
             configured_root.as_deref(),
         )?;
         drop(connection);
-        Ok(finish_account_deletion(target_user_id, deleted))
+        Ok(finish_account_deletion(
+            target_user_id,
+            deleted,
+            shared_guard,
+        ))
     })
     .await
     .map_err(|_| McBrowserError::Internal("Account deletion worker failed".to_owned()))?

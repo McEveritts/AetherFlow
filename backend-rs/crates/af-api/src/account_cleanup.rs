@@ -10,6 +10,7 @@ use std::io::{self, ErrorKind};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::SystemTime;
+use tokio::sync::OwnedMutexGuard;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EntryIdentity {
@@ -292,11 +293,21 @@ fn pending_targets(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<Pend
     targets.collect()
 }
 
-pub(crate) fn settle(user_id: i64) -> anyhow::Result<usize> {
-    let targets = {
+pub(crate) fn settle(user_id: i64, shared_guard: OwnedMutexGuard<()>) -> anyhow::Result<usize> {
+    let (shared, private) = {
         let conn = af_db::get_read_conn()?;
         pending_targets(&conn, user_id)?
+            .into_iter()
+            .partition(|pending| pending.target.shared)
     };
+    let shared_remaining = settle_targets(user_id, shared)?;
+    // A private tree can take time to remove. The account's mutation lock
+    // protects it while shared reads and publications proceed.
+    drop(shared_guard);
+    Ok(shared_remaining + settle_targets(user_id, private)?)
+}
+
+fn settle_targets(user_id: i64, targets: Vec<PendingTarget>) -> anyhow::Result<usize> {
     let mut remaining = 0;
     for pending in targets {
         let target = &pending.target;
@@ -359,8 +370,8 @@ pub(crate) async fn recover() {
             .lock_owned()
             .await;
         let result = tokio::task::spawn_blocking(move || {
-            let (_shared, _user) = (shared, user);
-            settle(user_id)
+            let _user = user;
+            settle(user_id, shared)
         })
         .await
         .map_err(anyhow::Error::from)
