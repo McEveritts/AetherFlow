@@ -907,3 +907,124 @@ async fn get_session_revoke_session_and_login_propagate_sqlite_errors() {
         "local_login must return 500 on SQLite errors rather than 401 Invalid credentials"
     );
 }
+
+#[tokio::test]
+async fn esc05_deleted_active_session_fails_closed_on_api_proxy_oidc_and_refresh() {
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    use axum::{middleware, routing::get, Router};
+    use tower::ServiceExt;
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    ensure_shared_test_db();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role, password_hash) VALUES (955, 'esc05-admin', 'admin', ?1)",
+            params![bcrypt::hash("StrongPass!1", 4).unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) VALUES ('esc05-client', '', 'ESC05', '[\"https://client.example.test/cb\"]')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::USER_AGENT, "esc05-browser".parse().unwrap());
+    let (token, claims) = create_standard_jwt(955, &headers).unwrap();
+
+    // Active session succeeds across auth_middleware, verify_proxy_auth, and marketplace auth.
+    let protected = Router::new()
+        .route("/api/v1/auth/session", get(|| async { StatusCode::OK }))
+        .layer(middleware::from_fn(super::middleware::auth_middleware));
+    let ok_api = protected
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .header(header::USER_AGENT, "esc05-browser")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok_api.status(), StatusCode::OK);
+
+    // Delete the active_sessions row WITHOUT inserting into revoked_tokens.
+    af_db::get_conn()
+        .unwrap()
+        .execute(
+            "DELETE FROM active_sessions WHERE jti = ?1",
+            params![claims.jti],
+        )
+        .unwrap();
+
+    // 1. auth_middleware fails closed (401 SESSION_EXPIRED).
+    let dead_api = protected
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .header(header::USER_AGENT, "esc05-browser")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dead_api.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. verify_proxy_auth fails closed (401).
+    let mut proxy_headers = HeaderMap::new();
+    proxy_headers.insert(header::USER_AGENT, "esc05-browser".parse().unwrap());
+    proxy_headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    assert_eq!(
+        verify_proxy_auth(proxy_headers.clone()).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 3. Optional marketplace auth falls back to unauthenticated (false, false).
+    assert_eq!(
+        crate::routes::marketplace::get_marketplace_auth_info(&proxy_headers),
+        (false, false)
+    );
+
+    // 4. OIDC /authorize redirects to /login instead of minting an authorization code.
+    let oidc_app = crate::routes::build_router();
+    let challenge = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
+    let oidc_resp = oidc_app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/public/oidc/authorize?client_id=esc05-client&redirect_uri=https%3A%2F%2Fclient.example.test%2Fcb&response_type=code&code_challenge={challenge}&code_challenge_method=S256"
+                ))
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "esc05-browser")
+                .header(header::COOKIE, format!("aetherflow_session={token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oidc_resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    let loc = oidc_resp.headers()[header::LOCATION].to_str().unwrap();
+    assert!(loc.starts_with("/login?return_to="), "{loc}");
+
+    // 5. /refresh fails closed (401) and MUST NOT resurrect the deleted active_sessions row.
+    let refresh_resp = refresh_session(proxy_headers).await;
+    assert_eq!(refresh_resp.status(), StatusCode::UNAUTHORIZED);
+    let resurrected: i64 = af_db::get_read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM active_sessions WHERE user_id = 955",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(resurrected, 0, "/refresh must never resurrect a deleted active_sessions row");
+}

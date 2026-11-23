@@ -48,6 +48,10 @@ Before the atomic `/opt/AetherFlow/current` symlink swap, the release engine ver
 
 - **Runner Environment Non-Forwarding (`sudo env` Required for Overrides)**: `af-runner` does not forward `AETHERFLOW_SKIP_PROVENANCE_VERIFY=1` or GitHub tokens (`AF_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) into transient self-update units. Both are honored only in the process environment of direct `--local` CLI runs or direct `deploy/release-manager.sh` invocations — pass them with `sudo env <VAR>=<VALUE> af release ... --local` (Debian/Ubuntu `sudo` strips shell-exported variables via `Defaults env_reset`).
 
+- **Upgrade Compatibility Notes (Ingress & Host Validation)**:
+  - **IP-Only Hosts**: Because `host_validation_middleware` now implicitly trusts only canonical loopback IPs (`127.0.0.0/8`, `::1`), ensure your host's LAN/public IP is listed in `ALLOWED_HOSTS` inside `/etc/aetherflow/aetherflow.env` before upgrading if you access the dashboard directly by IP.
+  - **`.aether.local` & ruTorrent**: All 10 gateway-protected apps (including `rutorrent`) now require administrator authentication on `*.aether.local` by default (TOTP admins launch them seamlessly from `aetherflow.aether.local` via `aetherflow_local_app`); single-owner LAN hosts wanting passwordless RFC 1918/ULA access can set `AF_ALLOW_UNAUTH_LOCAL_LAN=1`. Updating the `rutorrent` package (`sudo af package update rutorrent`) automatically migrates legacy loopback `rutorrent.conf` Basic Auth to the internal proxy secret (`/etc/aetherflow/rutorrent-proxy-token.conf`) so external gateway SSO works without a `401` loop.
+
 ### Running an Upgrade or Rollback via CLI
 
 On legacy **v3.2.x** hosts that do not yet have the Rust `af` CLI binary installed, trigger the initial jump to v4.0.0 from the Web UI (**Settings → System Updates**) or via `deploy/release-manager.sh` below. On **v4.0.0+** hosts, omitting `--local` dispatches through `aetherflow-runner.service`'s isolated transient systemd unit (`/v1/self-update`), while `--local` runs `af-release` directly in the invoking root shell (recommended for standalone recovery):

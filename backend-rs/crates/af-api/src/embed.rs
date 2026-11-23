@@ -1046,8 +1046,9 @@ mod tests {
             let csp = response.headers()["content-security-policy"]
                 .to_str()
                 .unwrap();
-            if uri.starts_with("/api/") {
+            if uri.starts_with("/api/") || response.status() != StatusCode::OK {
                 assert!(csp.contains("default-src 'none'"));
+                assert!(!csp.contains("'wasm-unsafe-eval'"));
             } else {
                 assert!(csp.contains("'wasm-unsafe-eval'"));
                 assert!(!csp.contains("'unsafe-inline'"));

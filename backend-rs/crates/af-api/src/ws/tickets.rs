@@ -102,20 +102,27 @@ pub struct WsTicketQuery {
     pub ticket: String,
 }
 
-fn check_ws_jti_revocation(connection: &rusqlite::Connection, entry: &mut WsTicketEntry) -> bool {
-    if entry.session_jti.is_empty() {
-        return false;
+fn verify_ws_session(
+    connection: &rusqlite::Connection,
+    entry: &mut WsTicketEntry,
+) -> Option<crate::auth::ActiveSubject> {
+    if entry.session_jti.trim().is_empty() {
+        return None;
     }
-    if entry.session_jti.starts_with("ws-anon-")
-        && !crate::auth::table_exists(connection, "revoked_tokens").unwrap_or(false)
-    {
-        return true;
-    }
-    !crate::auth::is_session_token_revoked_beyond_grace_with_conn(
+    let check_ver = entry.session_ver.unwrap_or(0);
+    let subj = crate::auth::verify_active_session_on_conn(
         connection,
-        &entry.session_jti,
         entry.user_id,
+        &entry.session_jti,
+        check_ver,
+        chrono::Utc::now().timestamp(),
+        crate::auth::RotationGrace::AllowAnyFingerprint,
     )
+    .ok()?;
+    if entry.session_ver.is_none() {
+        entry.session_ver = Some(subj.sessions_revoked_after);
+    }
+    Some(subj)
 }
 
 pub(super) fn consume_live_ws_ticket(
@@ -126,17 +133,7 @@ pub(super) fn consume_live_ws_ticket(
         map.retain(|_, value| value.expires_at > Instant::now());
         map.remove(ticket)
     })?;
-    if !check_ws_jti_revocation(connection, &mut entry) {
-        return None;
-    }
-    let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
-    if let Some(issued_ver) = entry.session_ver {
-        if subj.sessions_revoked_after > issued_ver {
-            return None;
-        }
-    } else {
-        entry.session_ver = Some(subj.sessions_revoked_after);
-    }
+    let subj = verify_ws_session(connection, &mut entry)?;
     entry.diagnostics_allowed = subj.role == "admin";
     Some(entry)
 }
@@ -211,17 +208,7 @@ pub(super) fn refresh_ws_authorization(
     connection: &rusqlite::Connection,
     entry: &mut WsTicketEntry,
 ) -> Option<bool> {
-    if !check_ws_jti_revocation(connection, entry) {
-        return None;
-    }
-    let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
-    if let Some(issued_ver) = entry.session_ver {
-        if subj.sessions_revoked_after > issued_ver {
-            return None;
-        }
-    } else {
-        entry.session_ver = Some(subj.sessions_revoked_after);
-    }
+    let subj = verify_ws_session(connection, entry)?;
     entry.diagnostics_allowed &= subj.role == "admin";
     Some(entry.diagnostics_allowed)
 }

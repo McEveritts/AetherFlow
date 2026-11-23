@@ -45,7 +45,7 @@ Handles initial admin bootstrap, CSRF token issuance, login, TOTP 2FA verificati
 | `GET` | `/api/v1/public/swagger/` | Serves the zero-CDN interactive OpenAPI viewer. |
 | `GET` | `/api/v1/auth/ready` | Authenticated readiness probe returning control-plane status, SQLite `database` health, and privileged `runner` health (`ok`, `unreachable`, or `disabled`) with `Cache-Control: no-store` on both `200` (`status: "ready"`) and `503` (`status: "not_ready"`). Unauthenticated probe: `/health/ready`. |
 | `GET` | `/api/v1/auth/session` | Returns the authenticated user's session profile, role, and 2FA status. |
-| `POST` | `/api/v1/auth/refresh` | Rotates the current session. Cookie clients send `X-Requested-With: XMLHttpRequest`. The public alias is `/api/v1/public/auth/refresh`. |
+| `POST` | `/api/v1/auth/refresh` | Rotates the current session (rate-limited at 10 req/min/IP alongside legacy `/api/auth/refresh` and `/api/v1/public/auth/refresh`; fails closed with `401` if `active_sessions` row was deleted). Cookie clients send `X-Requested-With: XMLHttpRequest`. |
 | `GET` | `/api/v1/auth/sessions` | Lists active sessions for the authenticated user (`DELETE /api/v1/auth/sessions/{jti}` revokes a specific session). |
 | `PUT` | `/api/v1/auth/profile` | Updates the authenticated user's profile details (`PUT /api/v1/auth/profile/password`, `PUT`/`DELETE /api/v1/auth/profile/avatar`). |
 | `POST` | `/api/v1/auth/user/2fa/setup` | Initiates TOTP 2FA enrollment (`POST /api/v1/auth/user/2fa/verify`, `POST /api/v1/auth/user/2fa/disable`, `POST /api/v1/auth/user/2fa/recovery/regenerate`). |
@@ -58,7 +58,7 @@ Handles initial admin bootstrap, CSRF token issuance, login, TOTP 2FA verificati
 > - **Payload & Status**: `GET /health/ready` returns `{ status, version, uptime, database, redis, runner }`, whereas `GET /api/v1/auth/ready` returns `{ service: "aetherflow-api", status, database, runner }` (`runner` is `"ok"`, `"unreachable"`, or `"disabled"`). Failing any required check returns HTTP `503` (`"status": "not_ready"`) while keeping `"database": "ok"` if only the runner is unreachable.
 > - **Runner Probing**: When `PRIVILEGED_RUNNER_ENABLED` is a trimmed, case-insensitive `1`, `true`, `yes`, or `on`, SQLite and `/v1/health` on the runner socket are probed concurrently with 2-second budgets; otherwise `"runner"` reports `"disabled"` and SQLite alone determines readiness.
 > - **Headers & Release Gate**: `GET /api/v1/auth/ready` sets `Cache-Control: no-store` on both `200` and `503`, and neither route leaks diagnostic addresses or runner error bodies. Release managers default `HEALTH_ENDPOINT` to `http://127.0.0.1:8080/health/ready`; explicit overrides must report full application readiness.
-> - **Subdomain Gateway Authentication**: Protected external application requests routed through the Rust gateway require an active administrator session or rate-limited Basic authentication (TOTP-enrolled admins must use a verified session, subject to the provisioning master-credential fallback and `.aether.local` private-IP routing rules documented in [Security & Hardening](./security.md)). Apache-authenticated vhosts and applications with native logins retain their respective policies.
+> - **Subdomain Gateway Authentication**: All 10 gateway-protected applications (including `rutorrent`) require an active administrator session (`aetherflow_session`, `__Host-aetherflow_app` on HTTPS, or `aetherflow_local_app` on HTTP `*.aether.local`) or rate-limited live-DB Basic authentication (`role == "admin"`, `totp_enabled == 0`, no `.master.creds` fallback) on both external `<app>.<baseDomain>` and internal `<app>.aether.local` routes (unless `AF_ALLOW_UNAUTH_LOCAL_LAN=1` is set for RFC 1918/ULA/link-local LAN clients; see [Security & Hardening](./security.md)). Legacy custom Apache vhosts and applications with native logins retain their respective policies.
 
 ### 2. System, Services & Self-Update (`/api/v1/auth`, `/api/v1/admin`)
 
@@ -86,7 +86,7 @@ Controls the lifecycle of the **77 bare-metal applications**.
 | `POST` | `/api/v1/admin/packages/{id}/reinstall` | Repairs or reinstalls an installed package while preserving its service configuration. |
 | `POST` | `/api/v1/admin/packages/{id}/uninstall` | Uninstalls a package (preserving application data unless `?purge=true`). |
 | `POST` | `/api/v1/admin/packages/updates/check` | Checks upstream versions across installed Marketplace packages. |
-| `POST` | `/api/v1/admin/apps/launch` | Starts the dashboard session exchange for eligible Marketplace apps on managed public HTTPS routes. |
+| `POST` | `/api/v1/admin/apps/launch` | Starts the dashboard session exchange for all 10 gateway-protected Marketplace apps (including `rutorrent`) on managed public HTTPS routes (`__Host-aetherflow_app`) and internal HTTP `*.aether.local` routes (`aetherflow_local_app`). |
 
 ### 4. Native McBrowser (`af-files` + `af-api::mcbrowser` — `/api/v1/auth/mcbrowser`)
 

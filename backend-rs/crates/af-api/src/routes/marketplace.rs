@@ -7,9 +7,11 @@ mod receipts;
 mod rollback;
 
 #[cfg(test)]
+pub(crate) use catalog::get_marketplace_auth_info;
+#[cfg(test)]
 pub(super) use catalog::{
-    build_single_package_update_response, get_marketplace_apps_blocking, get_marketplace_auth_info,
-    package_progress_payload, PackageProgressQuery,
+    build_single_package_update_response, get_marketplace_apps_blocking, package_progress_payload,
+    PackageProgressQuery,
 };
 pub(super) use catalog::{
     check_package_updates, check_single_package_update, get_marketplace_apps, package_progress,

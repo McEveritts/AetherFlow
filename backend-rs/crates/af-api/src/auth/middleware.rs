@@ -1,9 +1,10 @@
-use super::revocation::{is_session_token_revoked_beyond_grace_for_fp, ROTATED_TOKEN_GRACE};
+use super::revocation::ROTATED_TOKEN_GRACE;
 use super::tokens::{
     api_error, attach_logout_clear_cookie, blocking_auth_work, decode_session_claims,
     legacy_client_fingerprint, load_active_human_subject, matches_client_fingerprint,
-    resolve_raw_token, secure_cookie_enabled, session_auth_time, ActiveSubject, AuthUser,
-    SessionAuthTime, SubjectStatusError,
+    resolve_raw_token, secure_cookie_enabled, session_auth_time, verify_active_session_on_conn,
+    ActiveSubject, AuthUser, RotationGrace, SessionAuthTime, SessionValidationError,
+    SubjectStatusError,
 };
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
 use axum::extract::Request;
@@ -226,31 +227,6 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
     };
 
-    let jti = claims.jti.clone();
-    let check_uid = claims.user_id;
-    let req_peer_ip = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
-    let req_ua = req
-        .headers()
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let req_ip = crate::ws::extract_client_ip_for_peer(req.headers(), req_peer_ip);
-    let caller_strict_fp = legacy_client_fingerprint(&req_ip, req_ua);
-    let still_revoked = blocking_auth_work(move || {
-        is_session_token_revoked_beyond_grace_for_fp(&jti, check_uid, Some(&caller_strict_fp))
-    })
-    .await;
-    let Ok(false) = still_revoked else {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "SESSION_EXPIRED",
-            "Session revoked",
-        );
-    };
-
     // Reject legacy session-signed plugin claims (`plugin_id` / `plugin_scopes`);
     // active plugins must authenticate via `crate::plugins::decode_and_verify_plugin_token`.
     if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
@@ -261,12 +237,20 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         );
     }
 
-    let ua = headers
+    let req_peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let ua = req
+        .headers()
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let ip = extract_client_ip(headers);
-    if !matches_client_fingerprint(&claims.cfp, &ip, ua) {
+    let hdr_ip = extract_client_ip(req.headers());
+    let peer_ip = crate::ws::extract_client_ip_for_peer(req.headers(), req_peer_ip);
+    if !matches_client_fingerprint(&claims.cfp, &hdr_ip, ua)
+        && !matches_client_fingerprint(&claims.cfp, &peer_ip, ua)
+    {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "SESSION_HIJACKED",
@@ -274,32 +258,47 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         );
     }
 
+    let caller_strict_fp = legacy_client_fingerprint(&peer_ip, ua);
     let uid = claims.user_id;
+    let jti = claims.jti.clone();
+    let ver = claims.ver;
     let subject_res = blocking_auth_work(move || {
-        let conn = af_db::get_read_conn().map_err(|_| SubjectStatusError::DbError)?;
-        load_active_human_subject(&conn, uid)
+        let conn = af_db::get_read_conn().map_err(|_| SessionValidationError::DbError)?;
+        verify_active_session_on_conn(
+            &conn,
+            uid,
+            &jti,
+            ver,
+            Utc::now().timestamp(),
+            RotationGrace::StrictFingerprint(&caller_strict_fp),
+        )
     })
     .await;
 
     let subj = match subject_res {
         Ok(Ok(subj)) => subj,
-        Ok(Err(SubjectStatusError::Suspended)) => {
+        Ok(Err(SessionValidationError::Suspended)) => {
             return api_error(
                 StatusCode::FORBIDDEN,
                 "ACCOUNT_SUSPENDED",
                 "Account is not active",
             );
         }
-        _ => return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized"),
+        Ok(Err(SessionValidationError::MissingOrRevoked)) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "SESSION_EXPIRED",
+                "Session revoked",
+            );
+        }
+        Ok(Err(SessionValidationError::DbError)) | Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SESSION_UNAVAILABLE",
+                "Unable to validate session",
+            );
+        }
     };
-
-    if claims.ver < subj.sessions_revoked_after {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "SESSION_EXPIRED",
-            "Session revoked",
-        );
-    }
 
     let verified_auth_time = session_auth_time(&claims);
     req.extensions_mut()
@@ -348,7 +347,7 @@ pub async fn admin_only_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-fn is_production_or_release_env(val: &str) -> bool {
+pub(crate) fn is_production_or_release_env(val: &str) -> bool {
     let trimmed = val.trim();
     trimmed.eq_ignore_ascii_case("production") || trimmed.eq_ignore_ascii_case("release")
 }

@@ -1080,4 +1080,305 @@ mod proxy_header_tests {
         assert!(!request.headers().contains_key(header::CONNECTION));
         assert!(!request.headers().contains_key("x-aetherflow-user"));
     }
+
+    #[tokio::test]
+    async fn esc09_master_credentials_never_authenticate_proxy_basic_after_user_changes() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use base64::Engine;
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let fixture_root = ensure_shared_test_db().parent().unwrap();
+        env::set_var("AETHERFLOW_CONFIG_ROOT", fixture_root);
+        let master_pass = "legacy-provisioning-master-pass";
+        let master_file = fixture_root.join(".master.creds");
+        std::fs::write(
+            &master_file,
+            serde_json::json!({
+                "username": "ghost-admin",
+                "password": master_pass,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        env::set_var("AETHERFLOW_MASTER_CREDS_FILE", &master_file);
+        let loaded_master = af_services::mutators::load_master_credentials();
+        assert_eq!(loaded_master.0, "ghost-admin");
+        assert_eq!(loaded_master.1, master_pass);
+
+        let make_basic = |user: &str, pass: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            h.insert(header::AUTHORIZATION, format!("Basic {encoded}").parse().unwrap());
+            h
+        };
+
+        // 1. Deleted/nonexistent admin with valid .master.creds file -> rejected.
+        assert_eq!(
+            verify_proxy_basic_credentials(&make_basic("ghost-admin", master_pass)),
+            None
+        );
+
+        // 2. Active admin matching password -> accepted; after password rotation -> old master rejected.
+        let writer = af_db::get_conn().unwrap();
+        writer
+            .execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_enabled) \
+                 VALUES (401, 'ghost-admin', 'admin', ?1, 0)",
+                rusqlite::params![bcrypt::hash("rotated-new-password", 4).unwrap()],
+            )
+            .unwrap();
+        drop(writer);
+        assert_eq!(
+            verify_proxy_basic_credentials(&make_basic("ghost-admin", master_pass)),
+            None
+        );
+        assert_eq!(
+            verify_proxy_basic_credentials(&make_basic("ghost-admin", "rotated-new-password")),
+            Some("ghost-admin".to_string())
+        );
+
+        // 3. Demoted to user -> rejected even with matching password.
+        af_db::get_conn()
+            .unwrap()
+            .execute("UPDATE users SET role = 'user' WHERE id = 401", [])
+            .unwrap();
+        assert_eq!(
+            verify_proxy_basic_credentials(&make_basic("ghost-admin", "rotated-new-password")),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn esc10_and_esc14_local_auth_lan_opt_in_totp_launch_and_rutorrent_proxy_token() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use tower::ServiceExt;
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let fixture_root = ensure_shared_test_db().parent().unwrap();
+        env::set_var("AETHERFLOW_FS_ROOT", fixture_root);
+        env::set_var("AETHERFLOW_CONFIG_ROOT", fixture_root);
+        env::set_var("ALLOWED_HOSTS", "localhost,127.0.0.1,aetherflow.aether.local");
+        std::fs::create_dir_all(fixture_root.join("install")).unwrap();
+        std::fs::write(fixture_root.join("install/.rutorrent.lock"), "installed\n").unwrap();
+        std::fs::write(
+            fixture_root.join("packages.json"),
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "name": "rutorrent", "label": "ruTorrent", "description": "fixture",
+                    "lock_file": "/install/.rutorrent.lock", "category": "test",
+                    "service_type": "apache", "service_name": "apache2", "default_port": 8087
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let upstream_port = spawn_strict_kestrel_mock_upstream().await;
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "rutorrent".into(),
+            public_domain: "torrent.example.test".into(),
+            external_access_enabled: false,
+            tls_enabled: false,
+            listen_port: upstream_port.into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let token_file = fixture_root.join("rutorrent-proxy-token");
+        let expected_proxy_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        std::fs::write(&token_file, format!("{expected_proxy_token}\n")).unwrap();
+        env::set_var("AETHERFLOW_RUTORRENT_PROXY_TOKEN_FILE", &token_file);
+
+        let writer = af_db::get_conn().unwrap();
+        writer
+            .execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_enabled, totp_secret) \
+                 VALUES (402, 'totp-local-admin', 'admin', ?1, 1, 'JBSWY3DPEHPK3PXP')",
+                rusqlite::params![bcrypt::hash("StrongPass!1", 4).unwrap()],
+            )
+            .unwrap();
+        drop(writer);
+
+        let app = crate::routes::build_router()
+            .layer(axum::middleware::from_fn(app_subdomain_proxy_middleware));
+
+        // 1. Default AF_ALLOW_UNAUTH_LOCAL_LAN unset -> RFC 1918 LAN client must authenticate.
+        env::remove_var("AF_ALLOW_UNAUTH_LOCAL_LAN");
+        let unauth_lan = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "rutorrent.aether.local")
+                    .header("x-real-ip", "192.168.1.50")
+                    .extension(ConnectInfo("127.0.0.1:41000".parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_lan.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. With AF_ALLOW_UNAUTH_LOCAL_LAN=1:
+        //    - Tailscale CGNAT (100.64.0.10) still requires authentication (401, not 403).
+        //    - Loopback (127.0.0.1) still requires authentication (401).
+        //    - RFC 1918 LAN (192.168.1.50) is permitted unauthenticated and gets ruTorrent proxy token.
+        env::set_var("AF_ALLOW_UNAUTH_LOCAL_LAN", "1");
+        for denied_bypass_ip in ["100.64.0.10", "127.0.0.1"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/")
+                        .header(header::HOST, "rutorrent.aether.local")
+                        .header("x-real-ip", denied_bypass_ip)
+                        .extension(ConnectInfo("127.0.0.1:41001".parse::<SocketAddr>().unwrap()))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{denied_bypass_ip} must not bypass auth even when AF_ALLOW_UNAUTH_LOCAL_LAN=1"
+            );
+        }
+
+        let lan_ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "rutorrent.aether.local")
+                    .header("x-real-ip", "192.168.1.50")
+                    .header("x-aetherflow-rutorrent-token", "spoofed-client-token")
+                    .extension(ConnectInfo("127.0.0.1:41002".parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lan_ok.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(lan_ok.into_body(), 16384).await.unwrap();
+        let observed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            observed["headers"]["x-aetherflow-rutorrent-token"][0],
+            expected_proxy_token
+        );
+
+        // 3. TOTP admin launches http://rutorrent.aether.local via app_launch -> aetherflow_local_app cookie.
+        env::remove_var("AF_ALLOW_UNAUTH_LOCAL_LAN");
+        let mut ua_headers = axum::http::HeaderMap::new();
+        ua_headers.insert(header::USER_AGENT, HeaderValue::from_static("local-launch-ua"));
+        let (admin_jwt, _) = crate::auth::create_standard_jwt(402, &ua_headers).unwrap();
+
+        let issue_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/api/v1/admin/apps/launch")
+                    .header(header::HOST, "aetherflow.aether.local")
+                    .header(header::ORIGIN, "http://aetherflow.aether.local")
+                    .header(header::USER_AGENT, "local-launch-ua")
+                    .header(header::AUTHORIZATION, format!("Bearer {admin_jwt}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-real-ip", "100.64.0.10")
+                    .extension(ConnectInfo("127.0.0.1:41003".parse::<SocketAddr>().unwrap()))
+                    .body(Body::from(
+                        r#"{"app":"rutorrent","destination":"http://rutorrent.aether.local/"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(issue_resp.status(), StatusCode::OK);
+        let issue_body = axum::body::to_bytes(issue_resp.into_body(), 4096)
+            .await
+            .unwrap();
+        let issue_json: serde_json::Value = serde_json::from_slice(&issue_body).unwrap();
+        let ticket = issue_json["ticket"].as_str().expect("local launch ticket");
+
+        let redeem_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri(af_models::APP_LAUNCH_EXCHANGE_PATH)
+                    .header(header::HOST, "rutorrent.aether.local")
+                    .header(header::ORIGIN, "http://aetherflow.aether.local")
+                    .header(header::USER_AGENT, "local-launch-ua")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("x-real-ip", "100.64.0.10")
+                    .extension(ConnectInfo("127.0.0.1:41004".parse::<SocketAddr>().unwrap()))
+                    .body(Body::from(format!("ticket={ticket}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redeem_resp.status(), StatusCode::SEE_OTHER);
+        let set_cookie = redeem_resp.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.starts_with("aetherflow_local_app="));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Lax"));
+        assert!(!set_cookie.contains("Secure"));
+        let cookie_pair = set_cookie.split(';').next().unwrap();
+
+        // Authenticated Tailscale admin request using aetherflow_local_app cookie succeeds
+        // and strips aetherflow_local_app before forwarding upstream while injecting X-Aetherflow-User
+        // and X-Aetherflow-Rutorrent-Token.
+        let authed_local = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "rutorrent.aether.local")
+                    .header(header::USER_AGENT, "local-launch-ua")
+                    .header(header::COOKIE, format!("{cookie_pair}; keep_me=1"))
+                    .header("x-real-ip", "100.64.0.10")
+                    .extension(ConnectInfo("127.0.0.1:41005".parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authed_local.status(), StatusCode::OK);
+        let authed_body = axum::body::to_bytes(authed_local.into_body(), 16384)
+            .await
+            .unwrap();
+        let authed_obs: serde_json::Value = serde_json::from_slice(&authed_body).unwrap();
+        assert_eq!(authed_obs["headers"]["x-aetherflow-user"][0], "totp-local-admin");
+        assert_eq!(
+            authed_obs["headers"]["x-aetherflow-rutorrent-token"][0],
+            expected_proxy_token
+        );
+        assert_eq!(authed_obs["headers"]["cookie"][0], "keep_me=1");
+
+        // Deleting active_sessions immediately invalidates the local launch cookie (ESC-05).
+        af_db::get_conn()
+            .unwrap()
+            .execute("DELETE FROM active_sessions WHERE user_id = 402", [])
+            .unwrap();
+        let revoked_local = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "rutorrent.aether.local")
+                    .header(header::USER_AGENT, "local-launch-ua")
+                    .header(header::COOKIE, cookie_pair)
+                    .header("x-real-ip", "100.64.0.10")
+                    .extension(ConnectInfo("127.0.0.1:41006".parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked_local.status(), StatusCode::UNAUTHORIZED);
+    }
 }

@@ -18,7 +18,7 @@ sudo systemctl restart aetherflow-runner aetherflow-api
 | :--- | :--- | :--- |
 | `JWT_SECRET` | Cryptographically random secret (`>= 32` bytes) used to sign HS256 session tokens. | `(Required)` |
 | `AES_MASTER_KEY` | 32-byte key (32 raw bytes, 64 hex characters, or Base64 decoding to 32 bytes) for AES-256-GCM database secret encryption (`enc:v1:`). | `(Required in production)` |
-| `AETHERFLOW_ENV` | Runtime environment (`production` or `release` enforces fail-closed `AES_MASTER_KEY` initialization and ignores `CSRF_DISABLED=true`). | `production` (packaged unit) |
+| `AETHERFLOW_ENV` | Runtime environment (`production` or `release` enforces fail-closed `AES_MASTER_KEY` initialization and ignores `CSRF_DISABLED=true` and `AF_DISABLE_RATELIMIT=1\|true`). | `production` (packaged unit) |
 | `AETHERFLOW_ENV_FILE` | Explicit path to the environment file inspected for `AES_MASTER_KEY` and release resolution. | `/etc/aetherflow/aetherflow.env` |
 | `DATA_DIR` | Primary mutable state directory used by `aetherflow-api.service` and `aetherflow-runner.service`. | `/var/lib/aetherflow` |
 | `PORT` | TCP listen port for the `aetherflow-api` Rust HTTP/WebSocket server. If you change `PORT`, update Apache2's reverse-proxy upstream target away from `127.0.0.1:8080`, set `HEALTH_ENDPOINT` (e.g., `http://127.0.0.1:<port>/health/ready`) in `/etc/aetherflow/aetherflow.env` (and restart `aetherflow-runner`) for UI/runner-socket updates, and also pass `sudo env HEALTH_ENDPOINT=...` or `--config <external-conf>` (`AETHERFLOW_RELEASE_CONF`) during standalone `af release ... --local` deploys/rollbacks (which ignore `HEALTH_ENDPOINT` in `aetherflow.env`; note Debian/Ubuntu `sudo` `env_reset` strips shell-exported vars). | `8080` |
@@ -63,11 +63,13 @@ Optional external OAuth2 login and built-in OIDC provider settings for downstrea
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `ALLOWED_HOSTS` | Comma-separated list of permitted `Host` header values (hostnames or `host:port`; middleware strips ports/trailing dots when matching, and automatically permits loopback, `baseDomain`, `<app>.aether.local`, and enabled per-app public domains). | `(Auto-populated by Setup)` |
+| `ALLOWED_HOSTS` | Comma-separated list of permitted `Host` header values (hostnames, IP literals, or `host:port`; middleware strips ports/trailing dots and automatically permits canonical loopback IPs `127.0.0.0/8` / `::1`, `localhost`, `baseDomain`, `<app>.aether.local`, and enabled per-app public domains; non-loopback IPv4/IPv6 literals must be listed explicitly). | `(Auto-populated by Setup / af provision)` |
 | `PUBLIC_URL` | Optional public base URL whose host is automatically accepted by `host_validation_middleware`. | `(Optional)` |
 | `ALLOWED_CORS_ORIGIN` | Comma-separated list of explicit frontend origin URLs for CORS and WebSocket `Origin` checks. | Localhost origins (`http://localhost:3000/8080/$PORT`, `http://127.0.0.1:3000/8080/$PORT`) |
 | `COOKIE_SECURE` | Enforces `Secure` flag on `aetherflow_session` cookies. Set `false` only for local plain-HTTP testing. Note: both fresh `af provision` and fresh IP-only, `localhost`, or `*.local` `AetherFlow-Setup` runs write `COOKIE_SECURE=false` (unless `COOKIE_SECURE`, `AF_TLS_ENABLED=1`, or `SSL_ENABLED=1` is set in the setup environment), and `--repair` preserves that `false` value until changed — restore `true` behind HTTPS. | `true` (`false` in fresh `af provision` and IP/`*.local` Setup) |
 | `CSRF_DISABLED` | Disables double-submit CSRF validation when `true` in non-production environments. **Ignored** whenever `AETHERFLOW_ENV` is `production` or `release`. | `false` |
+| `AF_DISABLE_RATELIMIT` | Disables auth/OIDC/AI rate limiting when `1` or `true` in non-production/test environments. **Ignored** whenever `AETHERFLOW_ENV` is `production` or `release`. | `false` |
+| `AF_ALLOW_UNAUTH_LOCAL_LAN` | Opt-in (`1` or case-insensitive `true`) allowing unauthenticated access to gateway-protected `*.aether.local` apps from RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), and IPv6 ULA (`fc00::/7`) LAN clients only — unconditionally excludes Tailscale/CGNAT (`100.64.0.0/10`) and loopback (`127.0.0.0/8`, `::1`). Note that `172.16.0.0/12` includes local Docker bridge subnets. | `false` |
 | `AETHERFLOW_ALLOW_PRIVATE_WEBHOOKS` | Opt-in (`1`, `true`, `yes`) permitting outbound notification webhooks to target RFC1918/CGNAT/ULA private LAN addresses (loopback, link-local, metadata, unspecified, and multicast targets remain blocked). | `false` |
 
 ### Systemd Service Hardening & Operator Drop-ins

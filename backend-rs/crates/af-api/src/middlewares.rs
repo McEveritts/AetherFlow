@@ -12,7 +12,7 @@ mod tests;
 
 pub use host_resolution::resolve_app_target_for_host;
 pub use host_validation::host_validation_middleware;
-pub(crate) use host_validation::is_trusted_request_host;
+pub(crate) use host_validation::{is_trusted_request_host, ValidatedRequestHost};
 #[allow(unused_imports)]
 pub(crate) use proxy_helpers::upstream_uses_tls;
 pub use rate_limit::{
@@ -27,7 +27,8 @@ use host_resolution::PROXY_RESOLVE_LIMIT;
 use host_validation::is_host_trusted;
 #[cfg(test)]
 use proxy_helpers::{
-    canonical_forwarded_headers, is_private_or_loopback_ip, librespeed_tls_client,
+    canonical_forwarded_headers, is_private_or_loopback_ip, is_unauth_local_lan_ip,
+    librespeed_tls_client, unauth_local_lan_enabled,
 };
 #[cfg(test)]
-use rate_limit::{SlidingWindowLimiter, RATE_LIMIT_KEY_CAPACITY};
+use rate_limit::{is_rate_limit_disabled_for_env, SlidingWindowLimiter, RATE_LIMIT_KEY_CAPACITY};

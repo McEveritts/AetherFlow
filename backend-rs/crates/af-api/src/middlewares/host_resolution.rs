@@ -78,7 +78,9 @@ pub(super) fn local_control_plane_host(host: &str) -> bool {
     matches!(
         host,
         "" | "localhost" | "aether.local" | "aetherflow.aether.local"
-    ) || host.parse::<IpAddr>().is_ok()
+    ) || host
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
 pub(super) fn explicit_control_plane_host(raw: &str, clean: &str) -> bool {

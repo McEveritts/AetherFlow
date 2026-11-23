@@ -234,6 +234,12 @@ pub(crate) fn apache_upstream_tls(
     Ok(config)
 }
 
+// Authenticated internal `.aether.local` reachability allowlist.
+// `100.64.0.0/10` (RFC 6598 / Tailscale) is permitted for authenticated internal access
+// (matching `proxy_helpers.rs::is_private_or_loopback_ip`), while unauthenticated LAN
+// bypass in `af-api` (`is_unauth_local_lan_ip`) unconditionally excludes `100.64.0.0/10`
+// and loopback. IPv4 link-local `169.254.0.0/16` is intentionally omitted here at the
+// Apache layer to prevent cloud metadata / link-local forwarding ambiguity.
 pub(in crate::package_executor) const INTERNAL_NETWORKS: &str =
     "127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10";
 pub(in crate::package_executor) const APACHE_HTPASSWD: &str = "/etc/apache2/AetherFlow/htpasswd";
@@ -654,13 +660,11 @@ pub(crate) fn render_managed_apache_vhost(
     let acme = external && port == 80;
     let acme_http = if acme { ACME_HTTP_EXEMPTION } else { "" };
     let acme_rewrite = if acme { ACME_REWRITE_GUARD } else { "" };
-    // ruTorrent's local Apache/PHP vhost requires its own Basic credentials.
-    // Inherited Apache blocks may also implement local routing or authentication.
-    let gateway = if external
-        && requires_external_app_auth(&req.app_name)
-        && req.app_name != "rutorrent"
-        && blocks.is_empty()
-    {
+    // Standard external protected apps (including ruTorrent) route through the Rust
+    // Subdomain Gateway (`x-aetherflow-external-app`). Legacy `/etc/apache2/AetherFlow/htpasswd`
+    // is reserved strictly as a fallback for inherited custom Apache blocks or a
+    // non-loopback `BIND_ADDR` where Apache cannot reach the gateway over loopback.
+    let gateway = if external && requires_external_app_auth(&req.app_name) && blocks.is_empty() {
         let bind = env::var("BIND_ADDR")
             .or_else(|_| env::var("AETHERFLOW_BIND_ADDR"))
             .unwrap_or_default();

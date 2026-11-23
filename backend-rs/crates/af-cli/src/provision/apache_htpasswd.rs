@@ -3,7 +3,6 @@ use super::fs_helpers::{
 };
 use super::preflight::is_effective_root_user;
 use super::state::ProvisionStateStore;
-use super::steps::generate_crypto_secret;
 use crate::error::{CliError, CliResult};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -13,10 +12,25 @@ use std::path::{Path, PathBuf};
 static SAFE_APACHE_USER_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z_][a-z0-9_-]{0,31}$").unwrap());
 
+fn has_valid_bcrypt_entries(content: &str) -> bool {
+    content.lines().any(|raw_line| {
+        let line = raw_line.trim();
+        let Some((user, hash)) = line.split_once(':') else {
+            return false;
+        };
+        SAFE_APACHE_USER_RE.is_match(user)
+            && hash.len() == 60
+            && (hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$"))
+    })
+}
+
 /// Provisions `/etc/apache2/AetherFlow/htpasswd` (`0640`, `root:www-data`) with a bcrypt `$2y$`
-/// credential entry when `/etc/apache2/AetherFlow` is present/configured.
+/// credential entry when `/etc/apache2/AetherFlow` is present/configured and an explicit
+/// plaintext password is supplied.
 ///
-/// Returns `Ok(None)` when `/etc/apache2/AetherFlow` does not exist yet.
+/// When no plaintext password is supplied (for example when `.master.creds` is encrypted with
+/// `enc:v1:`), preserves any existing file with valid bcrypt entries (`$2a$`/`$2b$`/`$2y$`) and
+/// returns `Ok(Some(path))`, or returns `Ok(None)` without writing a random password.
 pub fn provision_apache_htpasswd_if_configured(
     store: &ProvisionStateStore,
 ) -> CliResult<Option<PathBuf>> {
@@ -98,20 +112,15 @@ pub fn provision_apache_htpasswd_if_configured(
         None
     };
 
-    if explicit_password.is_none() {
+    let Some(password) = explicit_password else {
         if let Some(ref content) = existing_raw {
-            let prefix = format!("{}:", username);
-            let has_valid_bcrypt = content
-                .lines()
-                .any(|line| line.starts_with(&prefix) && line[prefix.len()..].starts_with("$2y$"));
-            if has_valid_bcrypt {
+            if has_valid_bcrypt_entries(content) {
                 enforce_apache_htpasswd_perms(&htpasswd_path);
                 return Ok(Some(htpasswd_path));
             }
         }
-    }
-
-    let password = explicit_password.unwrap_or_else(|| generate_crypto_secret(24));
+        return Ok(None);
+    };
     let bcrypt_hash = generate_bcrypt_2y_hash(&password)?;
 
     let user_prefix = format!("{}:", username);

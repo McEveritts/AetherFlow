@@ -4,7 +4,6 @@ use crate::ws::{extract_client_ip, extract_client_ip_for_peer};
 use axum::extract::Request;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use rusqlite::params;
 use std::env;
 
 pub(super) async fn health_check() -> Json<serde_json::Value> {
@@ -264,36 +263,22 @@ pub(super) async fn is_metrics_request_authorized(req: Request) -> bool {
     {
         return false;
     }
+    let caller_strict_fp = crate::auth::legacy_client_fingerprint(&client_ip, &ua);
     crate::auth::blocking_auth_work(move || {
-        if crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id) {
-            return false;
-        }
         let Ok(conn) = af_db::get_read_conn() else {
             return false;
         };
-        let Ok(subj) = crate::auth::load_active_human_subject(&conn, claims.user_id) else {
+        let Ok(subj) = crate::auth::verify_active_session_on_conn(
+            &conn,
+            claims.user_id,
+            &claims.jti,
+            claims.ver,
+            chrono::Utc::now().timestamp(),
+            crate::auth::RotationGrace::StrictFingerprint(&caller_strict_fp),
+        ) else {
             return false;
         };
-        if !subj.role.eq_ignore_ascii_case("admin") {
-            return false;
-        }
-        if claims.ver < subj.sessions_revoked_after {
-            return false;
-        }
-        if crate::auth::table_exists(&conn, "active_sessions").unwrap_or(false) {
-            let resolved_jti = crate::auth::resolve_current_session_jti(&claims.jti);
-            let session_exists: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3))",
-                    params![claims.user_id, claims.jti, resolved_jti],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
-            if !session_exists {
-                return false;
-            }
-        }
-        true
+        subj.role.eq_ignore_ascii_case("admin")
     })
     .await
     .unwrap_or(false)

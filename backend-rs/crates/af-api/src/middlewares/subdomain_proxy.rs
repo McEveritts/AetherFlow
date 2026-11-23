@@ -6,11 +6,11 @@ use super::host_resolution::{
 use super::proxy_helpers::{
     canonical_forwarded_headers, forward_proxy_http_headers, internal_domain_forbidden,
     is_forwarded_header_name, is_hop_by_hop_header, is_spoofable_identity_header,
-    is_strict_loopback_https_url, is_trusted_proxy_ip, librespeed_tls_client,
-    local_domain_client_allowed, managed_app_route_unavailable,
-    resolve_optional_authenticated_user, strip_gateway_session_cookies, upstream_uses_tls,
-    verify_proxy_basic_credentials, PROXY_HTTP_CLIENT, PROXY_LOOPBACK_TLS_CLIENT,
-    PROXY_LOOPBACK_TLS_WS_CLIENT,
+    is_strict_loopback_https_url, is_trusted_proxy_ip, is_unauth_local_lan_ip,
+    librespeed_tls_client, local_domain_client_allowed, managed_app_route_unavailable,
+    read_rutorrent_proxy_token, resolve_optional_authenticated_user, strip_gateway_session_cookies,
+    unauth_local_lan_enabled, upstream_uses_tls, verify_proxy_basic_credentials, PROXY_HTTP_CLIENT,
+    PROXY_LOOPBACK_TLS_CLIENT, PROXY_LOOPBACK_TLS_WS_CLIENT,
 };
 use super::rate_limit::{rate_limited_response, PROXY_BASIC_AUTH_LIMITER};
 use crate::auth::api_error;
@@ -94,7 +94,15 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         }
         AppHostResolution::ControlPlane => return next.run(req).await,
     };
-    let requires_auth = !is_internal_aether_local && external_proxy_requires_auth(&app_name);
+    let unauth_local_lan_bypass = is_internal_aether_local
+        && unauth_local_lan_enabled()
+        && peer_ip_opt.is_some_and(|peer| {
+            is_unauth_local_lan_ip(&crate::ws::extract_client_ip_for_peer(
+                req.headers(),
+                Some(peer),
+            ))
+        });
+    let requires_auth = external_proxy_requires_auth(&app_name) && !unauth_local_lan_bypass;
     if managed_app.is_some_and(|expected| {
         !requires_auth
             || expected.as_bytes() != app_name.as_bytes()
@@ -212,6 +220,21 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     } else {
         None
     };
+    let rutorrent_proxy_token = if app_name == "rutorrent" {
+        match resolve_proxy_work(read_rutorrent_proxy_token).await {
+            Some(Ok(token)) => token,
+            result => {
+                tracing::warn!(?result, "ruTorrent proxy token unavailable");
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "BAD_GATEWAY",
+                    "ruTorrent upstream proxy token unavailable",
+                );
+            }
+        }
+    } else {
+        None
+    };
     let use_tls = pinned_client.is_some()
         || (app_name != "librespeed" && upstream_uses_tls(&app_name, target_port as u16));
     let scheme = if use_tls { "https" } else { "http" };
@@ -252,6 +275,9 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             ws_req = ws_req.header(reqwest::header::CONNECTION, "Upgrade");
             if let Some(ref user) = authenticated_user {
                 ws_req = ws_req.header("X-Aetherflow-User", user);
+            }
+            if let Some(ref token) = rutorrent_proxy_token {
+                ws_req = ws_req.header("X-Aetherflow-Rutorrent-Token", token);
             }
 
             let upstream_resp = match tokio::time::timeout(Duration::from_secs(15), ws_req.send())
@@ -487,9 +513,18 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             }
 
             hdrs.remove("x-aetherflow-user");
+            hdrs.remove("x-aetherflow-rutorrent-token");
             if let Some(ref user) = authenticated_user {
                 if let Ok(user_hv) = HeaderValue::from_str(user) {
                     hdrs.insert(HeaderName::from_static("x-aetherflow-user"), user_hv);
+                }
+            }
+            if let Some(ref token) = rutorrent_proxy_token {
+                if let Ok(token_hv) = HeaderValue::from_str(token) {
+                    hdrs.insert(
+                        HeaderName::from_static("x-aetherflow-rutorrent-token"),
+                        token_hv,
+                    );
                 }
             }
         }
@@ -628,6 +663,9 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     );
     if let Some(user) = authenticated_user {
         upstream_req = upstream_req.header("X-Aetherflow-User", user);
+    }
+    if let Some(token) = rutorrent_proxy_token {
+        upstream_req = upstream_req.header("X-Aetherflow-Rutorrent-Token", token);
     }
 
     if has_body {

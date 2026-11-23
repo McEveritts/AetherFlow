@@ -62,13 +62,19 @@ while True:
         .unwrap();
         std::fs::set_permissions(journal, std::fs::Permissions::from_mode(0o755)).unwrap();
         af_db::init_db().unwrap();
-        af_db::get_conn()
-            .unwrap()
-            .execute(
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
                 "INSERT INTO users(id,username,role) VALUES(1,'log-observer',?1)",
                 [role],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO active_sessions(jti,user_id,expires_at) VALUES('disposable-log-session',1,datetime('now','+1 hour'))",
+                [],
+            )
+            .unwrap();
+        }
         let user = crate::auth::AuthUser {
             user_id: 1,
             username: "log-observer".into(),
@@ -184,6 +190,15 @@ async fn revoked_log_delivery(kind: &str) {
                 .execute("DELETE FROM users WHERE id=1", [])
                 .unwrap();
         }
+        "delete_session" => {
+            af_db::get_conn()
+                .unwrap()
+                .execute(
+                    "DELETE FROM active_sessions WHERE jti='disposable-log-session'",
+                    [],
+                )
+                .unwrap();
+        }
         "uncertain" => {
             af_db::get_conn()
                 .unwrap()
@@ -209,6 +224,15 @@ async fn dedicated_logs_close_after_admin_demotion() {
 async fn dedicated_logs_close_after_account_deletion() {
     if isolated("ws::log_authorization_regressions::dedicated_logs_close_after_account_deletion") {
         revoked_log_delivery("delete").await;
+    }
+}
+
+#[tokio::test]
+async fn dedicated_logs_close_after_active_session_deletion() {
+    if isolated(
+        "ws::log_authorization_regressions::dedicated_logs_close_after_active_session_deletion",
+    ) {
+        revoked_log_delivery("delete_session").await;
     }
 }
 

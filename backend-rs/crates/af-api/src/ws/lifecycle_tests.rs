@@ -1,4 +1,6 @@
-use super::{consume_live_ws_ticket, issue_ws_ticket_for_user, websocket_message_for_session};
+use super::{
+    consume_live_ws_ticket, issue_ws_ticket_for_session, websocket_message_for_session,
+};
 
 #[test]
 fn websocket_progress_filters_installer_output_per_recipient() {
@@ -90,10 +92,16 @@ fn websocket_service_snapshots_cannot_bypass_progress_sanitization() {
 #[test]
 fn established_websocket_privileges_are_revoked_and_never_promoted() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection.execute_batch(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT NOT NULL); INSERT INTO users VALUES (1, 'admin');",
-    ).unwrap();
-    let ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+    connection
+        .execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT 'admin', role TEXT NOT NULL, sessions_revoked_after INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE active_sessions (jti TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at TEXT NOT NULL);
+             CREATE TABLE revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
+             INSERT INTO users VALUES (1, 'admin', 'admin', 0);
+             INSERT INTO active_sessions VALUES ('ws-sess-1', 1, datetime('now', '+1 hour'));",
+        )
+        .unwrap();
+    let ticket = issue_ws_ticket_for_session(1, "ws-sess-1", "127.0.0.1");
     let mut entry = consume_live_ws_ticket(&connection, &ticket).unwrap();
     assert_eq!(
         super::refresh_ws_authorization(&connection, &mut entry),
@@ -113,6 +121,19 @@ fn established_websocket_privileges_are_revoked_and_never_promoted() {
         super::refresh_ws_authorization(&connection, &mut entry),
         Some(false)
     );
+    connection
+        .execute("DELETE FROM active_sessions WHERE jti = 'ws-sess-1'", [])
+        .unwrap();
+    assert_eq!(
+        super::refresh_ws_authorization(&connection, &mut entry),
+        None
+    );
+    connection
+        .execute(
+            "INSERT INTO active_sessions VALUES ('ws-sess-1', 1, datetime('now', '+1 hour'))",
+            [],
+        )
+        .unwrap();
     connection.execute("DELETE FROM users", []).unwrap();
     assert_eq!(
         super::refresh_ws_authorization(&connection, &mut entry),
@@ -130,10 +151,14 @@ fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT NOT NULL); INSERT INTO users VALUES (1, 'admin'), (2, 'user');",
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT 'u', role TEXT NOT NULL, sessions_revoked_after INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE active_sessions (jti TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at TEXT NOT NULL);
+             CREATE TABLE revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
+             INSERT INTO users VALUES (1, 'admin', 'admin', 0), (2, 'member', 'user', 0);
+             INSERT INTO active_sessions VALUES ('ws-u1', 1, datetime('now', '+1 hour')), ('ws-u2', 2, datetime('now', '+1 hour'));",
         )
         .unwrap();
-    let ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+    let ticket = issue_ws_ticket_for_session(1, "ws-u1", "127.0.0.1");
     assert_eq!(
         consume_live_ws_ticket(&connection, &ticket)
             .unwrap()
@@ -141,7 +166,7 @@ fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
         1
     );
     assert!(consume_live_ws_ticket(&connection, &ticket).is_none());
-    let demoted_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+    let demoted_ticket = issue_ws_ticket_for_session(1, "ws-u1", "127.0.0.1");
     connection
         .execute("UPDATE users SET role='user' WHERE id=1", [])
         .unwrap();
@@ -150,7 +175,7 @@ fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
             .unwrap()
             .diagnostics_allowed
     );
-    let admin_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+    let admin_ticket = issue_ws_ticket_for_session(1, "ws-u1", "127.0.0.1");
     connection
         .execute("UPDATE users SET role='admin' WHERE id=1", [])
         .unwrap();
@@ -159,8 +184,8 @@ fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
             .unwrap()
             .diagnostics_allowed
     );
-    let deleted_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
-    let live_ticket = issue_ws_ticket_for_user(2, "127.0.0.1");
+    let deleted_ticket = issue_ws_ticket_for_session(1, "ws-u1", "127.0.0.1");
+    let live_ticket = issue_ws_ticket_for_session(2, "ws-u2", "127.0.0.1");
     connection
         .execute("DELETE FROM users WHERE id = 1", [])
         .unwrap();
@@ -172,7 +197,7 @@ fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
         2
     );
     connection.execute("DROP TABLE users", []).unwrap();
-    let unavailable_ticket = issue_ws_ticket_for_user(2, "127.0.0.1");
+    let unavailable_ticket = issue_ws_ticket_for_session(2, "ws-u2", "127.0.0.1");
     assert!(consume_live_ws_ticket(&connection, &unavailable_ticket).is_none());
 }
 
@@ -182,6 +207,7 @@ fn websocket_jti_revocation_does_not_rebind_after_grace_expires() {
     connection
         .execute_batch(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT 'admin', role TEXT NOT NULL, sessions_revoked_after INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE active_sessions (jti TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at TEXT NOT NULL);
              CREATE TABLE revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
              INSERT INTO users VALUES (1, 'admin', 'admin', 0);
              INSERT INTO revoked_tokens VALUES ('jti-rotated-old', datetime('now', '+1 hour'));",

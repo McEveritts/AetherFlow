@@ -6,7 +6,8 @@ use super::revocation::{
 use super::tokens::{
     api_error, blocking_response, column_exists, create_session_jwt_in_conn, decode_session_claims,
     legacy_client_fingerprint, load_active_human_subject, matches_client_fingerprint,
-    resolve_raw_token, secure_cookie_enabled, session_auth_time, table_exists, AuthUser,
+    resolve_raw_token, secure_cookie_enabled, session_auth_time, table_exists,
+    verify_active_session_on_conn, AuthUser, RotationGrace, SessionValidationError,
     SubjectStatusError, SESSION_COOKIE_MAX_AGE,
 };
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
@@ -235,7 +236,14 @@ fn refresh_session_for_peer_blocking(
     }
 
     let has_sessions_table = match table_exists(&tx, "active_sessions") {
-        Ok(v) => v,
+        Ok(true) => true,
+        Ok(false) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Session is no longer active",
+            );
+        }
         Err(_) => {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -244,32 +252,30 @@ fn refresh_session_for_peer_blocking(
             );
         }
     };
-    let has_family = if has_sessions_table {
-        match column_exists(&tx, "active_sessions", "family_id") {
-            Ok(v) => v,
-            Err(_) => {
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    "Failed to inspect session schema",
-                );
-            }
+    let has_family = match column_exists(&tx, "active_sessions", "family_id") {
+        Ok(v) => v,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to inspect session schema",
+            );
         }
-    } else {
-        false
     };
-    let existing_family_opt: Option<String> = if has_sessions_table {
+    let existing_family_opt: Option<String> = {
         let query_res = if has_family {
             tx.query_row(
-                "SELECT COALESCE(family_id, '') FROM active_sessions WHERE jti = ?1 AND user_id = ?2",
-                params![claims.jti, subj.user_id],
+                "SELECT COALESCE(family_id, '') FROM active_sessions \
+                 WHERE jti = ?1 AND user_id = ?2 AND unixepoch(expires_at, 'auto') > ?3",
+                params![claims.jti, subj.user_id, now],
                 |r| r.get(0),
             )
             .optional()
         } else {
             tx.query_row(
-                "SELECT jti FROM active_sessions WHERE jti = ?1 AND user_id = ?2",
-                params![claims.jti, subj.user_id],
+                "SELECT jti FROM active_sessions \
+                 WHERE jti = ?1 AND user_id = ?2 AND unixepoch(expires_at, 'auto') > ?3",
+                params![claims.jti, subj.user_id, now],
                 |r| r.get(0),
             )
             .optional()
@@ -284,8 +290,6 @@ fn refresh_session_for_peer_blocking(
                 );
             }
         }
-    } else {
-        None
     };
 
     let Ok(consumed) = af_db::try_consume_session_jti_in_tx(&tx, &claims.jti, MIN_REVOCATION_TTL)
@@ -305,12 +309,7 @@ fn refresh_session_for_peer_blocking(
                 let successor_revoked = leaf_succ.is_empty()
                     || af_db::token_revocation_status_with_conn(&tx, &leaf_succ).unwrap_or(true);
                 let successor_active = has_sessions_table
-                    && tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2)",
-                            params![leaf_succ, subj.user_id],
-                            |r| r.get::<_, bool>(0),
-                        )
+                    && af_db::has_unexpired_active_session(&tx, &leaf_succ, subj.user_id, now)
                         .unwrap_or(false);
                 if !successor_revoked && successor_active {
                     let cookie = build_set_cookie(
@@ -458,12 +457,22 @@ fn refresh_session_for_peer_blocking(
         );
     }
 
-    let family_id = existing_family_opt
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&claims.jti)
-        .to_string();
+    let Some(existing_family) = existing_family_opt else {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Session is no longer active",
+        );
+    };
+
+    let family_id = {
+        let trimmed = existing_family.trim();
+        if trimmed.is_empty() {
+            claims.jti.clone()
+        } else {
+            trimmed.to_string()
+        }
+    };
 
     let Ok((new_token, new_claims)) = create_session_jwt_in_conn(
         &tx,
@@ -593,58 +602,53 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !matches_client_fingerprint(&claims.cfp, &extract_client_ip(&headers), user_agent) {
+    let client_ip = extract_client_ip(&headers);
+    if !matches_client_fingerprint(&claims.cfp, &client_ip, user_agent) {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "Invalid or revoked session",
         );
     }
+    let caller_strict_fp = legacy_client_fingerprint(&client_ip, user_agent);
     let Ok(conn) = af_db::get_read_conn() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "Internal validation error" })),
-        )
-            .into_response();
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SESSION_UNAVAILABLE",
+            "Unable to validate session",
+        );
     };
-    let subj = match load_active_human_subject(&conn, claims.user_id) {
+    let subj = match verify_active_session_on_conn(
+        &conn,
+        claims.user_id,
+        &claims.jti,
+        claims.ver,
+        Utc::now().timestamp(),
+        RotationGrace::StrictFingerprint(&caller_strict_fp),
+    ) {
         Ok(subj) => subj,
-        Err(SubjectStatusError::Suspended) => {
+        Err(SessionValidationError::Suspended) => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "Account is not active" })),
             )
                 .into_response();
         }
-        Err(SubjectStatusError::MissingOrPlugin) => {
-            return (
+        Err(SessionValidationError::MissingOrRevoked) => {
+            return api_error(
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "User no longer exists" })),
-            )
-                .into_response();
+                "UNAUTHORIZED",
+                "Invalid or revoked session",
+            );
         }
-        Err(SubjectStatusError::DbError) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "Internal validation error" })),
-            )
-                .into_response();
+        Err(SessionValidationError::DbError) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SESSION_UNAVAILABLE",
+                "Unable to validate session",
+            );
         }
     };
-    let active = is_session_active(&conn, &claims.jti, claims.user_id);
-    if claims.ver < subj.sessions_revoked_after
-        || !matches!(active, Ok(true))
-        || !matches!(
-            af_db::token_revocation_status_with_conn(&conn, &claims.jti),
-            Ok(false)
-        )
-    {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "Invalid or revoked session",
-        );
-    }
 
     if subj.role != "admin" {
         return api_error(
@@ -662,6 +666,7 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
     resp
 }
 
+#[cfg(test)]
 pub(super) fn is_session_active(
     conn: &rusqlite::Connection,
     jti: &str,

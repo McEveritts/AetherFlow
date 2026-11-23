@@ -79,7 +79,7 @@ Both `aetherflow-api.service` and `aetherflow-runner.service` load `/etc/aetherf
 | :--- | :--- | :--- | :--- |
 | `JWT_SECRET` | **Yes** | — | `>= 32`-byte secret for HS256 JWT signing |
 | `AES_MASTER_KEY` | **Yes** | — | 32-byte raw, 64-char hex, or Base64 key for AES-256-GCM encryption at rest |
-| `ALLOWED_HOSTS` | **Yes** | — | Comma-separated permitted `Host` headers (`localhost,127.0.0.1,<your-domain>`); prevents hostname Host-header poisoning (note: `local_control_plane_host` accepts any valid IPv4/IPv6 literal — pin `PUBLIC_URL` and `OIDC_ISSUER` and reject catch-all IP `Host` headers at Apache2) |
+| `ALLOWED_HOSTS` | **Yes** | — | Comma-separated permitted `Host` headers (`localhost,127.0.0.1,<your-domain-or-ip>`); only canonical loopback IPs (`127.0.0.0/8`, `::1`) are implicitly trusted — list your host LAN/public IP explicitly for IP-only access (`400 INVALID_HOST` otherwise) |
 | `BIND_ADDR` | Recommended | `0.0.0.0` (bare/`af provision`) / `127.0.0.1` (Setup) | **Must be `127.0.0.1` behind Apache2** so plaintext port `8080` is never exposed publicly |
 | `PORT` | No | `8080` | HTTP/WS listen port (if changed, update Apache2's reverse-proxy target away from `127.0.0.1:8080`, set `HEALTH_ENDPOINT` in `aetherflow.env` + restart `aetherflow-runner` for UI updates, and pass `HEALTH_ENDPOINT` / `--config` explicitly on `--local` deploys/rollbacks; see [Health & Readiness Checks](#health--readiness-checks)) |
 | `COOKIE_SECURE` | Recommended | `true` (`false` in `af provision` and IP/`*.local` Setup) | Enforce `Secure` attribute on `aetherflow_session` cookies in HTTPS deployments (fresh `af provision` and IP-only/`localhost`/`*.local` `AetherFlow-Setup` runs write `false` unless `COOKIE_SECURE`/`AF_TLS_ENABLED=1`/`SSL_ENABLED=1` is set) |
@@ -186,10 +186,10 @@ See [Unified Rust Admin CLI (`af`)](./rust-admin-cli.md) for the complete comman
 | :--- | :--- |
 | Algorithm | HS256 (`JWT_SECRET`) |
 | Access Token TTL | 15 minutes (2-hour refresh grace window, 30-day absolute session cap) |
-| Revocation Store | SQLite `revoked_tokens` + `sessions_revoked_after` (`active_sessions` additionally checked on perimeter forward-auth `/api/v1/public/auth/verify`, `/metrics`, and optional authenticated `GET /api/v1/public/marketplace`; see [Security & Hardening](./security.md)) |
+| Revocation Store | SQLite `revoked_tokens` + unexpired `active_sessions` + `sessions_revoked_after` enforced uniformly across all human-session HTTP, proxy, app-launch, `/metrics`, optional marketplace, WebSocket, and OIDC `/authorize` surfaces (`verify_active_session_on_conn`; see [Security & Hardening](./security.md)) |
 | 2FA | Optional per-user TOTP (`totp-lite`) with bcrypt-hashed recovery codes |
 
-Every authenticated request, OIDC token introspection, and WebSocket upgrade verifies that the token is not in `revoked_tokens` and that the owning user account remains active in SQLite. On a fresh host where `users` is empty (and `AETHERFLOW_WEB_ADMIN_PASSWORD` was not passed to `AetherFlow-Setup`), remote or Apache-proxied `POST /api/v1/public/auth/setup` requests fail closed with HTTP `403 SETUP_TOKEN_REQUIRED` until supplied with the one-time `0600` bootstrap token at `/var/lib/aetherflow/.setup-bootstrap-token` (or `AETHERFLOW_SETUP_TOKEN`) via `setup_token` or `X-AetherFlow-Setup-Token`.
+Every authenticated request, Subdomain Gateway session, OIDC `/authorize` & token introspection, and WebSocket upgrade verifies unexpired `active_sessions`, `revoked_tokens`, `sessions_revoked_after`, and live owning user state in SQLite. On a fresh host where `users` is empty (and `AETHERFLOW_WEB_ADMIN_PASSWORD` was not passed to `AetherFlow-Setup`), remote or Apache-proxied `POST /api/v1/public/auth/setup` requests fail closed with HTTP `403 SETUP_TOKEN_REQUIRED` until supplied with the one-time `0600` bootstrap token at `/var/lib/aetherflow/.setup-bootstrap-token` (or `AETHERFLOW_SETUP_TOKEN`) via `setup_token` or `X-AetherFlow-Setup-Token`.
 
 ---
 
@@ -197,7 +197,7 @@ Every authenticated request, OIDC token introspection, and WebSocket upgrade ver
 
 AetherFlow includes a built-in OpenID Connect provider for downstream applications:
 
-- **RSA 2048-bit Key & Issuer Pinning**: Persisted at `OIDC_KEY_PATH` (`/var/lib/aetherflow/oidc_rsa.pem`, mode `0600`). Pin explicit `OIDC_ISSUER` and `PUBLIC_URL` in `/etc/aetherflow/aetherflow.env` so `/.well-known/openid-configuration` cannot reflect arbitrary IPv4/IPv6 `Host` literals (which bypass `ALLOWED_HOSTS` via `local_control_plane_host`).
+- **RSA 2048-bit Key & Issuer Pinning**: Persisted at `OIDC_KEY_PATH` (`/var/lib/aetherflow/oidc_rsa.pem`, mode `0600`). Set explicit `OIDC_ISSUER` and `PUBLIC_URL` in `/etc/aetherflow/aetherflow.env` for stable canonical discovery metadata (unlisted IPv4/IPv6 `Host` headers are rejected with `400 INVALID_HOST` by outer `host_validation_middleware`).
 - **Endpoints**:
   - `GET /.well-known/openid-configuration`
   - `GET /api/v1/public/oidc/authorize`
@@ -220,7 +220,7 @@ Dashboard and scheduled backups capture the AetherFlow SQLite database. `af-host
 
 `af backup create` (default `--archive`, or pass `--sqlite-only` for a standalone SQLite snapshot) archives:
 
-- `/var/lib/aetherflow/aetherflow.sqlite`, `/var/lib/aetherflow/.master.creds` (if present — provisioning master credentials generated on every fresh first-admin setup and still accepted by Subdomain Gateway Basic Auth alongside SQLite `system_config.master_credentials`; see [Security & Hardening](./security.md)), and `/var/lib/aetherflow/oidc_rsa.pem` (if present).
+- `/var/lib/aetherflow/aetherflow.sqlite`, `/var/lib/aetherflow/.master.creds` (if present — package installer provisioning credentials; no longer accepted by Subdomain Gateway Basic Auth), and `/var/lib/aetherflow/oidc_rsa.pem` (if present).
 - `/etc/aetherflow` and legacy `/etc/AetherFlow` configuration trees.
 - `/home/aetherflow/.rtorrent.rc` only if present (operators with legacy seedbox user accounts must back up `/home/<user>/.rtorrent.rc` separately).
 - Back up `/var/lib/aetherflow/mcbrowser`, `/var/lib/aetherflow/uploads` (FileShare), Marketplace application data/databases, and Apache configuration separately, keeping McBrowser synchronized with SQLite quota records. Periodically prune verified old `<app-dir>.af-backup.*` upgrade backup trees created by Marketplace installers to avoid unbounded disk growth.

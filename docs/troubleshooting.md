@@ -56,7 +56,7 @@ curl -s http://127.0.0.1:8080/health/ready | jq
    ```bash
    sudo ss -tulpn | grep 8080
    ```
-2. Check `/etc/aetherflow/aetherflow.env` and verify `ALLOWED_HOSTS` includes the domain or IP you are visiting, then restart:
+2. Check `/etc/aetherflow/aetherflow.env` and verify `ALLOWED_HOSTS` includes the domain or non-loopback LAN/public IP you are visiting (`host_validation_middleware` rejects unlisted non-loopback IP literals with `400 INVALID_HOST`), then restart:
    ```bash
    sudo systemctl restart aetherflow-api
    ```

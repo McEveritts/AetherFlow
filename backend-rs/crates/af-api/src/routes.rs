@@ -101,7 +101,7 @@ mod actions;
 mod blueprints_ingress;
 mod fs_browser;
 mod health;
-mod marketplace;
+pub(crate) mod marketplace;
 mod notifications;
 mod services;
 mod settings;
@@ -254,18 +254,9 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         req.uri().path().starts_with("/api/") && !req.uri().path().starts_with("/api/v1/");
     let req_path = req.uri().path().to_string();
     let req_host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 255
-                && s.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
-                })
-        })
-        .map(str::to_string);
+        .extensions()
+        .get::<crate::middlewares::ValidatedRequestHost>()
+        .map(|h| h.0.clone());
 
     req.headers_mut().insert(
         "X-Request-ID",
@@ -275,9 +266,10 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
     let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
     let mut resp = next.run(req).await;
     let is_plugin_proxy = resp.extensions().get::<ProxiedPluginResponse>().is_some();
+    let resp_status = resp.status();
     let is_openapi_viewer = (req_path.starts_with("/api/v1/public/swagger/")
         || req_path.starts_with("/api/public/swagger/"))
-        && resp.status() == StatusCode::OK
+        && resp_status == StatusCode::OK
         && resp
             .headers()
             .get(header::CONTENT_TYPE)
@@ -351,7 +343,7 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
                 "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
             ),
         );
-    } else {
+    } else if resp_status == StatusCode::OK {
         let connect_src = match req_host.as_deref() {
             Some(host) => format!("'self' ws://{host} wss://{host}"),
             None => "'self'".to_string(),
@@ -362,6 +354,13 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         if let Ok(hv) = HeaderValue::from_str(&csp) {
             h.insert("Content-Security-Policy", hv);
         }
+    } else {
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static(
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            ),
+        );
     }
     h.insert(
         "Referrer-Policy",
@@ -434,8 +433,8 @@ pub fn build_router() -> Router {
         .route("/health/ready", get(health_ready))
         .route("/metrics", get(prometheus_metrics))
         .fallback(spa_fallback_handler)
-        .layer(middleware::from_fn(host_validation_middleware))
         .layer(middleware::from_fn(security_headers_middleware))
+        .layer(middleware::from_fn(host_validation_middleware))
 }
 
 fn build_v1_router() -> Router {
@@ -487,7 +486,11 @@ fn build_v1_router() -> Router {
         .merge(ai_limited_auth)
         .route("/session", get(get_session))
         .route("/ready", get(authenticated_ready))
-        .route("/refresh", post(refresh_session_with_peer))
+        .route(
+            "/refresh",
+            post(refresh_session_with_peer)
+                .route_layer(middleware::from_fn(auth_rate_limit_middleware)),
+        )
         .route("/sessions", get(list_active_sessions))
         .route("/sessions/:jti", delete(revoke_session))
         .route("/logout", post(logout))

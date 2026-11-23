@@ -34,7 +34,11 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
-validate_config_paths /var/www/rutorrent/.af-directory-check /etc/apache2/AetherFlow/rutorrent.htpasswd
+validate_config_paths \
+    /var/www/rutorrent/.af-directory-check \
+    /etc/apache2/AetherFlow/rutorrent.htpasswd \
+    /etc/aetherflow/rutorrent-proxy-token \
+    /etc/aetherflow/rutorrent-proxy-token.conf
 load_master_credentials
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Apache, PHP, and media utility dependencies for ruTorrent..."
@@ -73,6 +77,8 @@ RUNTIME_PATHS=(
     "/var/lib/rutorrent"
     "/srv/rutorrent"
     "/etc/apache2/AetherFlow/rutorrent.htpasswd"
+    "/etc/aetherflow/rutorrent-proxy-token"
+    "/etc/aetherflow/rutorrent-proxy-token.conf"
     "/etc/apache2/sites-available/rutorrent.conf"
     "/etc/apache2/sites-enabled/rutorrent.conf"
     "/etc/apache2/conf-available/aetherflow-rutorrent-listen.conf"
@@ -182,43 +188,100 @@ chown -h www-data:www-data /srv/rutorrent
 report_progress 85 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
-if [[ ! -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
-    install -d -m 0750 -o root -g www-data /etc/apache2/AetherFlow 2>/dev/null || mkdir -p -m 0750 /etc/apache2/AetherFlow
-    RUT_HTPASSWD_ENTRY="$(printf '%s\n' "${MASTER_PASS}" | htpasswd -niB "${MASTER_USER}" 2>/dev/null || true)"
-    if [[ -z "$RUT_HTPASSWD_ENTRY" || "$RUT_HTPASSWD_ENTRY" != *:* ]]; then
-        print_error "Failed to generate /etc/apache2/AetherFlow/rutorrent.htpasswd; refusing unprotected ruTorrent VirtualHost"
-        exit 1
-    fi
-    write_config_file /etc/apache2/AetherFlow/rutorrent.htpasswd 0640 <<EOF
-${RUT_HTPASSWD_ENTRY}
-EOF
-    chown root:www-data /etc/apache2/AetherFlow/rutorrent.htpasswd 2>/dev/null || true
-    chmod 0640 /etc/apache2/AetherFlow/rutorrent.htpasswd
-fi
-if [[ ! -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
-    print_error "Missing or empty /etc/apache2/AetherFlow/rutorrent.htpasswd; refusing unprotected ruTorrent VirtualHost"
-    exit 1
-fi
-
 RUT_VHOST_HOST="127.0.0.1"
+RUT_TOKEN_FILE="/etc/aetherflow/rutorrent-proxy-token"
+RUT_TOKEN_CONF="/etc/aetherflow/rutorrent-proxy-token.conf"
 if [[ "${AF_APACHE_LISTEN_ALL:-0}" == "1" ]]; then
     RUT_VHOST_HOST="0.0.0.0"
+    if [[ ! -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
+        install -d -m 0750 -o root -g www-data /etc/apache2/AetherFlow 2>/dev/null || mkdir -p -m 0750 /etc/apache2/AetherFlow
+        RUT_HTPASSWD_ENTRY="$(printf '%s\n' "${MASTER_PASS}" | htpasswd -niB "${MASTER_USER}" 2>/dev/null || true)"
+        if [[ -z "$RUT_HTPASSWD_ENTRY" || "$RUT_HTPASSWD_ENTRY" != *:* ]]; then
+            print_error "Failed to generate /etc/apache2/AetherFlow/rutorrent.htpasswd; refusing unprotected ruTorrent VirtualHost"
+            exit 1
+        fi
+        write_config_file /etc/apache2/AetherFlow/rutorrent.htpasswd 0640 <<EOF
+${RUT_HTPASSWD_ENTRY}
+EOF
+        chown root:www-data /etc/apache2/AetherFlow/rutorrent.htpasswd 2>/dev/null || true
+        chmod 0640 /etc/apache2/AetherFlow/rutorrent.htpasswd
+    fi
+    if [[ ! -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
+        print_error "Missing or empty /etc/apache2/AetherFlow/rutorrent.htpasswd; refusing unprotected ruTorrent VirtualHost"
+        exit 1
+    fi
+else
+    af_logged a2enmod authz_host setenvif || true
+    mkdir -p -m 0750 /etc/aetherflow
+    RUT_PROXY_TOKEN=""
+    if [[ -f "$RUT_TOKEN_FILE" && ! -L "$RUT_TOKEN_FILE" ]]; then
+        RUT_EXISTING_TOKEN="$(tr -d '[:space:]' < "$RUT_TOKEN_FILE" 2>/dev/null || true)"
+        if [[ "$RUT_EXISTING_TOKEN" =~ ^[A-Za-z0-9_-]{32,128}$ ]]; then
+            RUT_PROXY_TOKEN="$RUT_EXISTING_TOKEN"
+        fi
+    fi
+    if [[ -z "$RUT_PROXY_TOKEN" ]]; then
+        RUT_PROXY_TOKEN="$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    fi
+    if [[ ! "$RUT_PROXY_TOKEN" =~ ^[A-Za-z0-9_-]{32,128}$ ]]; then
+        print_error "Failed to generate ruTorrent internal proxy secret"
+        exit 1
+    fi
+    write_config_file "$RUT_TOKEN_FILE" 0640 <<EOF
+${RUT_PROXY_TOKEN}
+EOF
+    chown root:aetherflow "$RUT_TOKEN_FILE" 2>/dev/null || true
+    chmod 0640 "$RUT_TOKEN_FILE"
+    write_config_file "$RUT_TOKEN_CONF" 0640 <<EOF
+Require expr "%{HTTP:X-Aetherflow-Rutorrent-Token} == '${RUT_PROXY_TOKEN}'"
+EOF
+    chown root:www-data "$RUT_TOKEN_CONF" 2>/dev/null || true
+    chmod 0640 "$RUT_TOKEN_CONF"
 fi
+
 validate_config_paths /etc/apache2/sites-available/rutorrent.conf
 if [[ -s /etc/apache2/sites-available/rutorrent.conf ]]; then
-    safe_config_python /etc/apache2/sites-available/rutorrent.conf "${RUT_VHOST_HOST}" "${APP_PORT}" <<'RUT_VHOST_PYEOF'
+    safe_config_python /etc/apache2/sites-available/rutorrent.conf "${RUT_VHOST_HOST}" "${APP_PORT}" "${AF_APACHE_LISTEN_ALL:-0}" "${RUT_TOKEN_CONF}" <<'RUT_VHOST_PYEOF'
 import re, sys
-path, vhost_host, port = sys.argv[1], sys.argv[2], sys.argv[3]
+path, vhost_host, port, listen_all, token_conf = sys.argv[1:6]
 existing = safe_read_text(path)
+had_loopback_vhost = bool(re.search(r"<VirtualHost\s+127\.0\.0\.1:[0-9]+>", existing))
 updated = re.sub(
     r"<VirtualHost\s+([^:>]+):[0-9]+>",
     lambda m: f"<VirtualHost {vhost_host if m.group(1) in ('*', '0.0.0.0', '127.0.0.1') else m.group(1)}:{port}>",
     existing,
 )
+if (
+    listen_all != "1"
+    and had_loopback_vhost
+    and "rutorrent-proxy-token.conf" not in updated
+    and re.search(r"<Directory\s+[^>]*rutorrent/?\s*>", updated)
+    and re.search(r"(?m)^[ \t]*AuthType[ \t]+Basic[ \t]*$", updated)
+    and re.search(r"(?m)^[ \t]*AuthUserFile[ \t]+\S*rutorrent\.htpasswd[ \t]*$", updated)
+    and re.search(r"(?m)^[ \t]*Require[ \t]+valid-user[ \t]*$", updated)
+):
+    replacement = (
+        "        <RequireAll>\n"
+        "            Require local\n"
+        f"            Include {token_conf}\n"
+        "        </RequireAll>\n"
+        "        <IfModule mod_setenvif.c>\n"
+        '            SetEnvIf X-Aetherflow-User "^([A-Za-z0-9._-]+)$" REMOTE_USER=$1\n'
+        "        </IfModule>"
+    )
+    updated = re.sub(
+        r"(?m)^[ \t]*AuthType[ \t]+Basic[ \t]*\n"
+        r"(?:[ \t]*AuthName[ \t]+[^\n]*\n)?"
+        r"[ \t]*AuthUserFile[ \t]+\S*rutorrent\.htpasswd[ \t]*\n"
+        r"[ \t]*Require[ \t]+valid-user[ \t]*$",
+        lambda _m: replacement,
+        updated,
+        count=1,
+    )
 if updated != existing:
     safe_write_text(path, updated, 0o644)
 RUT_VHOST_PYEOF
-else
+elif [[ "${AF_APACHE_LISTEN_ALL:-0}" == "1" ]]; then
     write_config_file /etc/apache2/sites-available/rutorrent.conf 0644 <<EOF
 <VirtualHost ${RUT_VHOST_HOST}:${APP_PORT}>
     DocumentRoot /var/www/rutorrent
@@ -234,6 +297,25 @@ else
     </Directory>
 </VirtualHost>
 EOF
+else
+    write_config_file /etc/apache2/sites-available/rutorrent.conf 0644 <<EOF
+<VirtualHost ${RUT_VHOST_HOST}:${APP_PORT}>
+    DocumentRoot /var/www/rutorrent
+    Alias /rutorrent "/var/www/rutorrent"
+    <Directory /var/www/rutorrent>
+        Options FollowSymLinks
+        AllowOverride All
+        <RequireAll>
+            Require local
+            Include ${RUT_TOKEN_CONF}
+        </RequireAll>
+        <IfModule mod_setenvif.c>
+            SetEnvIf X-Aetherflow-User "^([A-Za-z0-9._-]+)$" REMOTE_USER=\$1
+        </IfModule>
+        DirectoryIndex index.php index.html
+    </Directory>
+</VirtualHost>
+EOF
 fi
 
 apache_app_activate_vhost "${PACKAGE_NAME}" "$RUNTIME_BACKUP"
@@ -242,7 +324,21 @@ systemctl is-active --quiet apache2
 wait_for_apache_app_ready "${PACKAGE_NAME}" "$APP_PORT" "/"
 
 report_progress 95 "Checking ruTorrent's configured rTorrent SCGI backend..."
-RUT_PROBE_USER="$(awk -F: 'NF >= 2 && $1 !~ /^#/ { print $1; exit }' /etc/apache2/AetherFlow/rutorrent.htpasswd)"
+RUT_PROBE_USER=""
+if [[ -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
+    RUT_PROBE_USER="$(awk -F: 'NF >= 2 && $1 !~ /^#/ { print $1; exit }' /etc/apache2/AetherFlow/rutorrent.htpasswd)"
+fi
+if [[ -z "$RUT_PROBE_USER" && -d /var/www/rutorrent/conf/users ]]; then
+    for user_profile in /var/www/rutorrent/conf/users/*; do
+        [[ -d "$user_profile" ]] || continue
+        candidate="$(basename "$user_profile")"
+        if [[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            RUT_PROBE_USER="$candidate"
+            break
+        fi
+    done
+fi
+RUT_PROBE_USER="${RUT_PROBE_USER:-${MASTER_USER:-admin}}"
 # Use ruTorrent's own configuration loader and XML-RPC transport as the web
 # account, including socket permissions and the selected user's config.
 if ! RUT_RPC_RESULT="$(timeout --kill-after=2s 12s env -i PATH="$PATH" \

@@ -48,7 +48,7 @@ pub(in crate::routes) async fn get_marketplace_apps(
     response
 }
 
-pub(in crate::routes) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
+pub(crate) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
     let Some(token) = crate::auth::resolve_raw_token(headers) else {
         return (false, false);
     };
@@ -65,9 +65,6 @@ pub(in crate::routes) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool
         return (is_authed, false);
     }
     if let Ok(claims) = crate::auth::decode_session_claims(&token, false) {
-        if crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id) {
-            return (false, false);
-        }
         if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
             return (false, false);
         }
@@ -79,28 +76,20 @@ pub(in crate::routes) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool
         if !crate::auth::matches_client_fingerprint(&claims.cfp, &client_ip, ua) {
             return (false, false);
         }
+        let caller_strict_fp = crate::auth::legacy_client_fingerprint(&client_ip, ua);
         let Ok(conn) = af_db::get_read_conn() else {
             return (false, false);
         };
-        let Ok(subj) = crate::auth::load_active_human_subject(&conn, claims.user_id) else {
+        let Ok(subj) = crate::auth::verify_active_session_on_conn(
+            &conn,
+            claims.user_id,
+            &claims.jti,
+            claims.ver,
+            chrono::Utc::now().timestamp(),
+            crate::auth::RotationGrace::StrictFingerprint(&caller_strict_fp),
+        ) else {
             return (false, false);
         };
-        if claims.ver < subj.sessions_revoked_after {
-            return (false, false);
-        }
-        if crate::auth::table_exists(&conn, "active_sessions").unwrap_or(false) {
-            let resolved_jti = crate::auth::resolve_current_session_jti(&claims.jti);
-            let session_exists: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3))",
-                    rusqlite::params![claims.user_id, claims.jti, resolved_jti],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
-            if !session_exists {
-                return (false, false);
-            }
-        }
         let is_admin = subj.role.trim().eq_ignore_ascii_case("admin");
         return (true, is_admin);
     }

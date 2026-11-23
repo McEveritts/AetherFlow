@@ -109,10 +109,32 @@ static OIDC_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
 static AI_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(20, Duration::from_secs(60)));
 
+pub(super) fn is_rate_limit_disabled_for_env(
+    disable_flag: Option<&str>,
+    aetherflow_env: Option<&str>,
+) -> bool {
+    let disabled = disable_flag
+        .map(|v| {
+            let trimmed = v.trim();
+            trimmed.eq_ignore_ascii_case("true") || trimmed == "1"
+        })
+        .unwrap_or(false);
+    if !disabled {
+        return false;
+    }
+    if aetherflow_env.is_some_and(crate::auth::is_production_or_release_env) {
+        tracing::warn!(
+            "AF_DISABLE_RATELIMIT ignored because AETHERFLOW_ENV is production/release"
+        );
+        return false;
+    }
+    true
+}
+
 fn rate_limit_disabled() -> bool {
-    env::var("AF_DISABLE_RATELIMIT")
-        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
-        .unwrap_or(false)
+    let flag = env::var("AF_DISABLE_RATELIMIT").ok();
+    let af_env = env::var("AETHERFLOW_ENV").ok();
+    is_rate_limit_disabled_for_env(flag.as_deref(), af_env.as_deref())
 }
 
 pub(super) fn rate_limited_response() -> Response {
