@@ -74,6 +74,10 @@ The file 7 scan confirmed more direct authenticated browser URLs in `af-web-app/
 - The runner client exposes distinct busy, already-present peer, missing peer and tunnel-IP conflict outcomes for P3 retries. Status also distinguishes persistent peers from peers present in the live dump so P7 can detect an explicitly removed peer. Status and mutations share exclusion, and credential operations have their own lock.
 - The local tests use isolated files, sockets and commands. Verify the actual Debian WireGuard service, routing and package behavior during approved two-server acceptance.
 
+## P3 capability advertisement
+
+File 12 advertises `["links"]` on `/health` once the linking implementation is available. The capability describes protocol support before first pairing. The peer listener itself waits for a configured tunnel identity. The P3 API lane also owns the existing `/health` regression in `af-api/src/routes/tests/security_and_account.rs` for this change. Update its exact capability assertion and keep its protocol, response header and liveness coverage.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.

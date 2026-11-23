@@ -14,6 +14,7 @@ pub mod network;
 pub mod notifications_ext;
 pub mod oidc;
 pub mod openapi_ui;
+pub mod peers;
 pub mod plugins;
 #[cfg(test)]
 mod plugins_router_tests;
@@ -335,6 +336,7 @@ async fn async_main() -> anyhow::Result<()> {
         af_services::workers::start_app_update_watcher();
         af_services::workers::start_mediaflow_poller();
         af_services::cluster_daemon::start_cluster_runtime();
+        peers::start().await;
         notifications_ext::start_notification_engine();
         streaming_ext::start_streaming_monitor();
         tokio::spawn(async move {
@@ -386,6 +388,7 @@ async fn async_main() -> anyhow::Result<()> {
     })
     .await?;
 
+    peers::shutdown().await;
     plugins::shutdown_managed_plugins().await;
 
     Ok(())

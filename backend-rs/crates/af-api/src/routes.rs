@@ -416,8 +416,8 @@ fn make_http_request_span(req: &Request) -> tracing::Span {
 }
 
 pub fn build_router() -> Router {
-    let v1 = build_v1_router();
-    let legacy = build_v1_router();
+    let v1 = build_v1_router_with_options(true);
+    let legacy = build_v1_router_with_options(false);
     let top_level_plugins = Router::new()
         .route("/plugins/:id/ui", get(serve_plugin_ui_handler))
         .route(
@@ -461,7 +461,12 @@ pub fn build_router() -> Router {
         )
 }
 
+#[cfg(test)]
 fn build_v1_router() -> Router {
+    build_v1_router_with_options(true)
+}
+
+fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
     let auth_limited_public = Router::new()
         .route("/auth/login", post(local_login))
         .route("/auth/mfa/verify", post(mfa_login_verify))
@@ -814,7 +819,13 @@ fn build_v1_router() -> Router {
             "/streaming/sessions/:sessionId/command",
             post(control_streaming_session),
         )
-        .route("/streaming/demo", post(handle_streaming_demo))
+        .route("/streaming/demo", post(handle_streaming_demo));
+    let admin_routes = if include_peer_routes {
+        admin_routes.nest("/peers", crate::peers::admin_routes())
+    } else {
+        admin_routes
+    };
+    let admin_routes = admin_routes
         .layer(middleware::from_fn(admin_only_middleware))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
@@ -831,12 +842,17 @@ fn build_v1_router() -> Router {
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
-    Router::new()
+    let router = Router::new()
         .nest("/public", public_routes)
         .nest("/auth", auth_routes)
         .nest("/admin", admin_routes)
         .merge(compat_routes)
-        .merge(ingress_compat_routes)
+        .merge(ingress_compat_routes);
+    if include_peer_routes {
+        router.merge(crate::peers::public_routes())
+    } else {
+        router
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -633,7 +633,7 @@ impl CapturedLogBuffer {
 }
 
 #[tokio::test]
-async fn health_endpoint_reports_peer_protocol_and_empty_capabilities() {
+async fn health_endpoint_reports_peer_protocol_and_links_capability() {
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
     use tower::ServiceExt;
@@ -682,7 +682,7 @@ async fn health_endpoint_reports_peer_protocol_and_empty_capabilities() {
     ));
     assert!(payload["db_latency_ms"].is_i64());
     assert_eq!(payload["peer_protocol"].as_i64(), Some(1));
-    assert_eq!(payload["capabilities"], serde_json::json!([]));
+    assert_eq!(payload["capabilities"], serde_json::json!(["links"]));
 
     let live_resp = app
         .oneshot(
