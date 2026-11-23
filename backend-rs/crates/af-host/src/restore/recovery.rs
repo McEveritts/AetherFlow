@@ -8,7 +8,8 @@ use super::journal::{
     JOURNAL_STATE_ROLLBACK_FAILED, JOURNAL_STATE_ROLLED_BACK,
 };
 use super::policy::{
-    resolve_effective_quiesce_services, resolve_recovery_provenance_dir,
+    is_service_data_dir_secret_destination, resolve_effective_quiesce_services,
+    resolve_recovery_provenance_dir,
     resolve_trusted_canonical_host_destination_with_sqlite_override,
     validate_destination_not_provenance, validate_quiesce_service_entries,
     validate_trusted_sqlite_db_path, RecoveryContext,
@@ -862,7 +863,9 @@ pub fn recover_interrupted_restore_with_context<Q: ServiceQuiescenceController>(
 
         for rec in journal.entries.iter().rev() {
             let entry_kind = rec.kind.unwrap_or(BackupTargetKind::ConfigFile);
-            let trusted_ancestor_uid = if entry_kind == BackupTargetKind::SqliteSnapshot {
+            let trusted_ancestor_uid = if entry_kind == BackupTargetKind::SqliteSnapshot
+                || is_service_data_dir_secret_destination(&rec.destination_path)
+            {
                 context.trusted_sqlite_uid
             } else {
                 None

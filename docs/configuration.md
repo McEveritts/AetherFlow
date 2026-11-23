@@ -38,7 +38,7 @@ sudo systemctl restart aetherflow-runner aetherflow-api
 | :--- | :--- | :--- |
 | `AF_MCBROWSER_ROOT` | Dedicated absolute directory owned by `aetherflow` (`0700`) for per-user McBrowser storage (`user-<id>`). | `/var/lib/aetherflow/mcbrowser` |
 | `AF_MCBROWSER_MAX_UPLOAD_BYTES` | Maximum file size for resumable chunked uploads in Native McBrowser. | `68719476736` (`64 GiB`) |
-| `AF_ALLOWED_FS_ROOTS` | Comma-separated roots accessible to administrator-only host path pickers (`GET /api/v1/auth/fs`). When unset, `af-api` allows `/mnt,/media,/srv,/data,/home` plus `env::temp_dir()` (`/tmp`) and `env::current_dir()` (when outside `/opt/AetherFlow` and `/var/lib/aetherflow`). | `/mnt,/media,/srv,/data,/home` + `/tmp` + non-service CWD |
+| `AF_ALLOWED_FS_ROOTS` | Comma-separated roots accessible to administrator-only host path pickers (`GET /api/v1/auth/fs`). When unset, `af-api` allows `/mnt,/media,/srv,/data,/home` and `env::current_dir()` (when outside `/opt/AetherFlow` and `/var/lib/aetherflow`); `/tmp` (`env::temp_dir()`) is excluded by default. | `/mnt,/media,/srv,/data,/home` + non-service CWD |
 | `AETHERFLOW_UPLOAD_DIR` | Directory used by the built-in authenticated FileShare store (`/api/v1/auth/fileshare/*`, separate from McBrowser public share links). | `/var/lib/aetherflow/uploads` |
 
 ---
@@ -91,7 +91,7 @@ DeviceAllow=/dev/nvidia1 rw
 ```
 
 > [!WARNING]
-> Do **not** bind-mount shared host directories beneath `/var/lib/aetherflow/mcbrowser/user-<id>/` via `BindPaths=`. Account deletion recursively deletes `user-<id>` without `st_dev` mountpoint guards, which would remove files inside a bind-mounted host directory.
+> Do **not** bind-mount shared host directories beneath `/var/lib/aetherflow/mcbrowser/user-<id>/` via `BindPaths=`. Although `af-files` enforces `RESOLVE_NO_XDEV` / `st_dev` mount-boundary guards during recursive account cleanup (preserving mounted paths and auditing any skipped mountpoints), shared media should be exposed via explicit `ReadWritePaths` / `AF_ALLOWED_FS_ROOTS` instead of per-user McBrowser roots.
 
 After creating or modifying a drop-in, reload systemd and restart the service:
 

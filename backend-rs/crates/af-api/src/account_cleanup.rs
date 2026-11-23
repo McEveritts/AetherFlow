@@ -166,10 +166,58 @@ impl Target {
             parent.remove(&self.filename)?;
         } else {
             check_private_directory(&actual)?;
-            parent.remove_tree_with_size_allowing_symlinks(&self.filename)?;
+            let outcome = parent.remove_tree_with_outcome_allowing_symlinks(&self.filename)?;
+            self.record_mount_skips(user_id, &outcome);
         }
         parent.sync_directory()?;
         Ok(())
+    }
+
+    fn record_mount_skips(&self, user_id: i64, outcome: &af_files::RemoveTreeOutcome) {
+        if outcome.skipped_mount_paths.is_empty() {
+            return;
+        }
+        let preserved: Vec<String> = outcome
+            .skipped_mount_paths
+            .iter()
+            .map(|p| {
+                if self.directory.is_empty() {
+                    p.to_string_lossy().into_owned()
+                } else {
+                    format!("{}/{}", self.directory, p.to_string_lossy())
+                }
+            })
+            .collect();
+        tracing::warn!(
+            user_id,
+            root = %self.root,
+            directory = %self.directory,
+            filename = %self.filename,
+            skipped_mount_paths = ?preserved,
+            removed_bytes = outcome.removed_bytes,
+            "Account storage cleanup skipped mounted paths at filesystem boundary"
+        );
+        let target_label = if self.directory.is_empty() {
+            self.filename.clone()
+        } else {
+            format!("{}/{}", self.directory, self.filename)
+        };
+        let detail = format!(
+            "Account storage cleanup preserved mounted path(s) under {}/{}: {}",
+            self.root.trim_end_matches('/'),
+            target_label,
+            preserved.join(", ")
+        );
+        af_db::record_audit(
+            0,
+            "system:account_cleanup",
+            "account_storage_cleanup_mount_skipped",
+            "account_storage",
+            &format!("user-{user_id}"),
+            &detail,
+            "127.0.0.1",
+            "aetherflow-api/account_cleanup",
+        );
     }
 }
 
@@ -379,5 +427,68 @@ pub(crate) async fn recover() {
         if let Err(error) = result {
             tracing::warn!(%error, user_id, "Could not reconcile account storage cleanup");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn mount_boundary_skip_records_audit_and_deletes_cleanup_row_without_retry_loop() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let db_path = crate::plugins::tests::ensure_shared_test_db();
+        let root = db_path.parent().unwrap().join("mcbrowser-cleanup-root");
+        let user_dir = root.join("user-77");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&user_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(user_dir.join("local.txt"), b"remove-me").unwrap();
+
+        let target = Target {
+            shared: false,
+            root: root.to_string_lossy().into_owned(),
+            directory: String::new(),
+            filename: "user-77".to_string(),
+        };
+        let outcome = af_files::RemoveTreeOutcome {
+            removed_bytes: 9,
+            skipped_mount_paths: vec![PathBuf::from("user-77/Media")],
+        };
+        target.record_mount_skips(77, &outcome);
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            let queued = queue_private(&conn, 77, Some(&target.root)).unwrap();
+            assert_eq!(queued, 1);
+            assert_eq!(pending_count(&conn, 77).unwrap(), 1);
+        }
+
+        let shared_guard = crate::storage::lock_fileshare_mutations().await;
+        let remaining = settle(77, shared_guard).unwrap();
+        assert_eq!(
+            remaining, 0,
+            "completed cleanup row must be deleted without leaving a 15m retry loop"
+        );
+
+        let reader = af_db::get_read_conn().unwrap();
+        assert_eq!(pending_count(&reader, 77).unwrap(), 0);
+        let audit_detail: String = reader
+            .query_row(
+                "SELECT detail FROM admin_audit_log \
+                 WHERE action = 'account_storage_cleanup_mount_skipped' AND target_id = 'user-77' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            audit_detail.contains("user-77/Media"),
+            "audit entry must name skipped mount paths: {audit_detail}"
+        );
     }
 }

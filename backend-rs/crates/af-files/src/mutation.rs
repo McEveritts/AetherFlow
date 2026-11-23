@@ -3,16 +3,19 @@ use crate::path::{
     is_internal_upload_temp, parse_relative_path, MAX_PATH_COMPONENTS, UPLOAD_TEMP_PREFIX,
 };
 use crate::syscall::{
-    dup_cloexec, fstat_fd, fstatat_nofollow, open_dir_stream, open_regular_file_at,
-    openat_no_symlinks, renameat_noreplace, sync_dir,
+    dup_cloexec, fstat_fd, fstatat_nofollow, is_mount_boundary_error, open_dir_stream,
+    open_regular_file_at, openat_no_symlinks, openat_no_symlinks_no_xdev, renameat_noreplace,
+    sync_dir,
 };
 use crate::upload::allocate_pending_upload;
-use crate::{BrowserFs, RemovalError};
+use crate::{BrowserFs, RemovalError, RemoveTreeOutcome};
 use rand::Rng;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io::{self, Error, ErrorKind};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 impl BrowserFs {
     pub fn create_directory(&self, path: &str) -> io::Result<()> {
@@ -415,37 +418,103 @@ impl BrowserFs {
     }
 
     pub fn remove_tree_with_size(&self, path: &str) -> Result<u64, RemovalError> {
-        self.remove_tree_with_size_policy(path, false)
+        self.remove_tree_with_outcome(path)
+            .map(|outcome| outcome.removed_bytes)
     }
 
     pub fn remove_tree_with_size_allowing_symlinks(&self, path: &str) -> Result<u64, RemovalError> {
-        self.remove_tree_with_size_policy(path, true)
+        self.remove_tree_with_outcome_allowing_symlinks(path)
+            .map(|outcome| outcome.removed_bytes)
     }
 
-    fn remove_tree_with_size_policy(
+    pub fn remove_tree_with_outcome(&self, path: &str) -> Result<RemoveTreeOutcome, RemovalError> {
+        self.remove_tree_with_outcome_policy(path, false, &openat_no_symlinks_no_xdev)
+    }
+
+    pub fn remove_tree_with_outcome_allowing_symlinks(
+        &self,
+        path: &str,
+    ) -> Result<RemoveTreeOutcome, RemovalError> {
+        self.remove_tree_with_outcome_policy(path, true, &openat_no_symlinks_no_xdev)
+    }
+
+    pub(crate) fn remove_tree_with_outcome_policy<F>(
         &self,
         path: &str,
         allow_symlinks: bool,
-    ) -> Result<u64, RemovalError> {
-        let (parent_fd, leaf) =
-            self.resolve_parent_and_leaf(path)
-                .map_err(|error| RemovalError {
-                    removed_bytes: 0,
-                    error,
-                })?;
-        let mut removed_bytes = 0u64;
-        remove_entry_recursive(
-            parent_fd.as_raw_fd(),
-            leaf.as_c_str(),
-            &mut removed_bytes,
-            0,
-            allow_symlinks,
-        )
-        .map_err(|error| RemovalError {
-            removed_bytes,
+        open_dir: &F,
+    ) -> Result<RemoveTreeOutcome, RemovalError>
+    where
+        F: Fn(libc::c_int, &CStr, libc::c_int, libc::mode_t, libc::dev_t) -> io::Result<OwnedFd>,
+    {
+        let components = parse_relative_path(path, false).map_err(|error| RemovalError {
+            removed_bytes: 0,
             error,
         })?;
-        Ok(removed_bytes)
+        let (leaf_str, parent_components) =
+            components.split_last().ok_or_else(|| RemovalError {
+                removed_bytes: 0,
+                error: Error::new(ErrorKind::InvalidInput, "root path not allowed"),
+            })?;
+        let root_dev = fstat_fd(self.root_fd.as_raw_fd())
+            .map_err(|error| RemovalError {
+                removed_bytes: 0,
+                error,
+            })?
+            .st_dev;
+
+        let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+        let mut parent_fd =
+            openat_no_symlinks(self.root_fd.as_raw_fd(), c".", dir_flags, 0).map_err(|error| {
+                RemovalError {
+                    removed_bytes: 0,
+                    error,
+                }
+            })?;
+        let mut rel_path = PathBuf::new();
+        for &comp in parent_components {
+            rel_path.push(comp);
+            let c_comp = CString::new(comp).map_err(|_| RemovalError {
+                removed_bytes: 0,
+                error: Error::new(ErrorKind::InvalidInput, "path contains NUL"),
+            })?;
+            match open_dir(parent_fd.as_raw_fd(), c_comp.as_c_str(), dir_flags, 0, root_dev) {
+                Ok(next_fd) => parent_fd = next_fd,
+                Err(err) if is_mount_boundary_error(&err) => {
+                    return Ok(RemoveTreeOutcome {
+                        removed_bytes: 0,
+                        skipped_mount_paths: vec![rel_path],
+                    });
+                }
+                Err(error) => {
+                    return Err(RemovalError {
+                        removed_bytes: 0,
+                        error,
+                    });
+                }
+            }
+        }
+        rel_path.push(leaf_str);
+        let leaf = CString::new(*leaf_str).map_err(|_| RemovalError {
+            removed_bytes: 0,
+            error: Error::new(ErrorKind::InvalidInput, "path contains NUL"),
+        })?;
+        let mut outcome = RemoveTreeOutcome::default();
+        remove_entry_recursive_with_opener(
+            parent_fd.as_raw_fd(),
+            leaf.as_c_str(),
+            &rel_path,
+            root_dev,
+            &mut outcome,
+            0,
+            allow_symlinks,
+            open_dir,
+        )
+        .map_err(|error| RemovalError {
+            removed_bytes: outcome.removed_bytes,
+            error,
+        })?;
+        Ok(outcome)
     }
 }
 
@@ -621,16 +690,34 @@ fn list_raw_copy_children(dir_fd: libc::c_int) -> io::Result<Vec<CString>> {
 }
 
 fn cleanup_staging_tree(parent_fd: libc::c_int, staging_name: &CStr) {
-    let mut ignored = 0u64;
-    let _ = remove_entry_recursive(parent_fd, staging_name, &mut ignored, 0, false);
+    let Ok(parent_st) = fstat_fd(parent_fd) else {
+        return;
+    };
+    let mut ignored = RemoveTreeOutcome::default();
+    let rel_path = PathBuf::from(OsStr::from_bytes(staging_name.to_bytes()));
+    let _ = remove_entry_recursive_with_opener(
+        parent_fd,
+        staging_name,
+        &rel_path,
+        parent_st.st_dev,
+        &mut ignored,
+        0,
+        false,
+        &openat_no_symlinks_no_xdev,
+    );
 }
 
 fn remove_orphaned_upload_temps_if_only_children(
     parent_fd: libc::c_int,
     name: &CStr,
 ) -> io::Result<bool> {
+    let expected_dev = fstat_fd(parent_fd)?.st_dev;
     let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
-    let dir_fd = openat_no_symlinks(parent_fd, name, dir_flags, 0)?;
+    let dir_fd = match openat_no_symlinks_no_xdev(parent_fd, name, dir_flags, 0, expected_dev) {
+        Ok(fd) => fd,
+        Err(err) if is_mount_boundary_error(&err) => return Ok(false),
+        Err(err) => return Err(err),
+    };
     let (guard, dir_raw_fd) = open_dir_stream(dir_fd.as_raw_fd())?;
 
     let mut temp_regular_files: Vec<CString> = Vec::new();
@@ -681,14 +768,18 @@ fn remove_orphaned_upload_temps_if_only_children(
     temp_subdirs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     invalid_temp_entries.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
 
-    let mut discarded_bytes = 0u64;
+    let mut discarded = RemoveTreeOutcome::default();
     if let Some(invalid_name) = invalid_temp_entries.first() {
-        remove_entry_recursive(
+        let rel = PathBuf::from(OsStr::from_bytes(invalid_name.as_bytes()));
+        remove_entry_recursive_with_opener(
             dir_fd.as_raw_fd(),
             invalid_name.as_c_str(),
-            &mut discarded_bytes,
+            &rel,
+            expected_dev,
+            &mut discarded,
             1,
             false,
+            &openat_no_symlinks_no_xdev,
         )?;
     }
 
@@ -704,30 +795,41 @@ fn remove_orphaned_upload_temps_if_only_children(
     }
 
     for temp_subdir in temp_subdirs {
-        if let Err(err) = remove_entry_recursive(
+        let rel = PathBuf::from(OsStr::from_bytes(temp_subdir.as_bytes()));
+        match remove_entry_recursive_with_opener(
             dir_fd.as_raw_fd(),
             temp_subdir.as_c_str(),
-            &mut discarded_bytes,
+            &rel,
+            expected_dev,
+            &mut discarded,
             1,
             false,
+            &openat_no_symlinks_no_xdev,
         ) {
-            if err.kind() == ErrorKind::NotFound {
-                continue;
-            }
-            return Err(err);
+            Ok(true) => return Ok(false),
+            Ok(false) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
         }
     }
 
-    Ok(true)
+    Ok(discarded.skipped_mount_paths.is_empty())
 }
 
-fn remove_entry_recursive(
+#[allow(clippy::too_many_arguments)]
+fn remove_entry_recursive_with_opener<F>(
     parent_fd: libc::c_int,
     name: &CStr,
-    removed_bytes: &mut u64,
+    rel_path: &Path,
+    expected_dev: libc::dev_t,
+    outcome: &mut RemoveTreeOutcome,
     depth: usize,
     allow_symlinks: bool,
-) -> io::Result<()> {
+    open_dir: &F,
+) -> io::Result<bool>
+where
+    F: Fn(libc::c_int, &CStr, libc::c_int, libc::mode_t, libc::dev_t) -> io::Result<OwnedFd>,
+{
     if depth > MAX_PATH_COMPONENTS {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -750,12 +852,23 @@ fn remove_entry_recursive(
                 return Err(Error::last_os_error());
             }
             let size = st.st_size.max(0) as u64;
-            *removed_bytes = removed_bytes.saturating_add(size);
-            Ok(())
+            outcome.removed_bytes = outcome.removed_bytes.saturating_add(size);
+            Ok(false)
         }
         libc::S_IFDIR => {
+            if st.st_dev != expected_dev {
+                outcome.skipped_mount_paths.push(rel_path.to_path_buf());
+                return Ok(true);
+            }
             let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
-            let dir_fd = openat_no_symlinks(parent_fd, name, dir_flags, 0)?;
+            let dir_fd = match open_dir(parent_fd, name, dir_flags, 0, expected_dev) {
+                Ok(fd) => fd,
+                Err(err) if is_mount_boundary_error(&err) => {
+                    outcome.skipped_mount_paths.push(rel_path.to_path_buf());
+                    return Ok(true);
+                }
+                Err(err) => return Err(err),
+            };
             let (guard, dir_raw_fd) = open_dir_stream(dir_fd.as_raw_fd())?;
 
             let mut regular_files: Vec<(CString, u64)> = Vec::new();
@@ -830,7 +943,7 @@ fn remove_entry_recursive(
                     }
                     return Err(err);
                 }
-                *removed_bytes = removed_bytes.saturating_add(size);
+                outcome.removed_bytes = outcome.removed_bytes.saturating_add(size);
             }
 
             for temp_name in temp_regular_files {
@@ -855,55 +968,81 @@ fn remove_entry_recursive(
                 }
             }
 
+            let mut skipped_any = false;
             for subdir_name in subdirs {
-                remove_entry_recursive(
+                let child_rel = rel_path.join(OsStr::from_bytes(subdir_name.as_bytes()));
+                if remove_entry_recursive_with_opener(
                     dir_fd.as_raw_fd(),
                     subdir_name.as_c_str(),
-                    removed_bytes,
+                    &child_rel,
+                    expected_dev,
+                    outcome,
                     depth + 1,
                     allow_symlinks,
-                )?;
+                    open_dir,
+                )? {
+                    skipped_any = true;
+                }
             }
 
-            let mut discarded_temp_bytes = 0u64;
             for temp_subdir in temp_subdirs {
-                if let Err(err) = remove_entry_recursive(
+                let child_rel = rel_path.join(OsStr::from_bytes(temp_subdir.as_bytes()));
+                let mut discarded_temp = RemoveTreeOutcome::default();
+                match remove_entry_recursive_with_opener(
                     dir_fd.as_raw_fd(),
                     temp_subdir.as_c_str(),
-                    &mut discarded_temp_bytes,
+                    &child_rel,
+                    expected_dev,
+                    &mut discarded_temp,
                     depth + 1,
                     allow_symlinks,
+                    open_dir,
                 ) {
-                    if err.kind() == ErrorKind::NotFound {
-                        continue;
+                    Ok(skipped) => {
+                        if skipped {
+                            skipped_any = true;
+                            outcome
+                                .skipped_mount_paths
+                                .extend(discarded_temp.skipped_mount_paths);
+                        }
                     }
-                    return Err(err);
+                    Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
                 }
             }
 
             for invalid_name in invalid_entries {
-                remove_entry_recursive(
+                let child_rel = rel_path.join(OsStr::from_bytes(invalid_name.as_bytes()));
+                if remove_entry_recursive_with_opener(
                     dir_fd.as_raw_fd(),
                     invalid_name.as_c_str(),
-                    removed_bytes,
+                    &child_rel,
+                    expected_dev,
+                    outcome,
                     depth + 1,
                     allow_symlinks,
-                )?;
+                    open_dir,
+                )? {
+                    skipped_any = true;
+                }
             }
 
             drop(dir_fd);
+            if skipped_any {
+                return Ok(true);
+            }
             let rc = unsafe { libc::unlinkat(parent_fd, name.as_ptr(), libc::AT_REMOVEDIR) };
             if rc < 0 {
                 return Err(Error::last_os_error());
             }
-            Ok(())
+            Ok(false)
         }
         libc::S_IFLNK if allow_symlinks => {
             let rc = unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
             if rc < 0 {
                 return Err(Error::last_os_error());
             }
-            Ok(())
+            Ok(false)
         }
         libc::S_IFLNK => Err(Error::new(
             ErrorKind::PermissionDenied,

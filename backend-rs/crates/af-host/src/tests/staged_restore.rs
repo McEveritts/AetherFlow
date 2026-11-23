@@ -1128,3 +1128,137 @@ fn recovery_journal_rejects_untrusted_destinations_missing_sidecars_and_outside_
         HostBackupError::InvalidManifest(_)
     ));
 }
+
+#[test]
+fn canonical_root_preflight_and_staged_restore_allow_and_clamp_service_secret_files() {
+    let tmp = TempTestDir::new("esc08-service-secrets");
+    let host_root = tmp.path().join("host");
+    let live_db = host_root.join("var/lib/aetherflow/aetherflow.sqlite");
+    create_sample_wal_database(&live_db);
+
+    let master_creds = host_root.join("var/lib/aetherflow/.master.creds");
+    let oidc_pem = host_root.join("var/lib/aetherflow/oidc_rsa.pem");
+    fs::write(&master_creds, b"{\"username\":\"admin\",\"password\":\"enc:v1:abc\"}\n").unwrap();
+    fs::write(&oidc_pem, b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Intentionally overly broad modes in source so we verify 0600 clamping on restore.
+        fs::set_permissions(&master_creds, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&oidc_pem, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    let cfg = HostBackupConfig::for_isolated_root(&host_root, crate::default_host_app_version());
+    let receipt = create_host_archive_backup(&cfg, Some("2026-11-23-180000")).unwrap();
+    let archive_filename = receipt
+        .primary_artifact_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // 1. Canonical destination allowlist accepts both `.master.creds` and `oidc_rsa.pem`.
+    let canonical_sim_root = tmp.path().join("canonical-sim-root");
+    fs::create_dir_all(&canonical_sim_root).unwrap();
+    for rel in [
+        "var/lib/aetherflow/.master.creds",
+        "var/lib/aetherflow/oidc_rsa.pem",
+    ] {
+        let (_, sim_dest) = resolve_trusted_canonical_host_destination_with_sqlite_override(
+            &canonical_sim_root,
+            rel,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("canonical allowlist rejected {rel}: {e}"));
+        assert_eq!(sim_dest, canonical_sim_root.join(rel));
+
+        match resolve_trusted_canonical_host_destination_with_sqlite_override(
+            Path::new("/"),
+            rel,
+            None,
+        ) {
+            Ok((_, dest)) => assert_eq!(dest, PathBuf::from(format!("/{rel}"))),
+            Err(HostBackupError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(other) => panic!("canonical `/` allowlist rejected {rel}: {other}"),
+        }
+    }
+
+    // 2. Canonical `/` non-destructive preflight over the real default archive never fails allowlist.
+    match preflight_tar_gz_archive(
+        &receipt.primary_artifact_path,
+        &receipt.manifest,
+        Path::new("/"),
+        &RestorePreflightOptions {
+            overwrite_policy: OverwritePolicy::AllowRegularFilesInStaging,
+            require_artifact_sidecar: true,
+            ..Default::default()
+        },
+    ) {
+        Ok(canonical_plan) => {
+            assert!(canonical_plan
+                .items
+                .iter()
+                .any(|i| i.relative_path == "var/lib/aetherflow/.master.creds"));
+            assert!(canonical_plan
+                .items
+                .iter()
+                .any(|i| i.relative_path == "var/lib/aetherflow/oidc_rsa.pem"));
+        }
+        Err(HostBackupError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(other) => panic!(
+            "canonical `/` preflight must not reject default archive containing .master.creds & oidc_rsa.pem: {other}"
+        ),
+    }
+
+    // 3. Staged preflight + restore into an isolated target plans and clamps both secret files to 0600.
+    let stage_root = tmp.path().join("stage-restore");
+    fs::create_dir_all(&stage_root).unwrap();
+    let staged_plan = preflight_tar_gz_archive(
+        &receipt.primary_artifact_path,
+        &receipt.manifest,
+        &stage_root,
+        &RestorePreflightOptions {
+            overwrite_policy: OverwritePolicy::AllowRegularFilesInStaging,
+            require_artifact_sidecar: true,
+            ..Default::default()
+        },
+    )
+    .expect("staged preflight must pass for default archive containing .master.creds & oidc_rsa.pem");
+    assert!(staged_plan
+        .items
+        .iter()
+        .any(|i| i.relative_path == "var/lib/aetherflow/.master.creds"));
+    assert!(staged_plan
+        .items
+        .iter()
+        .any(|i| i.relative_path == "var/lib/aetherflow/oidc_rsa.pem"));
+    let report = execute_staged_restore(
+        &cfg.backup_dir,
+        &archive_filename,
+        &stage_root,
+        &RestoreExecutionOptions {
+            confirm_destructive_restore: true,
+            allow_overwrite: true,
+            ..Default::default()
+        },
+        &NoopQuiescenceController,
+    )
+    .unwrap();
+    assert!(report.sqlite_restored);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for rel in [
+            "var/lib/aetherflow/.master.creds",
+            "var/lib/aetherflow/oidc_rsa.pem",
+        ] {
+            let restored = stage_root.join(rel);
+            assert!(restored.is_file(), "missing restored {rel}");
+            let mode = fs::symlink_metadata(&restored).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{rel} must be clamped to 0600, got {:04o}", mode);
+        }
+    }
+}

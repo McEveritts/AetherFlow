@@ -7,6 +7,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 const RESOLVE_BENEATH: u64 = 0x08;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+const RESOLVE_NO_XDEV: u64 = 0x01;
 
 #[repr(C)]
 struct OpenHow {
@@ -227,6 +228,49 @@ pub(crate) fn openat_no_symlinks(
         return Err(Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+pub(crate) fn is_mount_boundary_error(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EXDEV)
+}
+
+pub(crate) fn openat_no_symlinks_no_xdev(
+    dirfd: libc::c_int,
+    name: &CStr,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+    expected_dev: libc::dev_t,
+) -> io::Result<OwnedFd> {
+    let effective_flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let fd = match openat2_with_resolve(
+        dirfd,
+        name,
+        effective_flags,
+        mode,
+        RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
+    ) {
+        Ok(fd) => fd,
+        Err(err)
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP)
+            ) =>
+        {
+            let raw = unsafe {
+                libc::openat(dirfd, name.as_ptr(), effective_flags, mode as libc::c_uint)
+            };
+            if raw < 0 {
+                return Err(Error::last_os_error());
+            }
+            unsafe { OwnedFd::from_raw_fd(raw) }
+        }
+        Err(err) => return Err(err),
+    };
+    let st = fstat_fd(fd.as_raw_fd())?;
+    if st.st_dev != expected_dev {
+        return Err(Error::from_raw_os_error(libc::EXDEV));
+    }
+    Ok(fd)
 }
 
 pub(crate) fn dup_cloexec(fd: libc::c_int) -> io::Result<OwnedFd> {

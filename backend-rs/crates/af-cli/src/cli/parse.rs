@@ -169,7 +169,7 @@ where
         "quota" | "setdisk" => AfCommand::Quota(parse_quota_subcommand(head, rest)?),
         "sandbox" => AfCommand::Sandbox(parse_sandbox_subcommand(rest)?),
         "release" | "self-update" => AfCommand::Release(parse_release_subcommand(rest)?),
-        "backup" => AfCommand::Backup(parse_backup_subcommand(rest)?),
+        "backup" => AfCommand::Backup(parse_backup_subcommand(rest, global.root.as_deref())?),
         "provision" | "setup" => AfCommand::Provision(parse_provision_subcommand(rest)?),
         "maintenance" => AfCommand::Maintenance(parse_maintenance_subcommand(rest)?),
         "tune" | "af-tune" => AfCommand::Maintenance(parse_tune_args(rest)?),

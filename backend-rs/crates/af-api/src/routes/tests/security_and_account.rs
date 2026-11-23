@@ -598,3 +598,45 @@ async fn account_endpoints_report_sqlite_failures() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn auth_fs_browser_rejects_tmp_when_allowed_fs_roots_unset() {
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    use tower::ServiceExt;
+
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    ensure_shared_test_db();
+    env::remove_var("AF_ALLOWED_FS_ROOTS");
+
+    let conn = af_db::get_conn().unwrap();
+    conn.execute(
+        "INSERT INTO users (id, username, role) VALUES (902, 'fs-admin', 'admin')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(header::USER_AGENT, "fs-browser-test".parse().unwrap());
+    let (token, _) = crate::auth::create_standard_jwt(902, &headers).unwrap();
+    let app = super::super::build_v1_router();
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/auth/fs?path=/tmp")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::USER_AGENT, "fs-browser-test")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "/api/v1/auth/fs must reject /tmp when AF_ALLOWED_FS_ROOTS is unset"
+    );
+}

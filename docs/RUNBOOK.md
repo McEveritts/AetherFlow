@@ -91,7 +91,7 @@ Both `aetherflow-api.service` and `aetherflow-runner.service` load `/etc/aetherf
 
 ### Host Path Picker & Multi-GPU Drop-ins
 
-- **Host Path Picker**: Administrator-only `GET /api/v1/auth/fs` defaults to `/mnt,/media,/srv,/data,/home` plus `env::temp_dir()` (`/tmp`) and `env::current_dir()` (when outside `/opt/AetherFlow` and `/var/lib/aetherflow`). Set `AF_ALLOWED_FS_ROOTS` in `/etc/aetherflow/aetherflow.env` to override.
+- **Host Path Picker**: Administrator-only `GET /api/v1/auth/fs` defaults to `/mnt,/media,/srv,/data,/home` and `env::current_dir()` (when outside `/opt/AetherFlow` and `/var/lib/aetherflow`); `/tmp` (`env::temp_dir()`) is excluded by default. Set `AF_ALLOWED_FS_ROOTS` in `/etc/aetherflow/aetherflow.env` to override.
 - **Multi-GPU NVENC Drop-ins**: `aetherflow-api.service` allows `/dev/nvidia0` by default under `DevicePolicy=closed`. Multi-GPU hosts can add `DeviceAllow=/dev/nvidia1 rw` lines in `/etc/systemd/system/aetherflow-api.service.d/local.conf`, then reload and restart systemd.
 
 ### Managing the Control Plane Units
@@ -238,21 +238,21 @@ sudo af backup verify <backup-filename>
 # 2. Zero-downtime non-destructive preflight plan (validates SHA-256, manifest, tar entries, and collisions)
 sudo af backup restore-preflight <backup-filename> --target-root /var/backups/af-restore-stage
 
-# 3. Extract and verify into a staging directory
-#    NOTE: On live Linux hosts (without the isolated-test global flag --root <dir>, which confines both
-#    backup-dir and target-root inside <dir>), running restore into a staging directory still stops and
-#    restarts live aetherflow-api.service automatically during restore quiescence. Use step 2 for zero-downtime checks.
+# 3. Zero-downtime extraction and verification into an isolated staging directory
+#    (isolated staging targets outside `/` and live `AF_DB_PATH` use NoopQuiescenceController
+#    and do NOT stop or restart live `aetherflow-api.service`):
 sudo af backup restore <backup-filename> --target-root /var/backups/af-restore-stage --confirm-destructive-restore
 
-# 4. Live restore directly onto / (supported for --sqlite-only / dashboard .sqlite backups, or .tar.gz
-#    archives that do NOT contain .master.creds or oidc_rsa.pem; see canonical allowlist note below.
-#    Note: restore-preflight accepts --allow-staging-overwrite; restore accepts --allow-overwrite.)
-sudo af backup restore-preflight <backup-filename> --target-root / --allow-staging-overwrite
+# 4. Live restore directly onto / (supported for --sqlite-only / dashboard .sqlite backups AND
+#    full `af backup create` .tar.gz archives including .master.creds and oidc_rsa.pem, which are
+#    clamped to 0600 and chowned to aetherflow:aetherflow when executing as root.
+#    Both restore-preflight and restore accept --allow-overwrite and --allow-staging-overwrite.)
+sudo af backup restore-preflight <backup-filename> --target-root / --allow-overwrite
 sudo af backup restore <backup-filename> --target-root / --allow-overwrite --confirm-destructive-restore
 
 # 5. Restart aetherflow-runner when restoring a .tar.gz containing /etc/aetherflow/aetherflow.env
-#    (af-host quiesces/restarts aetherflow-api.service only and clamps restored .env files to mode 0600),
-#    then verify post-restore health:
+#    (af-host quiesces/restarts aetherflow-api.service only and clamps restored .env/.creds/.pem
+#    files to mode 0600), then verify post-restore health:
 sudo systemctl restart aetherflow-runner
 sudo af health
 curl -fsS http://127.0.0.1:8080/health/ready | jq
@@ -262,11 +262,8 @@ sudo af backup recover-interrupted --target-root /
 ```
 
 > [!IMPORTANT]
-> - **Canonical `/` Restore Allowlist Limitation**: When `--target-root /` is passed, `af-host` enforces `resolve_trusted_canonical_host_destination_with_sqlite_override` (`af-host/src/restore/policy.rs`), which currently excludes `var/lib/aetherflow/.master.creds` and `var/lib/aetherflow/oidc_rsa.pem`. Full `af backup create` archives containing either file fail closed with `UnsafeOverwriteRejected` on `--target-root /`.
-> - **Manual Promotion Procedure (Full Archives)**:
->   1. Extract into `/var/backups/af-restore-stage` (step 3) and stop both units (`sudo systemctl stop aetherflow-api aetherflow-runner`).
->   2. Remove stale `-wal`/`-shm` sidecars and copy verified files into place with exact ownership/modes: `chown aetherflow:aetherflow` + `chmod 0600` on `/var/lib/aetherflow/oidc_rsa.pem` and `/var/lib/aetherflow/.master.creds`; `chown aetherflow:aetherflow` + `chmod 0640` on `/var/lib/aetherflow/aetherflow.sqlite`; `chown root:aetherflow` + `chmod 0640` (or `0600` `root:root`/`aetherflow:aetherflow`) on `/etc/aetherflow/aetherflow.env`.
->   3. Restart both services (`sudo systemctl restart aetherflow-runner aetherflow-api`) because `aetherflow-runner.service` also loads `/etc/aetherflow/aetherflow.env`.
+> - **Canonical `/` Restore Allowlist & Secret Modes**: When `--target-root /` is passed, `af-host` enforces `resolve_trusted_canonical_host_destination_with_sqlite_override` (`af-host/src/restore/policy.rs`), allowlisting `/var/lib/aetherflow/aetherflow.sqlite`, `/var/lib/aetherflow/.master.creds`, `/var/lib/aetherflow/oidc_rsa.pem`, `/etc/aetherflow/*`, `/etc/AetherFlow/*`, and supported legacy paths. Secret entries (`.env`, `.key`, `.pem`, `.creds`, `*secret*`, `*token*`) are clamped to `0600`, and `/var/lib/aetherflow/{aetherflow.sqlite,.master.creds,oidc_rsa.pem}` receive `aetherflow:aetherflow` ownership when executing as `root`.
+> - **Service Quiescence Scoping**: Both `af backup restore` and `af backup recover-interrupted` quiesce live `aetherflow-api.service` only when targeting `/`, system-scoped paths, or a target containing the live `AF_DB_PATH`. Restoring into an isolated staging directory (e.g., `/var/backups/af-restore-stage`) does not interrupt running services. Always restart `aetherflow-runner` after restoring `/etc/aetherflow/aetherflow.env`.
 > - Live `af backup restore` without `--confirm-destructive-restore` (or `--confirm`) fails closed (`ExitCode = 6`).
 > - `af backup restore --dry-run` only checks that `<backup-filename>` and `<backup-filename>.manifest.json` exist as regular files; **always use `af backup restore-preflight`** for full SHA-256, manifest, tar-entry, and collision verification before restoring onto `/`. See [Rust Host Management (`af-host`)](./rust-host-management.md).
 

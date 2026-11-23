@@ -1,10 +1,14 @@
 use super::parse_ops::parse_byte_size_arg;
 use super::{BackupCliCommand, BackupCreateKind};
+use crate::commands::backup::resolve_runtime_host_version;
 use crate::error::{CliError, CliResult};
 use af_host::OverwritePolicy;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub(super) fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
+pub(super) fn parse_backup_subcommand(
+    args: &[String],
+    isolated_root: Option<&Path>,
+) -> CliResult<BackupCliCommand> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
         return Err(CliError::Usage(
             "usage: af backup <create|list|verify|restore-preflight|restore|delete|prune|chunk|assemble|ownership> [options]".to_string(),
@@ -17,7 +21,7 @@ pub(super) fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCom
             let mut kind = BackupCreateKind::Archive;
             let mut backup_dir: Option<PathBuf> = None;
             let mut db_path: Option<PathBuf> = None;
-            let mut app_version = "v4.0.0".to_string();
+            let mut app_version = resolve_runtime_host_version(isolated_root);
             let mut chunk_size_bytes: Option<u64> = None;
             let mut timestamp_slug: Option<String> = None;
             let mut operator_privileged = false;
@@ -195,7 +199,7 @@ pub(super) fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCom
             let mut filename: Option<String> = None;
             let mut backup_dir: Option<PathBuf> = None;
             let mut target_root: Option<PathBuf> = None;
-            let mut host_version = "v4.0.0".to_string();
+            let mut host_version = resolve_runtime_host_version(isolated_root);
             let mut max_sqlite_user_version: Option<i64> = None;
             let mut overwrite_policy = OverwritePolicy::RejectExisting;
             let mut trusted_sqlite_uid: Option<u32> = None;
@@ -238,7 +242,7 @@ pub(super) fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCom
                         max_sqlite_user_version = Some(parsed);
                         i += 2;
                     }
-                    "--allow-staging-overwrite" => {
+                    "--allow-staging-overwrite" | "--allow-overwrite" => {
                         overwrite_policy = OverwritePolicy::AllowRegularFilesInStaging;
                         i += 1;
                     }

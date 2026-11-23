@@ -66,7 +66,8 @@ mod upload;
 mod tests;
 
 pub use types::{
-    Entry, RemovalError, ResolvedDir, ResolvedDirListing, ResolvedEntry, ResolvedFile,
+    Entry, RemovalError, RemoveTreeOutcome, ResolvedDir, ResolvedDirListing, ResolvedEntry,
+    ResolvedFile,
 };
 pub use upload::PendingUpload;
 

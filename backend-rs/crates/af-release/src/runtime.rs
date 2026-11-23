@@ -16,6 +16,21 @@ pub fn runtime_identity() -> &'static RuntimeIdentity {
     &RUNTIME_IDENTITY
 }
 
+/// Resolves the runtime application version, honoring `<isolated_root>/opt/AetherFlow/current/.version`
+/// when an isolated `--root` is supplied and otherwise falling back to [`runtime_identity()`].
+pub fn runtime_version_for_root(isolated_root: Option<&Path>) -> String {
+    if let Some(root) = isolated_root {
+        let candidate = root.join("opt/AetherFlow/current/.version");
+        if let Ok(raw) = fs::read_to_string(&candidate) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    runtime_identity().version.clone()
+}
+
 fn identity_for_executable(executable: &Path) -> RuntimeIdentity {
     let executable = fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
     let version = executable

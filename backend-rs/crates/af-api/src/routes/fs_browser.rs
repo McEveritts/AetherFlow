@@ -37,7 +37,6 @@ fn get_allowed_fs_roots_with(env_override: Option<&str>) -> Vec<PathBuf> {
         for def in ["/mnt", "/media", "/srv", "/data", "/home"] {
             raw_roots.push(PathBuf::from(def));
         }
-        raw_roots.push(env::temp_dir());
 
         if let Ok(cwd) = env::current_dir() {
             let cwd_canon = fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
@@ -276,6 +275,12 @@ mod tests {
 
         let overridden = get_allowed_fs_roots_with(Some("/srv,/mnt"));
         assert!(!overridden.contains(&expected_data));
+
+        let temp_canon = fs::canonicalize(env::temp_dir()).unwrap_or_else(|_| env::temp_dir());
+        assert!(
+            !roots.contains(&temp_canon),
+            "default allowed fs roots must not include temp_dir ({temp_canon:?}), got: {roots:?}"
+        );
     }
 
     #[test]
@@ -289,6 +294,16 @@ mod tests {
         assert!(
             roots.contains(&expected_data),
             "expected /data in get_allowed_fs_roots() when AF_ALLOWED_FS_ROOTS is unset, got: {roots:?}"
+        );
+        let temp_canon = fs::canonicalize(env::temp_dir()).unwrap_or_else(|_| env::temp_dir());
+        assert!(
+            !roots.contains(&temp_canon),
+            "default allowed fs roots must not include temp_dir ({temp_canon:?}), got: {roots:?}"
+        );
+        let tmp_root = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+        assert!(
+            !is_fs_path_allowed(&tmp_root, &roots),
+            "/tmp ({tmp_root:?}) must be denied when AF_ALLOWED_FS_ROOTS is unset, got: {roots:?}"
         );
     }
 }

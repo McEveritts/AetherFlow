@@ -508,3 +508,81 @@ fn remove_tree_and_empty_dir_clean_orphaned_upload_temp_files_and_subtrees_witho
     assert!(tmp.path().join("not_empty/real.txt").exists());
     assert!(sibling_temp.exists());
 }
+
+#[test]
+fn remove_tree_skips_injected_mount_boundary_without_unlinking_mounted_files() {
+    use crate::syscall::openat_no_symlinks_no_xdev;
+    use std::path::PathBuf;
+
+    let tmp = TempDir::new();
+    let bfs = BrowserFs::open(tmp.path()).unwrap();
+
+    // Create a user subtree containing a sibling local file, a nested mountpoint (`Media`),
+    // and a directly mounted top-level user directory (`user-2`).
+    bfs.create_directory_all("user-1/Media/Movies").unwrap();
+    bfs.create_directory_all("user-1/Docs").unwrap();
+    fs::write(tmp.path().join("user-1/Docs/notes.txt"), b"local-1234").unwrap(); // 10 bytes
+    fs::write(tmp.path().join("user-1/Media/keep.mkv"), b"shared-media-1").unwrap();
+    fs::write(
+        tmp.path().join("user-1/Media/Movies/movie.mkv"),
+        b"shared-media-2",
+    )
+    .unwrap();
+    bfs.create_directory_all("user-2/Mounted").unwrap();
+    fs::write(tmp.path().join("user-2/Mounted/data.bin"), b"top-mount").unwrap();
+
+    // Inject EXDEV when opening "Media" (simulating Linux openat2 RESOLVE_NO_XDEV on a bind mount).
+    let outcome = bfs
+        .remove_tree_with_outcome_policy("user-1", true, &|dirfd, name, flags, mode, dev| {
+            if name.to_bytes() == b"Media" {
+                return Err(std::io::Error::from_raw_os_error(libc::EXDEV));
+            }
+            openat_no_symlinks_no_xdev(dirfd, name, flags, mode, dev)
+        })
+        .unwrap();
+
+    assert_eq!(outcome.removed_bytes, 10);
+    assert_eq!(outcome.skipped_mount_paths, vec![PathBuf::from("user-1/Media")]);
+    assert!(
+        !tmp.path().join("user-1/Docs").exists(),
+        "non-mounted sibling subtree must still be cleaned"
+    );
+    assert!(
+        tmp.path().join("user-1/Media/keep.mkv").is_file(),
+        "files inside mountpoint must never be unlinked"
+    );
+    assert!(
+        tmp.path().join("user-1/Media/Movies/movie.mkv").is_file(),
+        "nested files inside mountpoint must never be unlinked"
+    );
+
+    // Inject EXDEV directly on the top-level target ("user-2") as if user-2 itself is a mountpoint.
+    let top_outcome = bfs
+        .remove_tree_with_outcome_policy("user-2", true, &|dirfd, name, flags, mode, dev| {
+            if name.to_bytes() == b"user-2" {
+                return Err(std::io::Error::from_raw_os_error(libc::EXDEV));
+            }
+            openat_no_symlinks_no_xdev(dirfd, name, flags, mode, dev)
+        })
+        .unwrap();
+    assert_eq!(top_outcome.removed_bytes, 0);
+    assert_eq!(top_outcome.skipped_mount_paths, vec![PathBuf::from("user-2")]);
+    assert!(tmp.path().join("user-2/Mounted/data.bin").is_file());
+
+    // Also test st_dev mismatch (simulating ENOSYS fallback where openat2 is unavailable and st_dev differs).
+    let dev_mismatch_outcome = bfs
+        .remove_tree_with_outcome_policy("user-1", true, &|dirfd, name, flags, mode, dev| {
+            let fake_dev = if name.to_bytes() == b"Media" {
+                dev.wrapping_add(1)
+            } else {
+                dev
+            };
+            openat_no_symlinks_no_xdev(dirfd, name, flags, mode, fake_dev)
+        })
+        .unwrap();
+    assert_eq!(
+        dev_mismatch_outcome.skipped_mount_paths,
+        vec![PathBuf::from("user-1/Media")]
+    );
+    assert!(tmp.path().join("user-1/Media/keep.mkv").is_file());
+}

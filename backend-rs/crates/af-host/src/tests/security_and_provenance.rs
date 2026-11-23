@@ -1236,3 +1236,63 @@ fn maintenance_lock_preserves_existing_parent_mode_and_configured_custom_sqlite_
         let _ = sqlite_receipt;
     }
 }
+
+#[test]
+fn default_host_app_version_parses_valid_semver_and_canonical_secrets_preserve_ownership_policy() {
+    let default_ver = crate::default_host_app_version();
+    assert!(
+        parse_semver_triplet(&default_ver).is_ok(),
+        "default_host_app_version must return a valid semver triplet, got {default_ver}"
+    );
+    assert_eq!(
+        RestorePreflightOptions::default().host_app_version,
+        default_ver
+    );
+    assert_eq!(
+        RestoreExecutionOptions::default().host_app_version,
+        default_ver
+    );
+
+    let sim_root = TempTestDir::new("esc08-canonical-allowlist");
+    // Non-allowlisted files under /var/lib/aetherflow remain rejected on canonical bases.
+    assert!(matches!(
+        resolve_trusted_canonical_host_destination_with_sqlite_override(
+            sim_root.path(),
+            "var/lib/aetherflow/arbitrary.txt",
+            None,
+        ),
+        Err(HostBackupError::UnsafeOverwriteRejected { .. })
+    ));
+    assert!(matches!(
+        resolve_trusted_canonical_host_destination_with_sqlite_override(
+            Path::new("/"),
+            "var/lib/aetherflow/arbitrary.txt",
+            None,
+        ),
+        Err(HostBackupError::UnsafeOverwriteRejected { .. })
+    ));
+    // Allowlisted service data-dir secrets succeed under canonical host bases.
+    for rel in [
+        "var/lib/aetherflow/.master.creds",
+        "var/lib/aetherflow/oidc_rsa.pem",
+    ] {
+        let (_, sim_dest) = resolve_trusted_canonical_host_destination_with_sqlite_override(
+            sim_root.path(),
+            rel,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("canonical allowlist rejected {rel}: {e}"));
+        assert_eq!(sim_dest, sim_root.path().join(rel));
+
+        match resolve_trusted_canonical_host_destination_with_sqlite_override(
+            Path::new("/"),
+            rel,
+            None,
+        ) {
+            Ok((_, dest)) => assert_eq!(dest, PathBuf::from(format!("/{rel}"))),
+            Err(HostBackupError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(other) => panic!("canonical `/` allowlist rejected {rel}: {other}"),
+        }
+    }
+}
