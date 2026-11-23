@@ -229,15 +229,31 @@ fn warn_if_mcbrowser_home_root_is_read_only() {
     }
 }
 
+fn log_format_is_json(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim().eq_ignore_ascii_case("json"))
+}
+
+fn build_tracing_env_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
+fn init_tracing() {
+    let env_filter = build_tracing_env_filter();
+    if log_format_is_json(env::var("AF_LOG_FORMAT").ok().as_deref()) {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
+}
+
 async fn async_main() -> anyhow::Result<()> {
     let _ = af_runner::af_release::runtime::runtime_identity();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
     // Privileged Root Socket Runner Mode (`aetherflow-api runner` / `--runner`)
     if let Some(first_arg) = std::env::args().nth(1) {
@@ -500,6 +516,206 @@ mod main_isolation_tests {
         assert_eq!(
             resolve_bind_addr(Some("::1"), Some("18080"), false),
             "[::1]:18080"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(self.0.clone())
+        }
+    }
+
+    impl SharedLogBuffer {
+        fn take_string(&self) -> String {
+            let mut guard = self.0.lock().unwrap();
+            let out = String::from_utf8(guard.clone()).unwrap();
+            guard.clear();
+            out
+        }
+    }
+
+    fn build_test_dispatch(
+        env_filter: tracing_subscriber::EnvFilter,
+        log_format: Option<&str>,
+        buffer: SharedLogBuffer,
+    ) -> tracing::Dispatch {
+        if log_format_is_json(log_format) {
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(buffer)
+                    .json()
+                    .finish(),
+            )
+        } else {
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(buffer)
+                    .finish(),
+            )
+        }
+    }
+
+    #[test]
+    fn log_format_is_json_honors_json_setting_and_defaults_to_text() {
+        assert!(log_format_is_json(Some("json")));
+        assert!(log_format_is_json(Some("JSON")));
+        assert!(log_format_is_json(Some("  json  ")));
+        assert!(!log_format_is_json(None));
+        assert!(!log_format_is_json(Some("")));
+        assert!(!log_format_is_json(Some("text")));
+        assert!(!log_format_is_json(Some("pretty")));
+    }
+
+    #[test]
+    fn tracing_subscriber_respects_format_and_env_filter() {
+        let json_buf = SharedLogBuffer::default();
+        let json_dispatch = build_test_dispatch(
+            tracing_subscriber::EnvFilter::new("warn"),
+            Some("json"),
+            json_buf.clone(),
+        );
+        tracing::dispatcher::with_default(&json_dispatch, || {
+            let span = tracing::info_span!("http_request", request_id = "json-filter-1");
+            let _entered = span.enter();
+            tracing::info!("filtered_info_event");
+            tracing::warn!("visible_warn_event");
+        });
+        let json_output = json_buf.take_string();
+        assert!(!json_output.contains("filtered_info_event"));
+        let json_lines: Vec<serde_json::Value> = json_output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("expected valid JSON log line"))
+            .collect();
+        assert_eq!(json_lines.len(), 1);
+        assert_eq!(json_lines[0]["level"], "WARN");
+        assert_eq!(json_lines[0]["fields"]["message"], "visible_warn_event");
+
+        let text_buf = SharedLogBuffer::default();
+        let text_dispatch = build_test_dispatch(
+            tracing_subscriber::EnvFilter::new("info"),
+            None,
+            text_buf.clone(),
+        );
+        tracing::dispatcher::with_default(&text_dispatch, || {
+            let span = tracing::info_span!("http_request", request_id = "text-default-1");
+            let _entered = span.enter();
+            tracing::debug!("filtered_debug_event");
+            tracing::info!("visible_text_event");
+        });
+        let text_output = text_buf.take_string();
+        assert!(!text_output.contains("filtered_debug_event"));
+        assert!(text_output.contains("visible_text_event"));
+        assert!(text_output.contains("text-default-1"));
+        assert!(serde_json::from_str::<serde_json::Value>(text_output.trim()).is_err());
+    }
+
+    #[test]
+    fn init_tracing_emits_json_and_text_request_id_logs_by_af_log_format() {
+        use tower::ServiceExt;
+
+        const MODE_ENV: &str = "AETHERFLOW_TRACING_SUBPROCESS_MODE";
+        if let Ok(mode) = env::var(MODE_ENV) {
+            init_tracing();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let req_id = format!("subprocess-{mode}-req-id");
+            let response = rt.block_on(
+                routes::build_router().oneshot(
+                    axum::http::Request::builder()
+                        .uri("/health/live")
+                        .header(header::HOST, "localhost")
+                        .header("X-Request-ID", &req_id)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                ),
+            );
+            let response = response.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(response.headers()["X-Request-ID"], req_id);
+            return;
+        }
+
+        let json_out = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "main_isolation_tests::init_tracing_emits_json_and_text_request_id_logs_by_af_log_format",
+                "--nocapture",
+            ])
+            .env(MODE_ENV, "json")
+            .env("AF_LOG_FORMAT", "json")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(
+            json_out.status.success(),
+            "json subprocess failed: {}",
+            String::from_utf8_lossy(&json_out.stderr)
+        );
+        let json_stdout = String::from_utf8_lossy(&json_out.stdout);
+        let parsed_json_events: Vec<serde_json::Value> = json_stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+            .collect();
+        assert!(
+            parsed_json_events.iter().any(|event| {
+                event["level"] == "INFO"
+                    && event["fields"]["status"] == 200
+                    && event["span"]["request_id"] == "subprocess-json-req-id"
+            }),
+            "expected JSON log event with request_id in stdout: {json_stdout}"
+        );
+
+        let text_out = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "main_isolation_tests::init_tracing_emits_json_and_text_request_id_logs_by_af_log_format",
+                "--nocapture",
+            ])
+            .env(MODE_ENV, "text")
+            .env_remove("AF_LOG_FORMAT")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(
+            text_out.status.success(),
+            "text subprocess failed: {}",
+            String::from_utf8_lossy(&text_out.stderr)
+        );
+        let text_stdout = String::from_utf8_lossy(&text_out.stdout);
+        assert!(
+            text_stdout.contains("subprocess-text-req-id"),
+            "expected text log line with request_id in stdout: {text_stdout}"
+        );
+        assert!(
+            !text_stdout.lines().any(|line| {
+                serde_json::from_str::<serde_json::Value>(line.trim())
+                    .ok()
+                    .is_some_and(|v| v["span"]["request_id"] == "subprocess-text-req-id")
+            }),
+            "default text mode must not emit JSON log lines: {text_stdout}"
         );
     }
 }

@@ -212,7 +212,7 @@ fn test_round3_64hex_aes_key_schema24_and_revoked_lineage_epoch_mfa() {
     let max_ver: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(max_ver, 24, "MAX(schema_versions.version) must remain 24");
+    assert_eq!(max_ver, 25, "MAX(schema_versions.version) must be 25");
 
     conn.execute(
         "INSERT INTO users (id, username, role) VALUES (777, 'r3_db_user', 'user')",
@@ -644,4 +644,374 @@ fn test_per_user_broadcast_notification_reads_isolate_users() {
         count_unread_notifications_for_user_with_conn(&conn, 2).unwrap(),
         0
     );
+}
+
+struct TestDbPathGuard(Option<std::ffi::OsString>);
+
+impl Drop for TestDbPathGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => env::set_var("DB_PATH", value),
+            None => env::remove_var("DB_PATH"),
+        }
+    }
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .expect("prepare PRAGMA table_info");
+    stmt.query_map([], |row| row.get::<_, String>(1))
+        .expect("query PRAGMA table_info")
+        .map(|row| row.expect("read column name"))
+        .collect()
+}
+
+#[test]
+fn migration_v25_fresh_db_creates_peer_tables_and_preserves_v24_and_legacy_tables() {
+    let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _db_path_guard = TestDbPathGuard(env::var_os("DB_PATH"));
+
+    let dir = env::temp_dir().join(format!(
+        "af-peer-v25-fresh-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let db_file = dir.join("fresh.sqlite");
+    env::set_var("DB_PATH", &db_file);
+
+    init_db().expect("fresh init_db must apply migration 25");
+
+    {
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 25);
+
+        let v25_desc: String = conn
+            .query_row(
+                "SELECT description FROM schema_versions WHERE version = 25",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v25_desc, "Peer clustering");
+
+        let v24_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = 24",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v24_count, 1, "streaming v24 migration must remain recorded");
+
+        // Legacy cluster_nodes and v24 streaming_history_read_revision remain intact in P0
+        for preserved_table in ["cluster_nodes", "streaming_history_read_revision"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![preserved_table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "table {preserved_table} must be preserved in P0");
+        }
+
+        // Verify exact column layout for all nine peer clustering tables
+        let expected_tables: &[(&str, &[&str])] = &[
+            (
+                "peer_identity",
+                &["id", "wg_pubkey", "tunnel_ip", "wg_port", "created_at"],
+            ),
+            (
+                "peer_links",
+                &[
+                    "id",
+                    "name",
+                    "wg_pubkey",
+                    "tunnel_ip",
+                    "endpoint",
+                    "wg_port",
+                    "state",
+                    "peer_version",
+                    "peer_protocol",
+                    "capabilities",
+                    "rtt_ms",
+                    "last_ok_at",
+                    "last_error",
+                    "consecutive_failures",
+                    "inbound_token_hash",
+                    "pending_attempt_id",
+                    "pending_expires_at",
+                    "created_at",
+                    "updated_at",
+                ],
+            ),
+            (
+                "peer_grants",
+                &[
+                    "id",
+                    "link_id",
+                    "run_as_user_id",
+                    "access",
+                    "token_hash",
+                    "created_by",
+                    "created_at",
+                    "revoked_at",
+                ],
+            ),
+            (
+                "peer_pairing_windows",
+                &["id", "code_hash", "expires_at", "consumed_at"],
+            ),
+            (
+                "peer_pairing_attempts",
+                &[
+                    "id",
+                    "window_id",
+                    "remote_name",
+                    "remote_pubkey",
+                    "remote_tunnel_ip",
+                    "remote_endpoint",
+                    "source_ip",
+                    "status",
+                    "error_code",
+                    "expires_at",
+                    "created_at",
+                ],
+            ),
+            (
+                "peer_exports",
+                &[
+                    "id",
+                    "link_id",
+                    "path",
+                    "writable",
+                    "squash_uid",
+                    "squash_gid",
+                    "created_at",
+                ],
+            ),
+            (
+                "peer_mounts",
+                &[
+                    "id",
+                    "link_id",
+                    "remote_path",
+                    "mount_path",
+                    "unit_name",
+                    "writable",
+                    "purpose",
+                    "state",
+                    "last_error",
+                ],
+            ),
+            (
+                "transcode_workers",
+                &[
+                    "link_id",
+                    "enabled",
+                    "weight",
+                    "max_jobs",
+                    "ffmpeg_version",
+                    "encoders",
+                    "render_node",
+                    "parity_ok",
+                    "parity_error",
+                ],
+            ),
+            (
+                "transcode_jobs",
+                &[
+                    "id",
+                    "link_id",
+                    "started_at",
+                    "ended_at",
+                    "exit_code",
+                    "request_id",
+                    "ran_locally",
+                ],
+            ),
+        ];
+
+        for (table, expected_cols) in expected_tables {
+            let actual = table_columns(&conn, table);
+            let expected: Vec<String> = expected_cols.iter().map(|c| (*c).to_string()).collect();
+            assert_eq!(actual, expected, "column layout mismatch on table {table}");
+        }
+
+        // Verify users.account_type defaults to 'human'
+        conn.execute(
+            "INSERT INTO users (username, role) VALUES ('fresh-human', 'admin')",
+            [],
+        )
+        .unwrap();
+        let account_type: String = conn
+            .query_row(
+                "SELECT account_type FROM users WHERE username = 'fresh-human'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_type, "human");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
+    let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _db_path_guard = TestDbPathGuard(env::var_os("DB_PATH"));
+
+    let dir = env::temp_dir().join(format!(
+        "af-peer-v25-legacy-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let db_file = dir.join("legacy.sqlite");
+    env::set_var("DB_PATH", &db_file);
+
+    // Initialize full DB first, then roll it back into a pre-v25 (v24) legacy snapshot with existing rows
+    init_db().unwrap();
+    {
+        let conn = get_conn().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE transcode_jobs;
+             DROP TABLE transcode_workers;
+             DROP TABLE peer_mounts;
+             DROP TABLE peer_exports;
+             DROP TABLE peer_pairing_attempts;
+             DROP TABLE peer_pairing_windows;
+             DROP TABLE peer_grants;
+             DROP TABLE peer_links;
+             DROP TABLE peer_identity;
+             DELETE FROM schema_versions WHERE version = 25;
+             DROP TABLE users;
+             CREATE TABLE users (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 username TEXT UNIQUE NOT NULL,
+                 password_hash TEXT DEFAULT '',
+                 google_id TEXT DEFAULT '',
+                 email TEXT DEFAULT '',
+                 avatar_url TEXT DEFAULT '',
+                 role TEXT DEFAULT 'user',
+                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                 totp_secret TEXT DEFAULT '',
+                 totp_enabled BOOLEAN DEFAULT 0,
+                 last_totp_step INTEGER NOT NULL DEFAULT -1,
+                 sessions_revoked_after INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO users (id, username, role) VALUES
+                 (1, 'legacy-admin', 'admin'),
+                 (2, 'legacy-member', 'user');
+             INSERT INTO cluster_nodes (id, hostname, address, psk_hash, role, status)
+                 VALUES ('legacy-node-1', 'worker-1', '10.0.0.5', 'legacy-hash', 'worker', 'online');
+             INSERT INTO plugins_registry (plugin_id, enabled)
+                 VALUES ('legacy-plugin', 1);
+             PRAGMA foreign_keys = ON;",
+        )
+        .expect("prepare pre-v25 legacy fixture");
+
+        assert!(
+            !table_columns(&conn, "users").contains(&"account_type".to_string()),
+            "pre-v25 legacy users table must not yet have account_type"
+        );
+        let pre_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pre_max, 24);
+    }
+
+    // Upgrade legacy v24 DB to v25
+    init_db().expect("upgrading pre-v25 legacy database must succeed");
+
+    {
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 25);
+
+        let legacy_users: Vec<(String, String)> = conn
+            .prepare("SELECT username, account_type FROM users ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            legacy_users,
+            vec![
+                ("legacy-admin".to_string(), "human".to_string()),
+                ("legacy-member".to_string(), "human".to_string()),
+            ],
+            "existing legacy users must be preserved with default account_type='human'"
+        );
+
+        let preserved_cluster: String = conn
+            .query_row(
+                "SELECT hostname FROM cluster_nodes WHERE id = 'legacy-node-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_cluster, "worker-1");
+
+        let preserved_plugin: bool = conn
+            .query_row(
+                "SELECT enabled FROM plugins_registry WHERE plugin_id = 'legacy-plugin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(preserved_plugin);
+
+        // Seed v25 peer data before restarting init_db()
+        peers::upsert_peer_identity(
+            &conn,
+            &peers::PeerIdentity {
+                wg_pubkey: "pk-local-restart".to_string(),
+                tunnel_ip: "10.231.0.1".to_string(),
+                wg_port: 51821,
+                created_at: "2026-11-23T05:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    // Re-running init_db() across simulated restarts must be idempotent and retain all rows
+    for _ in 0..2 {
+        init_db().expect("restart init_db on v25 database must be idempotent");
+        let conn = get_conn().unwrap();
+        let v25_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = 25",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v25_rows, 1);
+
+        let identity = peers::get_peer_identity(&conn)
+            .unwrap()
+            .expect("peer identity must survive restart");
+        assert_eq!(identity.wg_pubkey, "pk-local-restart");
+
+        let account_type: String = conn
+            .query_row(
+                "SELECT account_type FROM users WHERE username = 'legacy-admin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_type, "human");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
 }

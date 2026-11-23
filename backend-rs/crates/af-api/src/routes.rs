@@ -59,10 +59,10 @@ use crate::ws::{handle_log_websocket, handle_websocket, normalize_request_forwar
 #[cfg(test)]
 #[allow(unused_imports)]
 use af_models::{AppIngressConfig, MarketplaceApp, User};
-use axum::extract::Request;
 #[cfg(test)]
 #[allow(unused_imports)]
 use axum::extract::{Extension, Path, Query};
+use axum::extract::{MatchedPath, Request};
 #[cfg(test)]
 #[allow(unused_imports)]
 use axum::http::HeaderMap;
@@ -95,6 +95,7 @@ use std::os::unix::ffi::OsStrExt;
 #[allow(unused_imports)]
 use std::path::PathBuf;
 use std::time::Instant;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
 mod account;
 mod actions;
@@ -243,12 +244,19 @@ const OPENAPI_VIEWER_CSP: &str = concat!(
 
 pub async fn security_headers_middleware(mut req: Request, next: Next) -> Response {
     normalize_request_forwarding_for_peer(&mut req);
-    let req_id = req
+    let req_id_header = req
         .headers()
         .get("X-Request-ID")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        .filter(|header| {
+            let id = header.as_bytes();
+            !id.is_empty()
+                && id.len() <= 128
+                && id.iter().all(|&byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+        })
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from(Utc::now().timestamp_nanos_opt().unwrap_or(0)));
 
     let is_legacy_api =
         req.uri().path().starts_with("/api/") && !req.uri().path().starts_with("/api/v1/");
@@ -267,10 +275,9 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         })
         .map(str::to_string);
 
-    req.headers_mut().insert(
-        "X-Request-ID",
-        HeaderValue::from_str(&req_id).unwrap_or_else(|_| HeaderValue::from_static("0")),
-    );
+    tracing::Span::current().record("request_id", req_id_header.to_str().unwrap_or("0"));
+    req.headers_mut()
+        .insert("X-Request-ID", req_id_header.clone());
 
     let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
     let mut resp = next.run(req).await;
@@ -372,9 +379,7 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=()"),
     );
     h.insert("X-API-Version", HeaderValue::from_static("v1"));
-    if let Ok(hv) = HeaderValue::from_str(&req_id) {
-        h.insert("X-Request-ID", hv);
-    }
+    h.insert("X-Request-ID", req_id_header);
     if is_legacy_api {
         h.insert("Deprecation", HeaderValue::from_static("true"));
         let raw_successor = req_path.replacen("/api/", "/api/v1/", 1);
@@ -396,6 +401,19 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
 // ─────────────────────────────────────────────────────────────────────────────
 // Router Construction
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn make_http_request_span(req: &Request) -> tracing::Span {
+    let matched_path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    tracing::info_span!(
+        "http_request",
+        method = %req.method(),
+        matched_path,
+        request_id = tracing::field::Empty,
+    )
+}
 
 pub fn build_router() -> Router {
     let v1 = build_v1_router();
@@ -436,6 +454,11 @@ pub fn build_router() -> Router {
         .fallback(spa_fallback_handler)
         .layer(middleware::from_fn(host_validation_middleware))
         .layer(middleware::from_fn(security_headers_middleware))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_http_request_span)
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        )
 }
 
 fn build_v1_router() -> Router {

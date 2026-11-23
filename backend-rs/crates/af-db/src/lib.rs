@@ -3,6 +3,7 @@ mod auth;
 mod crypto;
 mod ingress;
 mod notifications;
+pub mod peers;
 mod pending_actions;
 mod pool;
 mod retained_ingress;
@@ -765,6 +766,22 @@ pub fn init_db() -> anyhow::Result<()> {
     anyhow::ensure!(
         local_settings_migration == 1,
         "Local AI settings migration v23 failed"
+    );
+
+    migrate(
+        &conn,
+        25,
+        "Peer clustering",
+        peers::PEER_CLUSTERING_MIGRATION_25_SQL,
+    )?;
+    let peer_clustering_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 25",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        peer_clustering_migration == 1,
+        "Peer clustering migration v25 failed"
     );
 
     ensure_security_schema_invariants(&conn)?;

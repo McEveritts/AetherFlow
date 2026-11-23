@@ -27,6 +27,8 @@ pub(super) async fn health_check() -> Json<serde_json::Value> {
         "version": af_runner::af_release::runtime::runtime_identity().version,
         "database": db_status,
         "db_latency_ms": latency_ms,
+        "peer_protocol": 1,
+        "capabilities": [],
     }))
 }
 

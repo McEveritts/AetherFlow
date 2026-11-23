@@ -598,3 +598,358 @@ async fn account_endpoints_report_sqlite_failures() {
         StatusCode::OK
     );
 }
+
+#[derive(Clone, Default)]
+struct CapturedLogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct CapturedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogBuffer {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter(self.0.clone())
+    }
+}
+
+impl CapturedLogBuffer {
+    fn take_string(&self) -> String {
+        let mut guard = self.0.lock().unwrap();
+        let text = String::from_utf8(guard.clone()).unwrap();
+        guard.clear();
+        text
+    }
+}
+
+#[tokio::test]
+async fn health_endpoint_reports_peer_protocol_and_empty_capabilities() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let app = super::super::build_router();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(header::HOST, "localhost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+        "nosniff"
+    );
+    assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+    assert_eq!(response.headers()["X-API-Version"], "v1");
+    assert!(
+        !response.headers()["X-Request-ID"]
+            .to_str()
+            .unwrap()
+            .is_empty(),
+        "expected generated X-Request-ID header"
+    );
+
+    let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(
+        payload["status"].as_str(),
+        Some("ok" | "degraded")
+    ));
+    assert!(payload["uptime"].is_string());
+    assert_eq!(
+        payload["version"],
+        af_runner::af_release::runtime::runtime_identity().version
+    );
+    assert!(matches!(
+        payload["database"].as_str(),
+        Some("ok" | "unreachable")
+    ));
+    assert!(payload["db_latency_ms"].is_i64());
+    assert_eq!(payload["peer_protocol"].as_i64(), Some(1));
+    assert_eq!(payload["capabilities"], serde_json::json!([]));
+
+    let live_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health/live")
+                .header(header::HOST, "localhost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live_resp.status(), StatusCode::OK);
+    let live_body = to_bytes(live_resp.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&live_body).unwrap(),
+        serde_json::json!({ "status": "alive" })
+    );
+}
+
+#[test]
+fn trace_layer_correlates_request_id_and_omits_sensitive_request_data() {
+    use axum::body::Body;
+    use axum::http::{header, HeaderValue, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let buffer = CapturedLogBuffer::default();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .json()
+            .finish(),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        rt.block_on(async {
+            let app = super::super::build_router();
+
+            // 1. Explicit X-Request-ID is echoed and correlated while headers and query secrets stay out of logs.
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health?ticket=ws-secret-ticket&token=query-secret-val")
+                        .header(header::HOST, "localhost")
+                        .header("X-Request-ID", "peer-corr-explicit-42")
+                        .header(header::AUTHORIZATION, "Bearer jwt-secret-value")
+                        .header(header::COOKIE, "af_session=cookie-secret-value")
+                        .header("X-CSRF-Token", "csrf-secret-value")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.headers()["X-Request-ID"], "peer-corr-explicit-42");
+            let raw = buffer.take_string();
+            for secret in [
+                "ws-secret-ticket",
+                "query-secret-val",
+                "jwt-secret-value",
+                "cookie-secret-value",
+                "csrf-secret-value",
+            ] {
+                assert!(!raw.contains(secret), "log leaked secret `{secret}`: {raw}");
+            }
+            let events: Vec<serde_json::Value> = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                events.iter().any(|event| {
+                    event["span"]["request_id"] == "peer-corr-explicit-42"
+                        && event["fields"]["status"] == 200
+                }),
+                "expected correlated request_id in JSON events: {raw}"
+            );
+
+            // 2. Generated X-Request-ID (when absent) matches the span's request_id.
+            let generated_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health/live")
+                        .header(header::HOST, "localhost")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(generated_resp.status(), StatusCode::OK);
+            let generated_id = generated_resp.headers()["X-Request-ID"]
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(!generated_id.is_empty());
+            let raw = buffer.take_string();
+            let events: Vec<serde_json::Value> = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                events.iter().any(|event| {
+                    event["span"]["request_id"] == generated_id
+                        && event["fields"]["status"] == 200
+                }),
+                "expected generated request_id `{generated_id}` in JSON events: {raw}"
+            );
+
+            // 3. Malformed IDs fall back to the same generated value in the response and trace.
+            for malformed_id in [
+                HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap(),
+                HeaderValue::from_static(""),
+                HeaderValue::from_static("   "),
+                HeaderValue::from_static("contains a space"),
+                HeaderValue::from_str(&"a".repeat(129)).unwrap(),
+            ] {
+                let request = Request::builder()
+                    .uri("/health/live")
+                    .header(header::HOST, "localhost")
+                    .header("X-Request-ID", malformed_id.clone())
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let fallback = &response.headers()["X-Request-ID"];
+                assert_ne!(fallback, &malformed_id);
+                assert!(!fallback.is_empty());
+                let fallback = fallback.to_str().unwrap();
+                let raw = buffer.take_string();
+                assert!(
+                    raw.lines().filter(|line| !line.trim().is_empty()).any(|line| {
+                        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                        event["span"]["request_id"] == fallback
+                    }),
+                    "expected fallback request_id in JSON events"
+                );
+            }
+
+            // 4. Auth-protected route preserves 401 behavior and never logs path filenames, tokens, or auth headers.
+            let unauth_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/auth/fileshare/download/private-user-doc-999.pdf?code=oauth-secret")
+                        .header(header::HOST, "localhost")
+                        .header("X-Request-ID", "peer-corr-unauth-401")
+                        .header(header::AUTHORIZATION, "Bearer invalid-secret-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(unauth_resp.headers()["X-Request-ID"], "peer-corr-unauth-401");
+            assert_eq!(
+                unauth_resp.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            let raw = buffer.take_string();
+            for secret in [
+                "private-user-doc-999.pdf",
+                "oauth-secret",
+                "invalid-secret-token",
+            ] {
+                assert!(!raw.contains(secret), "log leaked `{secret}`: {raw}");
+            }
+            let events: Vec<serde_json::Value> = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                events.iter().any(|event| {
+                    event["span"]["request_id"] == "peer-corr-unauth-401"
+                        && event["fields"]["status"] == 401
+                }),
+                "expected 401 event with request_id in JSON logs: {raw}"
+            );
+
+            // 5. Downstream handler logs and host_validation_middleware rejections share the enclosing request_id span.
+            let traced_app = axum::Router::new()
+                .route(
+                    "/api/v1/public/trace-check",
+                    axum::routing::get(|| async {
+                        tracing::info!("handler_correlated_marker");
+                        StatusCode::OK
+                    }),
+                )
+                .layer(axum::middleware::from_fn(
+                    super::super::host_validation_middleware,
+                ))
+                .layer(axum::middleware::from_fn(
+                    super::super::security_headers_middleware,
+                ))
+                .layer(
+                    tower_http::trace::TraceLayer::new_for_http()
+                        .make_span_with(super::super::make_http_request_span)
+                        .on_response(
+                            tower_http::trace::DefaultOnResponse::new()
+                                .level(tracing::Level::INFO),
+                        ),
+                );
+            let handler_resp = traced_app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/public/trace-check")
+                        .header(header::HOST, "localhost")
+                        .header("X-Request-ID", "handler-span-77")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(handler_resp.status(), StatusCode::OK);
+            assert_eq!(handler_resp.headers()["X-Request-ID"], "handler-span-77");
+            let raw = buffer.take_string();
+            let events: Vec<serde_json::Value> = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                events.iter().any(|event| {
+                    event["fields"]["message"] == "handler_correlated_marker"
+                        && event["span"]["request_id"] == "handler-span-77"
+                }),
+                "expected downstream handler event to carry request_id: {raw}"
+            );
+
+            let invalid_host_resp = traced_app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/public/trace-check")
+                        .header(header::HOST, "evil.example.invalid")
+                        .header("X-Request-ID", "invalid-host-88")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(invalid_host_resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                invalid_host_resp.headers()["X-Request-ID"],
+                "invalid-host-88"
+            );
+            assert_eq!(invalid_host_resp.headers()[header::X_FRAME_OPTIONS], "DENY");
+            let raw = buffer.take_string();
+            let events: Vec<serde_json::Value> = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                events.iter().any(|event| {
+                    event["span"]["request_id"] == "invalid-host-88"
+                        && event["fields"]["status"] == 400
+                }),
+                "expected host rejection event with request_id: {raw}"
+            );
+        });
+    });
+}

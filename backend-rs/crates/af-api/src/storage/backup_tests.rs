@@ -327,7 +327,7 @@ async fn chunked_backup_upload_enforces_bounds_and_isolates_concurrent_sessions(
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn test_oauth_only_admin_backup_stepup_against_live_schema_v24() {
+async fn test_oauth_only_admin_backup_stepup_against_current_schema() {
     if crate::plugins::tests::run_plugin_test_in_subprocess() {
         return;
     }
@@ -346,14 +346,14 @@ async fn test_oauth_only_admin_backup_stepup_against_live_schema_v24() {
         std::env::set_var(k, &db_file);
     }
 
-    af_db::init_db().expect("initialize full v24 schema");
+    af_db::init_db().expect("initialize full v25 schema");
     let now = Utc::now().timestamp();
     {
         let conn = af_db::get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 24);
+        assert_eq!(max_ver, 25);
         conn.execute(
             "INSERT INTO users (id, username, role, password_hash, totp_enabled) VALUES (77, 'oauth-admin', 'admin', '', 0)",
             [],
