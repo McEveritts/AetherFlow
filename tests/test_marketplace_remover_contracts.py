@@ -531,7 +531,8 @@ write_lock() { mkdir -p "$TEST_ROOT/install"; touch "$TEST_ROOT/install/.$1.lock
         self.assertIn('APP_PORT="${AF_APP_PORT:-8080}"', template)
         for helper in ("report_progress", "write_lock", "queue_app_version", "commit_app_versions", "stage_app_archive", "finish_app_archive_update"):
             self.assertIn(helper, template)
-        self.assertLess(template.index('finish_app_archive_update "$PACKAGE_NAME"'), template.index('commit_app_versions'))
+        self.assertIn('SERVICE_NAME="af-${PACKAGE_NAME}"', template)
+        self.assertLess(template.index('finish_app_archive_update "$SERVICE_NAME"'), template.index('commit_app_versions'))
         self.assertLess(template.index('commit_app_versions'), template.index('write_lock "$PACKAGE_NAME"'))
         self.assertNotIn("touch ", template)
         self.assertNotIn("Skipping", template)

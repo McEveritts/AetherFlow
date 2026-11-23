@@ -91,11 +91,14 @@ def common_functions(*names):
                                      'apache_app_quiesce_for_rollback', 'apache_app_activate_vhost',
                                      'apache_app_resume_after_rollback',
                                      'validate_config_paths', 'safe_config_python')))
-    if 'begin_state_transaction' in names:
+    if 'begin_state_transaction' in names or 'apt-get' in names or 'rollback_apt_packages' in names:
         names = tuple(dict.fromkeys((*names, 'installed_apt_package_version', 'apt_reinstall_marker_path',
                                      'record_apt_package_for_rollback', 'prepare_apt_package_transaction',
+                                     '_af_apt_lock_timeout_value', '_af_apt_args_have_lock_timeout',
                                      'apt-get', 'rollback_apt_packages', 'clear_apt_reinstall_markers', 'write_config_file',
                                      'derive_app_password', 'check_disk_space')))
+    if 'replace_app_tree' in names or 'finish_app_archive_update' in names:
+        names = tuple(dict.fromkeys((*names, 'prune_app_archive_backups')))
     if 'stop_systemd_unit' in names:
         names = tuple(dict.fromkeys((*names, 'quiesce_services_for_rollback', 'retained_bind_address')))
     if 'download_file' in names:

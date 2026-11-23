@@ -48,7 +48,14 @@ elif command == "apt-get":
         sys.exit(0)
     if not arguments or arguments[0] not in ("install", "remove"):
         sys.exit("Unexpected apt-get arguments")
+    skip_next = False
     for argument in arguments[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if argument in ("-o", "--option"):
+            skip_next = True
+            continue
         if argument.startswith("-"):
             continue
         package, separator, version = argument.partition("=")
@@ -306,9 +313,9 @@ rollback_apt_packages
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(packages.read_text()), {"fixture-existing": "1.0.0"})
         commands = (self.root / "commands").read_text().splitlines()
-        self.assertIn("apt-get install --reinstall --no-remove -y fixture-new fixture-existing", commands)
-        self.assertIn("apt-get install -y --allow-downgrades --reinstall fixture-existing=1.0.0", commands)
-        self.assertIn("apt-get remove -y --no-auto-remove fixture-new", commands)
+        self.assertIn("apt-get install -o DPkg::Lock::Timeout=120 --reinstall --no-remove -y fixture-new fixture-existing", commands)
+        self.assertIn("apt-get install -o DPkg::Lock::Timeout=120 -y --allow-downgrades --reinstall fixture-existing=1.0.0", commands)
+        self.assertIn("apt-get remove -o DPkg::Lock::Timeout=120 -y --no-auto-remove fixture-new", commands)
 
     def test_install_reinstall_and_remove_preserve_data(self):
         for app in APPS:

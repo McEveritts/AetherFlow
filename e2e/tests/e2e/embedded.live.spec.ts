@@ -533,14 +533,36 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     await expect(userField).toBeVisible();
     await userField.fill(ADMIN_USER);
     await passField.fill(ADMIN_PASS);
-    const firstSocketPromise = page.waitForEvent('websocket', {
-      predicate: (socket) => new URL(socket.url()).pathname === '/api/v1/auth/ws',
-    });
-    const initialHistoryPromise = completedTelemetryHistory(page);
-    const initialSettingsPromise = page.waitForResponse((response) =>
-      new URL(response.url()).pathname === '/api/v1/auth/settings' && response.ok()
-    );
-    await page.locator('button[type="submit"]').first().click();
+    const submitLoginWithWaiters = async () => {
+      const firstSocketPromise = page.waitForEvent('websocket', {
+        predicate: (socket) => new URL(socket.url()).pathname === '/api/v1/auth/ws',
+      });
+      const initialHistoryPromise = completedTelemetryHistory(page);
+      const initialSettingsPromise = page.waitForResponse((response) =>
+        new URL(response.url()).pathname === '/api/v1/auth/settings' && response.ok()
+      );
+      const loginPromise = page.waitForResponse((response) =>
+        new URL(response.url()).pathname === '/api/v1/public/auth/login'
+          && response.request().method() === 'POST'
+      );
+      await page.locator('button[type="submit"]').first().click();
+      const loginResponse = await loginPromise;
+      return { loginResponse, firstSocketPromise, initialHistoryPromise, initialSettingsPromise };
+    };
+    let attempt = await submitLoginWithWaiters();
+    if (attempt.loginResponse.status() === 429) {
+      attempt.firstSocketPromise.catch(() => null);
+      attempt.initialHistoryPromise.catch(() => null);
+      attempt.initialSettingsPromise.catch(() => null);
+      const retryAfter = Number(attempt.loginResponse.headers()['retry-after']);
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+      console.log(`LIVE_AUTH_RETRY: honoring the server's ${retryAfter}s Retry-After`);
+      await page.waitForTimeout(retryAfter * 1000);
+      attempt = await submitLoginWithWaiters();
+    }
+    expect(attempt.loginResponse.status()).toBe(200);
+    const { firstSocketPromise, initialHistoryPromise, initialSettingsPromise } = attempt;
 
     // Verify redirect to dashboard root and real session cookie presence
     await expect(page).toHaveURL(/\/$/);
@@ -1402,13 +1424,24 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
         await member.goto('/login', { waitUntil: 'domcontentloaded' });
         await member.locator('input[type="text"]').first().fill(username);
         await member.locator('input[type="password"]').first().fill(ADMIN_PASS);
-        const signedIn = member.waitForResponse((response) =>
-          new URL(response.url()).pathname === '/api/v1/public/auth/login'
-            && response.request().method() === 'POST'
-        );
-        await member.locator('button[type="submit"]').first().click();
-        const loginResponse = await signedIn;
+        const submitMemberLogin = async () => {
+          const signedIn = member.waitForResponse((response) =>
+            new URL(response.url()).pathname === '/api/v1/public/auth/login'
+              && response.request().method() === 'POST'
+          );
+          await member.locator('button[type="submit"]').first().click();
+          return signedIn;
+        };
+        let loginResponse = await submitMemberLogin();
         expect(loginResponse.request().postDataJSON()).toEqual({ username, password: ADMIN_PASS });
+        if (loginResponse.status() === 429) {
+          const retryAfter = Number(loginResponse.headers()['retry-after']);
+          expect(retryAfter).toBeGreaterThan(0);
+          expect(retryAfter).toBeLessThanOrEqual(60);
+          console.log(`LIVE_AUTH_RETRY: honoring the server's ${retryAfter}s Retry-After`);
+          await member.waitForTimeout(retryAfter * 1000);
+          loginResponse = await submitMemberLogin();
+        }
         expect(loginResponse.status()).toBe(200);
         await expect(member).not.toHaveURL(/\/login/);
         const session = await member.request.get('/api/v1/auth/session');
@@ -1438,8 +1471,12 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
         );
         await member.getByRole('button', { name: 'Send', exact: true }).click();
         const reply = await chat;
-        // A disposable server may have no inference provider configured; authorization and routing still apply.
-        expect([401, 403, 404]).not.toContain(reply.status());
+        // Default disposable server routes FlowAI to a cloud model; non-admin users must
+        // still call /api/v1/auth/ai/chat (never /support) and be gated with 403 AI_PROVIDER_ADMIN_ONLY
+        // unless AF_AI_ALLOW_USER_CLOUD_PROVIDERS is explicitly enabled.
+        expect(reply.status()).toBe(403);
+        const replyBody = await reply.json();
+        expect(replyBody.code).toBe('AI_PROVIDER_ADMIN_ONLY');
         expect(reply.request().postDataJSON().message).toBe(prompt);
         expect(reply.request().postDataJSON()).not.toHaveProperty('metrics_snapshot');
         expect(aiRequests).toContain('/api/v1/auth/ai/chat');
