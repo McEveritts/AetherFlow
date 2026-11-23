@@ -1,6 +1,89 @@
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+thread_local! {
+    static ACTIVE_SERVER: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn normalize_active_server(server: Option<String>) -> Option<String> {
+    let trimmed = server?.trim().to_string();
+    if trimmed.is_empty() || matches!(trimmed.as_str(), "." | "..") {
+        return None;
+    }
+    Some(trimmed)
+}
+
+pub fn set_active_server(server: Option<String>) {
+    let normalized = normalize_active_server(server);
+    ACTIVE_SERVER.with(|slot| {
+        *slot.borrow_mut() = normalized;
+    });
+}
+
+pub fn active_server() -> Option<String> {
+    ACTIVE_SERVER.with(|slot| slot.borrow().clone())
+}
+
+fn is_dashboard_auth_path(path: &str) -> bool {
+    matches!(
+        path,
+        "auth/session"
+            | "auth/logout"
+            | "auth/refresh"
+            | "auth/login"
+            | "auth/mfa/verify"
+            | "auth/setup"
+            | "auth/setup/check"
+            | "auth/profile/password"
+            | "csrf-token"
+            | "public/csrf-token"
+    ) || [
+        "auth/google",
+        "auth/oidc",
+        "auth/sessions",
+        "auth/user/2fa",
+        "oidc",
+        "peer-pairing",
+        "public/auth",
+    ]
+    .into_iter()
+    .any(|prefix| {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
+}
+
+pub fn api_url(path: &str) -> String {
+    if path.starts_with('/') && validate_local_api_path(path).is_err() {
+        return "#".to_string();
+    }
+    rewrite_api_path(path)
+}
+
+fn rewrite_api_path(path: &str) -> String {
+    let Some(server) = active_server() else {
+        return path.to_string();
+    };
+    let Some(rest) = path.strip_prefix("/api/v1/") else {
+        return path.to_string();
+    };
+    let rest_path = rest.split(['?', '#']).next().unwrap_or("");
+    if rest_path.is_empty()
+        || rest_path == "peers"
+        || rest_path.starts_with("peers/")
+        || rest_path == "admin/peers"
+        || rest_path.starts_with("admin/peers/")
+        || is_dashboard_auth_path(rest_path)
+    {
+        return path.to_string();
+    }
+    let encoded_server = percent_encode_header_component(&server);
+    format!("/api/v1/peers/{encoded_server}/{rest}")
+}
 
 static AUTH_EPOCH: AtomicU64 = AtomicU64::new(0);
 static AUTH_REVALIDATING: AtomicBool = AtomicBool::new(false);
@@ -138,6 +221,58 @@ fn validate_header_ascii(value: &str) -> Result<(), ApiError> {
     }
 }
 
+fn validate_local_api_path(path: &str) -> Result<(), ApiError> {
+    let route = path.split(['?', '#']).next().unwrap_or_default();
+    // The browser strips some controls and normalizes dot segments before sending a request.
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || path.bytes().any(|b| b.is_ascii_control() || b == b'\\')
+        || (route.starts_with("/api/v1/") && route.contains("//"))
+        || route.split('/').any(|segment| {
+            [".", "..", "%2e", ".%2e", "%2e.", "%2e%2e"]
+                .iter()
+                .any(|dot| segment.eq_ignore_ascii_case(dot))
+        })
+    {
+        return Err(ApiError {
+            status: 0,
+            message: "API path must be local".into(),
+            code: None,
+        });
+    }
+    Ok(())
+}
+
+fn prepare_api_request_path(path: &str, method: &str) -> Result<String, ApiError> {
+    validate_local_api_path(path)?;
+    let resolved = rewrite_api_path(path);
+    ensure_auth_request_allowed(&resolved, method)?;
+    Ok(resolved)
+}
+
+fn is_valid_peer_segment(segment: &str) -> bool {
+    if segment.is_empty()
+        || segment
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b == b'\\')
+    {
+        return false;
+    }
+    let Ok(decoded) = percent_decode_str(segment).decode_utf8() else {
+        return false;
+    };
+    !decoded.is_empty() && !matches!(decoded.as_ref(), "." | "..")
+}
+
+fn peer_prefixed_api_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/v1/peers/")?;
+    let (peer_id, leaf) = rest.split_once('/')?;
+    if !is_valid_peer_segment(peer_id) || leaf.is_empty() || leaf.starts_with('/') {
+        return None;
+    }
+    Some(format!("/api/v1/{leaf}"))
+}
+
 pub fn request_path(input: &str) -> String {
     if input.starts_with("https://") || input.starts_with("http://") {
         url::Url::parse(input)
@@ -156,6 +291,8 @@ pub fn should_attach_csrf(method: &str, input: &str, authorization: Option<&str>
         return false;
     }
     let path = request_path(input);
+    let peer_leaf = peer_prefixed_api_path(&path);
+    let effective_path = peer_leaf.as_deref().unwrap_or(path.as_str());
     if matches!(
         path.as_str(),
         "/api/v1/auth/refresh" | "/api/v1/public/auth/refresh" | "/api/auth/refresh"
@@ -177,7 +314,7 @@ pub fn should_attach_csrf(method: &str, input: &str, authorization: Option<&str>
         "/api/v1/share/",
     ]
     .iter()
-    .any(|prefix| path.starts_with(prefix))
+    .any(|prefix| effective_path.starts_with(prefix))
 }
 pub fn is_login_endpoint(input: &str) -> bool {
     let path = request_path(input);
@@ -294,7 +431,6 @@ mod browser {
         future::{LocalBoxFuture, Shared},
         FutureExt,
     };
-    use std::cell::RefCell;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{HtmlDocument, RequestCredentials, RequestInit, Response};
@@ -568,14 +704,7 @@ mod browser {
         authorization: Option<&str>,
         signal: Option<&web_sys::AbortSignal>,
     ) -> Result<Response, ApiError> {
-        // Cookie/CSRF transports are local-origin only, including caller-supplied paths.
-        if !path.starts_with('/') || path.starts_with("//") || path.contains('\\') {
-            return Err(ApiError {
-                status: 0,
-                message: "API path must be local".into(),
-                code: None,
-            });
-        }
+        validate_local_api_path(path)?;
         let init = RequestInit::new();
         init.set_method(method);
         init.set_credentials(RequestCredentials::Include);
@@ -838,7 +967,8 @@ mod browser {
             authorization: Option<&str>,
             origin_epoch: u64,
         ) -> Result<(Response, RequestAbort), ApiError> {
-            ensure_auth_request_allowed(path, method)?;
+            let rewritten = prepare_api_request_path(path, method)?;
+            let path = rewritten.as_str();
             let request = RequestAbort::new(None)?;
             let signal = request.controller.signal();
             request.ensure_active(origin_epoch)?;
@@ -1079,7 +1209,8 @@ mod browser {
             extra_headers: &[(&str, &str)],
             signal: Option<&web_sys::AbortSignal>,
         ) -> Result<RawResponse, ApiError> {
-            ensure_auth_request_allowed(path, method)?;
+            let rewritten = prepare_api_request_path(path, method)?;
+            let path = rewritten.as_str();
             let origin_epoch = current_auth_epoch();
             let request = RequestAbort::new(signal)?;
             let request_signal = request.controller.signal();
@@ -1131,13 +1262,6 @@ mod browser {
                     .map_err(js_error)?
                     .dyn_into::<Response>()
                     .map_err(js_error)
-            }
-            if !path.starts_with('/') || path.starts_with("//") || path.contains('\\') {
-                return Err(ApiError {
-                    status: 0,
-                    message: "API path must be local".into(),
-                    code: None,
-                });
             }
             let authorization = extra_headers
                 .iter()
@@ -1650,5 +1774,429 @@ mod tests {
         }
         assert!(retries.take_refresh(401, "/api/v1/auth/session"));
         assert!(!retries.take_refresh(401, "/api/v1/auth/session"));
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn active_server_state_handles_local_active_switch_and_reset() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(active_server(), None);
+        assert_eq!(api_url("/api/v1/auth/services"), "/api/v1/auth/services");
+
+        set_active_server(Some("media-2".into()));
+        assert_eq!(active_server().as_deref(), Some("media-2"));
+        assert_eq!(
+            api_url("/api/v1/auth/services"),
+            "/api/v1/peers/media-2/auth/services"
+        );
+
+        set_active_server(Some("  storage-3  ".into()));
+        assert_eq!(active_server().as_deref(), Some("storage-3"));
+        assert_eq!(
+            api_url("/api/v1/auth/services"),
+            "/api/v1/peers/storage-3/auth/services"
+        );
+
+        for blank in ["", "   ", "\t\n"] {
+            set_active_server(Some(blank.into()));
+            assert_eq!(active_server(), None, "{blank:?}");
+            assert_eq!(api_url("/api/v1/auth/services"), "/api/v1/auth/services");
+        }
+
+        set_active_server(Some("media-2".into()));
+        set_active_server(None);
+        assert_eq!(active_server(), None);
+        assert_eq!(api_url("/api/v1/auth/services"), "/api/v1/auth/services");
+    }
+
+    #[test]
+    fn api_url_enforces_exact_boundaries_single_prefix_and_query_retention() {
+        let _guard = ActiveServerGuard::new(Some("media-2"));
+
+        for (input, expected) in [
+            (
+                "/api/v1/auth/services",
+                "/api/v1/peers/media-2/auth/services",
+            ),
+            (
+                "/api/v1/admin/users?page=2&limit=50",
+                "/api/v1/peers/media-2/admin/users?page=2&limit=50",
+            ),
+            (
+                "/api/v1/auth/deploy/stream?appName=mediaflow_engine",
+                "/api/v1/peers/media-2/auth/deploy/stream?appName=mediaflow_engine",
+            ),
+            (
+                "/api/v1/auth/fileshare/download/a%20b.zip?path=%2Fmedia#part",
+                "/api/v1/peers/media-2/auth/fileshare/download/a%20b.zip?path=%2Fmedia#part",
+            ),
+            (
+                "/api/v1/auth/ws/logs?unit=jellyfin.service&lines=200",
+                "/api/v1/peers/media-2/auth/ws/logs?unit=jellyfin.service&lines=200",
+            ),
+            (
+                "/api/v1/peers-other/status?x=1",
+                "/api/v1/peers/media-2/peers-other/status?x=1",
+            ),
+            (
+                "/api/v1/admin/peers-audit?limit=10",
+                "/api/v1/peers/media-2/admin/peers-audit?limit=10",
+            ),
+        ] {
+            let rewritten = api_url(input);
+            assert_eq!(rewritten, expected, "{input}");
+            // Re-running api_url on an already-prefixed path must be idempotent.
+            assert_eq!(api_url(&rewritten), expected, "idempotent: {input}");
+        }
+
+        for unchanged in [
+            "",
+            "/health",
+            "/health/ready",
+            "/metrics",
+            "/api/v1",
+            "/api/v1?x=1",
+            "/api/v1#top",
+            "/api/v1/",
+            "/api/v1/?x=1",
+            "/api/v1/#top",
+            "/api/v10/auth/services",
+            "/api/v2/auth/services",
+            "/api/auth/services",
+            "/plugins/demo/proxy",
+            "relative/api/v1/auth/services",
+            "https://evil.example/api/v1/auth/services",
+            "/api/v1/peers",
+            "/api/v1/peers?include=health",
+            "/api/v1/peers/",
+            "/api/v1/peers/other-peer/auth/services?x=1",
+            "/api/v1/peers/media-2/auth/services?x=1",
+        ] {
+            assert_eq!(api_url(unchanged), unchanged, "{unchanged}");
+        }
+    }
+
+    #[test]
+    fn api_url_keeps_admin_peer_controls_local() {
+        let _guard = ActiveServerGuard::new(Some("media-2"));
+
+        for path in [
+            "/api/v1/admin/peers",
+            "/api/v1/admin/peers?state=active",
+            "/api/v1/admin/peers#links",
+            "/api/v1/admin/peers/",
+            "/api/v1/admin/peers/pair",
+            "/api/v1/admin/peers/pairing-window",
+            "/api/v1/admin/peers/media-2",
+            "/api/v1/admin/peers/media-2/grant?preset=read",
+            "/api/v1/admin/peers/media-2/endpoint",
+            "/api/v1/admin/peers/transcode",
+        ] {
+            assert_eq!(api_url(path), path, "{path}");
+        }
+
+        assert_eq!(
+            api_url("/api/v1/admin/users"),
+            "/api/v1/peers/media-2/admin/users"
+        );
+        assert_eq!(
+            api_url("/api/v1/admin/peers-other"),
+            "/api/v1/peers/media-2/admin/peers-other"
+        );
+    }
+
+    #[test]
+    fn dashboard_auth_uses_the_local_session_when_a_peer_is_selected() {
+        let _guard = ActiveServerGuard::new(Some("media-2"));
+
+        for path in [
+            "/api/v1/auth/session?details=1",
+            "/api/v1/auth/logout",
+            "/api/v1/auth/refresh",
+            "/api/v1/auth/login",
+            "/api/v1/auth/mfa/verify",
+            "/api/v1/auth/setup/check",
+            "/api/v1/auth/sessions",
+            "/api/v1/auth/sessions/session-a",
+            "/api/v1/auth/profile/password",
+            "/api/v1/auth/user/2fa/verify",
+            "/api/v1/auth/oidc/device/consent",
+            "/api/v1/peer-pairing/request",
+            "/api/v1/public/auth/setup",
+            "/api/v1/public/auth/refresh",
+            "/api/v1/public/auth/login",
+            "/api/v1/public/auth/mfa/verify",
+            "/api/v1/public/auth/google/login",
+            "/api/v1/public/csrf-token",
+            "/api/v1/csrf-token",
+        ] {
+            assert_eq!(api_url(path), path);
+        }
+        assert_eq!(
+            api_url("/api/v1/auth/ws/ticket"),
+            "/api/v1/peers/media-2/auth/ws/ticket"
+        );
+        assert!(allowed_during_auth_revalidation(
+            &api_url("/api/v1/auth/session"),
+            "GET"
+        ));
+    }
+
+    #[test]
+    fn malformed_active_server_ids_cannot_change_authority_or_add_path_segments() {
+        let _guard = ActiveServerGuard::new(None);
+        let base = url::Url::parse("https://local.example").unwrap();
+
+        for dot_or_blank in ["", "   ", ".", "..", " . ", " .. "] {
+            set_active_server(Some(dot_or_blank.into()));
+            assert_eq!(active_server(), None, "{dot_or_blank:?}");
+            assert_eq!(
+                api_url("/api/v1/auth/services?limit=10"),
+                "/api/v1/auth/services?limit=10"
+            );
+        }
+
+        for raw_id in [
+            "peer/evil",
+            "../admin",
+            "peer/../admin",
+            "//evil.example",
+            "https://evil.example:8443",
+            "@evil.example",
+            "peer\\evil",
+            "peer?injected=1#frag",
+            "peer#frag",
+            "peer\r\nX-Injected: 1",
+            "%2e%2e",
+            "peer 1",
+            "média-2",
+        ] {
+            set_active_server(Some(raw_id.into()));
+            let rewritten = api_url("/api/v1/auth/services?limit=10");
+            let expected_segment = percent_encode_header_component(raw_id.trim());
+            assert_eq!(
+                rewritten,
+                format!("/api/v1/peers/{expected_segment}/auth/services?limit=10"),
+                "{raw_id:?}"
+            );
+            assert!(validate_local_api_path(&rewritten).is_ok(), "{raw_id:?}");
+            assert_eq!(api_url(&rewritten), rewritten, "idempotent: {raw_id:?}");
+
+            let resolved = base.join(&rewritten).unwrap();
+            assert_eq!(resolved.scheme(), "https", "{raw_id:?}");
+            assert_eq!(resolved.host_str(), Some("local.example"), "{raw_id:?}");
+            assert_eq!(resolved.port(), None, "{raw_id:?}");
+            assert_eq!(resolved.query(), Some("limit=10"), "{raw_id:?}");
+            assert_eq!(resolved.fragment(), None, "{raw_id:?}");
+            let segments: Vec<&str> = resolved.path_segments().unwrap().collect();
+            assert_eq!(
+                segments,
+                vec![
+                    "api",
+                    "v1",
+                    "peers",
+                    expected_segment.as_str(),
+                    "auth",
+                    "services"
+                ],
+                "{raw_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_boundary_rewrites_once_and_rejects_non_local_paths() {
+        let _guard = ActiveServerGuard::new(None);
+
+        assert_eq!(
+            prepare_api_request_path("/api/v1/auth/services?x=1", "GET").unwrap(),
+            "/api/v1/auth/services?x=1"
+        );
+
+        set_active_server(Some("media-2".into()));
+        let once = prepare_api_request_path("/api/v1/auth/services?x=1", "GET").unwrap();
+        assert_eq!(once, "/api/v1/peers/media-2/auth/services?x=1");
+        assert_eq!(
+            prepare_api_request_path(&once, "GET").unwrap(),
+            "/api/v1/peers/media-2/auth/services?x=1"
+        );
+        assert_eq!(
+            prepare_api_request_path("/api/v1/admin/peers/pair", "POST").unwrap(),
+            "/api/v1/admin/peers/pair"
+        );
+        assert!(!allowed_during_auth_revalidation(
+            "/api/v1/peers/media-2/auth/session",
+            "GET"
+        ));
+
+        for non_local in [
+            "",
+            "relative/api/v1/auth/services",
+            "https://evil.example/api/v1/auth/services",
+            "http://evil.example/api/v1/peers/media-2/admin/users",
+            "//evil.example/api/v1/auth/services",
+            "/api/v1/auth/services\\evil",
+            "/\\evil.example/api/v1/auth/services",
+        ] {
+            let err = prepare_api_request_path(non_local, "POST").unwrap_err();
+            assert_eq!(
+                err,
+                ApiError {
+                    status: 0,
+                    message: "API path must be local".into(),
+                    code: None,
+                },
+                "{non_local}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_root_relative_paths_are_rejected_before_routing() {
+        for server in [None, Some("media-2")] {
+            let _guard = ActiveServerGuard::new(server);
+            for path in [
+                "/api/v1/auth/a\tb",
+                "/api/v1/auth/a\nb",
+                "/api/v1/auth/a\rb",
+                "/api/v1/auth/a\x7fb",
+                "/api/v1/auth//settings",
+                "/api/v1/./auth/settings",
+                "/api/v1/peers/./status",
+                "/api/v1/admin/peers/%2E%2e",
+                "/api/v1/peers/media-2/%2e./status",
+                "/api/v1/peers/media-2/.%2E/status",
+            ] {
+                assert!(prepare_api_request_path(path, "POST").is_err(), "{path:?}");
+                assert_eq!(api_url(path), "#", "{path:?}");
+            }
+            assert!(prepare_api_request_path("/api/v1/auth/files?name=a%2F..%2Fb", "GET").is_ok());
+        }
+    }
+
+    #[test]
+    fn csrf_matches_valid_peer_prefixed_leaf_paths_without_broadening() {
+        for leaf in [
+            "auth/settings",
+            "public/auth/setup",
+            "admin/users",
+            "ingress/apps/sonarr",
+            "mcbrowser/files",
+            "fileshare/upload",
+            "oauth/authorize",
+            "share/password",
+        ] {
+            let path = format!("/api/v1/peers/media-2/{leaf}");
+            for method in ["POST", "PUT", "DELETE", "PATCH", "post"] {
+                for input in [
+                    path.clone(),
+                    format!("{path}?download=1#fragment"),
+                    format!("https://host{path}?download=1"),
+                ] {
+                    assert!(should_attach_csrf(method, &input, None), "{method} {input}");
+                    for read in ["GET", "HEAD", "OPTIONS", "get"] {
+                        assert!(!should_attach_csrf(read, &input, None), "{read} {input}");
+                    }
+                    assert!(!should_attach_csrf(method, &input, Some("Bearer token")));
+                }
+            }
+            assert!(should_attach_csrf("POST", &path, Some("Basic token")));
+        }
+
+        // Local admin peer controls remain CSRF-protected on mutations.
+        assert!(should_attach_csrf("POST", "/api/v1/admin/peers/pair", None));
+        assert!(should_attach_csrf(
+            "DELETE",
+            "/api/v1/admin/peers/media-2",
+            None
+        ));
+
+        // The managing server applies its refresh exemption only at the local endpoint.
+        assert!(should_attach_csrf(
+            "POST",
+            "/api/v1/peers/media-2/auth/refresh",
+            None
+        ));
+        assert!(should_attach_csrf(
+            "POST",
+            "/api/v1/peers/media-2/public/auth/refresh",
+            None
+        ));
+        assert!(should_attach_csrf(
+            "POST",
+            "/api/v1/peers/media-2/auth/refresh/other",
+            None
+        ));
+
+        // Unrelated, non-v1, double-prefixed, or malformed peer paths must not match.
+        for path in [
+            "/api/v1/peers/media-2",
+            "/api/v1/peers/media-2/",
+            "/api/v1/peers/media-2/unrelated",
+            "/api/v1/peers/media-2/health",
+            "/api/v1/peers/media-2/auth",
+            "/api/v1/peers/media-2/auth-other/settings",
+            "/api/v1/peers/media-2/admin-other/users",
+            "/api/v1/peers/media-2/ingress-other/apps/sonarr",
+            "/api/v1/peers/media-2/mcbrowser-other/files",
+            "/api/v1/peers/media-2/fileshare-other/upload",
+            "/api/v1/peers/media-2/oauth-other/authorize",
+            "/api/v1/peers/media-2/share-other/password",
+            "/api/v1/peers/media-2/plugins/example/action",
+            "/api/v1/peers/media-2/api/admin/users",
+            "/api/v1/peers/media-2/peers/other/admin/users",
+            "/api/v1/peers//admin/users",
+            "/api/v1/peers/./admin/users",
+            "/api/v1/peers/../admin/users",
+            "/api/v1/peers/%2e/admin/users",
+            "/api/v1/peers/%2e%2e/admin/users",
+            "/api/v1/peers/.%2e/admin/users",
+            "/api/v1/peers/%2E./admin/users",
+            "/api/v1/peers/media-2//admin/users",
+            "/api/v1/peers/media-2\\evil/admin/users",
+            "/api/v1/peers/media 2/admin/users",
+            "/api/v1/peers-other/media-2/admin/users",
+            "/api/peers/media-2/admin/users",
+            "//evil.example/api/v1/peers/media-2/admin/users",
+        ] {
+            assert!(!should_attach_csrf("POST", path, None), "{path}");
+        }
+
+        // Peer-prefixed CSRF 403 recovers once, while peer scope denial does not retry.
+        let mut retries = RequestRetries::default();
+        let peer_path = "/api/v1/peers/media-2/admin/users";
+        assert!(!retries.take_csrf_retry(
+            403,
+            "POST",
+            peer_path,
+            None,
+            &serde_json::json!({"code":"PEER_SCOPE_DENIED","message":"Read-only grant"}),
+        ));
+        assert!(retries.take_csrf_retry(
+            403,
+            "POST",
+            peer_path,
+            None,
+            &serde_json::json!({"error":"Invalid CSRF token"}),
+        ));
+        assert!(!retries.take_csrf_retry(
+            403,
+            "POST",
+            peer_path,
+            None,
+            &serde_json::json!({"error":"Invalid CSRF token"}),
+        ));
     }
 }

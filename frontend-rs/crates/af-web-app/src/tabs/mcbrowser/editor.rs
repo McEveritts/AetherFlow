@@ -782,8 +782,9 @@ pub(super) fn MediaPreview(
             <div node_ref=media_host>
                 {move || {
                     let current_path = path.get();
-                    let src = format!("{BASE}/media?path={}", encode(&current_path));
-                    let big_src = format!("{BASE}/preview/big?path={}", encode(&current_path));
+                    let encoded_path = encode(&current_path);
+                    let src = mcbrowser_media_url_encoded(&encoded_path);
+                    let big_src = mcbrowser_preview_big_url_encoded(&encoded_path);
                     match media_kind(&current_path) {
                         "image" => {
                             let alt = leaf(&current_path).to_owned();
@@ -946,7 +947,7 @@ pub(super) fn MediaPreview(
                                 .into_any()
                         }
                         "pdf" => {
-                            let download_href = format!("{BASE}/download?path={}", encode(&current_path));
+                            let download_href = mcbrowser_download_url_encoded(&encoded_path);
                             let file_name = leaf(&current_path).to_owned();
                             let download_name = file_name.clone();
                             view! {
@@ -1316,7 +1317,7 @@ pub(super) fn MediaPreview(
             <Show when=move || can_download.get()>
                 <a
                     class="glass-button inline-block px-4 py-2 mt-3"
-                    href=move || format!("{BASE}/download?path={}", encode(&path.get()))
+                    href=move || mcbrowser_download_url_encoded(&encode(&path.get()))
                     download=move || leaf(&path.get()).to_owned()
                 >
                     {move || tt(context, "Download original")}
@@ -1412,5 +1413,63 @@ mod busy_tests {
         assert_eq!(valid_book.language, "en");
         assert_eq!(valid_book.chapters[0].title, "Chapter 1");
         assert!(decode_epub_preview(&json!({"title": "broken"}), "book.epub").is_err());
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            af_web_core::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            af_web_core::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn preview_media_subtitle_and_download_urls_stay_same_origin_for_active_peer() {
+        let _guard = ActiveServerGuard::new(Some("media-2"));
+        let subs = json!({
+            "subtitles": [
+                {
+                    "url": "/api/v1/auth/mcbrowser/subtitle?path=movies%2Fclip.en.vtt",
+                    "label": "English",
+                    "language": "en"
+                },
+                {
+                    "url": "https://evil.example/inject.vtt",
+                    "label": "Evil",
+                    "language": "xx"
+                },
+                {
+                    "url": "/api/v1/peers/other/auth/mcbrowser/subtitle?path=clip.en.vtt",
+                    "label": "Spoofed",
+                    "language": "xx"
+                }
+            ]
+        });
+        let parsed_subs = parse_subtitle_tracks(&subs);
+        assert_eq!(parsed_subs.len(), 1);
+        assert_eq!(
+            parsed_subs[0].0,
+            "/api/v1/peers/media-2/auth/mcbrowser/subtitle?path=movies%2Fclip.en.vtt"
+        );
+        let video_src = mcbrowser_media_url_encoded("movies%2Fclip.mp4");
+        assert_eq!(
+            video_src,
+            "/api/v1/peers/media-2/auth/mcbrowser/media?path=movies%2Fclip.mp4"
+        );
+        assert!(video_src.starts_with('/') && !video_src.starts_with("//"));
+        assert!(parsed_subs[0].0.starts_with('/') && !parsed_subs[0].0.starts_with("//"));
+        assert_eq!(
+            mcbrowser_preview_big_url_encoded("photos%2Fhero.jpg"),
+            "/api/v1/peers/media-2/auth/mcbrowser/preview/big?path=photos%2Fhero.jpg"
+        );
+        assert_eq!(
+            mcbrowser_download_url_encoded("docs%2Fguide.pdf"),
+            "/api/v1/peers/media-2/auth/mcbrowser/download?path=docs%2Fguide.pdf"
+        );
     }
 }

@@ -3,7 +3,7 @@ use super::contracts::MediaFlowLiveProgress;
 use crate::state::{app, json_rows, use_api, TabId};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{Badge, ConfirmDialog, EmptyState, ObsCard};
-use af_web_core::api::ApiClient;
+use af_web_core::api::{api_url, ApiClient};
 use af_web_ui::SkeletonBox;
 use gloo_events::EventListener;
 use leptos::prelude::*;
@@ -383,6 +383,10 @@ pub fn MediaflowTab() -> impl IntoView {
     }
 }
 
+fn deploy_stream_url() -> String {
+    api_url("/api/v1/auth/deploy/stream?appName=mediaflow_engine")
+}
+
 #[component]
 fn MediaflowQueue(
     busy: RwSignal<bool>,
@@ -412,9 +416,8 @@ fn MediaflowQueue(
             }
         });
         stream_error.set(None);
-        let Ok(events) =
-            web_sys::EventSource::new("/api/v1/auth/deploy/stream?appName=mediaflow_engine")
-        else {
+        let stream_url = deploy_stream_url();
+        let Ok(events) = web_sys::EventSource::new(&stream_url) else {
             stream_error.set(Some("Live transcode stream could not be opened.".into()));
             stream_requested.set(false);
             return;
@@ -800,3 +803,43 @@ fn MediaflowQueue(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stream_url_tests {
+    use super::*;
+    use af_web_core::api::set_active_server;
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn deploy_stream_url_preserves_query_locally_and_routes_active_peer() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(
+            deploy_stream_url(),
+            "/api/v1/auth/deploy/stream?appName=mediaflow_engine"
+        );
+
+        set_active_server(Some("media-2".into()));
+        assert_eq!(
+            deploy_stream_url(),
+            "/api/v1/peers/media-2/auth/deploy/stream?appName=mediaflow_engine"
+        );
+
+        set_active_server(Some("peer/a b".into()));
+        assert_eq!(
+            deploy_stream_url(),
+            "/api/v1/peers/peer%2Fa%20b/auth/deploy/stream?appName=mediaflow_engine"
+        );
+    }
+}

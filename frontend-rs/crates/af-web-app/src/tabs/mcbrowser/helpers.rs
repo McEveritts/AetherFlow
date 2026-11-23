@@ -1,5 +1,5 @@
 use super::*;
-use af_web_core::api::RawResponse;
+use af_web_core::api::{api_url, RawResponse};
 
 pub(super) const BASE: &str = "/api/v1/auth/mcbrowser";
 pub(super) const DIRECT_BYTES: u64 = 64 * 1024 * 1024;
@@ -483,6 +483,22 @@ pub(super) fn parse_csv_preview(raw: &str, delimiter: char, max_rows: usize) -> 
     }
 }
 
+pub(super) fn mcbrowser_media_url_encoded(encoded_path: &str) -> String {
+    api_url(&format!("{BASE}/media?path={encoded_path}"))
+}
+
+pub(super) fn mcbrowser_preview_big_url_encoded(encoded_path: &str) -> String {
+    api_url(&format!("{BASE}/preview/big?path={encoded_path}"))
+}
+
+pub(super) fn mcbrowser_preview_thumb_url_encoded(encoded_path: &str) -> String {
+    api_url(&format!("{BASE}/preview/thumb?path={encoded_path}"))
+}
+
+pub(super) fn mcbrowser_download_url_encoded(encoded_path: &str) -> String {
+    api_url(&format!("{BASE}/download?path={encoded_path}"))
+}
+
 pub(super) fn safe_subtitle_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("/api/v1/auth/mcbrowser/subtitle?") {
@@ -491,7 +507,7 @@ pub(super) fn safe_subtitle_url(raw: &str) -> Option<String> {
     if trimmed.contains('\r') || trimmed.contains('\n') || trimmed.contains("..") {
         return None;
     }
-    Some(trimmed.to_owned())
+    Some(api_url(trimmed))
 }
 
 fn decode_windows_1252(bytes: &[u8]) -> String {
@@ -914,6 +930,79 @@ mod helper_tests {
         ] {
             assert!(safe_subtitle_url(bad).is_none(), "{bad}");
         }
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            af_web_core::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            af_web_core::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn subtitle_and_mcbrowser_direct_urls_route_active_peer_after_validation() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(
+            safe_subtitle_url("  /api/v1/auth/mcbrowser/subtitle?path=movies%2Fclip.vtt  ")
+                .as_deref(),
+            Some("/api/v1/auth/mcbrowser/subtitle?path=movies%2Fclip.vtt")
+        );
+        assert_eq!(
+            mcbrowser_media_url_encoded("movies%2Fclip%201.mp4"),
+            "/api/v1/auth/mcbrowser/media?path=movies%2Fclip%201.mp4"
+        );
+        assert_eq!(
+            mcbrowser_preview_big_url_encoded("photos%2Fimg%201.png"),
+            "/api/v1/auth/mcbrowser/preview/big?path=photos%2Fimg%201.png"
+        );
+        assert_eq!(
+            mcbrowser_preview_thumb_url_encoded("photos%2Fimg%201.png"),
+            "/api/v1/auth/mcbrowser/preview/thumb?path=photos%2Fimg%201.png"
+        );
+        assert_eq!(
+            mcbrowser_download_url_encoded("docs%2Freport%201.pdf"),
+            "/api/v1/auth/mcbrowser/download?path=docs%2Freport%201.pdf"
+        );
+
+        af_web_core::api::set_active_server(Some("media-2".into()));
+        assert_eq!(
+            safe_subtitle_url("  /api/v1/auth/mcbrowser/subtitle?path=movies%2Fclip.vtt  ")
+                .as_deref(),
+            Some("/api/v1/peers/media-2/auth/mcbrowser/subtitle?path=movies%2Fclip.vtt")
+        );
+        for bad in [
+            "https://evil.example/sub.vtt",
+            "javascript:alert(1)",
+            "//evil.example/sub.vtt",
+            "/api/v1/auth/mcbrowser/subtitle?path=../etc/passwd",
+            "/api/v1/auth/mcbrowser/subtitle?path=clip.vtt\r\nX-Test: 1",
+            "/api/v1/auth/mcbrowser/media?path=clip.vtt",
+            "/api/v1/peers/other/auth/mcbrowser/subtitle?path=clip.vtt",
+        ] {
+            assert!(safe_subtitle_url(bad).is_none(), "{bad}");
+        }
+        assert_eq!(
+            mcbrowser_media_url_encoded("movies%2Fclip%201.mp4"),
+            "/api/v1/peers/media-2/auth/mcbrowser/media?path=movies%2Fclip%201.mp4"
+        );
+        assert_eq!(
+            mcbrowser_preview_big_url_encoded("photos%2Fimg%201.png"),
+            "/api/v1/peers/media-2/auth/mcbrowser/preview/big?path=photos%2Fimg%201.png"
+        );
+        assert_eq!(
+            mcbrowser_preview_thumb_url_encoded("photos%2Fimg%201.png"),
+            "/api/v1/peers/media-2/auth/mcbrowser/preview/thumb?path=photos%2Fimg%201.png"
+        );
+        assert_eq!(
+            mcbrowser_download_url_encoded("docs%2Freport%201.pdf"),
+            "/api/v1/peers/media-2/auth/mcbrowser/download?path=docs%2Freport%201.pdf"
+        );
     }
 
     #[test]

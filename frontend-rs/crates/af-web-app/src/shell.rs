@@ -3,7 +3,7 @@ use crate::state::{
     AppContext, TabId,
 };
 use af_web_core::{
-    api::{storage_get, storage_set, ApiClient},
+    api::{api_url, storage_get, storage_set, ApiClient},
     worker::{SearchItem, SearchMatch, WorkerRequest, WorkerResponse},
     worker_pool::WorkerPool,
     ws::{BrowserConnection, ConnectionState, TransportEvent},
@@ -537,6 +537,10 @@ fn safe_avatar_src(raw: &str) -> Option<String> {
     None
 }
 
+fn account_avatar_src(raw: &str) -> Option<String> {
+    safe_avatar_src(raw).map(|src| api_url(&src))
+}
+
 fn palette_items(context: AppContext, locale: &str) -> Vec<SearchItem> {
     let is_admin = context.is_admin();
     let mut items: Vec<SearchItem> = TabId::ALL
@@ -758,7 +762,7 @@ pub fn Header() -> impl IntoView {
                             let avatar = user
                                 .as_ref()
                                 .filter(|_| !avatar_failed.get())
-                                .and_then(|u| safe_avatar_src(&u.avatar_url));
+                                .and_then(|u| account_avatar_src(&u.avatar_url));
                             let initial = user
                                 .as_ref()
                                 .and_then(|u| u.username.chars().next())
@@ -1189,6 +1193,69 @@ mod tests {
         assert_eq!(safe_avatar_src("javascript:alert(1)"), None);
         assert_eq!(safe_avatar_src("data:image/svg+xml,<svg/>"), None);
         assert_eq!(safe_avatar_src("   "), None);
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            af_web_core::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            af_web_core::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn account_avatar_src_rewrites_validated_api_paths_only_after_allowlist() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(
+            account_avatar_src("/api/v1/auth/profile/avatar"),
+            Some("/api/v1/auth/profile/avatar".into())
+        );
+
+        af_web_core::api::set_active_server(Some("media-2".into()));
+        assert_eq!(
+            account_avatar_src("/api/v1/auth/profile/avatar"),
+            Some("/api/v1/peers/media-2/auth/profile/avatar".into())
+        );
+        assert_eq!(
+            account_avatar_src("/api/v1/auth/profile/avatar?v=2"),
+            Some("/api/v1/peers/media-2/auth/profile/avatar?v=2".into())
+        );
+        assert_eq!(
+            account_avatar_src("/api/v1/peers/media-2/auth/profile/avatar"),
+            Some("/api/v1/peers/media-2/auth/profile/avatar".into())
+        );
+        assert_eq!(
+            account_avatar_src("/img/avatar.png"),
+            Some("/img/avatar.png".into())
+        );
+        assert_eq!(
+            account_avatar_src("https://example.com/a.png"),
+            Some("https://example.com/a.png".into())
+        );
+        assert_eq!(
+            account_avatar_src("data:image/png;base64,YQ=="),
+            Some("data:image/png;base64,YQ==".into())
+        );
+        assert_eq!(
+            account_avatar_src("blob:https://example.com/550e8400-e29b-41d4-a716-446655440000"),
+            Some("blob:https://example.com/550e8400-e29b-41d4-a716-446655440000".into())
+        );
+        for unsafe_url in [
+            "http://example.com/a.png",
+            "//evil.example/api/v1/auth/profile/avatar",
+            "/\\evil.example/api/v1/auth/profile/avatar",
+            "/api/v1/auth/profile/../secret",
+            "javascript:alert(1)",
+            "data:image/svg+xml,<svg/>",
+            "   ",
+        ] {
+            assert_eq!(account_avatar_src(unsafe_url), None, "{unsafe_url}");
+        }
     }
 
     #[test]

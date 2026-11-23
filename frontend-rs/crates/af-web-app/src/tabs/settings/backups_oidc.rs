@@ -1,4 +1,13 @@
 use super::*;
+use af_web_core::api::api_url;
+
+fn backup_download_path_encoded(encoded_filename: &str) -> String {
+    format!("/api/v1/admin/backup/download/{encoded_filename}")
+}
+
+fn backup_download_href(path: &str) -> String {
+    api_url(path)
+}
 
 fn backup_authorization_error(
     context: crate::state::AppContext,
@@ -153,11 +162,15 @@ pub(super) fn BackupsSettings() -> impl IntoView {
         let value = selected.get_untracked();
         let sent = draft_value(password);
         let filename = text(&value, "filename");
-        let path = format!("/api/v1/admin/backup/download/{}", encode(&filename));
+        let path = backup_download_path_encoded(&encode(&filename));
         busy.set(true);
         let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
         spawn_local(async move {
             let result = async {
+                // Capture the browser-navigation download URL synchronously with
+                // the ApiClient authorization POST so the native anchor click
+                // targets the same server/path as the one-use ticket cookie.
+                let download_href = backup_download_href(&path);
                 let pass = text(&sent, "password");
                 let body = serde_json::to_vec(&json!({"password": pass}))
                     .map_err(|error| error.to_string())?;
@@ -185,7 +198,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 // Large archives stream in the browser instead of filling Wasm memory.
                 drop(response);
                 if download_open.try_get_untracked() == Some(true) {
-                    click_download(&path, &filename)
+                    click_download(&download_href, &filename)
                 } else {
                     Err("Backup download was closed".to_string())
                 }
@@ -504,5 +517,38 @@ mod tests {
                 "Invalid staging response"
             );
         });
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            af_web_core::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            af_web_core::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn backup_download_href_routes_direct_anchor_without_pre_rewriting_api_path() {
+        let _guard = ActiveServerGuard::new(None);
+        let api_path = backup_download_path_encoded("snap%202026.sqlite");
+        assert_eq!(api_path, "/api/v1/admin/backup/download/snap%202026.sqlite");
+        assert_eq!(
+            backup_download_href(&api_path),
+            "/api/v1/admin/backup/download/snap%202026.sqlite"
+        );
+
+        af_web_core::api::set_active_server(Some("media-2".into()));
+        assert_eq!(api_path, "/api/v1/admin/backup/download/snap%202026.sqlite");
+        let peer_href = backup_download_href(&api_path);
+        assert_eq!(
+            peer_href,
+            "/api/v1/peers/media-2/admin/backup/download/snap%202026.sqlite"
+        );
+        assert_eq!(backup_download_href(&peer_href), peer_href);
     }
 }

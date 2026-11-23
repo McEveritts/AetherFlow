@@ -89,6 +89,10 @@ fn safe_avatar_url(value: &str) -> bool {
     })
 }
 
+fn profile_avatar_src(value: &str) -> Option<String> {
+    safe_avatar_url(value).then(|| af_web_core::api::api_url(value))
+}
+
 #[cfg(test)]
 mod avatar_tests {
     use super::*;
@@ -125,6 +129,27 @@ mod avatar_tests {
         ] {
             assert!(!safe_avatar_url(uri), "{uri}");
         }
+    }
+
+    #[test]
+    fn profile_avatar_routes_validated_api_urls() {
+        use af_web_core::api::set_active_server;
+
+        let path = "/api/v1/auth/profile/avatar";
+        let local = profile_avatar_src(path);
+        set_active_server(Some("media-2".into()));
+        let remote = profile_avatar_src(path);
+        let external = profile_avatar_src("https://example.com/avatar.png");
+        let rejected = profile_avatar_src("//example.com/avatar.png");
+        set_active_server(None);
+
+        assert_eq!(local.as_deref(), Some(path));
+        assert_eq!(
+            remote.as_deref(),
+            Some("/api/v1/peers/media-2/auth/profile/avatar")
+        );
+        assert_eq!(external.as_deref(), Some("https://example.com/avatar.png"));
+        assert_eq!(rejected, None);
     }
 }
 
@@ -589,8 +614,8 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
             <div class="flex flex-wrap items-center gap-4 mb-4">
                 {move || {
                     let avatar = context.user.with(|user| user.as_ref().map(|user| text(user, "avatar_url")).unwrap_or_default());
-                    if safe_avatar_url(&avatar) {
-                        view! { <img src=avatar alt=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl object-cover border border-white/10" /> }.into_any()
+                    if let Some(src) = profile_avatar_src(&avatar) {
+                        view! { <img src=src alt=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl object-cover border border-white/10" /> }.into_any()
                     } else {
                         view! { <div role="img" aria-label=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl border border-white/10 flex items-center justify-center text-xl">
                             {move || context.user.with(|user| user.as_ref().and_then(|user| text(user, "username").chars().next()).map(|c| c.to_uppercase().to_string()).unwrap_or_default())}

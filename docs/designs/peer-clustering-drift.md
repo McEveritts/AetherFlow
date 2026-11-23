@@ -53,6 +53,18 @@ Files 12, 17, 18, 22, 30 and 32 spell out the portions applied in each phase. P7
 
 - The P0 reviewer identified unbounded request IDs and gaps in direct CRUD test coverage. The coordinator bounded IDs to 128 ASCII identifier bytes, reused one header value for request and response, and extended the existing tests. Existing short identifier values keep their correlation behavior.
 
+## P1 direct URL audit
+
+The file 7 scan confirmed more direct authenticated browser URLs in `af-web-app/src/tabs/mcbrowser/editor.rs` and `af-web-app/src/tabs/mcbrowser/mod.rs`, including media, previews, thumbnails and downloads. The P1 app lane owns these files for that scope. The Streaming history and portability exports already use `ApiClient::fetch_raw_body_with_signal` and get the core rewrite there. Public anonymous shares preserve their existing destinations.
+
+- Dashboard sign-in, session lookup, refresh, sign-out, CSRF issuance, credential changes, OIDC consent and pairing use the managing server. The authenticated request builder also handles those calls, so P1 explicitly keeps their destinations local during a peer selection. P6 must preserve this session when an upstream peer rejects authorization and hide local password, 2FA and session controls in the remote Settings view.
+- The P1 review found that browser URL normalization can change the destination of a malformed path. Reject controls, backslashes, duplicate API separators and browser-normalized dot segments before prefixing or sending a request. The direct URL helper substitutes a same-page fragment for malformed root-relative input. Refresh CSRF exemptions apply only to the local endpoint, matching the server middleware.
+- The Profile Security avatar is also a direct browser request and now uses `api_url` after validation.
+- The Plugin Sandbox iframe and its message bridge stay local. P5 denies the remote iframe route. P6 closes an open local sandbox on a reactive server switch.
+- Backup download initiation already uses `ApiClient`. P1 captures the corresponding native download URL when starting the POST so the GET goes to the same server. P6 must scope the download ticket cookie and use the grant for remote step-up without forwarding the local password.
+- P6 must teach the McBrowser tus client to accept the selected peer's upload path in a rewritten `Location` response.
+- When P6 enables reactive switching, fence asynchronous telemetry, McBrowser subtitle loading and backup downloads by server selection. Check that remote update readiness polls the selected server's authenticated readiness endpoint.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.
@@ -123,11 +135,11 @@ A cited location beyond the current file length is marked **Past EOF**. The corr
 | `frontend-rs/crates/af-web-core/src/ws.rs:L280` | Telemetry ticket request through `ApiClient` | Same target. |
 | `frontend-rs/crates/af-web-core/src/ws.rs:L307-311` | Telemetry socket URL format | Same target. The current core has one WebSocket constructor. |
 | `frontend-rs/crates/af-web-app/src/tabs/mediaflow.rs:L374` | Component fallback markup | `tabs/mediaflow.rs:416`, direct deploy EventSource URL. |
-| `frontend-rs/crates/af-web-app/src/shell.rs:L1172` | Direct profile avatar URL | Same target. |
+| `frontend-rs/crates/af-web-app/src/shell.rs:L1172` | Profile avatar safety test | The production avatar source is `shell.rs:761`. Rewrite the validated API URL at that caller. |
 | `frontend-rs/crates/af-web-app/src/tabs/fileshare/local_storage.rs:L578` | Fileshare download URL format | Same target. |
 | `frontend-rs/crates/af-web-app/src/tabs/mcbrowser/helpers.rs:L488` | Subtitle URL allowlist check | Same target. `safe_subtitle_url` is a validator at 486–495. Keep validation when routing the eventual request. |
 | `frontend-rs/crates/af-web-app/src/tabs/streaming/live.rs:L67` | Streaming artwork URL | Same target. |
-| `frontend-rs/crates/af-web-app/src/tabs/settings/backups_oidc.rs:L123` | Early `return` | `tabs/settings/backups_oidc.rs:156`, direct backup download URL. |
+| `frontend-rs/crates/af-web-app/src/tabs/settings/backups_oidc.rs:L123` | Early `return` | `tabs/settings/backups_oidc.rs:156` builds the download path. The POST already uses `ApiClient::fetch_raw_body`. Route the subsequent native download anchor through `api_url`. |
 | `setup/modules/00-core.sh:L117-129` | Later distro-reporting logic | `setup/modules/00-core.sh:95–112`, Debian trixie detection in the os-release and lsb_release paths. |
 | `docs/API.md:L116-126` | FlowAI table tail and cluster section header | `docs/API.md:122–142`, all of section 8, including added worker-receipt notes. |
 | `docs/configuration.md:L114-115` | Release-related configuration flags | `docs/configuration.md:117–118`, `CLUSTER_MODE` and `CLUSTER_PSK`. |

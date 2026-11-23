@@ -668,10 +668,9 @@ pub fn McBrowserTab() -> impl IntoView {
                                                 && media_kind(&row_path) == "image"
                                                 && size <= MAX_THUMBNAIL_SOURCE_BYTES
                                             {
-                                                Some(format!(
-                                                    "{BASE}/preview/thumb?path={}",
-                                                    encode(&row_path)
-                                                ))
+                                                Some(mcbrowser_preview_thumb_url_encoded(&encode(
+                                                    &row_path,
+                                                )))
                                             } else {
                                                 None
                                             }
@@ -784,9 +783,8 @@ pub fn McBrowserTab() -> impl IntoView {
                                                     .with_value(|row| {
                                                         (row["kind"] != "directory")
                                                             .then(|| {
-                                                                let href = format!(
-                                                                    "{BASE}/download?path={}",
-                                                                    encode(&text(row, "path")),
+                                                                let href = mcbrowser_download_url_encoded(
+                                                                    &encode(&text(row, "path")),
                                                                 );
                                                                 view! {
                                                                     <Show when=move || can("download")>
@@ -967,5 +965,41 @@ mod tests {
         assert!(!TransferStatus::Uncertain.terminal());
         assert!(!TransferStatus::Paused.terminal());
         assert!(!TransferStatus::Failed.terminal());
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            af_web_core::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            af_web_core::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn grid_thumbnail_and_download_urls_route_active_peer_and_preserve_local() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(
+            mcbrowser_preview_thumb_url_encoded("gallery%2Fshot%201.png"),
+            "/api/v1/auth/mcbrowser/preview/thumb?path=gallery%2Fshot%201.png"
+        );
+        assert_eq!(
+            mcbrowser_download_url_encoded("gallery%2Fshot%201.png"),
+            "/api/v1/auth/mcbrowser/download?path=gallery%2Fshot%201.png"
+        );
+
+        af_web_core::api::set_active_server(Some("media-2".into()));
+        assert_eq!(
+            mcbrowser_preview_thumb_url_encoded("gallery%2Fshot%201.png"),
+            "/api/v1/peers/media-2/auth/mcbrowser/preview/thumb?path=gallery%2Fshot%201.png"
+        );
+        assert_eq!(
+            mcbrowser_download_url_encoded("gallery%2Fshot%201.png"),
+            "/api/v1/peers/media-2/auth/mcbrowser/download?path=gallery%2Fshot%201.png"
+        );
     }
 }

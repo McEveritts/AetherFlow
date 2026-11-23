@@ -4,7 +4,7 @@ use super::types::*;
 use crate::state::app;
 use crate::tabs::contracts;
 use crate::tabs::l10n::{tt, tt_with, Badge, ConfirmDialog, Drawer, EmptyState, Modal, ObsCard};
-use af_web_core::api::{percent_encode_header_component, ApiClient};
+use af_web_core::api::{api_url, percent_encode_header_component, ApiClient};
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -63,9 +63,9 @@ pub(super) fn session_artwork_url(
     let encoded_item = percent_encode_header_component(item_id);
     let encoded_provider = percent_encode_header_component(&provider);
     let encoded_server = percent_encode_header_component(&resolved_server_id);
-    Some(format!(
+    Some(api_url(&format!(
         "/api/v1/auth/streaming/artwork/{encoded_item}?provider={encoded_provider}&serverId={encoded_server}"
-    ))
+    )))
 }
 
 pub(super) fn has_connected_live_provider(servers: &[ProviderStatus]) -> bool {
@@ -967,6 +967,50 @@ mod tests {
             Some("/api/v1/auth/streaming/artwork/ok-1?provider=plex&serverId=srv-plex-1")
         );
 
+        session.provider = "demo".into();
+        assert_eq!(session_artwork_url(&session, &servers), None);
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            af_web_core::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            af_web_core::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn scoped_artwork_url_routes_active_peer_and_preserves_encoded_validation() {
+        let _guard = ActiveServerGuard::new(Some("media-2"));
+        let servers = vec![ProviderStatus {
+            provider: "jellyfin".into(),
+            server_id: "srv/jf 1".into(),
+            status: "connected".into(),
+            ..Default::default()
+        }];
+        let mut session = PlaybackSession {
+            provider: "Jellyfin".into(),
+            has_artwork: true,
+            artwork_item_id: "item 123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            session_artwork_url(&session, &servers).as_deref(),
+            Some(
+                "/api/v1/peers/media-2/auth/streaming/artwork/item%20123?provider=jellyfin&serverId=srv%2Fjf%201"
+            )
+        );
+
+        for bad in ["", "../secret", "a/b", "a\\b"] {
+            session.artwork_item_id = bad.into();
+            assert_eq!(session_artwork_url(&session, &servers), None, "{bad}");
+        }
+        session.artwork_item_id = "ok-1".into();
         session.provider = "demo".into();
         assert_eq!(session_artwork_url(&session, &servers), None);
     }

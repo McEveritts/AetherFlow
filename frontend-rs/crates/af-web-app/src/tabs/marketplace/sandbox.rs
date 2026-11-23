@@ -1,4 +1,9 @@
 use super::*;
+use af_web_core::api::active_server;
+
+fn plugin_sandbox_is_local() -> bool {
+    active_server().is_none()
+}
 
 pub(super) fn message_value(value: JsValue) -> Result<Value, String> {
     js_sys::JSON::stringify(&value)
@@ -30,7 +35,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
     let listener = StoredValue::new_local(None::<EventListener>);
     if let Some(window) = web_sys::window() {
         listener.set_value(Some(EventListener::new(&window,"message",move|event|{
-            if !sandbox.get_untracked(){return;}
+            if !plugin_sandbox_is_local() || !sandbox.get_untracked(){return;}
             let Some(event)=event.dyn_ref::<web_sys::MessageEvent>()else{return;};
             let Some(frame)=iframe.get().and_then(|iframe|iframe.content_window())else{return;};
             if event.origin() != "null" || !event.source().is_some_and(|source|js_sys::Object::is(&source,&frame)){return;}
@@ -67,11 +72,12 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
             };
             spawn_local(async move{
                 let _permit=permit;
+                if !plugin_sandbox_is_local(){return;}
                 let reply=match ApiClient.request(&endpoint,&method,body.as_ref()).await{
                     Ok(payload)=>json!({"type":"AF_PLUGIN_PROXY_RESPONSE","pluginId":id,"requestId":request_id,"ok":true,"status":200,"payload":payload}),
                     Err(e)=>proxy_error(&id,request_id,e.status,&e.message),
                 };
-                if mounted.try_with_untracked(|p|p.as_ref().is_some_and(|p|p["id"]==id)).unwrap_or(false)&&sandbox.try_get_untracked()==Some(true){post_plugin(&frame,reply);}
+                if plugin_sandbox_is_local() && mounted.try_with_untracked(|p|p.as_ref().is_some_and(|p|p["id"]==id)).unwrap_or(false)&&sandbox.try_get_untracked()==Some(true){post_plugin(&frame,reply);}
             });
         })));
     }
@@ -248,10 +254,12 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                                             type="button"
                                             data-testid=format!("open-plugin-ui-{id}")
                                             class="glass-button-primary px-4 py-2 min-h-11"
-                                            disabled=!enabled
+                                            disabled=move || !enabled || !plugin_sandbox_is_local()
                                             on:click=move |_| {
-                                                mounted.set(Some(open_plugin.clone()));
-                                                sandbox.set(true);
+                                                if plugin_sandbox_is_local() {
+                                                    mounted.set(Some(open_plugin.clone()));
+                                                    sandbox.set(true);
+                                                }
                                             }
                                         >
                                             {move || tt(context, "Open UI")}
@@ -282,6 +290,9 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                     {move || tt(context, "Close Sandbox")}
                 </button>
                 {move || {
+                    if !plugin_sandbox_is_local() {
+                        return None;
+                    }
                     mounted
                         .get()
                         .map(|plugin| {
@@ -310,6 +321,18 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_sandbox_is_available_only_on_the_local_server() {
+        use af_web_core::api::set_active_server;
+
+        assert!(plugin_sandbox_is_local());
+        set_active_server(Some("media-2".into()));
+        let available_on_peer = plugin_sandbox_is_local();
+        set_active_server(None);
+        assert!(!available_on_peer);
+        assert!(plugin_sandbox_is_local());
+    }
 
     #[test]
     fn proxy_failures_preserve_request_identity_and_status() {

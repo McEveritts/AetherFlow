@@ -6,7 +6,7 @@ use super::upload::{browser_error, stream_upload, upload_id, MAX_UPLOAD_BYTES};
 use crate::state::{app, use_api};
 use crate::tabs::l10n::{tt, tt_with, ConfirmDialog, EmptyState, ObsCard};
 use crate::tabs::settings::{bytes, ResourceFeedback};
-use af_web_core::api::ApiClient;
+use af_web_core::api::{api_url, ApiClient};
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 #[component]
@@ -57,6 +57,12 @@ pub(crate) fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
             </Show>
         </div>
     }
+}
+
+fn fileshare_download_url_encoded(encoded_name: &str, encoded_path: &str) -> String {
+    api_url(&format!(
+        "/api/v1/auth/fileshare/download/{encoded_name}?path={encoded_path}"
+    ))
 }
 
 #[component]
@@ -574,10 +580,9 @@ pub(super) fn LocalStorage() -> impl IntoView {
                                                                     <a
                                                                         class="glass-button px-3 py-2"
                                                                         href=move || {
-                                                                            format!(
-                                                                                "/api/v1/auth/fileshare/download/{}?path={}",
-                                                                                encode(&download_name),
-                                                                                encode(&current_path.get()),
+                                                                            fileshare_download_url_encoded(
+                                                                                &encode(&download_name),
+                                                                                &encode(&current_path.get()),
                                                                             )
                                                                         }
                                                                         download=""
@@ -651,5 +656,45 @@ pub(super) fn LocalStorage() -> impl IntoView {
                     })
             }}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use af_web_core::api::set_active_server;
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn fileshare_download_url_preserves_encoded_query_and_routes_active_peer() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(
+            fileshare_download_url_encoded("archive%201.zip", "%2Fmnt%2Fmedia"),
+            "/api/v1/auth/fileshare/download/archive%201.zip?path=%2Fmnt%2Fmedia"
+        );
+
+        set_active_server(Some("media-2".into()));
+        assert_eq!(
+            fileshare_download_url_encoded("archive%201.zip", "%2Fmnt%2Fmedia"),
+            "/api/v1/peers/media-2/auth/fileshare/download/archive%201.zip?path=%2Fmnt%2Fmedia"
+        );
+
+        set_active_server(Some("peer/a b".into()));
+        assert_eq!(
+            fileshare_download_url_encoded("archive%201.zip", "%2Fmnt%2Fmedia"),
+            "/api/v1/peers/peer%2Fa%20b/auth/fileshare/download/archive%201.zip?path=%2Fmnt%2Fmedia"
+        );
     }
 }

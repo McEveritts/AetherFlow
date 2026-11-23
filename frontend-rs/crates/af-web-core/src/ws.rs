@@ -20,6 +20,45 @@ pub const POLL_INTERVAL_MS: u64 = 5_000;
 pub const CONNECT_DEADLINE_MS: u64 = 8_000;
 pub const MAX_FAILURES_BEFORE_POLLING: u32 = 3;
 pub const MAX_FAILURES: u32 = MAX_FAILURES_BEFORE_POLLING;
+
+const TELEMETRY_WS_TICKET_PATH: &str = "/api/v1/auth/ws/ticket";
+const TELEMETRY_WS_PATH: &str = "/api/v1/auth/ws";
+
+fn telemetry_ticket_path() -> String {
+    crate::api::api_url(TELEMETRY_WS_TICKET_PATH)
+}
+
+fn telemetry_socket_path() -> String {
+    crate::api::api_url(TELEMETRY_WS_PATH)
+}
+
+fn ws_protocol(location_protocol: &str) -> &'static str {
+    if location_protocol == "https:" {
+        "wss"
+    } else {
+        "ws"
+    }
+}
+
+fn build_ws_url(location_protocol: &str, host: &str, resolved_path: &str, ticket: &str) -> String {
+    let protocol = ws_protocol(location_protocol);
+    let encoded_ticket = crate::api::percent_encode_header_component(ticket);
+    let (without_fragment, fragment) = match resolved_path.split_once('#') {
+        Some((before, frag)) => (before, Some(frag)),
+        None => (resolved_path, None),
+    };
+    let sep = if without_fragment.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    match fragment {
+        Some(frag) => {
+            format!("{protocol}://{host}{without_fragment}{sep}ticket={encoded_ticket}#{frag}")
+        }
+        None => format!("{protocol}://{host}{without_fragment}{sep}ticket={encoded_ticket}"),
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConnectionState {
@@ -276,8 +315,10 @@ mod browser {
         *inner.ticket_abort.borrow_mut() = Some(abort);
         arm_connect_deadline(&inner, generation);
         spawn_local(async move {
+            let ticket_path = telemetry_ticket_path();
+            let socket_path = telemetry_socket_path();
             let result = Abortable::new(
-                ApiClient.get_typed::<WsTicketResponse>("/api/v1/auth/ws/ticket"),
+                ApiClient.get_typed::<WsTicketResponse>(&ticket_path),
                 registration,
             )
             .await;
@@ -299,16 +340,9 @@ mod browser {
                 failed(&inner);
                 return;
             };
-            let protocol = if window.location().protocol().unwrap_or_default() == "https:" {
-                "wss"
-            } else {
-                "ws"
-            };
-            let url = format!(
-                "{protocol}://{}/api/v1/auth/ws?ticket={}",
-                window.location().host().unwrap_or_default(),
-                js_sys::encode_uri_component(&ticket)
-            );
+            let protocol = window.location().protocol().unwrap_or_default();
+            let host = window.location().host().unwrap_or_default();
+            let url = build_ws_url(&protocol, &host, &socket_path, &ticket);
             let socket = match web_sys::WebSocket::new(&url) {
                 Ok(socket) => socket,
                 Err(_) => {
@@ -622,5 +656,168 @@ mod tests {
         assert_eq!(e.failures, 0);
         e.stop();
         assert!(e.tick(u64::MAX - 1).is_empty());
+    }
+
+    struct ActiveServerGuard;
+    impl ActiveServerGuard {
+        fn new(server: Option<&str>) -> Self {
+            crate::api::set_active_server(server.map(str::to_string));
+            Self
+        }
+    }
+    impl Drop for ActiveServerGuard {
+        fn drop(&mut self) {
+            crate::api::set_active_server(None);
+        }
+    }
+
+    #[test]
+    fn telemetry_ticket_and_socket_urls_follow_active_server_and_preserve_origin() {
+        let _guard = ActiveServerGuard::new(None);
+
+        assert_eq!(telemetry_ticket_path(), "/api/v1/auth/ws/ticket");
+        assert_eq!(telemetry_socket_path(), "/api/v1/auth/ws");
+        assert_eq!(
+            build_ws_url(
+                "https:",
+                "panel.example:8443",
+                &telemetry_socket_path(),
+                "tok+1/="
+            ),
+            "wss://panel.example:8443/api/v1/auth/ws?ticket=tok%2B1%2F%3D"
+        );
+        assert_eq!(
+            build_ws_url("http:", "127.0.0.1:8080", &telemetry_socket_path(), "plain"),
+            "ws://127.0.0.1:8080/api/v1/auth/ws?ticket=plain"
+        );
+
+        crate::api::set_active_server(Some("media-2".into()));
+        let ticket_path = telemetry_ticket_path();
+        assert_eq!(ticket_path, "/api/v1/peers/media-2/auth/ws/ticket");
+        // Passing the rewritten ticket path into ApiClient's api_url stays single-prefixed.
+        assert_eq!(
+            crate::api::api_url(&ticket_path),
+            "/api/v1/peers/media-2/auth/ws/ticket"
+        );
+        assert_eq!(telemetry_socket_path(), "/api/v1/peers/media-2/auth/ws");
+        assert_eq!(
+            build_ws_url(
+                "https:",
+                "panel.example:8443",
+                &telemetry_socket_path(),
+                "tok+1/="
+            ),
+            "wss://panel.example:8443/api/v1/peers/media-2/auth/ws?ticket=tok%2B1%2F%3D"
+        );
+        assert_eq!(
+            build_ws_url("http:", "127.0.0.1:8080", &telemetry_socket_path(), "plain"),
+            "ws://127.0.0.1:8080/api/v1/peers/media-2/auth/ws?ticket=plain"
+        );
+
+        crate::api::set_active_server(None);
+        assert_eq!(telemetry_ticket_path(), "/api/v1/auth/ws/ticket");
+        assert_eq!(telemetry_socket_path(), "/api/v1/auth/ws");
+        assert_eq!(
+            build_ws_url("https:", "panel.example", &telemetry_socket_path(), "plain"),
+            "wss://panel.example/api/v1/auth/ws?ticket=plain"
+        );
+    }
+
+    #[test]
+    fn log_websocket_url_rewrites_via_api_url_and_preserves_query_and_host() {
+        let _guard = ActiveServerGuard::new(None);
+
+        let local_logs = crate::api::api_url("/api/v1/auth/ws/logs");
+        assert_eq!(local_logs, "/api/v1/auth/ws/logs");
+        assert_eq!(
+            build_ws_url("https:", "panel.example", &local_logs, "t1"),
+            "wss://panel.example/api/v1/auth/ws/logs?ticket=t1"
+        );
+        let local_logs_query =
+            crate::api::api_url("/api/v1/auth/ws/logs?unit=jellyfin.service&lines=200");
+        assert_eq!(
+            build_ws_url("https:", "panel.example", &local_logs_query, "t1"),
+            "wss://panel.example/api/v1/auth/ws/logs?unit=jellyfin.service&lines=200&ticket=t1"
+        );
+
+        crate::api::set_active_server(Some("media-2".into()));
+        let peer_logs = crate::api::api_url("/api/v1/auth/ws/logs");
+        assert_eq!(peer_logs, "/api/v1/peers/media-2/auth/ws/logs");
+        assert_eq!(
+            crate::api::api_url(&peer_logs),
+            "/api/v1/peers/media-2/auth/ws/logs"
+        );
+        assert_eq!(
+            build_ws_url("https:", "panel.example", &peer_logs, "t1"),
+            "wss://panel.example/api/v1/peers/media-2/auth/ws/logs?ticket=t1"
+        );
+        let peer_logs_query =
+            crate::api::api_url("/api/v1/auth/ws/logs?unit=jellyfin.service&lines=200");
+        assert_eq!(
+            build_ws_url("http:", "127.0.0.1:8080", &peer_logs_query, "t1"),
+            "ws://127.0.0.1:8080/api/v1/peers/media-2/auth/ws/logs?unit=jellyfin.service&lines=200&ticket=t1"
+        );
+
+        crate::api::set_active_server(None);
+        assert_eq!(
+            crate::api::api_url("/api/v1/auth/ws/logs"),
+            "/api/v1/auth/ws/logs"
+        );
+    }
+
+    #[test]
+    fn malformed_active_server_ids_preserve_websocket_authority_and_segments() {
+        let _guard = ActiveServerGuard::new(None);
+
+        for raw_id in [
+            "peer/evil",
+            "../admin",
+            "//evil.example",
+            "https://evil.example",
+            "@evil.example",
+            "peer\\evil",
+            "peer?x=1#frag",
+        ] {
+            crate::api::set_active_server(Some(raw_id.into()));
+            let url = build_ws_url(
+                "https:",
+                "panel.example:8443",
+                &telemetry_socket_path(),
+                "t1",
+            );
+            let parsed = url::Url::parse(&url).unwrap();
+            assert_eq!(parsed.scheme(), "wss", "{raw_id:?}");
+            assert_eq!(parsed.host_str(), Some("panel.example"), "{raw_id:?}");
+            assert_eq!(parsed.port(), Some(8443), "{raw_id:?}");
+            assert_eq!(parsed.query(), Some("ticket=t1"), "{raw_id:?}");
+            let expected_segment = crate::api::percent_encode_header_component(raw_id);
+            let segments: Vec<&str> = parsed.path_segments().unwrap().collect();
+            assert_eq!(
+                segments,
+                vec![
+                    "api",
+                    "v1",
+                    "peers",
+                    expected_segment.as_str(),
+                    "auth",
+                    "ws"
+                ],
+                "{raw_id:?}"
+            );
+        }
+
+        for dot_or_blank in ["", "   ", ".", ".."] {
+            crate::api::set_active_server(Some(dot_or_blank.into()));
+            let url = build_ws_url(
+                "https:",
+                "panel.example:8443",
+                &telemetry_socket_path(),
+                "t1",
+            );
+            assert_eq!(
+                url, "wss://panel.example:8443/api/v1/auth/ws?ticket=t1",
+                "{dot_or_blank:?}"
+            );
+        }
     }
 }
