@@ -190,6 +190,32 @@ id = "generic-api-key"
   regexes = ['''^nd1We7dFW2RqxPw8$''']
 
   [[rules.allowlists]]
+  description = "Shell variable assignment following empty ENV_FILE_GITHUB_TOKEN initializer in release-manager.sh"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^deploy/release-manager\.sh$''']
+  regexes = ['''^EFFECTIVE_SKIP_PROVENANCE_VERIFY=$''']
+
+  [[rules.allowlists]]
+  description = "Historical synthetic sequential-hex ruTorrent proxy token fixture in middleware unit test"
+  condition = "AND"
+  regexTarget = "secret"
+  commits = [
+    '''45ea145693e7edc35bef8d8635bd359a499cc494''',
+    '''8d1bb7228b3148528f6b0d9203aca4665c9cb37d''',
+  ]
+  paths = ['''^backend-rs/crates/af-api/src/middlewares/tests\.rs$''']
+  regexes = ['''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''']
+
+  [[rules.allowlists]]
+  description = "Historical serde deserialize_with attribute false positive after isOauth alias in contracts.rs"
+  condition = "AND"
+  regexTarget = "secret"
+  commits = ['''fda09f793e808399e8b3acb13159377cf9fe052d''']
+  paths = ['''^frontend-rs/crates/af-web-app/src/tabs/contracts\.rs$''']
+  regexes = ['''^deserialize_with=$''']
+
+  [[rules.allowlists]]
   description = "RFC 4648 Base32 alphabet string in legacy 2017 ruTorrent util.php base32decode helper"
   condition = "AND"
   regexTarget = "secret"
@@ -236,7 +262,7 @@ id = "curl-auth-header"
   description = "Exact synthetic header canary in the final lifecycle masking regression"
   condition = "AND"
   regexTarget = "secret"
-  paths = ['''^backend-rs/crates/af-services/src/package_jobs\.rs$''']
+  paths = ['''^backend-rs/crates/af-services/src/package_jobs(?:/unit_tests)?\.rs$''']
   regexes = ['''^FRAGMENT_CANARY$''']
 
   [[rules.allowlists]]
@@ -257,11 +283,11 @@ id = "curl-auth-user"
     '''^backend-rs/crates/af-api/src/(?:routes|ws)\.rs$''',
     '''^backend-rs/crates/af-api/src/ws/telemetry_tests\.rs$''',
     '''^backend-rs/crates/af-api/src/routes/tests(?:/marketplace_catalog)?\.rs$''',
-    '''^backend-rs/crates/af-release/src/lifecycle\.rs$''',
+    '''^backend-rs/crates/af-release/src/lifecycle(?:/tests/redaction_tests)?\.rs$''',
     '''^backend-rs/crates/af-runner/src/package_lifecycle\.rs$''',
-    '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests\.rs$''',
-    '''^backend-rs/crates/af-services/src/(?:package_jobs|workers)\.rs$''',
-    '''^backend-rs/crates/af-services/src/workers/tests\.rs$''',
+    '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests(?:/redaction_and_receipts)?\.rs$''',
+    '''^backend-rs/crates/af-services/src/(?:package_jobs(?:/unit_tests)?|workers)\.rs$''',
+    '''^backend-rs/crates/af-services/src/workers/tests(?:/discovery_and_pagination)?\.rs$''',
   ]
   regexes = [
     '''^admin:(?:mysecret123|hunter2|synthetic-secret|secret_pass|secret|supersecret|super_secret_curl|SECRET)$''',

@@ -50,6 +50,8 @@ def rebase_root(source: str, root: Path) -> str:
     replacements.extend([
         (":-/install}", f":-{root_str}/install}}"),
         ('"/install"', f'"{root_str}/install"'),
+        ("mkdir -p /install\n", f"mkdir -p {root_str}/install\n"),
+        ("mkdir -p /install ", f"mkdir -p {root_str}/install "),
     ])
     return replace_paths_once(source, replacements)
 

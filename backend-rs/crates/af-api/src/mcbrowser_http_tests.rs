@@ -1036,6 +1036,17 @@ async fn host_filesystem_listing_rejects_nonadmins_before_disclosing_service_bac
 
     let _guard = TEST_DATABASE_LOCK.lock().await;
     let fixture = HttpFixture::new();
+    struct AllowedFsRootsGuard(Option<std::ffi::OsString>);
+    impl Drop for AllowedFsRootsGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => env::set_var("AF_ALLOWED_FS_ROOTS", value),
+                None => env::remove_var("AF_ALLOWED_FS_ROOTS"),
+            }
+        }
+    }
+    let _allowed_fs_roots_guard = AllowedFsRootsGuard(env::var_os("AF_ALLOWED_FS_ROOTS"));
+    env::set_var("AF_ALLOWED_FS_ROOTS", &fixture.directory);
     let service_directory = fixture.directory.join("streaming-backup-private");
     fs::create_dir(&service_directory).unwrap();
     fs::set_permissions(&service_directory, fs::Permissions::from_mode(0o700)).unwrap();
