@@ -8,6 +8,8 @@ Features:
 - B23: App Topology Map Boundaries
 """
 
+import os
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 OVERVIEW_WIDGETS = "frontend-rs/crates/af-web-app/src/tabs/overview/widgets.rs"
@@ -79,7 +81,15 @@ class TestB19ExtremeSpikeMetricsHandled(TestCase):
         super().__init__("T2_B19_05", "F19", 2, "Sparkline scaling clamps extreme 100% CPU or 10Gbps spikes cleanly")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B19: Sparkline clamping contract verified")
+        charts = inspector.read_file("frontend-rs/crates/af-web-core/src/charts.rs") or ""
+        self.assert_true(
+            "pub fn build_sparkline_path(" in charts
+            and ".clamp(0.0, width)" in charts
+            and ".clamp(0.0, height)" in charts
+            and "span.abs() < f64::EPSILON" in charts
+            and "is_finite()" in charts,
+            "B19: charts.rs must clamp sparkline coordinates and guard zero/non-finite denominator spans",
+        )
 
 
 class TestB20PathSelectorTraversalBlockedInUi(TestCase):
@@ -258,7 +268,15 @@ class TestB22ProfileNameXssNeutralized(TestCase):
         super().__init__("T2_B22_05", "F22", 2, "Usernames containing HTML tags (<script>) are rendered safely as text")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B22: Leptos DOM text-node escaping contract verified")
+        checked = []
+        settings_dir = os.path.join(inspector.root, "frontend-rs/crates/af-web-app/src/tabs/settings")
+        for fname in sorted(os.listdir(settings_dir)):
+            if fname.endswith(".rs"):
+                checked.append(f"frontend-rs/crates/af-web-app/src/tabs/settings/{fname}")
+        checked.append("frontend-rs/crates/af-web-app/src/shell.rs")
+        for rel in checked:
+            src = inspector.read_file(rel) or ""
+            self.assert_not_in("inner_html", src, f"B22: {rel} must not use unsafe inner_html bindings for user/profile rendering")
 
 
 class TestB23TopologyApiFailureFallback(TestCase):

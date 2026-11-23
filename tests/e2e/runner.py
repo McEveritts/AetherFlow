@@ -19,11 +19,10 @@ from .tier4_realworld import get_tier4_tests
 
 class TestRunner:
     def __init__(self, mode: str = "contract", base_url: str = "http://localhost:8080",
-                 socket_path: str = "/run/aetherflow/runner.sock", verbose: bool = False,
+                 verbose: bool = False,
                  tier_filter: int = 0, feature_filter: str = "", fail_fast: bool = False):
         self.mode = mode
         self.base_url = base_url
-        self.socket_path = socket_path
         self.verbose = verbose
         self.tier_filter = tier_filter
         self.feature_filter = feature_filter.upper()
@@ -67,7 +66,6 @@ class TestRunner:
         print("=" * 80)
         print(f" Execution Mode : {self.mode.upper()}")
         print(f" Target URL     : {self.base_url}")
-        print(f" Socket Path    : {self.socket_path}")
         print(f" Discovered     : {len(self.all_tests)} tests across Tiers 1-4")
         if self.tier_filter:
             print(f" Tier Filter    : Tier {self.tier_filter}")
@@ -319,7 +317,6 @@ def main():
     parser.add_argument("--feature", type=str, default="", help="Filter by feature ID (e.g. F01)")
     parser.add_argument("--mode", type=str, choices=["contract", "live", "mock"], default="contract", help="Execution mode")
     parser.add_argument("--url", type=str, default="http://localhost:8080", help="Base URL for live tests")
-    parser.add_argument("--socket", type=str, default="/run/aetherflow/runner.sock", help="Runner socket path")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose test output")
     parser.add_argument("--fail-fast", action="store_true", help="Stop execution on first failure")
     parser.add_argument("--json-out", type=str, default="", help="Path to write JSON test metrics")
@@ -329,7 +326,6 @@ def main():
     runner = TestRunner(
         mode=args.mode,
         base_url=args.url,
-        socket_path=args.socket,
         verbose=args.verbose,
         tier_filter=args.tier,
         feature_filter=args.feature,

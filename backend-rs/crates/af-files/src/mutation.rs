@@ -464,12 +464,10 @@ impl BrowserFs {
             .st_dev;
 
         let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
-        let mut parent_fd =
-            openat_no_symlinks(self.root_fd.as_raw_fd(), c".", dir_flags, 0).map_err(|error| {
-                RemovalError {
-                    removed_bytes: 0,
-                    error,
-                }
+        let mut parent_fd = openat_no_symlinks(self.root_fd.as_raw_fd(), c".", dir_flags, 0)
+            .map_err(|error| RemovalError {
+                removed_bytes: 0,
+                error,
             })?;
         let mut rel_path = PathBuf::new();
         for &comp in parent_components {
@@ -478,7 +476,13 @@ impl BrowserFs {
                 removed_bytes: 0,
                 error: Error::new(ErrorKind::InvalidInput, "path contains NUL"),
             })?;
-            match open_dir(parent_fd.as_raw_fd(), c_comp.as_c_str(), dir_flags, 0, root_dev) {
+            match open_dir(
+                parent_fd.as_raw_fd(),
+                c_comp.as_c_str(),
+                dir_flags,
+                0,
+                root_dev,
+            ) {
                 Ok(next_fd) => parent_fd = next_fd,
                 Err(err) if is_mount_boundary_error(&err) => {
                     return Ok(RemoveTreeOutcome {

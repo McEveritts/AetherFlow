@@ -123,9 +123,7 @@ pub(super) fn is_rate_limit_disabled_for_env(
         return false;
     }
     if aetherflow_env.is_some_and(crate::auth::is_production_or_release_env) {
-        tracing::warn!(
-            "AF_DISABLE_RATELIMIT ignored because AETHERFLOW_ENV is production/release"
-        );
+        tracing::warn!("AF_DISABLE_RATELIMIT ignored because AETHERFLOW_ENV is production/release");
         return false;
     }
     true

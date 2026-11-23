@@ -289,10 +289,11 @@ fn cgroup_v2_and_systemd_version_preflight_enforces_minimum_249() {
         Err(PluginRunnerError::IsolationUnavailable(_))
     ));
     // Unified cgroup v2 + systemd >= 249 passes
-    assert!(
-        validate_systemd_cgroup_v2_and_version(&present, "systemd 249 (249.11-0ubuntu3)\n+PAM")
-            .is_ok()
-    );
+    assert!(validate_systemd_cgroup_v2_and_version(
+        &present,
+        "systemd 249 (249.11-0ubuntu3)\n+PAM"
+    )
+    .is_ok());
     assert!(validate_systemd_cgroup_v2_and_version(
         &present,
         "systemd 256 (256.5-2ubuntu3)\n+PAM +AUDIT"

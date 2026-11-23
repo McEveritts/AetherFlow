@@ -1,6 +1,4 @@
-use super::{
-    consume_live_ws_ticket, issue_ws_ticket_for_session, websocket_message_for_session,
-};
+use super::{consume_live_ws_ticket, issue_ws_ticket_for_session, websocket_message_for_session};
 
 #[test]
 fn websocket_progress_filters_installer_output_per_recipient() {

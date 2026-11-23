@@ -788,4 +788,77 @@ mod tests {
             assert!(merge_warn.contains("Merging will not restore"));
         });
     }
+
+    fn parse_portability_contract_fixture(
+        raw: &str,
+    ) -> Result<(super::super::types::PortableArchive, ArchivePreview, Value), String> {
+        let root: Value = serde_json::from_str(raw)
+            .map_err(|e| format!("malformed portability fixture JSON: {e}"))?;
+        let obj = root
+            .as_object()
+            .ok_or_else(|| "portability fixture root must be a JSON object".to_string())?;
+        let archive_val = obj
+            .get("archive")
+            .ok_or_else(|| "portability fixture missing 'archive'".to_string())?;
+        let preview_val = obj
+            .get("preview")
+            .ok_or_else(|| "portability fixture missing 'preview'".to_string())?;
+        let restored_val = obj
+            .get("restored")
+            .ok_or_else(|| "portability fixture missing 'restored'".to_string())?;
+        if !restored_val.is_object() {
+            return Err("portability fixture 'restored' must be a JSON object".to_string());
+        }
+        let archive: super::super::types::PortableArchive =
+            serde_json::from_value(archive_val.clone())
+                .map_err(|e| format!("failed to decode portability fixture archive: {e}"))?;
+        let preview: ArchivePreview = serde_json::from_value(preview_val.clone())
+            .map_err(|e| format!("failed to decode portability fixture preview: {e}"))?;
+        Ok((archive, preview, restored_val.clone()))
+    }
+
+    #[test]
+    fn streaming_portability_fixture_decodes_archive_preview_and_restored() {
+        let from_env = std::env::var_os("AF_STREAMING_PORTABILITY_FIXTURE");
+        let raw = if let Some(path) = &from_env {
+            std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "AF_STREAMING_PORTABILITY_FIXTURE={:?} unreadable (fail-closed): {e}",
+                    path
+                )
+            })
+        } else {
+            json!({
+                "archive": {
+                    "manifest": {
+                        "format": "aetherflow.streaming-history",
+                        "formatVersion": 1,
+                        "recordCounts": { "history": 1 }
+                    },
+                    "data": { "history": [] }
+                },
+                "preview": {
+                    "mode": "merge",
+                    "approvalToken": "inline-approval-token",
+                    "archiveCounts": { "history": 1 },
+                    "targetCounts": { "history": 0 },
+                    "plan": { "insert": { "history": 1 } },
+                    "conflicts": [],
+                    "expiresAt": "2026-12-01T00:00:00Z"
+                },
+                "restored": { "status": "ok" }
+            })
+            .to_string()
+        };
+
+        let (archive, preview, restored) = parse_portability_contract_fixture(&raw)
+            .expect("AF_STREAMING_PORTABILITY_FIXTURE must decode cleanly");
+        assert_eq!(archive.manifest.format, "aetherflow.streaming-history");
+        assert!(!preview.approval_token.is_empty());
+        assert!(restored.is_object());
+
+        // Verify fail-closed rejection on malformed/missing-slot JSON.
+        assert!(parse_portability_contract_fixture("{bad").is_err());
+        assert!(parse_portability_contract_fixture(r#"{"archive":{}}"#).is_err());
+    }
 }

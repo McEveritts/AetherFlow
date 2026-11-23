@@ -878,15 +878,12 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
             }
 
             if rec_ok {
-                let trusted_ancestor_uid = if uses_service_data_dir_ownership(
-                    None,
-                    &rec.destination_path,
-                    rec.kind,
-                ) {
-                    options.trusted_sqlite_uid
-                } else {
-                    None
-                };
+                let trusted_ancestor_uid =
+                    if uses_service_data_dir_ownership(None, &rec.destination_path, rec.kind) {
+                        options.trusted_sqlite_uid
+                    } else {
+                        None
+                    };
 
                 if rec.kind == BackupTargetKind::SqliteSnapshot {
                     let (wal_path, shm_path) = sqlite_sidecar_paths(&rec.destination_path);

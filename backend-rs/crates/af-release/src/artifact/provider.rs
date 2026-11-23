@@ -115,8 +115,8 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
         );
 
         let token = config.github_auth_token_str();
-        let body = run_blocking_http_get_text(&url, Duration::from_secs(15), token)
-            .unwrap_or_default();
+        let body =
+            run_blocking_http_get_text(&url, Duration::from_secs(15), token).unwrap_or_default();
         match select_release_tag_from_json(channel, &body) {
             Ok(tag) => Ok(tag),
             Err(api_err) if channel == ReleaseChannel::Stable => {
@@ -179,9 +179,9 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
             run_blocking_http_get_text(&checksum_url, Duration::from_secs(30), token).map_err(
                 |e| {
                     ReleaseError::ArtifactVerification(format!(
-                        "Missing SHA256SUMS manifest for release {} ({}). Refusing unverified binary.",
-                        tag, e
-                    ))
+                "Missing SHA256SUMS manifest for release {} ({}). Refusing unverified binary.",
+                tag, e
+            ))
                 },
             )?;
         let checksum_dest = staging_dir.join(&config.checksum_name);
@@ -271,10 +271,7 @@ pub(super) fn is_trusted_github_auth_url(url: &reqwest::Url) -> bool {
     false
 }
 
-fn resolve_github_auth_token_for_url(
-    url: &str,
-    configured_token: Option<&str>,
-) -> Option<String> {
+fn resolve_github_auth_token_for_url(url: &str, configured_token: Option<&str>) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     if !is_trusted_github_auth_url(&parsed) {
         return None;
@@ -364,12 +361,8 @@ fn run_blocking_http_get_text(
     timeout: Duration,
     configured_token: Option<&str>,
 ) -> ReleaseResult<String> {
-    let bytes = run_blocking_http_get_bytes_capped(
-        url,
-        timeout,
-        MAX_RELEASE_TEXT_BYTES,
-        configured_token,
-    )?;
+    let bytes =
+        run_blocking_http_get_bytes_capped(url, timeout, MAX_RELEASE_TEXT_BYTES, configured_token)?;
     String::from_utf8(bytes).map_err(|e| {
         ReleaseError::ArtifactVerification(format!("invalid UTF-8 response from {}: {}", url, e))
     })

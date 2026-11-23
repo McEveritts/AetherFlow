@@ -2315,5 +2315,6 @@
   "Permanently delete retained AetherFlow-managed data, configuration, secrets, and allocated port for this uninstalled application. This cannot be undone.": "永久删除此已卸载应用中由 AetherFlow 管理的保留数据、配置、密钥和已分配端口。此操作无法撤销。",
   "Purge retained data": "清除保留数据",
   "Purge retained data for {name}": "清除 {name} 的保留数据",
-  "Retained data": "保留数据"
+  "Retained data": "保留数据",
+  "Reset atmosphere defaults": "重置氛围默认设置"
 }

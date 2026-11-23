@@ -766,7 +766,9 @@ impl ReleaseConfig {
                 github_token_keys.iter().find_map(|key| {
                     parsed_entries
                         .get(*key)
-                        .filter(|entry| !entry.is_default_fallback && !entry.value.trim().is_empty())
+                        .filter(|entry| {
+                            !entry.is_default_fallback && !entry.value.trim().is_empty()
+                        })
                         .map(|entry| entry.value.trim().to_string())
                 })
             })
@@ -790,8 +792,7 @@ impl ReleaseConfig {
         cfg.github_auth_token = resolved_token.map(RedactedSecret::new);
 
         cfg.skip_provenance_verify =
-            resolve_with_env_file("AETHERFLOW_SKIP_PROVENANCE_VERIFY", true)
-                .as_deref()
+            resolve_with_env_file("AETHERFLOW_SKIP_PROVENANCE_VERIFY", true).as_deref()
                 == Some("1");
 
         cfg.validate()?;
@@ -1215,11 +1216,7 @@ pub fn parse_conf_str(content: &str, script_dir: Option<&Path>) -> HashMap<Strin
 }
 
 fn load_env_file_if_enabled(path: &Path, env_map: &HashMap<String, String>) -> Option<String> {
-    if env_map
-        .get("AETHERFLOW_SKIP_ENV_FILES")
-        .map(|v| v.trim())
-        == Some("1")
-    {
+    if env_map.get("AETHERFLOW_SKIP_ENV_FILES").map(|v| v.trim()) == Some("1") {
         return None;
     }
     let meta = fs::symlink_metadata(path).ok()?;

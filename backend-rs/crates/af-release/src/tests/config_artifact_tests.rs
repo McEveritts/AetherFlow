@@ -810,8 +810,8 @@ fn test_unified_env_file_precedence_redaction_and_root_only_provenance_bypass() 
     )
     .unwrap();
     let empty_env = HashMap::new();
-    let cfg = ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &empty_env)
-        .unwrap();
+    let cfg =
+        ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &empty_env).unwrap();
     assert_eq!(cfg.health_endpoint, "http://127.0.0.1:9091/health/ready");
     assert_eq!(cfg.github_auth_token_str(), Some(secret_token));
     assert!(
@@ -863,7 +863,10 @@ fn test_unified_env_file_precedence_redaction_and_root_only_provenance_bypass() 
     );
     let cfg_proc =
         ReleaseConfig::load_for_root_with_env(Some(root), Some(&explicit_conf), &proc_env).unwrap();
-    assert_eq!(cfg_proc.health_endpoint, "http://127.0.0.1:8083/health/ready");
+    assert_eq!(
+        cfg_proc.health_endpoint,
+        "http://127.0.0.1:8083/health/ready"
+    );
     assert_eq!(
         cfg_proc.github_auth_token_str(),
         Some("ghp_proc_env_override_token")
@@ -874,15 +877,17 @@ fn test_unified_env_file_precedence_redaction_and_root_only_provenance_bypass() 
     skip_env.insert("AETHERFLOW_SKIP_ENV_FILES".to_string(), "1".to_string());
     let cfg_skip =
         ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &skip_env).unwrap();
-    assert_eq!(cfg_skip.health_endpoint, "http://127.0.0.1:8080/health/ready");
+    assert_eq!(
+        cfg_skip.health_endpoint,
+        "http://127.0.0.1:8080/health/ready"
+    );
     assert_eq!(cfg_skip.github_auth_token_str(), None);
     assert!(!cfg_skip.skip_provenance_verify);
 
     // 5. Group-writable env file cannot enable AETHERFLOW_SKIP_PROVENANCE_VERIFY
     fs::set_permissions(&env_file, fs::Permissions::from_mode(0o660)).unwrap();
     let cfg_untrusted =
-        ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &empty_env)
-            .unwrap();
+        ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &empty_env).unwrap();
     assert!(
         !cfg_untrusted.skip_provenance_verify,
         "group-writable env file must not enable AETHERFLOW_SKIP_PROVENANCE_VERIFY"
@@ -910,8 +915,10 @@ fn test_stage4_rollback_completes_when_log_retention_service_fails_and_logs_warn
     std::os::unix::fs::symlink(&prev_dir, &cfg.current_link).unwrap();
     let db_path = cfg.data_dir.join(&cfg.sqlite_db);
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch("CREATE TABLE items (id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1);")
-        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1);",
+    )
+    .unwrap();
     drop(conn);
 
     // Build a synthetic candidate release tarball that fails its health check to trigger Stage 4 rollback
@@ -927,11 +934,7 @@ fn test_stage4_rollback_completes_when_log_retention_service_fails_and_logs_warn
                 b"<html>candidate</html>",
                 EntryType::Regular,
             ),
-            (
-                "web/dist/app.wasm",
-                b"\0asm\x01\0\0\0",
-                EntryType::Regular,
-            ),
+            ("web/dist/app.wasm", b"\0asm\x01\0\0\0", EntryType::Regular),
         ],
     );
     let provider = super::MockArtifactProvider {

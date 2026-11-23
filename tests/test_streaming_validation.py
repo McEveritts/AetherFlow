@@ -25,6 +25,8 @@ class StreamingValidationTests(unittest.TestCase):
             "PATH": f"{self.tools}:{os.environ['PATH']}",
             "AF_TEST_CALLS": str(self.calls),
             "AF_TEST_MISSING_FIXTURE": "0",
+            "AF_TEST_MISSING_ARCHIVE_FIXTURE": "0",
+            "AF_TEST_MISSING_PORTABILITY_FIXTURE": "0",
             "AF_TEST_FAIL_INTEGRATED": "0",
             "AF_TEST_HANG_TYPESCRIPT": "0",
             "AF_STREAMING_CHECK_TIMEOUT": "10s",
@@ -40,6 +42,14 @@ fi
             "cargo": '''printf 'cargo %s\\n' "$*" >> "$AF_TEST_CALLS"
 if [[ "$*" == *"streaming_ext::tests"* && "$AF_TEST_MISSING_FIXTURE" != 1 ]]; then
   printf '{}' > "$AF_STREAMING_CONTRACT_FIXTURE"
+fi
+if [[ "$*" == *" streaming_ "* ]]; then
+  if [[ "$AF_TEST_MISSING_ARCHIVE_FIXTURE" != 1 ]]; then
+    printf '{}' > "$AF_STREAMING_ARCHIVE_FIXTURE"
+  fi
+  if [[ "$AF_TEST_MISSING_PORTABILITY_FIXTURE" != 1 ]]; then
+    printf '{}' > "$AF_STREAMING_PORTABILITY_FIXTURE"
+  fi
 fi
 if [[ ( "$*" == *"-p af-api -- --test-threads=1"* || "$*" == *"build --manifest-path backend-rs/Cargo.toml --locked -p af-api"* ) && "$AF_TEST_FAIL_INTEGRATED" == 1 ]]; then
   exit 1
@@ -68,14 +78,31 @@ fi
         self.assertNotIn("-p af-api -- --test-threads=1", calls)
         self.assertIn("PASS typescript", result.stdout)
         self.assertEqual(len(list((self.root / "dist").glob("*/rust-dashboard.json"))), 1)
+        self.assertEqual(len(list((self.root / "dist").glob("*/rust-archive.json"))), 1)
+        self.assertEqual(len(list((self.root / "dist").glob("*/rust-portability.json"))), 1)
 
     def test_missing_fixture_fails_instead_of_silently_skipping_contracts(self):
-        self.environment["AF_TEST_MISSING_FIXTURE"] = "1"
-        result = self.run_gate()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("FAIL rust-contract-fixture", result.stdout)
-        self.assertNotIn("cargo test --manifest-path frontend-rs/Cargo.toml", self.calls.read_text())
-        self.assertIn("PASS typescript", result.stdout)
+        for env_flag, expected_name in [
+            ("AF_TEST_MISSING_FIXTURE", "AF_STREAMING_CONTRACT_FIXTURE"),
+            ("AF_TEST_MISSING_ARCHIVE_FIXTURE", "AF_STREAMING_ARCHIVE_FIXTURE"),
+            ("AF_TEST_MISSING_PORTABILITY_FIXTURE", "AF_STREAMING_PORTABILITY_FIXTURE"),
+        ]:
+            with self.subTest(missing=env_flag):
+                self.calls.unlink(missing_ok=True)
+                env_copy = dict(self.environment)
+                env_copy[env_flag] = "1"
+                result = subprocess.run(
+                    ["bash", str(self.root / "scripts/validate-streaming.sh")],
+                    env=env_copy,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("FAIL rust-contract-fixture", result.stdout)
+                self.assertIn(expected_name, result.stdout)
+                self.assertNotIn("cargo test --manifest-path frontend-rs/Cargo.toml", self.calls.read_text())
+                self.assertIn("PASS typescript", result.stdout)
 
     def test_integrated_failures_do_not_hide_remaining_gates(self):
         self.environment["AF_TEST_FAIL_INTEGRATED"] = "1"

@@ -62,7 +62,11 @@ class TestB13PrintStylesDegradeCleanly(TestCase):
         super().__init__("T2_B13_05", "F13", 2, "Print media query disables heavy background radial gradients")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B13: Print style degradation contract verified")
+        css = inspector.read_file(INPUT_CSS) or ""
+        self.assert_true(
+            "@media print" in css and "background-image: none" in css and "animation: none" in css,
+            "B13: input.css must declare @media print rules disabling radial gradients and animations",
+        )
 
 
 class TestB14PrefersReducedMotionRespected(TestCase):
@@ -200,7 +204,11 @@ class TestB16TouchScrollPhysicsEnabled(TestCase):
         super().__init__("T2_B16_05", "F16", 2, "Horizontal scroll containers use smooth touch scrolling")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B16: Touch scroll physics contract verified")
+        css = inspector.read_file(INPUT_CSS) or ""
+        self.assert_true(
+            "overflow-x: auto;" in css and "-webkit-overflow-scrolling: touch;" in css,
+            "B16: input.css must define horizontal scroll containers with smooth touch scrolling",
+        )
 
 
 class TestB17ZeroPercentAuroraOpacity(TestCase):
@@ -217,7 +225,15 @@ class TestB17HundredPercentAuroraOpacity(TestCase):
         super().__init__("T2_B17_02", "F17", 2, "Setting aurora opacity to 100% does not wash out foreground text")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B17: 100% aurora opacity contrast contract verified")
+        prefs = inspector.read_file("frontend-rs/crates/af-web-app/src/state/preferences.rs") or ""
+        css = inspector.read_file(INPUT_CSS) or ""
+        self.assert_true(
+            "quantize_aurora_opacity_pct" in prefs
+            and ".clamp(0.0, 100.0)" in prefs
+            and "z-index: -2" in css
+            and "--obs-aurora-opacity" in css,
+            "B17: aurora opacity must be clamped and isolated to background layers without degrading foreground text contrast",
+        )
 
 
 class TestB17CorruptedLocalStorageFallback(TestCase):
@@ -234,7 +250,15 @@ class TestB17HighFrequencyToggleNoMemoryLeak(TestCase):
         super().__init__("T2_B17_04", "F17", 2, "Rapidly toggling grain or animation does not leak event listeners or timers")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B17: High frequency toggle stability contract verified")
+        state = inspector.read_file(STATE_RS) or ""
+        self.assert_true(
+            "pub fn set_aurora_animation(" in state and "pub fn set_grain_display(" in state,
+            "B17: state.rs must expose reactive atmosphere toggles",
+        )
+        start = state.index("pub fn set_aurora_animation(")
+        snippet = state[start:start + 600]
+        self.assert_not_in("set_interval", snippet, "B17: atmosphere toggle must not register leaked timers")
+        self.assert_not_in("add_event_listener", snippet, "B17: atmosphere toggle must not register leaked listeners")
 
 
 class TestB17ResetToDefaultsRestoresObsidianTokens(TestCase):
@@ -242,7 +266,16 @@ class TestB17ResetToDefaultsRestoresObsidianTokens(TestCase):
         super().__init__("T2_B17_05", "F17", 2, "Reset button restores original Obsidian V2 default values")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B17: Settings reset contract verified")
+        state = inspector.read_file(STATE_RS) or ""
+        settings_ui = inspector.read_file("frontend-rs/crates/af-web-app/src/tabs/settings/mod.rs") or ""
+        self.assert_true(
+            "pub fn reset_atmosphere_defaults(" in state
+            and 'self.set_theme("dark")' in state
+            and "self.set_aurora_opacity(55)" in state
+            and "settings-atmosphere-reset" in settings_ui
+            and "context.reset_atmosphere_defaults()" in settings_ui,
+            "B17: appearance settings must provide a reset handler restoring default Obsidian V2 tokens",
+        )
 
 
 class TestB18DisabledButtonState(TestCase):

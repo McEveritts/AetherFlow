@@ -840,4 +840,61 @@ mod tests {
         assert_eq!(recorded("en", &json!({}), "codec"), "Unrecorded");
         assert_eq!(recorded("en", &json!({"codec":"h264"}), "codec"), "h264");
     }
+
+    fn parse_archive_contract_fixture(raw: &str) -> Result<(HistoryPage, HistoryPage), String> {
+        let root: Value = serde_json::from_str(raw)
+            .map_err(|e| format!("malformed archive fixture JSON: {e}"))?;
+        let obj = root
+            .as_object()
+            .ok_or_else(|| "archive fixture root must be a JSON object".to_string())?;
+        let decode_page = |key: &str| -> Result<HistoryPage, String> {
+            let slot = obj
+                .get(key)
+                .ok_or_else(|| format!("archive fixture missing required '{key}' page"))?;
+            if !slot.is_object() {
+                return Err(format!("archive fixture '{key}' page must be an object"));
+            }
+            serde_json::from_value::<HistoryPage>(slot.clone())
+                .map_err(|e| format!("failed to decode archive fixture '{key}' HistoryPage: {e}"))
+        };
+        Ok((decode_page("administrative")?, decode_page("linked")?))
+    }
+
+    #[test]
+    fn streaming_archive_fixture_decodes_administrative_and_linked_pages() {
+        let from_env = std::env::var_os("AF_STREAMING_ARCHIVE_FIXTURE");
+        let raw = if let Some(path) = &from_env {
+            std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "AF_STREAMING_ARCHIVE_FIXTURE={:?} unreadable (fail-closed): {e}",
+                    path
+                )
+            })
+        } else {
+            json!({
+                "administrative": {
+                    "items": [{ "id": 1, "provider": "jellyfin", "itemName": "Title A", "provenance": "observed" }],
+                    "counts": { "matchingRecords": 1, "confirmedPlays": 1 },
+                    "scope": { "permissionScope": "administrative", "snapshotToken": "snap-admin" }
+                },
+                "linked": {
+                    "items": [{ "id": 1, "provider": "jellyfin", "itemName": "Title A", "provenance": "observed" }],
+                    "counts": { "matchingRecords": 1, "confirmedPlays": 1 },
+                    "scope": { "permissionScope": "linked", "snapshotToken": "snap-linked" }
+                }
+            })
+            .to_string()
+        };
+
+        let (administrative, linked) = parse_archive_contract_fixture(&raw)
+            .expect("AF_STREAMING_ARCHIVE_FIXTURE must decode cleanly");
+        assert!(!administrative.items.is_empty());
+        assert!(!linked.items.is_empty());
+        assert!(!administrative.scope.snapshot_token.is_empty());
+        assert!(!linked.scope.snapshot_token.is_empty());
+
+        // Verify fail-closed rejection on malformed/missing-slot JSON.
+        assert!(parse_archive_contract_fixture("not-json").is_err());
+        assert!(parse_archive_contract_fixture(r#"{"administrative":{}}"#).is_err());
+    }
 }

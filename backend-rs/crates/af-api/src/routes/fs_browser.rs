@@ -139,6 +139,13 @@ pub(super) fn browse_host_directories(q: FsQuery) -> Response {
             "Path query parameter is required",
         );
     }
+    if raw_path.contains('\0') {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_PATH",
+            "Path query parameter must not contain null bytes",
+        );
+    }
     let p = PathBuf::from(raw_path);
     if !p.exists() && fs::symlink_metadata(&p).is_err() {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Directory not found");

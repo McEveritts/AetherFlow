@@ -622,7 +622,11 @@ impl LifecycleController for SystemdLifecycleController {
 
         run_systemctl(&config.log_file, &["daemon-reload"], true)?;
 
-        let _ = run_systemctl(&config.log_file, &["stop", "aetherflow-frontend.service"], false);
+        let _ = run_systemctl(
+            &config.log_file,
+            &["stop", "aetherflow-frontend.service"],
+            false,
+        );
         let _ = run_systemctl(
             &config.log_file,
             &["disable", "aetherflow-frontend.service"],
@@ -652,11 +656,7 @@ impl LifecycleController for SystemdLifecycleController {
             true,
         )?;
 
-        run_post_restart_log_retention_with_bin(
-            Path::new("systemctl"),
-            config,
-            has_log_retention,
-        );
+        run_post_restart_log_retention_with_bin(Path::new("systemctl"), config, has_log_retention);
         Ok(())
     }
 

@@ -715,4 +715,73 @@ mod tests {
         assert_eq!(rows[3].1, 1);
         assert!((rows[3].2 - 10.0).abs() < 0.01);
     }
+
+    fn parse_dashboard_contract_fixture(
+        raw: &str,
+    ) -> Result<(Dashboard, Dashboard, Dashboard), String> {
+        let root: Value = serde_json::from_str(raw)
+            .map_err(|e| format!("malformed contract fixture JSON: {e}"))?;
+        let obj = root
+            .as_object()
+            .ok_or_else(|| "contract fixture root must be a JSON object".to_string())?;
+        let decode_slot = |key: &str| -> Result<Dashboard, String> {
+            let slot = obj
+                .get(key)
+                .ok_or_else(|| format!("contract fixture missing required '{key}' payload"))?;
+            if !slot.is_object() {
+                return Err(format!(
+                    "contract fixture '{key}' payload must be an object"
+                ));
+            }
+            serde_json::from_value::<Dashboard>(slot.clone())
+                .map_err(|e| format!("failed to decode contract fixture '{key}' Dashboard: {e}"))
+        };
+        Ok((
+            decode_slot("empty")?,
+            decode_slot("populated")?,
+            decode_slot("sessions")?,
+        ))
+    }
+
+    #[test]
+    fn streaming_contract_fixture_decodes_backend_dashboard_payloads() {
+        let from_env = std::env::var_os("AF_STREAMING_CONTRACT_FIXTURE");
+        let raw = if let Some(path) = &from_env {
+            std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "AF_STREAMING_CONTRACT_FIXTURE={:?} unreadable (fail-closed): {e}",
+                    path
+                )
+            })
+        } else {
+            json!({
+                "empty": {
+                    "servers": [],
+                    "activeSessions": [],
+                    "analytics": { "windowDays": 30, "totalPlays": 0 }
+                },
+                "populated": {
+                    "servers": [{ "provider": "jellyfin", "name": "Jellyfin", "status": "connected" }],
+                    "activeSessions": [],
+                    "analytics": { "windowDays": 30, "totalPlays": 2 }
+                },
+                "sessions": {
+                    "servers": [],
+                    "activeSessions": [{ "provider": "jellyfin", "sessionId": "s-1", "itemName": "Demo", "state": "playing" }],
+                    "analytics": { "windowDays": 30, "totalPlays": 0 }
+                }
+            })
+            .to_string()
+        };
+
+        let (empty, populated, sessions) = parse_dashboard_contract_fixture(&raw)
+            .expect("AF_STREAMING_CONTRACT_FIXTURE must decode cleanly");
+        assert_eq!(empty.analytics.total_plays, 0);
+        assert!(populated.analytics.total_plays > 0);
+        assert!(!sessions.active_sessions.is_empty());
+
+        // Verify fail-closed rejection on malformed/missing-slot JSON.
+        assert!(parse_dashboard_contract_fixture("{not json").is_err());
+        assert!(parse_dashboard_contract_fixture(r#"{"empty":{}}"#).is_err());
+    }
 }

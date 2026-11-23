@@ -1138,8 +1138,16 @@ fn canonical_root_preflight_and_staged_restore_allow_and_clamp_service_secret_fi
 
     let master_creds = host_root.join("var/lib/aetherflow/.master.creds");
     let oidc_pem = host_root.join("var/lib/aetherflow/oidc_rsa.pem");
-    fs::write(&master_creds, b"{\"username\":\"admin\",\"password\":\"enc:v1:abc\"}\n").unwrap();
-    fs::write(&oidc_pem, b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n").unwrap();
+    fs::write(
+        &master_creds,
+        b"{\"username\":\"admin\",\"password\":\"enc:v1:abc\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &oidc_pem,
+        b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1226,7 +1234,9 @@ fn canonical_root_preflight_and_staged_restore_allow_and_clamp_service_secret_fi
             ..Default::default()
         },
     )
-    .expect("staged preflight must pass for default archive containing .master.creds & oidc_rsa.pem");
+    .expect(
+        "staged preflight must pass for default archive containing .master.creds & oidc_rsa.pem",
+    );
     assert!(staged_plan
         .items
         .iter()
@@ -1257,8 +1267,16 @@ fn canonical_root_preflight_and_staged_restore_allow_and_clamp_service_secret_fi
         ] {
             let restored = stage_root.join(rel);
             assert!(restored.is_file(), "missing restored {rel}");
-            let mode = fs::symlink_metadata(&restored).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{rel} must be clamped to 0600, got {:04o}", mode);
+            let mode = fs::symlink_metadata(&restored)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "{rel} must be clamped to 0600, got {:04o}",
+                mode
+            );
         }
     }
 }

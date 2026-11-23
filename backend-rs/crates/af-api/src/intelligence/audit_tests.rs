@@ -696,7 +696,10 @@ async fn anthropic_local_uses_messages_protocol_and_credentials() {
         .recv()
         .await
         .expect("expected request to /v1/messages");
-    assert_eq!(api_key, "fixture-local-key");
+    assert!(
+        api_key.is_empty(),
+        "anthropic-local must never forward stored cloud anthropic_api_key; got {api_key:?}"
+    );
     assert_eq!(version, "2023-06-01");
     assert_eq!(body["model"], "local-claude-sonnet");
 
@@ -857,4 +860,254 @@ async fn test_ai_connection_honors_unsaved_anthropic_drafts_and_returns_bad_gate
     assert_eq!(err_resp.status(), StatusCode::BAD_GATEWAY);
 
     server.abort();
+}
+
+#[tokio::test]
+async fn esc04_flowai_self_target_guard_default_port_and_cloud_rbac() {
+    use super::ai_providers::{is_self_target_ai_endpoint_with, DEFAULT_ANTHROPIC_LOCAL_ENDPOINT};
+    use crate::auth::AuthUser;
+    use axum::http::{header, Method};
+    use tower::ServiceExt;
+
+    assert_eq!(DEFAULT_ANTHROPIC_LOCAL_ENDPOINT, "http://127.0.0.1:8081");
+
+    // 1. Self-target detection across loopback, IPv4-mapped IPv6, unspecified, BIND_ADDR, and implicit ports.
+    for blocked in [
+        "http://localhost:8080",
+        "http://LOCALHOST:8080/v1",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.2:8080",
+        "http://[::1]:8080",
+        "http://[::ffff:127.0.0.1]:8080",
+        "http://0.0.0.0:8080",
+        "http://[::]:8080",
+    ] {
+        assert!(
+            is_self_target_ai_endpoint_with(blocked, 8080, None),
+            "expected self-target rejection for {blocked}"
+        );
+    }
+    assert!(!is_self_target_ai_endpoint_with(
+        DEFAULT_ANTHROPIC_LOCAL_ENDPOINT,
+        8080,
+        None
+    ));
+    assert!(is_self_target_ai_endpoint_with(
+        "http://localhost",
+        80,
+        None
+    ));
+    assert!(is_self_target_ai_endpoint_with(
+        "https://127.0.0.1",
+        443,
+        None
+    ));
+    assert!(is_self_target_ai_endpoint_with(
+        "http://192.168.1.50:9090",
+        9090,
+        Some("192.168.1.50")
+    ));
+    assert!(!is_self_target_ai_endpoint_with(
+        "http://192.168.1.50:9091",
+        9090,
+        Some("192.168.1.50")
+    ));
+
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    init_ai_test_settings();
+    std::env::remove_var("PORT");
+    std::env::remove_var("BIND_ADDR");
+    std::env::remove_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS");
+
+    let admin = AuthUser {
+        user_id: 940,
+        username: "esc04-admin".into(),
+        role: "admin".into(),
+        jti: String::new(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+    let non_admin = AuthUser {
+        user_id: 941,
+        username: "esc04-user".into(),
+        role: "user".into(),
+        jti: String::new(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+
+    // 2. Save-time settings validation rejects self-target URLs with 400 AI_SELF_TARGET_REJECTED.
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO users (id, username, role) VALUES (940, 'esc04-admin', 'admin')",
+            [],
+        )
+        .unwrap();
+    }
+    let mut hdrs = axum::http::HeaderMap::new();
+    hdrs.insert(header::USER_AGENT, "esc04-ua".parse().unwrap());
+    let (admin_jwt, admin_claims) = crate::auth::create_standard_jwt(940, &hdrs).unwrap();
+    af_db::get_conn()
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, last_active, expires_at) VALUES (?1, 940, '127.0.0.1', 'esc04-ua', datetime('now'), datetime('now', '+1 hour'))",
+            [&admin_claims.jti],
+        )
+        .unwrap();
+    let app = crate::routes::build_router();
+    for bad_ep in [
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://0.0.0.0:8080",
+        "http://[::1]:8080",
+    ] {
+        let payload = serde_json::json!({
+            "aiModel": "gemini-4-argon",
+            "localProvider": "anthropic-local",
+            "localModel": "qwen2.5-coder:7b",
+            "systemPrompt": "",
+            "language": "en",
+            "timezone": "UTC",
+            "updateChannel": "stable",
+            "defaultDashboard": "overview",
+            "setupCompleted": true,
+            "baseDomain": "",
+            "geminiApiKey": "",
+            "openaiApiKey": "",
+            "lmStudioEndpoint": "",
+            "ollamaEndpoint": "",
+            "anthropicApiKey": "",
+            "anthropicEndpoint": bad_ep,
+        });
+        let req = axum::http::Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/admin/settings")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::USER_AGENT, "esc04-ua")
+            .header(header::AUTHORIZATION, format!("Bearer {admin_jwt}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "save {bad_ep}");
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("AI_SELF_TARGET_REJECTED"),
+            "save {bad_ep}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    // 3. Probe-time test_ai_connection rejects self-target URLs with 400 AI_SELF_TARGET_REJECTED.
+    let probe_resp = test_ai_connection(
+        axum::Extension(admin.clone()),
+        Json(serde_json::json!({
+            "provider": "anthropic-local",
+            "endpoint": "http://[::ffff:127.0.0.1]:8080",
+            "model": "qwen2.5-coder:7b",
+        })),
+    )
+    .await;
+    assert_eq!(probe_resp.status(), StatusCode::BAD_REQUEST);
+    let probe_body = axum::body::to_bytes(probe_resp.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&probe_body).contains("AI_SELF_TARGET_REJECTED"));
+
+    // 4. Outbound chat dispatch rejects stored self-target URLs with 400 AI_SELF_TARGET_REJECTED.
+    af_db::get_conn()
+        .unwrap()
+        .execute(
+            "UPDATE settings SET ollama_endpoint = 'http://localhost:8080' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    let chat_self = run_chat_session(
+        Some(admin.clone()),
+        "",
+        "",
+        "",
+        "llama3.2",
+        "ollama",
+        vec![],
+        "hi".to_string(),
+    )
+    .await;
+    assert_eq!(chat_self.status(), StatusCode::BAD_REQUEST);
+    let chat_self_body = axum::body::to_bytes(chat_self.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&chat_self_body).contains("AI_SELF_TARGET_REJECTED"));
+
+    // 5. Paid cloud provider dispatch is admin-only by default (403 AI_PROVIDER_ADMIN_ONLY).
+    af_db::get_conn()
+        .unwrap()
+        .execute(
+            "UPDATE settings SET anthropic_endpoint = '', anthropic_api_key = 'sk-cloud-key' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    for (provider, model) in [
+        ("openai", "gpt-4o"),
+        ("gemini", "gemini-4-argon"),
+        ("anthropic", "claude-sonnet-5-5"),
+    ] {
+        let resp = run_chat_session(
+            Some(non_admin.clone()),
+            "",
+            "",
+            "",
+            model,
+            provider,
+            vec![],
+            "hello".to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{provider}/{model}");
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("AI_PROVIDER_ADMIN_ONLY"),
+            "{provider}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    // 6. AF_AI_ALLOW_USER_CLOUD_PROVIDERS parses 1 / true / TRUE case-insensitively and rejects false.
+    std::env::set_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS", "false");
+    let still_blocked = run_chat_session(
+        Some(non_admin.clone()),
+        "",
+        "",
+        "",
+        "gpt-4o",
+        "openai",
+        vec![],
+        "hello".to_string(),
+    )
+    .await;
+    assert_eq!(still_blocked.status(), StatusCode::FORBIDDEN);
+
+    for truthy in ["1", "true", "TRUE"] {
+        std::env::set_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS", truthy);
+        let allowed_attempt = run_chat_session(
+            Some(non_admin.clone()),
+            "",
+            "",
+            "",
+            "gpt-4o",
+            "openai",
+            vec![],
+            "hello".to_string(),
+        )
+        .await;
+        assert_ne!(
+            allowed_attempt.status(),
+            StatusCode::FORBIDDEN,
+            "truthy={truthy} must permit non-admin cloud dispatch"
+        );
+    }
+    std::env::remove_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS");
 }

@@ -158,8 +158,7 @@ fn eligible_destination(req: &LaunchRequest) -> Option<Url> {
                 return None;
             }
             let port = configured_tls_port(&req.app, host)?;
-            (crate::middlewares::resolve_app_target_for_host(host)
-                == Some((req.app.clone(), port))
+            (crate::middlewares::resolve_app_target_for_host(host) == Some((req.app.clone(), port))
                 && managed_tls_vhost(&req.app, host))
             .then_some(destination)
         }

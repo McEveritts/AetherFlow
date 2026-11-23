@@ -1026,5 +1026,14 @@ async fn esc05_deleted_active_session_fails_closed_on_api_proxy_oidc_and_refresh
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(resurrected, 0, "/refresh must never resurrect a deleted active_sessions row");
+    assert_eq!(
+        resurrected, 0,
+        "/refresh must never resurrect a deleted active_sessions row"
+    );
+}
+
+#[tokio::test]
+async fn refresh_rejects_missing_session_cookie_with_401() {
+    let response = refresh_session(HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

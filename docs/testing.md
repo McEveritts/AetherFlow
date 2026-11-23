@@ -115,7 +115,7 @@ python3 -m unittest discover -s tests -p 'test_maintainerr_installer.py' -v
 python3 -m unittest discover -s tests -p 'test_jellyseerr_installer.py' -v
 python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
 
-# Run the 4-tier static E2E contract inspection harness (see tests/TEST_INFRA.md)
+# Run the 4-tier static E2E contract inspection harness (387 checks, zero assert_true(True) stubs; see tests/TEST_INFRA.md)
 python3 tests/run_e2e.py --mode contract
 
 # Local release-lifecycle smoke script (non-privileged temporary staging)

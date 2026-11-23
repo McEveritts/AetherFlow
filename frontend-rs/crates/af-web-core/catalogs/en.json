@@ -2315,5 +2315,6 @@
   "Permanently delete retained AetherFlow-managed data, configuration, secrets, and allocated port for this uninstalled application. This cannot be undone.": "Permanently delete retained AetherFlow-managed data, configuration, secrets, and allocated port for this uninstalled application. This cannot be undone.",
   "Purge retained data": "Purge retained data",
   "Purge retained data for {name}": "Purge retained data for {name}",
-  "Retained data": "Retained data"
+  "Retained data": "Retained data",
+  "Reset atmosphere defaults": "Reset atmosphere defaults"
 }

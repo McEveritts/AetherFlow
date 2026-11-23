@@ -9,6 +9,9 @@ Features:
 - F37: Full Verification & Adversarial Hardening
 """
 
+import ast
+import os
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 class TestF32WasmBuildBeforeBackendCompile(TestCase):
@@ -203,7 +206,27 @@ class TestF36TestSuiteCovers37Features(TestCase):
         super().__init__("T1_F36_01", "F36", 1, "Test suite implements coverage for all 37 features in PROJECT.md")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "F36: All 37 features are mapped to test suites")
+        tier1_dir = os.path.join(inspector.root, "tests", "e2e", "tier1_features")
+        discovered = set()
+        for fname in sorted(os.listdir(tier1_dir)):
+            if not (fname.startswith("test_") and fname.endswith(".py")):
+                continue
+            with open(os.path.join(tier1_dir, fname), "r", encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=fname)
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "__init__"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                    and node.args[1].value.startswith("F")
+                ):
+                    discovered.add(node.args[1].value)
+        expected = {f"F{i:02d}" for i in range(1, 38)}
+        missing = sorted(expected - discovered)
+        self.assert_equal(missing, [], f"F36: Missing Tier 1 coverage for features: {missing}")
 
 class TestF36FourTiersImplemented(TestCase):
     def __init__(self):
@@ -269,14 +292,42 @@ class TestF37ZeroFacadeAssertions(TestCase):
         super().__init__("T1_F37_04", "F37", 1, "Tests enforce real assertions against specifications rather than dummy passes")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "F37: Test integrity verified")
+        e2e_root = os.path.join(inspector.root, "tests", "e2e")
+        stubs = []
+        for root_dir, _, files in os.walk(e2e_root):
+            for fname in sorted(files):
+                if not fname.endswith(".py"):
+                    continue
+                full = os.path.join(root_dir, fname)
+                rel = os.path.relpath(full, inspector.root)
+                with open(full, "r", encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read(), filename=rel)
+                for node in ast.walk(tree):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "assert_true"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value is True
+                    ):
+                        stubs.append(f"{rel}:{node.lineno}")
+        self.assert_equal(stubs, [], f"F37: Found unconditional assert_true(True) placeholder stubs: {stubs}")
 
 class TestF37ProgressiveTestabilityVerified(TestCase):
     def __init__(self):
         super().__init__("T1_F37_05", "F37", 1, "Tests execute cleanly in M0 baseline phase to establish gap analysis")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "F37: Progressive testability verified")
+        runner = inspector.read_file("tests/e2e/runner.py") or ""
+        self.assert_true(
+            'choices=["contract", "live", "mock"]' in runner
+            and 'default="contract"' in runner
+            and "return 0 if self.failed_count == 0 else 1" in runner
+            and "sys.exit(exit_code)" in runner,
+            "F37: runner.py must support contract and live modes with deterministic offline exit codes",
+        )
+        self.assert_not_in("--socket", runner, "F37: dead --socket CLI option must be removed from runner.py")
 
 def get_tests():
     return [

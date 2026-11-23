@@ -755,7 +755,10 @@ async fn metrics_loopback_requires_bearer_or_active_admin_session_unless_metrics
     let mut req_bearer = axum::http::Request::builder()
         .uri("/metrics")
         .header(header::HOST, "127.0.0.1:8080")
-        .header(header::AUTHORIZATION, "Bearer loopback-metrics-token-secret")
+        .header(
+            header::AUTHORIZATION,
+            "Bearer loopback-metrics-token-secret",
+        )
         .body(axum::body::Body::empty())
         .unwrap();
     req_bearer.extensions_mut().insert(loopback);

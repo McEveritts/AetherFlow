@@ -64,10 +64,10 @@ pub use fs_security::{
 pub use health::{
     install_packaged_unit_if_missing, install_systemd_hardening_dropins, is_healthy_status,
     parse_endpoint_socket_addr, parse_health_status, poll_readiness_probe,
-    run_post_restart_log_retention_with_bin, sync_cli_entrypoints,
-    verify_deployed_frontend_assets, verify_isolated_systemd_lifecycle_authorized,
-    wait_for_listener_stopped, HealthCheckAttempt, HealthProber, LifecycleController,
-    NoopLifecycleController, ReqwestHealthProber, SystemdLifecycleController,
+    run_post_restart_log_retention_with_bin, sync_cli_entrypoints, verify_deployed_frontend_assets,
+    verify_isolated_systemd_lifecycle_authorized, wait_for_listener_stopped, HealthCheckAttempt,
+    HealthProber, LifecycleController, NoopLifecycleController, ReqwestHealthProber,
+    SystemdLifecycleController,
 };
 pub use lock::{RecoveryState, ReleaseLockGuard, ReleasePhase};
 pub use snapshot::{

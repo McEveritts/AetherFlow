@@ -1108,8 +1108,12 @@ mod proxy_header_tests {
 
         let make_basic = |user: &str, pass: &str| {
             let mut h = axum::http::HeaderMap::new();
-            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-            h.insert(header::AUTHORIZATION, format!("Basic {encoded}").parse().unwrap());
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            h.insert(
+                header::AUTHORIZATION,
+                format!("Basic {encoded}").parse().unwrap(),
+            );
             h
         };
 
@@ -1159,7 +1163,10 @@ mod proxy_header_tests {
         let fixture_root = ensure_shared_test_db().parent().unwrap();
         env::set_var("AETHERFLOW_FS_ROOT", fixture_root);
         env::set_var("AETHERFLOW_CONFIG_ROOT", fixture_root);
-        env::set_var("ALLOWED_HOSTS", "localhost,127.0.0.1,aetherflow.aether.local");
+        env::set_var(
+            "ALLOWED_HOSTS",
+            "localhost,127.0.0.1,aetherflow.aether.local",
+        );
         std::fs::create_dir_all(fixture_root.join("install")).unwrap();
         std::fs::write(fixture_root.join("install/.rutorrent.lock"), "installed\n").unwrap();
         std::fs::write(
@@ -1187,7 +1194,8 @@ mod proxy_header_tests {
         .unwrap();
 
         let token_file = fixture_root.join("rutorrent-proxy-token");
-        let expected_proxy_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let expected_proxy_token =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         std::fs::write(&token_file, format!("{expected_proxy_token}\n")).unwrap();
         env::set_var("AETHERFLOW_RUTORRENT_PROXY_TOKEN_FILE", &token_file);
 
@@ -1213,7 +1221,9 @@ mod proxy_header_tests {
                     .uri("/")
                     .header(header::HOST, "rutorrent.aether.local")
                     .header("x-real-ip", "192.168.1.50")
-                    .extension(ConnectInfo("127.0.0.1:41000".parse::<SocketAddr>().unwrap()))
+                    .extension(ConnectInfo(
+                        "127.0.0.1:41000".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1234,7 +1244,9 @@ mod proxy_header_tests {
                         .uri("/")
                         .header(header::HOST, "rutorrent.aether.local")
                         .header("x-real-ip", denied_bypass_ip)
-                        .extension(ConnectInfo("127.0.0.1:41001".parse::<SocketAddr>().unwrap()))
+                        .extension(ConnectInfo(
+                            "127.0.0.1:41001".parse::<SocketAddr>().unwrap(),
+                        ))
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -1255,14 +1267,18 @@ mod proxy_header_tests {
                     .header(header::HOST, "rutorrent.aether.local")
                     .header("x-real-ip", "192.168.1.50")
                     .header("x-aetherflow-rutorrent-token", "spoofed-client-token")
-                    .extension(ConnectInfo("127.0.0.1:41002".parse::<SocketAddr>().unwrap()))
+                    .extension(ConnectInfo(
+                        "127.0.0.1:41002".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(lan_ok.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(lan_ok.into_body(), 16384).await.unwrap();
+        let body = axum::body::to_bytes(lan_ok.into_body(), 16384)
+            .await
+            .unwrap();
         let observed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             observed["headers"]["x-aetherflow-rutorrent-token"][0],
@@ -1272,7 +1288,10 @@ mod proxy_header_tests {
         // 3. TOTP admin launches http://rutorrent.aether.local via app_launch -> aetherflow_local_app cookie.
         env::remove_var("AF_ALLOW_UNAUTH_LOCAL_LAN");
         let mut ua_headers = axum::http::HeaderMap::new();
-        ua_headers.insert(header::USER_AGENT, HeaderValue::from_static("local-launch-ua"));
+        ua_headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("local-launch-ua"),
+        );
         let (admin_jwt, _) = crate::auth::create_standard_jwt(402, &ua_headers).unwrap();
 
         let issue_resp = app
@@ -1287,7 +1306,9 @@ mod proxy_header_tests {
                     .header(header::AUTHORIZATION, format!("Bearer {admin_jwt}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .header("x-real-ip", "100.64.0.10")
-                    .extension(ConnectInfo("127.0.0.1:41003".parse::<SocketAddr>().unwrap()))
+                    .extension(ConnectInfo(
+                        "127.0.0.1:41003".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(Body::from(
                         r#"{"app":"rutorrent","destination":"http://rutorrent.aether.local/"}"#,
                     ))
@@ -1313,7 +1334,9 @@ mod proxy_header_tests {
                     .header(header::USER_AGENT, "local-launch-ua")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header("x-real-ip", "100.64.0.10")
-                    .extension(ConnectInfo("127.0.0.1:41004".parse::<SocketAddr>().unwrap()))
+                    .extension(ConnectInfo(
+                        "127.0.0.1:41004".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(Body::from(format!("ticket={ticket}")))
                     .unwrap(),
             )
@@ -1342,7 +1365,9 @@ mod proxy_header_tests {
                     .header(header::USER_AGENT, "local-launch-ua")
                     .header(header::COOKIE, format!("{cookie_pair}; keep_me=1"))
                     .header("x-real-ip", "100.64.0.10")
-                    .extension(ConnectInfo("127.0.0.1:41005".parse::<SocketAddr>().unwrap()))
+                    .extension(ConnectInfo(
+                        "127.0.0.1:41005".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1353,7 +1378,10 @@ mod proxy_header_tests {
             .await
             .unwrap();
         let authed_obs: serde_json::Value = serde_json::from_slice(&authed_body).unwrap();
-        assert_eq!(authed_obs["headers"]["x-aetherflow-user"][0], "totp-local-admin");
+        assert_eq!(
+            authed_obs["headers"]["x-aetherflow-user"][0],
+            "totp-local-admin"
+        );
         assert_eq!(
             authed_obs["headers"]["x-aetherflow-rutorrent-token"][0],
             expected_proxy_token
@@ -1373,7 +1401,9 @@ mod proxy_header_tests {
                     .header(header::USER_AGENT, "local-launch-ua")
                     .header(header::COOKIE, cookie_pair)
                     .header("x-real-ip", "100.64.0.10")
-                    .extension(ConnectInfo("127.0.0.1:41006".parse::<SocketAddr>().unwrap()))
+                    .extension(ConnectInfo(
+                        "127.0.0.1:41006".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )

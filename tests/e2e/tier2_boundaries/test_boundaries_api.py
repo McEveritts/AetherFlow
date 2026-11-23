@@ -9,6 +9,8 @@ Features:
 - B06: System Topology Boundaries
 """
 
+import os
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 ROUTES_RS = "backend-rs/crates/af-api/src/routes.rs"
@@ -38,7 +40,17 @@ class TestB01NullByteInjectionBlocked(TestCase):
             code, _, _ = client.request("GET", "/api/v1/auth/fs?path=/mnt%00test")
             self.assert_true(code in [400, 403, 404], f"Expected 400 for null byte, got {code}")
         else:
-            self.assert_true(True, "B01: Null byte validation contract established")
+            fs_browser = inspector.read_file("backend-rs/crates/af-api/src/routes/fs_browser.rs") or ""
+            self.assert_true(
+                "contains('\\0')" in fs_browser and "INVALID_PATH" in fs_browser,
+                "B01: fs_browser.rs must explicitly reject null bytes in path queries",
+            )
+            af_files_path = inspector.read_file("backend-rs/crates/af-files/src/path.rs") or ""
+            af_files_lib = inspector.read_file("backend-rs/crates/af-files/src/lib.rs") or ""
+            self.assert_true(
+                "path contains NUL byte" in af_files_path and "path contains NUL" in af_files_lib,
+                "B01: af-files crate must reject NUL bytes in confined path validation",
+            )
 
 
 class TestB01PathOutsideAllowedRootsRejected(TestCase):
@@ -99,7 +111,14 @@ class TestB02MissingCredentialsRejected(TestCase):
             code, _, _ = unauth_client.request("POST", "/api/v1/auth/refresh")
             self.assert_status_code(code, 401)
         else:
-            self.assert_true(True, "B02: Missing credentials boundary contract verified")
+            sessions = inspector.read_file("backend-rs/crates/af-api/src/auth/sessions.rs") or ""
+            session_tests = inspector.read_file("backend-rs/crates/af-api/src/auth/session_tests.rs") or ""
+            self.assert_true(
+                "resolve_raw_token(&headers)" in sessions
+                and "No session token provided" in sessions
+                and "refresh_rejects_missing_session_cookie_with_401" in session_tests,
+                "B02: sessions.rs must reject missing refresh credentials with 401 and session_tests.rs must cover it",
+            )
 
 
 class TestB02RevokedSessionRejected(TestCase):
@@ -130,7 +149,13 @@ class TestB02MalformedCookieRejected(TestCase):
             code, _, _ = unauth_client.request("POST", "/api/v1/auth/refresh", headers={"Cookie": "aetherflow_session=!!!not_a_valid_jwt!!!"})
             self.assert_status_code(code, 401)
         else:
-            self.assert_true(True, "B02: Malformed cookie handling contract verified")
+            tokens = inspector.read_file("backend-rs/crates/af-api/src/auth/tokens.rs") or ""
+            mw_tests = inspector.read_file("backend-rs/crates/af-api/src/auth/middleware_tests.rs") or ""
+            self.assert_true(
+                "fn decode_session_claims" in tokens
+                and "malformed_session_cookie_returns_401_without_panic" in mw_tests,
+                "B02: tokens.rs must decode JWTs fallibly and middleware_tests.rs must cover malformed cookies",
+            )
 
 
 class TestB03IncorrectCurrentPasswordRejected(TestCase):
@@ -165,7 +190,14 @@ class TestB03IdenticalOldAndNewPassword(TestCase):
         super().__init__("T2_B03_04", "F03", 2, "Identical current and new password handled cleanly without corruption")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B03: Idempotent password update boundary contract verified")
+        account = inspector.read_file("backend-rs/crates/af-api/src/routes/account.rs") or ""
+        self.assert_true(
+            "verify_password(&req.current_password, &existing_hash)" in account
+            and "bcrypt::hash(&req.new_password, bcrypt::DEFAULT_COST)" in account
+            and "UPDATE users SET password_hash = ?1" in account
+            and "create_session_jwt_in_conn(" in account,
+            "B03: account.rs must verify current password, re-hash via bcrypt, and rotate session cleanly",
+        )
 
 
 class TestB03SqlInjectionPayloadInPassword(TestCase):
@@ -310,7 +342,15 @@ class TestB06TopologyGraphIntegrity(TestCase):
         super().__init__("T2_B06_05", "F06", 2, "Link array contains zero dangling references to non-existent node IDs")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B06: Topology link graph integrity contract verified")
+        telemetry = inspector.read_file("backend-rs/crates/af-api/src/intelligence/telemetry.rs") or ""
+        tests = inspector.read_file("backend-rs/crates/af-api/src/intelligence/media_cluster_tests.rs") or ""
+        self.assert_true(
+            "fn topology_from_inventory(" in telemetry
+            and "if let Some(api) = &api" in telemetry
+            and "if let Some(gateway) = &gateway" in telemetry
+            and "fn topology_uses_inventory_status_and_one_gateway(" in tests,
+            "B06: topology_from_inventory must only link emitted nodes and be verified by Rust unit tests",
+        )
 
 def get_tests():
     return [

@@ -574,10 +574,8 @@ pub(crate) fn execute_backup_command(
                 ));
             }
             if !*confirm_destructive_restore {
-                let dummy_manifest = BackupManifest::new(
-                    &runtime_host_version,
-                    "aetherflow_placeholder.sqlite",
-                )?;
+                let dummy_manifest =
+                    BackupManifest::new(&runtime_host_version, "aetherflow_placeholder.sqlite")?;
                 let dummy_stage = target_root
                     .clone()
                     .unwrap_or_else(|| cfg.backup_dir.join("restore-stage"));

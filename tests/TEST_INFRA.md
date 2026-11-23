@@ -13,10 +13,10 @@ The `tests/e2e/` Python harness (`tests/run_e2e.py`) provides a 387-case require
 
 1. **Contract-Driven Checks**: Test cases map 37 core platform features (`F01`–`F37`) to explicit source, route, token, and API contracts across the repository.
 2. **Execution Modes (`--mode`)**:
-   - **Static Contract Inspection Mode (`--mode contract`, default)**: Evaluates repository files, route registrations, CSS design tokens, shell LF line endings, and SQL migrations without starting daemons (all 387 checks run offline).
-   - **Live HTTP Mode (`--mode live`)**: Targets a running API via `--url` (default `http://localhost:8080`, optionally authenticated with `AETHERFLOW_E2E_USER` and `AETHERFLOW_E2E_PASS`), executing live HTTP probes alongside static contract checks. `--socket` (default `/run/aetherflow/runner.sock`) is accepted by the CLI and printed in the run header only; `RunnerSocketClient` is not wired into Tiers 1–4, so zero live UDS probes execute in `--mode live`.
+   - **Static Contract Inspection Mode (`--mode contract`, default)**: Evaluates repository files, route registrations, CSS design tokens, shell LF line endings, `bash -n` syntax, and SQL migrations without starting daemons (all 387 checks run offline).
+   - **Live HTTP Mode (`--mode live`)**: Targets a running API via `--url` (default `http://localhost:8080`, optionally authenticated with `AETHERFLOW_E2E_USER` and `AETHERFLOW_E2E_PASS`), executing live HTTP probes alongside static contract checks. Privileged runner socket drills are executed separately via `scripts/v4_privileged_guest_drills.py`.
    - **Mock Mode (`--mode mock`)**: Accepted by the CLI for compatibility; no in-process mock HTTP server is implemented, so `--mode mock` currently executes the same static contract branch as `--mode contract`.
-3. **Known Legacy Stub Caveat**: While most assertions inspect real source contracts or live endpoints, **25** legacy checks across **8** files—all 7 files in `tests/e2e/tier2_boundaries/` (`test_boundaries_api.py`, `test_boundaries_backend_core.py`, `test_boundaries_components.py`, `test_boundaries_debian.py`, `test_boundaries_obsidian.py`, `test_boundaries_operator_panels.py`, `test_boundaries_pipeline.py`) plus `tests/e2e/tier1_features/test_f32_to_f37_system_pipeline.py`—execute placeholder `self.assert_true(True, ...)` assertions in `--mode contract` (22 are unconditional across all modes; 3 in `test_boundaries_api.py`—`T2_B01_02`, `T2_B02_02`, `T2_B02_05`—execute live HTTP checks in `--mode live` and fall back to `assert_true(True)` offline) and do not substitute for Rust workspace tests (`cargo test`), Playwright browser runs (`e2e/`), or KVM guest drills.
+3. **Zero Placeholder Assertions (`T1_F37_04`)**: Every one of the **387** checks asserts concrete AST, source-symbol, syntax, or live HTTP predicates; `T1_F37_04` parses all `tests/e2e/**/*.py` ASTs and fails if any unconditional `self.assert_true(True, ...)` placeholder stub is introduced. Static contract checks still supplement—and do not substitute for—Rust workspace tests (`cargo test`), Playwright browser runs (`e2e/`), or KVM guest drills.
 4. **Actionable Diagnostics**: Failing assertions report the feature ID, tier, expected contract, and observed mismatch.
 
 ---
@@ -137,7 +137,7 @@ tests/
 
 ### CLI Flags & Invocation
 
-`tests/e2e/runner.py` supports `--tier`, `--feature`, `--mode {contract,live,mock}`, `--url`, `--socket`, `--verbose` (`-v`), `--fail-fast`, `--json-out`, and `--report-out` (plus `AETHERFLOW_E2E_USER` / `AETHERFLOW_E2E_PASS` in live mode):
+`tests/e2e/runner.py` supports `--tier`, `--feature`, `--mode {contract,live,mock}`, `--url`, `--verbose` (`-v`), `--fail-fast`, `--json-out`, and `--report-out` (plus `AETHERFLOW_E2E_USER` / `AETHERFLOW_E2E_PASS` in live mode):
 
 ```bash
 # Run all 4 tiers in static contract verification mode
@@ -152,7 +152,7 @@ python3 tests/run_e2e.py --feature F05 --json-out /tmp/f05.json --report-out /tm
 
 # Run in live mode against a running AetherFlow daemon
 AETHERFLOW_E2E_USER=admin AETHERFLOW_E2E_PASS=<password> \
-  python3 tests/run_e2e.py --mode live --url http://127.0.0.1:8080 --socket /run/aetherflow/runner.sock
+  python3 tests/run_e2e.py --mode live --url http://127.0.0.1:8080
 
 # Run all Python unittest regression suites in parallel
 AETHERFLOW_SKIP_ENV_FILES=1 python3 tests/run_parallel_tests.py

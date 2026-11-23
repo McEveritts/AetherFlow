@@ -420,3 +420,25 @@ async fn esc13_refresh_routes_are_rate_limited_and_production_ignores_disable_fl
         );
     }
 }
+
+#[tokio::test]
+async fn malformed_session_cookie_returns_401_without_panic() {
+    use axum::{middleware, routing::get, Router};
+    use tower::ServiceExt;
+
+    assert!(decode_session_claims("!!!not_a_valid_jwt!!!", false).is_err());
+    let app = Router::new()
+        .route("/api/v1/auth/session", get(|| async { StatusCode::OK }))
+        .layer(middleware::from_fn(auth_middleware));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .header(header::COOKIE, "aetherflow_session=!!!not_a_valid_jwt!!!")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

@@ -68,7 +68,8 @@ fn apache_htpasswd_does_not_write_random_password_when_master_creds_encrypted() 
 #[test]
 fn build_allowed_hosts_seeds_non_loopback_bind_and_discovered_lan_ip() {
     let lan_ip: IpAddr = "192.168.10.25".parse().unwrap();
-    let (hosts, cors) = build_allowed_hosts_and_cors_for_bind("0.0.0.0", "8080", None, Some(lan_ip));
+    let (hosts, cors) =
+        build_allowed_hosts_and_cors_for_bind("0.0.0.0", "8080", None, Some(lan_ip));
     assert_eq!(hosts, "localhost,127.0.0.1,192.168.10.25");
     assert_eq!(
         cors,

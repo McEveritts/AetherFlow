@@ -542,7 +542,10 @@ fn remove_tree_skips_injected_mount_boundary_without_unlinking_mounted_files() {
         .unwrap();
 
     assert_eq!(outcome.removed_bytes, 10);
-    assert_eq!(outcome.skipped_mount_paths, vec![PathBuf::from("user-1/Media")]);
+    assert_eq!(
+        outcome.skipped_mount_paths,
+        vec![PathBuf::from("user-1/Media")]
+    );
     assert!(
         !tmp.path().join("user-1/Docs").exists(),
         "non-mounted sibling subtree must still be cleaned"
@@ -566,7 +569,10 @@ fn remove_tree_skips_injected_mount_boundary_without_unlinking_mounted_files() {
         })
         .unwrap();
     assert_eq!(top_outcome.removed_bytes, 0);
-    assert_eq!(top_outcome.skipped_mount_paths, vec![PathBuf::from("user-2")]);
+    assert_eq!(
+        top_outcome.skipped_mount_paths,
+        vec![PathBuf::from("user-2")]
+    );
     assert!(tmp.path().join("user-2/Mounted/data.bin").is_file());
 
     // Also test st_dev mismatch (simulating ENOSYS fallback where openat2 is unavailable and st_dev differs).

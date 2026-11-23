@@ -1,9 +1,9 @@
 # AetherFlow v4.0.0 — Static Contract Verification Report
 
 **Test Mode**: `CONTRACT` (static source & interface inspection via `tests/run_e2e.py --mode contract`)  
-**Verified Snapshot**: `2026-11-23` (baseline commit `447e04fe`)  
-**Contract Suite Size**: **387 Static Contract Checks**  
-**Scope Notice**: This baseline snapshot covers the offline static contract harness only—not live full-stack runtime execution, browser E2E, or privileged KVM guest certification. **25** legacy checks across **8** Tier 1/2 files remain unconditional `self.assert_true(True, ...)` placeholder stubs ([TEST_INFRA.md](./TEST_INFRA.md)); live verification is tracked separately by the Rust workspace, Playwright, streaming, release-smoke, and VM drill suites below.
+**Verified Snapshot**: `2026-11-23` (post-EGM Track D hardening)  
+**Contract Suite Size**: **387 Static Contract Checks** (0 placeholder `assert_true(True)` stubs)  
+**Scope Notice**: This snapshot covers the offline static contract harness only—not live full-stack runtime execution, browser E2E, or privileged KVM guest certification. Every check across Tiers 1–4 enforces real AST, symbol, syntax, or live HTTP assertions (verified by `T1_F37_04`, see [TEST_INFRA.md](./TEST_INFRA.md)); live verification is tracked separately by the Rust workspace, Playwright, streaming, release-smoke, and VM drill suites below.
 
 ## 1. Test Execution Commands
 
@@ -22,57 +22,53 @@ AETHERFLOW_SKIP_ENV_FILES=1 python3 tests/run_parallel_tests.py
 
 | Tier | Verification Scope (Contract Mode) | Total Checks | Passed | Gaps | Pass Rate |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| Tier 1 | Feature Contract Inspection (`F01`–`F37`) | 185 | 185* | 0* | 100.0%* |
-| Tier 2 | Boundary & Hardening Contract Inspection (`F01`–`F37`) | 185 | 185* | 0* | 100.0%* |
+| Tier 1 | Feature Contract Inspection (`F01`–`F37`) | 185 | 185 | 0 | 100.0% |
+| Tier 2 | Boundary & Hardening Contract Inspection (`F01`–`F37`) | 185 | 185 | 0 | 100.0% |
 | Tier 3 | Cross-Feature Pairwise Contract Checks | 12 | 12 | 0 | 100.0% |
 | Tier 4 | Operator Scenario Contract Checklists (static / read-only in live mode) | 5 | 5 | 0 | 100.0% |
-| **Total** | **Static Contract Inspection (`--mode contract`)** | **387** | **387**\* | **0**\* | **100.0%**\* |
-
-*\*Includes 25 unconditional `self.assert_true(True, ...)` placeholder stubs across 8 Tier 1/2 files (see [TEST_INFRA.md](./TEST_INFRA.md)); 362 checks assert real source/contract predicates.*
+| **Total** | **Static Contract Inspection (`--mode contract`)** | **387** | **387** | **0** | **100.0%** |
 
 ## 3. Feature Contract Checklist (`F01`–`F37`)
 
 | Feature ID | Description | Domain | Contract Status |
 | :--- | :--- | :--- | :---: |
-| F01 | Rust Directory Browser Handler | Backend API | PASSED\* |
-| F02 | Auth Session Refresh | Backend API | PASSED\* |
-| F03 | Profile Password Mutation | Backend API | PASSED\* |
+| F01 | Rust Directory Browser Handler | Backend API | PASSED |
+| F02 | Auth Session Refresh | Backend API | PASSED |
+| F03 | Profile Password Mutation | Backend API | PASSED |
 | F04 | Profile Avatar Mutation | Backend API | PASSED |
 | F05 | Ingress Configuration CRUD | Backend API | PASSED |
-| F06 | System Topology Endpoint | Backend API | PASSED\* |
+| F06 | System Topology Endpoint | Backend API | PASSED |
 | F07 | Privileged Runner Extensions | Backend Core | PASSED |
 | F08 | Privileged Caller Migration | Backend Core | PASSED |
 | F09 | SQLite Migration 17 | Backend Core | PASSED |
 | F10 | Cluster Manager Startup Cleanliness | Backend Core | PASSED |
 | F11 | Retire Legacy Next.js Frontend | Backend Core | PASSED |
-| F12 | Backend Unit & Integration Tests | Backend Core | PASSED\* |
-| F13 | Obsidian V2 CSS Foundation | Obsidian UI | PASSED\* |
+| F12 | Backend Unit & Integration Tests | Backend Core | PASSED |
+| F13 | Obsidian V2 CSS Foundation | Obsidian UI | PASSED |
 | F14 | Obsidian V2 Glass & Chromatic Tokens | Obsidian UI | PASSED |
 | F15 | Tri-Mode Navigation Architecture | Obsidian UI | PASSED |
-| F16 | Scroller Containment Invariant | Obsidian UI | PASSED\* |
-| F17 | Atmosphere Tuning Controls | Obsidian UI | PASSED\* |
+| F16 | Scroller Containment Invariant | Obsidian UI | PASSED |
+| F17 | Atmosphere Tuning Controls | Obsidian UI | PASSED |
 | F18 | UI Primitives Redesign | Obsidian UI | PASSED |
-| F19 | Mount Bandwidth & Predictions Cards | Dashboard Panels | PASSED\* |
+| F19 | Mount Bandwidth & Predictions Cards | Dashboard Panels | PASSED |
 | F20 | Mount Metadata & DirectoryPicker | Dashboard Panels | PASSED |
 | F21 | Mount ExternalAccess & DeploymentStatus | Dashboard Panels | PASSED |
-| F22 | Wire Profile Controls | Dashboard Panels | PASSED\* |
+| F22 | Wire Profile Controls | Dashboard Panels | PASSED |
 | F23 | Real App Topology Map | Dashboard Panels | PASSED |
 | F24 | Network & VPN Operator Panel | Dashboard Panels | PASSED |
-| F25 | Notifications & Alerting Panel | Dashboard Panels | PASSED\* |
+| F25 | Notifications & Alerting Panel | Dashboard Panels | PASSED |
 | F26 | Storage Quotas Panel | Dashboard Panels | PASSED |
 | F27 | Cluster Nodes Panel | Dashboard Panels | PASSED |
 | F28 | Modernize Debian APT Template | Packaging & Pipeline | PASSED |
 | F29 | Debian 13 Core OS Detection | Packaging & Pipeline | PASSED |
-| F30 | Modernize Package Dependencies | Packaging & Pipeline | PASSED\* |
-| F31 | Keyring Migration Across `packages/` | Packaging & Pipeline | PASSED\* |
-| F32 | Rust API & External WASM Build Pipeline | Packaging & Pipeline | PASSED\* |
+| F30 | Modernize Package Dependencies | Packaging & Pipeline | PASSED |
+| F31 | Keyring Migration Across `packages/` | Packaging & Pipeline | PASSED |
+| F32 | Rust API & External WASM Build Pipeline | Packaging & Pipeline | PASSED |
 | F33 | Systemd Privilege Boundary Units | Packaging & Pipeline | PASSED |
-| F34 | Sudoers & PM2 Purge | Packaging & Pipeline | PASSED\* |
-| F35 | Shell Script Line Endings & Syntax | Packaging & Pipeline | PASSED\* |
-| F36 | Automated Contract Test Suite | Test Harness | PASSED\* |
-| F37 | Full Verification & Hardening | Verification | PASSED\* |
-
-*\*Rows marked `PASSED*` include one or more legacy unconditional `self.assert_true(True, ...)` placeholder stubs in their Tier 1/2 contract suite (25 stubs total across 18 features).*
+| F34 | Sudoers & PM2 Purge | Packaging & Pipeline | PASSED |
+| F35 | Shell Script Line Endings & Syntax | Packaging & Pipeline | PASSED |
+| F36 | Automated Contract Test Suite | Test Harness | PASSED |
+| F37 | Full Verification & Hardening | Verification | PASSED |
 
 ## 4. Runtime, Browser & Host Verification Suites
 

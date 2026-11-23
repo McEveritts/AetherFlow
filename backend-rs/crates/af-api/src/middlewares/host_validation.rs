@@ -180,9 +180,9 @@ pub async fn host_validation_middleware(mut req: Request, next: Next) -> Respons
         if !trimmed.is_empty()
             && trimmed.len() <= 255
             && !strip_host_port_and_dot(trimmed).is_empty()
-            && trimmed.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
-            })
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
         {
             req.extensions_mut()
                 .insert(ValidatedRequestHost(trimmed.to_string()));

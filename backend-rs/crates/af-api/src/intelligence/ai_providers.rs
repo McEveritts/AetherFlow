@@ -1,6 +1,71 @@
 use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::net::IpAddr;
+
+pub(super) const DEFAULT_ANTHROPIC_LOCAL_ENDPOINT: &str = "http://127.0.0.1:8081";
+
+pub(super) fn allow_user_cloud_ai_providers() -> bool {
+    env::var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| v == "1" || v == "true")
+}
+
+pub(crate) fn is_self_target_ai_endpoint(raw: &str) -> bool {
+    let api_port = env::var("PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(8080);
+    let bind_addr = env::var("BIND_ADDR").ok();
+    is_self_target_ai_endpoint_with(raw, api_port, bind_addr.as_deref())
+}
+
+pub(super) fn is_self_target_ai_endpoint_with(
+    raw: &str,
+    api_port: u16,
+    bind_addr: Option<&str>,
+) -> bool {
+    let Ok(parsed) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        return false;
+    };
+    if port != api_port {
+        return false;
+    }
+    let Some(host_raw) = parsed.host_str() else {
+        return false;
+    };
+    let host = host_raw.trim_matches(['[', ']']);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let canon = ip.to_canonical();
+        if canon.is_loopback() || canon.is_unspecified() {
+            return true;
+        }
+        if let Some(bind) = bind_addr.map(str::trim).filter(|s| !s.is_empty()) {
+            let bind_clean = bind.trim_matches(['[', ']']);
+            if let Ok(bind_ip) = bind_clean.parse::<IpAddr>() {
+                if bind_ip.to_canonical() == canon {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if let Some(bind) = bind_addr.map(str::trim).filter(|s| !s.is_empty()) {
+        let bind_clean = bind.trim_matches(['[', ']']);
+        if host.eq_ignore_ascii_case(bind_clean) {
+            return true;
+        }
+    }
+    false
+}
 
 pub(super) static ALLOWED_AI_MODELS: &[&str] = &[
     "gemini-4-argon",
@@ -504,8 +569,18 @@ pub(super) async fn call_openai_compatible_api(
     }
     messages.push(serde_json::json!({ "role": "user", "content": message }));
 
+    if is_self_target_ai_endpoint(endpoint) {
+        anyhow::bail!(
+            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+        );
+    }
     let endpoint = af_services::validate_server_url(endpoint)
         .map_err(|error| anyhow::anyhow!("Invalid AI endpoint: {error}"))?;
+    if is_self_target_ai_endpoint(&endpoint) {
+        anyhow::bail!(
+            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+        );
+    }
     if !api_key.trim().is_empty()
         && !endpoint.starts_with("https://")
         && !is_loopback_ai_endpoint(&endpoint)
@@ -555,8 +630,18 @@ pub(super) async fn call_anthropic_api(
     } else {
         endpoint.trim().trim_end_matches('/')
     };
+    if is_self_target_ai_endpoint(base_raw) {
+        anyhow::bail!(
+            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+        );
+    }
     let base = af_services::validate_server_url(base_raw)
         .map_err(|error| anyhow::anyhow!("Invalid AI endpoint: {error}"))?;
+    if is_self_target_ai_endpoint(&base) {
+        anyhow::bail!(
+            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+        );
+    }
     if !api_key.trim().is_empty()
         && !base.starts_with("https://")
         && !is_loopback_ai_endpoint(&base)
@@ -671,36 +756,43 @@ pub(crate) async fn call_configured_ai(
             let runtime = infer_local_runtime(&ps.local_provider, ps);
             match runtime {
                 "anthropic-local" => {
-                    let ep = if ps.anthropic_endpoint.is_empty() {
-                        "http://localhost:8080".to_string()
+                    let ep = if ps.anthropic_endpoint.trim().is_empty() {
+                        DEFAULT_ANTHROPIC_LOCAL_ENDPOINT.to_string()
                     } else {
-                        ps.anthropic_endpoint.clone()
+                        ps.anthropic_endpoint.trim().to_string()
                     };
-                    call_anthropic_api(
-                        &ep,
-                        &ps.anthropic_api_key,
-                        local_model,
-                        system_prompt,
-                        &[],
-                        message,
-                    )
-                    .await
+                    if is_self_target_ai_endpoint(&ep) {
+                        anyhow::bail!(
+                            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+                        );
+                    }
+                    call_anthropic_api(&ep, "", local_model, system_prompt, &[], message).await
                 }
                 "ollama" => {
-                    let ep = if ps.ollama_endpoint.is_empty() {
+                    let ep = if ps.ollama_endpoint.trim().is_empty() {
                         "http://localhost:11434".to_string()
                     } else {
-                        ps.ollama_endpoint.clone()
+                        ps.ollama_endpoint.trim().to_string()
                     };
+                    if is_self_target_ai_endpoint(&ep) {
+                        anyhow::bail!(
+                            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+                        );
+                    }
                     call_openai_compatible_api(&ep, "", local_model, system_prompt, &[], message)
                         .await
                 }
                 _ => {
-                    let ep = if ps.lm_studio_endpoint.is_empty() {
+                    let ep = if ps.lm_studio_endpoint.trim().is_empty() {
                         "http://localhost:1234".to_string()
                     } else {
-                        ps.lm_studio_endpoint.clone()
+                        ps.lm_studio_endpoint.trim().to_string()
                     };
+                    if is_self_target_ai_endpoint(&ep) {
+                        anyhow::bail!(
+                            "AI_SELF_TARGET_REJECTED: AI endpoint cannot target the AetherFlow API server itself"
+                        );
+                    }
                     call_openai_compatible_api(&ep, "", local_model, system_prompt, &[], message)
                         .await
                 }

@@ -60,10 +60,14 @@ run_check rust-canonical-streaming cargo test --manifest-path backend-rs/Cargo.t
 run_check rust-streaming-migration cargo test --manifest-path backend-rs/Cargo.toml --locked \
   -p af-db streaming::tests -- --test-threads=1
 
-if [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" ]]; then
+if [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" && -s "${AF_STREAMING_ARCHIVE_FIXTURE}" && -s "${AF_STREAMING_PORTABILITY_FIXTURE}" ]]; then
   run_check frontend-streaming cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
 else
-  echo 'FAIL rust-contract-fixture (not generated; frontend contracts cannot run)' \
+  missing_fixtures=()
+  [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" ]] || missing_fixtures+=("AF_STREAMING_CONTRACT_FIXTURE")
+  [[ -s "${AF_STREAMING_ARCHIVE_FIXTURE}" ]] || missing_fixtures+=("AF_STREAMING_ARCHIVE_FIXTURE")
+  [[ -s "${AF_STREAMING_PORTABILITY_FIXTURE}" ]] || missing_fixtures+=("AF_STREAMING_PORTABILITY_FIXTURE")
+  echo "FAIL rust-contract-fixture (not generated: ${missing_fixtures[*]}; frontend contracts cannot run)" \
     | tee -a "${RESULT_DIR}/summary.txt"
   FAILED=1
 fi
@@ -72,15 +76,17 @@ run_check typescript npm exec --workspace e2e -- tsc --noEmit --incremental fals
 run_check streaming-lint cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --locked -- -D warnings
 
 if [[ "${MODE}" == "--integrated" ]]; then
-  unset AF_STREAMING_CONTRACT_FIXTURE
+  unset AF_STREAMING_CONTRACT_FIXTURE AF_STREAMING_ARCHIVE_FIXTURE AF_STREAMING_PORTABILITY_FIXTURE
   run_check rust-integrated-tests cargo test --manifest-path backend-rs/Cargo.toml --locked \
     -p af-api -- --test-threads=1
   run_check rust-integrated-build cargo build --manifest-path backend-rs/Cargo.toml --locked -p af-api
   export AF_STREAMING_CONTRACT_FIXTURE="${RESULT_DIR}/rust-dashboard.json"
-  if [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" ]]; then
+  export AF_STREAMING_ARCHIVE_FIXTURE="${RESULT_DIR}/rust-archive.json"
+  export AF_STREAMING_PORTABILITY_FIXTURE="${RESULT_DIR}/rust-portability.json"
+  if [[ -s "${AF_STREAMING_CONTRACT_FIXTURE}" && -s "${AF_STREAMING_ARCHIVE_FIXTURE}" && -s "${AF_STREAMING_PORTABILITY_FIXTURE}" ]]; then
     run_check frontend-all cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
   else
-    echo 'FAIL frontend-all (Rust contract fixture unavailable)' | tee -a "${RESULT_DIR}/summary.txt"
+    echo 'FAIL frontend-all (Rust contract fixtures unavailable)' | tee -a "${RESULT_DIR}/summary.txt"
     FAILED=1
   fi
   run_check frontend-lint cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings

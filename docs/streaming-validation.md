@@ -18,18 +18,15 @@ Each check runs under a GNU `timeout` bound of 10 minutes with a 10-second termi
 
 ### Scoped Mode (`--scoped`)
 
-1. Runs streaming integration and contract tests inside `af-api` (`streaming_ext::tests`, `streaming_`) and `af-db` (`streaming::tests`) with `--locked`, emitting the synthetic JSON contract files and verifying `-s "${AF_STREAMING_CONTRACT_FIXTURE}"` is non-empty.
-2. Runs `frontend-rs` workspace tests (`cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked`), `e2e/` TypeScript typecheck (`npm exec --workspace e2e -- tsc --noEmit --incremental false`), and `frontend-rs` Clippy (`-D warnings`; without `--all-targets` in scoped mode).
-
-> [!NOTE]
-> `scripts/validate-streaming.sh` verifies that the generated Rust contract fixture file is non-empty, whereas current `frontend-rs` unit tests exercise streaming deserialization using inline `json!()` literals rather than reading `AF_STREAMING_*_FIXTURE` environment variables at runtime.
+1. Runs streaming integration and contract tests inside `af-api` (`streaming_ext::tests`, `streaming_`) and `af-db` (`streaming::tests`) with `--locked`, emitting all three synthetic JSON contract files and verifying all three (`-s "${AF_STREAMING_CONTRACT_FIXTURE}"`, `-s "${AF_STREAMING_ARCHIVE_FIXTURE}"`, and `-s "${AF_STREAMING_PORTABILITY_FIXTURE}"`) are non-empty.
+2. Runs `frontend-rs` workspace tests (`cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked`) which consume all three `AF_STREAMING_*_FIXTURE` files **fail-closed** (`types.rs` -> `AF_STREAMING_CONTRACT_FIXTURE`, `history.rs` -> `AF_STREAMING_ARCHIVE_FIXTURE`, `portability.rs` -> `AF_STREAMING_PORTABILITY_FIXTURE`; inline JSON fallbacks are used only when an env var is unset), `e2e/` TypeScript typecheck (`npm exec --workspace e2e -- tsc --noEmit --incremental false`), and `frontend-rs` Clippy (`-D warnings`; without `--all-targets` in scoped mode).
 
 ### Integrated Mode (`--integrated`)
 
-After the scoped checks, `--integrated` runs:
+After the scoped checks, `--integrated` unsets all three `AF_STREAMING_*_FIXTURE` variables before running:
 
 1. Serial `af-api` crate tests (`cargo test --manifest-path backend-rs/Cargo.toml --locked -p af-api -- --test-threads=1`) and a debug `af-api` build.
-2. `frontend-rs` workspace tests, `frontend-rs` `--all-targets` Clippy (`-D warnings`), and the `frontend-rs` `wasm32-unknown-unknown` crate compilation check (to stage the full Trunk/WASM bundle into `web/dist/`, run `bash scripts/build_wasm_frontend.sh --stage`).
+2. Re-exports all three `AF_STREAMING_*_FIXTURE` variables, verifies all three fixture files are non-empty, then runs `frontend-rs` workspace tests, `frontend-rs` `--all-targets` Clippy (`-D warnings`), and the `frontend-rs` `wasm32-unknown-unknown` crate compilation check (to stage the full Trunk/WASM bundle into `web/dist/`, run `bash scripts/build_wasm_frontend.sh --stage`).
 
 Database migrations exercised during tests operate exclusively on disposable temporary databases. The companion orchestrator test suite (`tests/test_streaming_validation.py`) validates script argument parsing, timeout handling, missing-fixture failure reporting, and log retention using mocked commands; it does not replace running the Rust and WASM suites directly.
 

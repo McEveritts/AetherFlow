@@ -9,6 +9,11 @@ Features:
 - B37: Full Verification & Adversarial Hardening Boundaries
 """
 
+import ast
+import glob
+import os
+import subprocess
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 # ============================================================================
@@ -77,7 +82,21 @@ class TestB32BinarySizeWithinUpperBounds(TestCase):
         super().__init__("T2_B32_05", "F32", 2, "Compiled single binary size is reasonable (<150MB with embedded assets)")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B32: Single binary size constraint contract verified")
+        cargo = inspector.read_file("backend-rs/Cargo.toml") or ""
+        self.assert_true(
+            "[profile.release]" in cargo
+            and "lto =" in cargo
+            and "strip =" in cargo
+            and "codegen-units = 1" in cargo,
+            "B32: backend-rs/Cargo.toml [profile.release] must enable lto, strip, and codegen-units = 1",
+        )
+        release_bin = os.path.join(inspector.root, "backend-rs/target/release/aetherflow-api")
+        if os.path.isfile(release_bin):
+            size_bytes = os.path.getsize(release_bin)
+            self.assert_true(
+                size_bytes < 150 * 1024 * 1024,
+                f"B32: release binary exceeds 150 MB upper bound ({size_bytes} bytes)",
+            )
 
 # ============================================================================
 # B33: Systemd Privilege Boundary Boundaries
@@ -166,7 +185,13 @@ class TestB34CleanSystemdServiceState(TestCase):
         super().__init__("T2_B34_05", "F34", 2, "Services run strictly within systemd cgroups")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B34: Systemd cgroup containment contract verified")
+        api_unit = inspector.read_file("deploy/systemd/aetherflow-api.service") or ""
+        runner_unit = inspector.read_file("deploy/systemd/aetherflow-runner.service") or ""
+        self.assert_true(
+            all(tok in api_unit for tok in ("NoNewPrivileges=yes", "ProtectSystem=strict", "PrivateTmp=yes", "ProtectControlGroups=yes"))
+            and all(tok in runner_unit for tok in ("PrivateTmp=yes", "ProtectControlGroups=yes", "SystemCallFilter=")),
+            "B34: systemd unit templates must declare cgroup and namespace confinement directives",
+        )
 
 # ============================================================================
 # B35: Shell Script Line Endings & Syntax Boundaries
@@ -211,7 +236,15 @@ class TestB35BashSyntaxValidationPasses(TestCase):
         super().__init__("T2_B35_05", "F35", 2, "Core installer scripts have 100% valid bash syntax")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B35: bash -n syntax validation verified")
+        targets = [
+            os.path.join(inspector.root, "setup/AetherFlow-Setup"),
+            os.path.join(inspector.root, "deploy/release-manager.sh"),
+            os.path.join(inspector.root, "packages/common.sh"),
+        ] + sorted(glob.glob(os.path.join(inspector.root, "packages/lib/*.sh")))
+        self.assert_true(len(targets) > 3, "B35: expected core shell scripts and packages/lib/*.sh")
+        for script_path in targets:
+            res = subprocess.run(["bash", "-n", script_path], capture_output=True, text=True, timeout=15)
+            self.assert_equal(res.returncode, 0, f"B35: bash -n failed for {script_path}: {res.stderr}")
 
 # ============================================================================
 # B36: Automated E2E Test Suite Boundaries
@@ -245,7 +278,32 @@ class TestB36TestsSelfContainedAndIsolated(TestCase):
         super().__init__("T2_B36_04", "F36", 2, "Each test case initializes independent state and does not depend on order")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B36: Test case isolation contract verified")
+        e2e_root = os.path.join(inspector.root, "tests", "e2e")
+        violations = []
+        test_classes = 0
+        for root_dir, _, files in os.walk(e2e_root):
+            for fname in sorted(files):
+                if not fname.endswith(".py"):
+                    continue
+                full = os.path.join(root_dir, fname)
+                rel = os.path.relpath(full, inspector.root)
+                with open(full, "r", encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read(), filename=rel)
+                for node in tree.body:
+                    if not isinstance(node, ast.ClassDef):
+                        continue
+                    bases = {b.id for b in node.bases if isinstance(b, ast.Name)}
+                    if "TestCase" not in bases:
+                        continue
+                    test_classes += 1
+                    has_run = any(isinstance(item, ast.FunctionDef) and item.name == "run" for item in node.body)
+                    if not has_run:
+                        violations.append(f"{rel}:{node.name} missing run()")
+                    for item in node.body:
+                        if isinstance(item, ast.Assign) and isinstance(item.value, (ast.List, ast.Dict, ast.Set)):
+                            violations.append(f"{rel}:{node.name} defines mutable class attribute at line {item.lineno}")
+        self.assert_true(test_classes >= 380, f"B36: expected >= 380 TestCase subclasses, found {test_classes}")
+        self.assert_equal(violations, [], f"B36: TestCase isolation violations: {violations}")
 
 class TestB36JsonReportSchemaValidity(TestCase):
     def __init__(self):
@@ -263,7 +321,16 @@ class TestB37FuzzingPayloadsResilience(TestCase):
         super().__init__("T2_B37_01", "F37", 2, "Backend handles extreme payload fuzzing (10MB, non-UTF8, control chars)")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B37: Payload fuzzing resilience contract verified")
+        routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs") or ""
+        plugin_tests = inspector.read_file("backend-rs/crates/af-api/src/plugins/tests.rs") or ""
+        token_tests = inspector.read_file("backend-rs/crates/af-api/src/oidc/token_tests.rs") or ""
+        self.assert_true(
+            "DefaultBodyLimit::max(" in routes
+            and "proxy_body_collection_stops_at_limit_and_distinguishes_transport_errors" in plugin_tests
+            and "PAYLOAD_TOO_LARGE" in plugin_tests
+            and "0xffu8" in token_tests,
+            "B37: af-api must enforce DefaultBodyLimit caps and test oversized / non-UTF8 payload rejection",
+        )
 
 class TestB37ConcurrentSqliteWriteSafety(TestCase):
     def __init__(self):

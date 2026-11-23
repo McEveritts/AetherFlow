@@ -24,8 +24,8 @@ pub use mfa::{
     MfaVerifyRequest,
 };
 
-pub(crate) use middleware::{is_production_or_release_env, require_admin};
 pub use middleware::{admin_only_middleware, auth_middleware, csrf_middleware, issue_csrf_token};
+pub(crate) use middleware::{is_production_or_release_env, require_admin};
 
 #[allow(unused_imports)]
 pub(crate) use revocation::{
