@@ -175,19 +175,19 @@ async fn expired_cleanup_advances_past_a_full_page_of_ambiguous_uploads() {
         .map(|user_id| queried_used_bytes(&conn, user_id))
         .collect();
     assert_eq!(
-        cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(),
+        cleanup_expired_uploads_isolated_at(&conn, temporary.path(), 100).unwrap(),
         0
     );
     assert!(load_session_conn(&conn, &safe.id).unwrap().is_some());
     assert_eq!(
-        cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(),
+        cleanup_expired_uploads_isolated_at(&conn, temporary.path(), 100).unwrap(),
         1
     );
     assert!(load_session_conn(&conn, &safe.id).unwrap().is_none());
     assert!(open_existing_staging_file_at(temporary.path(), 5, &safe.id).is_err());
     assert_eq!(queried_used_bytes(&conn, 5), 0);
     assert_eq!(
-        cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(),
+        cleanup_expired_uploads_isolated_at(&conn, temporary.path(), 100).unwrap(),
         0
     );
     for session in &ambiguous {
@@ -569,7 +569,7 @@ async fn missing_or_unmatched_publication_proof_preserves_expired_session_and_qu
         )
         .unwrap();
         assert_eq!(
-            cleanup_expired_uploads_at(&conn, temporary.path(), now_unix_secs()).unwrap(),
+            cleanup_expired_uploads_isolated_at(&conn, temporary.path(), now_unix_secs()).unwrap(),
             0
         );
         assert!(load_session_conn(&conn, &session.id).unwrap().is_some());
@@ -615,7 +615,10 @@ async fn cancellation_and_expiry_roll_back_quota_when_audit_failure_cannot_be_re
                 [&session.id],
             )
             .unwrap();
-            assert!(cleanup_expired_uploads_at(&conn, temporary.path(), now_unix_secs()).is_err());
+            assert!(
+                cleanup_expired_uploads_isolated_at(&conn, temporary.path(), now_unix_secs())
+                    .is_err()
+            );
         }
         assert!(load_session_conn(&conn, &session.id).unwrap().is_some());
         assert_eq!(queried_used_bytes(&conn, 1), 1004);
@@ -636,7 +639,8 @@ async fn cancellation_and_expiry_roll_back_quota_when_audit_failure_cannot_be_re
             );
         } else {
             assert_eq!(
-                cleanup_expired_uploads_at(&conn, temporary.path(), now_unix_secs()).unwrap(),
+                cleanup_expired_uploads_isolated_at(&conn, temporary.path(), now_unix_secs())
+                    .unwrap(),
                 1
             );
         }
@@ -1922,7 +1926,7 @@ async fn enforces_quota_limits_max_active_sessions_oversize_chunk_and_expiry_cle
     )
     .unwrap();
 
-    let cleaned = cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap();
+    let cleaned = cleanup_expired_uploads_isolated_at(&conn, tmp.path(), now_unix_secs()).unwrap();
     assert_eq!(cleaned, 2);
     // Quota for the 2 expired uploading sessions (20 bytes) is released!
     assert_eq!(queried_used_bytes(&conn, 1), 1000 + 30 * 10);
@@ -1968,7 +1972,7 @@ fn symlink_in_staging_hierarchy_is_rejected_and_completed_expiry_never_releases_
     )
     .unwrap();
 
-    let cleaned = cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap();
+    let cleaned = cleanup_expired_uploads_isolated_at(&conn, tmp.path(), now_unix_secs()).unwrap();
     assert_eq!(cleaned, 1);
     // Published file's 50 bytes MUST remain accounted in user_quotas!
     assert_eq!(queried_used_bytes(&conn, 1), 1050);
@@ -2124,7 +2128,7 @@ fn crash_after_file_rename_before_db_completed_never_releases_published_quota_on
 
     // Expiry cleanup reconciles both against disk, cleans up the expired rows and leftover .part files,
     // and NEVER releases quota for the published files!
-    let cleaned = cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap();
+    let cleaned = cleanup_expired_uploads_isolated_at(&conn, tmp.path(), now_unix_secs()).unwrap();
     assert_eq!(cleaned, 2);
     assert_eq!(queried_used_bytes(&conn, 1), 1024 + 64);
     assert!(!staging_b.exists());
@@ -2260,7 +2264,7 @@ fn crash_during_publishing_reconciles_via_head_or_releases_only_when_proven_unpu
         params![past, rec_c.id],
     )
     .unwrap();
-    let cleaned = cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap();
+    let cleaned = cleanup_expired_uploads_isolated_at(&conn, tmp.path(), now_unix_secs()).unwrap();
     assert_eq!(cleaned, 0);
     assert!(load_session_conn(&conn, &rec_c.id).unwrap().is_some());
     assert_eq!(queried_used_bytes(&conn, 1), 1016 + 40);
@@ -2897,7 +2901,7 @@ async fn upload_audit_handles_conflict_deltas_skip_cancel_and_ambiguous_expiry()
     )
     .unwrap();
 
-    cleanup_expired_uploads_at(&conn, tmp.path(), 100).unwrap();
+    cleanup_expired_uploads_isolated_at(&conn, tmp.path(), 100).unwrap();
     let amb_audit =
         super::super::events::load_audit_record_by_id_with_conn(&conn, &amb_rec.audit_event_id)
             .unwrap()
@@ -2996,7 +3000,7 @@ async fn cleanup_and_discover_skip_locked_sessions_and_preserve_global_cursor_an
 
         // Global cleanup skips Alice's locked session (and cleans Bob's unlocked expired session).
         assert_eq!(
-            cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
+            cleanup_expired_uploads_isolated_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
             1
         );
         assert!(load_session_conn(&conn, &alice_rec.id).unwrap().is_some());
@@ -3072,7 +3076,7 @@ async fn cleanup_and_discover_skip_locked_sessions_and_preserve_global_cursor_an
     )
     .unwrap();
     assert_eq!(
-        cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
+        cleanup_expired_uploads_isolated_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
         1, // Bob's bob_rec2 is cleaned, proof_rec is conservatively retained!
     );
     assert!(
@@ -3133,4 +3137,206 @@ async fn head_and_patch_handlers_acquire_user_mutation_stripe_after_session_lock
     );
     drop(patch_fut);
     drop(stripe_guard);
+}
+
+struct IsolatedUserStripes {
+    stripes: StdMutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
+}
+
+impl IsolatedUserStripes {
+    fn new() -> Self {
+        Self {
+            stripes: StdMutex::new(HashMap::new()),
+        }
+    }
+
+    fn stripe(&self, user_id: i64) -> Arc<AsyncMutex<()>> {
+        let mut map = self.stripes.lock().unwrap();
+        Arc::clone(
+            map.entry(user_id)
+                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+        )
+    }
+
+    fn cleanup_expired_uploads_at(
+        &self,
+        conn: &Connection,
+        base_root: &Path,
+        now_secs: i64,
+    ) -> Result<usize, McBrowserError> {
+        db::cleanup_expired_uploads_with_user_stripe_at(conn, base_root, now_secs, |user_id| {
+            self.stripe(user_id)
+        })
+    }
+}
+
+fn cleanup_expired_uploads_isolated_at(
+    conn: &Connection,
+    base_root: &Path,
+    now_secs: i64,
+) -> Result<usize, McBrowserError> {
+    IsolatedUserStripes::new().cleanup_expired_uploads_at(conn, base_root, now_secs)
+}
+
+#[tokio::test]
+async fn cleanup_expired_uploads_skips_contended_user_stripe_and_retries_after_release() {
+    let conn = setup_isolated_db();
+    let tmp = TestTempDir::new();
+    let stripes = IsolatedUserStripes::new();
+    let alice = human_user(1);
+    let bob = human_user(2);
+
+    let (alice_rec, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &alice,
+        &tus_post_headers("alice-contended.bin", Some("fp-alice-contended"), 10),
+        None,
+    )
+    .unwrap();
+    let (bob_rec, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &bob,
+        &tus_post_headers("bob-uncontended.bin", Some("fp-bob-uncontended"), 8),
+        None,
+    )
+    .unwrap();
+
+    let alice_staging = tmp
+        .path()
+        .join(".af-upload-staging/user-1")
+        .join(format!("{}.part", alice_rec.id));
+    let bob_staging = tmp
+        .path()
+        .join(".af-upload-staging/user-2")
+        .join(format!("{}.part", bob_rec.id));
+
+    // Expire Alice strictly earlier than Bob so Alice is visited first in the page and
+    // skipping her contended user stripe still proceeds to clean Bob in the same pass.
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET expires_at = 1 WHERE id = ?1",
+        params![alice_rec.id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET expires_at = 2 WHERE id = ?1",
+        params![bob_rec.id],
+    )
+    .unwrap();
+
+    // Hold Alice's user stripe: global cleanup must skip Alice non-blockingly and clean Bob.
+    let alice_guard = stripes.stripe(1).lock_owned().await;
+    assert_eq!(
+        stripes
+            .cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs())
+            .unwrap(),
+        1
+    );
+    assert!(load_session_conn(&conn, &alice_rec.id).unwrap().is_some());
+    assert!(alice_staging.exists());
+    assert!(read_publication_proof_at(tmp.path(), &alice_rec)
+        .unwrap()
+        .is_some());
+    assert_eq!(queried_used_bytes(&conn, 1), 1010);
+    let alice_pending =
+        super::super::events::load_audit_record_by_id_with_conn(&conn, &alice_rec.audit_event_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        alice_pending.status,
+        super::super::events::AuditEventStatus::Pending
+    );
+
+    assert!(load_session_conn(&conn, &bob_rec.id).unwrap().is_none());
+    assert!(!bob_staging.exists());
+    assert_eq!(queried_used_bytes(&conn, 2), 0);
+    let bob_expired =
+        super::super::events::load_audit_record_by_id_with_conn(&conn, &bob_rec.audit_event_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        bob_expired.status,
+        super::super::events::AuditEventStatus::Failed
+    );
+    assert_eq!(bob_expired.error_code.as_deref(), Some("UPLOAD_EXPIRED"));
+
+    // Release Alice's user stripe: the next cleanup pass wraps the global cursor and cleans Alice.
+    drop(alice_guard);
+    assert_eq!(
+        stripes
+            .cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs())
+            .unwrap(),
+        1
+    );
+    assert!(load_session_conn(&conn, &alice_rec.id).unwrap().is_none());
+    assert!(!alice_staging.exists());
+    assert!(read_publication_proof_at(tmp.path(), &alice_rec)
+        .unwrap()
+        .is_none());
+    assert_eq!(queried_used_bytes(&conn, 1), 1000);
+    let alice_expired =
+        super::super::events::load_audit_record_by_id_with_conn(&conn, &alice_rec.audit_event_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        alice_expired.status,
+        super::super::events::AuditEventStatus::Failed
+    );
+    assert_eq!(alice_expired.error_code.as_deref(), Some("UPLOAD_EXPIRED"));
+    assert_eq!(
+        stripes
+            .cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs())
+            .unwrap(),
+        0
+    );
+
+    // Verify the production `cleanup_expired_uploads_at` wrapper binds the global
+    // `user_mutation_stripe` and skips when that stripe is held.
+    let contended_uid = 8802;
+    conn.execute(
+        "INSERT INTO users (id, username) VALUES (?1, 'contended_global')",
+        params![contended_uid],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status) \
+         VALUES (?1, 'contended_global', 10000, 0, 'active')",
+        params![contended_uid],
+    )
+    .unwrap();
+    let (global_rec, _) = create_upload_session_at(
+        &conn,
+        tmp.path(),
+        &human_user(contended_uid),
+        &tus_post_headers("global-contended.bin", Some("fp-global-contended"), 12),
+        None,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET expires_at = 3 WHERE id = ?1",
+        params![global_rec.id],
+    )
+    .unwrap();
+
+    let global_guard = crate::mcbrowser::user_mutation_stripe(contended_uid)
+        .lock_owned()
+        .await;
+    assert_eq!(
+        cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs()).unwrap(),
+        0
+    );
+    assert!(load_session_conn(&conn, &global_rec.id).unwrap().is_some());
+    assert_eq!(queried_used_bytes(&conn, contended_uid), 12);
+    drop(global_guard);
+
+    // Retry via isolated stripes confirms the skipped row is cleanable once uncontended.
+    assert_eq!(
+        stripes
+            .cleanup_expired_uploads_at(&conn, tmp.path(), now_unix_secs())
+            .unwrap(),
+        1
+    );
+    assert!(load_session_conn(&conn, &global_rec.id).unwrap().is_none());
+    assert_eq!(queried_used_bytes(&conn, contended_uid), 0);
 }

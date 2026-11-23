@@ -11,6 +11,8 @@ use crate::auth::AuthUser;
 use crate::mcbrowser::{map_fs_io_error, release_user_quota_conn, McBrowserError};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SQLite Schema & Durable State Management
@@ -857,25 +859,16 @@ pub(crate) fn cleanup_expired_uploads_for_user_at(
     Ok(cleaned)
 }
 
-/// Cleans up expired upload sessions (`expires_at <= now`) globally using a persistent cursor.
-/// - Acquires non-blocking `session_lock(&rec.id).try_lock()` -> `user_mutation_stripe(rec.user_id).try_lock()`
-///   for every expired session and holds those guards across reconciliation, `BEGIN IMMEDIATE`
-///   (with a fresh publication-proof re-check), and staging/proof file unlinks.
-/// - Before releasing any quota, reconciles `'publishing'` sessions (and `'uploading'` sessions
-///   at `offset_bytes == upload_length`) against disk:
-///   - If the file was already published to `BrowserFs`, transitions the session to `'completed'`
-///     and NEVER releases quota.
-///   - If publication state is ambiguous, conservatively retains the quota reservation (never
-///     undercounts a potentially published file).
-///   - Only when an unfinished upload is proven unpublished (`status == 'uploading'` with
-///     `offset_bytes < upload_length`, or `UnpublishedStagingIntact`) is its `reserved_bytes` released.
-/// - For expired `'completed'` sessions: deletes the DB tracking row ONLY and NEVER releases quota.
 #[allow(dead_code)]
-pub fn cleanup_expired_uploads_at(
+pub(super) fn cleanup_expired_uploads_with_user_stripe_at<F>(
     conn: &Connection,
     base_root: &Path,
     now_secs: i64,
-) -> Result<usize, McBrowserError> {
+    mut user_stripe_for: F,
+) -> Result<usize, McBrowserError>
+where
+    F: FnMut(i64) -> Arc<AsyncMutex<()>>,
+{
     ensure_uploads_schema(conn)?;
 
     conn.execute_batch(
@@ -924,7 +917,7 @@ pub fn cleanup_expired_uploads_at(
         let Ok(_sess_guard) = sess_mutex.try_lock() else {
             continue;
         };
-        let user_stripe = crate::mcbrowser::user_mutation_stripe(rec.user_id);
+        let user_stripe = user_stripe_for(rec.user_id);
         let Ok(_user_guard) = user_stripe.try_lock() else {
             continue;
         };
@@ -934,6 +927,33 @@ pub fn cleanup_expired_uploads_at(
     }
 
     Ok(cleaned)
+}
+
+/// Cleans up expired upload sessions (`expires_at <= now`) globally using a persistent cursor.
+/// - Acquires non-blocking `session_lock(&rec.id).try_lock()` -> `user_mutation_stripe(rec.user_id).try_lock()`
+///   for every expired session and holds those guards across reconciliation, `BEGIN IMMEDIATE`
+///   (with a fresh publication-proof re-check), and staging/proof file unlinks.
+/// - Before releasing any quota, reconciles `'publishing'` sessions (and `'uploading'` sessions
+///   at `offset_bytes == upload_length`) against disk:
+///   - If the file was already published to `BrowserFs`, transitions the session to `'completed'`
+///     and NEVER releases quota.
+///   - If publication state is ambiguous, conservatively retains the quota reservation (never
+///     undercounts a potentially published file).
+///   - Only when an unfinished upload is proven unpublished (`status == 'uploading'` with
+///     `offset_bytes < upload_length`, or `UnpublishedStagingIntact`) is its `reserved_bytes` released.
+/// - For expired `'completed'` sessions: deletes the DB tracking row ONLY and NEVER releases quota.
+#[allow(dead_code)]
+pub fn cleanup_expired_uploads_at(
+    conn: &Connection,
+    base_root: &Path,
+    now_secs: i64,
+) -> Result<usize, McBrowserError> {
+    cleanup_expired_uploads_with_user_stripe_at(
+        conn,
+        base_root,
+        now_secs,
+        crate::mcbrowser::user_mutation_stripe,
+    )
 }
 
 pub(super) fn cancel_and_release_session_conn(
