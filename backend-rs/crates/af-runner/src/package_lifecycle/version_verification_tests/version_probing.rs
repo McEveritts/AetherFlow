@@ -15,6 +15,9 @@ fn test_cloudplow_version_probe_reads_the_deployed_git_commit() {
                 "package_lifecycle::version_verification_tests::version_probing::test_cloudplow_version_probe_reads_the_deployed_git_commit",
             ])
             .env(FIXTURE_CHILD, "1")
+            .env_remove("AETHERFLOW_FS_ROOT")
+            .env_remove("AF_PACKAGES_CONFIG")
+            .env_remove("AF_PACKAGE_AUTOMATION_CONFIG")
             .env("AETHERFLOW_PACKAGES_CONFIG", config.join("packages.json"))
             .env(
                 "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
@@ -53,6 +56,7 @@ fn test_cloudplow_version_probe_reads_the_deployed_git_commit() {
 
 #[test]
 fn test_stale_af_version_receipt_against_older_live_runtime_fails_certification() {
+    let _env_lock = crate::ENV_TEST_MUTEX.blocking_lock();
     let env_cfg = crate::PackageExecutionEnv::default();
     let target = "2.5.0";
 
@@ -241,7 +245,12 @@ fn test_piped_live_probe_three_components() {
 
 #[test]
 fn test_direct_runner_extract_version_token_from_rclone_output() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::version_probing::test_direct_runner_extract_version_token_from_rclone_output",
+        "AF_RCLONE_VERSION_TOKEN_TEST_CHILD",
+    ) {
+        return;
+    }
     let temp_dir = std::env::temp_dir().join(format!(
         "af-test-rclone-version-token-{}",
         uuid::Uuid::new_v4()
@@ -272,22 +281,16 @@ fn test_direct_runner_extract_version_token_from_rclone_output() {
     std::fs::write(&packages_path, crate::EMBEDDED_PACKAGES_JSON).unwrap();
     let automation_path = temp_dir.join("package_automation.json");
     std::fs::write(&automation_path, crate::EMBEDDED_AUTOMATION_JSON).unwrap();
-    let previous_packages = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
-    let previous_automation = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
-    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &packages_path);
-    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation_path);
 
     // Probe live runtime version for "rclone"
-    let outcome = probe_live_runtime_version("rclone", &env_cfg);
-    for (key, previous) in [
-        ("AETHERFLOW_PACKAGES_CONFIG", previous_packages),
-        ("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", previous_automation),
-    ] {
-        match previous {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
+    let outcome = {
+        let mut env_vars = ScopedEnvVars::new();
+        env_vars.remove("AF_PACKAGES_CONFIG");
+        env_vars.remove("AF_PACKAGE_AUTOMATION_CONFIG");
+        env_vars.set("AETHERFLOW_PACKAGES_CONFIG", &packages_path);
+        env_vars.set("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation_path);
+        probe_live_runtime_version("rclone", &env_cfg)
+    };
     assert_eq!(
         outcome,
         LiveRuntimeProbeOutcome::Verified("1.75.2".to_string()),
@@ -313,7 +316,12 @@ fn test_direct_runner_extract_version_token_from_rclone_output() {
 
 #[test]
 fn test_catalog_loading_failure_fails_closed_without_certifying_af_version() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::version_probing::test_catalog_loading_failure_fails_closed_without_certifying_af_version",
+        "AF_CATALOG_FAIL_CLOSED_TEST_CHILD",
+    ) {
+        return;
+    }
     let temp_dir =
         std::env::temp_dir().join(format!("af-test-catalog-fail-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
@@ -321,7 +329,9 @@ fn test_catalog_loading_failure_fails_closed_without_certifying_af_version() {
     std::fs::write(&malformed_cfg, "{ this is not valid json }").unwrap();
 
     // Point AF_PACKAGES_CONFIG to the malformed file
-    std::env::set_var("AF_PACKAGES_CONFIG", &malformed_cfg);
+    let mut env_vars = ScopedEnvVars::new();
+    env_vars.remove("AETHERFLOW_PACKAGES_CONFIG");
+    env_vars.set("AF_PACKAGES_CONFIG", &malformed_cfg);
 
     let mut env_cfg = crate::PackageExecutionEnv::default();
     env_cfg.fs_root = Some(temp_dir.clone());
@@ -352,13 +362,18 @@ fn test_catalog_loading_failure_fails_closed_without_certifying_af_version() {
         "Catalog failure must fail closed and refuse to certify .af-version"
     );
 
-    std::env::remove_var("AF_PACKAGES_CONFIG");
+    drop(env_vars);
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 fn test_probe_live_runtime_version_descendant_pipe_drain_does_not_hang() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::version_probing::test_probe_live_runtime_version_descendant_pipe_drain_does_not_hang",
+        "AF_PROBE_PIPE_DRAIN_TEST_CHILD",
+    ) {
+        return;
+    }
     let temp_dir =
         std::env::temp_dir().join(format!("af-test-pipe-drain-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
@@ -388,16 +403,18 @@ fn test_probe_live_runtime_version_descendant_pipe_drain_does_not_hang() {
     let auto_path = temp_dir.join("package_automation.json");
     std::fs::write(&auto_path, serde_json::to_string(&automation).unwrap()).unwrap();
 
-    std::env::set_var("AF_PACKAGES_CONFIG", &pkg_path);
-    std::env::set_var("AF_PACKAGE_AUTOMATION_CONFIG", &auto_path);
+    let mut env_vars = ScopedEnvVars::new();
+    env_vars.remove("AETHERFLOW_PACKAGES_CONFIG");
+    env_vars.remove("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
+    env_vars.set("AF_PACKAGES_CONFIG", &pkg_path);
+    env_vars.set("AF_PACKAGE_AUTOMATION_CONFIG", &auto_path);
 
     let env_cfg = crate::PackageExecutionEnv::default();
     let start = std::time::Instant::now();
     let outcome = probe_live_runtime_version("probe-pipe-test", &env_cfg);
     let elapsed = start.elapsed();
 
-    std::env::remove_var("AF_PACKAGES_CONFIG");
-    std::env::remove_var("AF_PACKAGE_AUTOMATION_CONFIG");
+    drop(env_vars);
     let _ = std::fs::remove_dir_all(&temp_dir);
 
     assert!(
@@ -414,7 +431,12 @@ fn test_probe_live_runtime_version_descendant_pipe_drain_does_not_hang() {
 
 #[test]
 fn test_preserve_complete_prerelease_and_build_identities() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::version_probing::test_preserve_complete_prerelease_and_build_identities",
+        "AF_PRESERVE_VERSION_IDENTITY_TEST_CHILD",
+    ) {
+        return;
+    }
     // 1. extract_version_token preserves complete identities
     let old_token = extract_version_token("my-tool 1.0.0+build--old (x86_64-linux)");
     let new_token = extract_version_token("my-tool 1.0.0+build--new (x86_64-linux)");
@@ -462,7 +484,9 @@ fn test_preserve_complete_prerelease_and_build_identities() {
     }));
     let pkg_path = temp_dir.join("packages.json");
     std::fs::write(&pkg_path, serde_json::to_string(&packages).unwrap()).unwrap();
-    std::env::set_var("AF_PACKAGES_CONFIG", &pkg_path);
+    let mut env_vars = ScopedEnvVars::new();
+    env_vars.remove("AETHERFLOW_PACKAGES_CONFIG");
+    env_vars.set("AF_PACKAGES_CONFIG", &pkg_path);
 
     let mut env_cfg = crate::PackageExecutionEnv::default();
     env_cfg.fs_root = Some(temp_dir.clone());
@@ -493,7 +517,7 @@ fn test_preserve_complete_prerelease_and_build_identities() {
         );
     }
 
-    std::env::remove_var("AF_PACKAGES_CONFIG");
+    drop(env_vars);
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
@@ -801,15 +825,20 @@ fn test_has_independent_runtime_evidence_systemd_reset_and_interpreter_checks() 
 
 #[test]
 fn test_run_bounded_probe_command_waitid_eperm_zombie_fallback_kills_descendants() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
-    super::INJECT_WAITID_EPERM.store(true, std::sync::atomic::Ordering::SeqCst);
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::version_probing::test_run_bounded_probe_command_waitid_eperm_zombie_fallback_kills_descendants",
+        "AF_WAITID_EPERM_TEST_CHILD",
+    ) {
+        return;
+    }
+    let _eperm_guard = InjectWaitidEpermGuard::enable();
 
     let mut cmd = std::process::Command::new("sh");
     cmd.args(["-c", "(sleep 30) & exit 0"]);
 
     let start = std::time::Instant::now();
     let res = run_bounded_probe_command_cancellable(&mut cmd, Duration::from_secs(5), || false);
-    super::INJECT_WAITID_EPERM.store(false, std::sync::atomic::Ordering::SeqCst);
+    drop(_eperm_guard);
 
     assert!(
         res.is_ok(),
@@ -1053,7 +1082,7 @@ fn listenarr_receipt_paths_and_runtime_evidence_recognize_capitalized_opt_dir() 
 
 #[test]
 fn test_probe_live_runtime_version_apt_uses_dpkg_status_and_update_package() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.blocking_lock();
     use std::os::unix::fs::PermissionsExt;
 
     let scratch =

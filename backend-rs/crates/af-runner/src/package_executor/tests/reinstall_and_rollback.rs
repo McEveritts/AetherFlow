@@ -652,8 +652,10 @@ async fn test_afmp002_native_failed_update_stops_service_restores_state_downgrad
         }
     }
 
-    env::set_var("AETHERFLOW_HTTP_READY_MAX_ATTEMPTS", "2");
-    env::set_var("AETHERFLOW_HTTP_READY_RETRY_DELAY_MS", "5");
+    let _http_ready_guard = EnvVarGuard::new(&[
+        ("AETHERFLOW_HTTP_READY_MAX_ATTEMPTS", Some("2")),
+        ("AETHERFLOW_HTTP_READY_RETRY_DELAY_MS", Some("5")),
+    ]);
 
     let recipe = get_declarative_recipe("znc").unwrap();
 
@@ -836,7 +838,4 @@ async fn test_afmp002_native_failed_update_stops_service_restores_state_downgrad
 
         let _ = fs::remove_dir_all(&root);
     }
-
-    env::remove_var("AETHERFLOW_HTTP_READY_MAX_ATTEMPTS");
-    env::remove_var("AETHERFLOW_HTTP_READY_RETRY_DELAY_MS");
 }

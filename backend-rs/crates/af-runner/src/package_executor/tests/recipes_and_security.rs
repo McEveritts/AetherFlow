@@ -118,6 +118,7 @@ fn test_target_version_env_is_explicit_and_cleared_when_absent() {
 
 #[test]
 fn test_registry_contains_catalog_packages_and_defers_incomplete_recipes() {
+    let _env_guard = crate::ENV_TEST_MUTEX.blocking_lock();
     for id in list_declarative_recipe_ids() {
         assert!(
             crate::get_runner_package_definition(&id).is_some(),
@@ -1718,8 +1719,7 @@ async fn declarative_recipes_thread_custom_af_bind_address_and_reject_invalid() 
     assert_eq!(probe_host_for_bind_address("::1"), "[::1]");
     assert_eq!(probe_host_for_bind_address("127.0.0.2"), "127.0.0.2");
 
-    let prev_bind = env::var_os("AF_BIND_ADDRESS");
-    env::set_var("AF_BIND_ADDRESS", "127.0.0.2");
+    let _bind_guard = EnvVarGuard::new(&[("AF_BIND_ADDRESS", Some("127.0.0.2"))]);
 
     // 1. Threadfin threads custom AF_BIND_ADDRESS into unit + settings.json
     let tf_root = create_isolated_test_dir("threadfin-custom-bind");
@@ -1819,11 +1819,6 @@ async fn declarative_recipes_thread_custom_af_bind_address_and_reject_invalid() 
     );
     assert!(!bad_root.join("etc/netdata/netdata.conf").exists());
     let _ = fs::remove_dir_all(&bad_root);
-
-    match prev_bind {
-        Some(v) => env::set_var("AF_BIND_ADDRESS", v),
-        None => env::remove_var("AF_BIND_ADDRESS"),
-    }
 }
 
 #[tokio::test]

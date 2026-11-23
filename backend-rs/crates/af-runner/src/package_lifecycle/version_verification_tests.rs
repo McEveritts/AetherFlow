@@ -21,8 +21,133 @@ mod rollback_transitions;
 mod runtime_snapshots;
 mod version_probing;
 
-static ENV_TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
-    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+struct ScopedEnvVars {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl ScopedEnvVars {
+    fn new() -> Self {
+        Self { saved: Vec::new() }
+    }
+
+    fn save_once(&mut self, key: &'static str) {
+        if !self.saved.iter().any(|(existing, _)| *existing == key) {
+            self.saved.push((key, std::env::var_os(key)));
+        }
+    }
+
+    fn set<V: AsRef<std::ffi::OsStr>>(&mut self, key: &'static str, value: V) {
+        self.save_once(key);
+        std::env::set_var(key, value);
+    }
+
+    fn remove(&mut self, key: &'static str) {
+        self.save_once(key);
+        std::env::remove_var(key);
+    }
+}
+
+impl Drop for ScopedEnvVars {
+    fn drop(&mut self) {
+        for (key, prev) in self.saved.drain(..).rev() {
+            match prev {
+                Some(val) => std::env::set_var(key, val),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+struct RollbackHookGuard;
+
+impl RollbackHookGuard {
+    fn set<F>(hook: F) -> Self
+    where
+        F: Fn(&[FileSnapshot]) + Send + Sync + 'static,
+    {
+        *super::TEST_ROLLBACK_HOOK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(Box::new(hook));
+        Self
+    }
+}
+
+impl Drop for RollbackHookGuard {
+    fn drop(&mut self) {
+        *super::TEST_ROLLBACK_HOOK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = None;
+    }
+}
+
+struct CertifyFailHookGuard;
+
+impl CertifyFailHookGuard {
+    fn set<F>(hook: F) -> Self
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        *super::TEST_CERTIFY_FAIL_HOOK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(Box::new(hook));
+        Self
+    }
+}
+
+impl Drop for CertifyFailHookGuard {
+    fn drop(&mut self) {
+        *super::TEST_CERTIFY_FAIL_HOOK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = None;
+    }
+}
+
+struct InjectWaitidEpermGuard;
+
+impl InjectWaitidEpermGuard {
+    fn enable() -> Self {
+        super::INJECT_WAITID_EPERM.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InjectWaitidEpermGuard {
+    fn drop(&mut self) {
+        super::INJECT_WAITID_EPERM.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn run_in_isolated_subprocess(test_name: &str, child_env: &str) -> bool {
+    if std::env::var_os(child_env).is_some() {
+        return false;
+    }
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", test_name, "--nocapture"])
+        .env(child_env, "1");
+    for key in [
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+        "AETHERFLOW_RECOVERY_ROOT",
+        "AF_RECOVERY_ROOT",
+        "AETHERFLOW_PACKAGES_CONFIG",
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "AF_PACKAGES_CONFIG",
+        "AF_PACKAGE_AUTOMATION_CONFIG",
+        "AETHERFLOW_MAX_SNAPSHOT_BYTES",
+        "AETHERFLOW_TEST_FORCE_DISK_FULL",
+    ] {
+        cmd.env_remove(key);
+    }
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed"),
+        "isolated subprocess test `{test_name}` failed (status={}):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        output.status
+    );
+    true
+}
 
 fn test_fixture() -> (PathBuf, PathBuf, Connection, Package) {
     let root = std::env::temp_dir().join(format!("af-coordinator-{}", uuid::Uuid::new_v4()));

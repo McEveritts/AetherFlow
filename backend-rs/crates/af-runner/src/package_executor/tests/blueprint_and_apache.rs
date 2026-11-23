@@ -572,32 +572,24 @@ async fn generated_master_credentials_include_encrypted_digest() {
     use std::os::unix::fs::PermissionsExt;
     let _env = crate::ENV_TEST_MUTEX.lock().await;
     let root = create_isolated_test_dir("generated-master-digest");
-    let vars = [
-        "AETHERFLOW_MASTER_PASS",
-        "MASTER_PASS",
-        "AF_PASS",
-        "AETHERFLOW_VNC_PASSWORD",
-        "AETHERFLOW_MASTER_CREDS_FILE",
-        "AES_MASTER_KEY",
-    ];
-    let previous = vars.map(|key| (key, env::var_os(key)));
-    for key in vars {
-        env::remove_var(key);
-    }
-    env::set_var("AES_MASTER_KEY", "11".repeat(32));
-    let result = try_resolve_master_credentials(Some(&root));
+    let aes_key = "11".repeat(32);
     let path = root.join("var/lib/aetherflow/.master.creds");
-    let stored = fs::read_to_string(&path).unwrap();
-    let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
-    let password = af_db::decrypt_secret_if_needed(stored["password"].as_str().unwrap());
-    let stored_digest = af_db::decrypt_secret_if_needed(stored["ha1"].as_str().unwrap());
-    for (key, value) in previous {
-        if let Some(value) = value {
-            env::set_var(key, value);
-        } else {
-            env::remove_var(key);
-        }
-    }
+    let (result, stored, password, stored_digest) = {
+        let _env_guard = EnvVarGuard::new(&[
+            ("AETHERFLOW_MASTER_PASS", None),
+            ("MASTER_PASS", None),
+            ("AF_PASS", None),
+            ("AETHERFLOW_VNC_PASSWORD", None),
+            ("AETHERFLOW_MASTER_CREDS_FILE", None),
+            ("AES_MASTER_KEY", Some(aes_key.as_str())),
+        ]);
+        let result = try_resolve_master_credentials(Some(&root));
+        let stored = fs::read_to_string(&path).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let password = af_db::decrypt_secret_if_needed(stored["password"].as_str().unwrap());
+        let stored_digest = af_db::decrypt_secret_if_needed(stored["ha1"].as_str().unwrap());
+        (result, stored, password, stored_digest)
+    };
     let (user, secret) = result.unwrap();
     assert_eq!(stored["username"], user);
     assert!(stored["password"].as_str().unwrap().starts_with("enc:v1:"));
@@ -617,15 +609,10 @@ async fn generated_master_credentials_include_encrypted_digest() {
 #[tokio::test]
 async fn threadfin_ignores_unpinned_target_and_catalog_matches_native_recipes() {
     let _env = crate::ENV_TEST_MUTEX.lock().await;
-    let key = "AF_TARGET_VERSION";
-    let previous = env::var_os(key);
-    env::set_var(key, "99.9.9");
-    let version = resolve_threadfin_target_version();
-    if let Some(value) = previous {
-        env::set_var(key, value);
-    } else {
-        env::remove_var(key);
-    }
+    let version = {
+        let _target_guard = EnvVarGuard::new(&[("AF_TARGET_VERSION", Some("99.9.9"))]);
+        resolve_threadfin_target_version()
+    };
     assert_eq!(version, THREADFIN_PINNED_VERSION);
     let recipes: HashMap<String, af_models::PackageAutomation> =
         serde_json::from_str(crate::EMBEDDED_AUTOMATION_JSON).unwrap();

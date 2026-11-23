@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn test_preflight_rejects_tmpfs_staging() {
+    let _env_guard = crate::ENV_TEST_MUTEX.blocking_lock();
     let shm_dir = Path::new("/dev/shm");
     if !shm_dir.exists() {
         return;
@@ -31,13 +32,14 @@ fn test_preflight_rejects_tmpfs_staging() {
     );
 
     // 3. AF_REJECT_TMPFS_STAGING=1 must also reject tmpfs on any check path
-    std::env::set_var("AF_REJECT_TMPFS_STAGING", "1");
-    let env_res = check_filesystem_capacity_and_inodes(&test_root, 512 * 1024 * 1024, 1024);
-    assert!(
-        env_res.is_err(),
-        "AF_REJECT_TMPFS_STAGING=1 must reject tmpfs mount"
-    );
-    std::env::remove_var("AF_REJECT_TMPFS_STAGING");
+    {
+        let _reject_guard = EnvVarGuard::new(&[("AF_REJECT_TMPFS_STAGING", Some("1"))]);
+        let env_res = check_filesystem_capacity_and_inodes(&test_root, 512 * 1024 * 1024, 1024);
+        assert!(
+            env_res.is_err(),
+            "AF_REJECT_TMPFS_STAGING=1 must reject tmpfs mount"
+        );
+    }
 
     let _ = fs::remove_dir_all(&test_root);
 }

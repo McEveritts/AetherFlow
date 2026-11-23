@@ -2,6 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn direct_remove_reinstall_and_explicit_purge_share_durable_ingress_callbacks() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, package) = fixture();
     let backend = FakeBackend::default();
     let (sender, _receiver) = mpsc::channel(32);
@@ -87,6 +88,7 @@ async fn direct_remove_reinstall_and_explicit_purge_share_durable_ingress_callba
 
 #[tokio::test]
 async fn update_retains_custom_port_and_reservation_until_timer_and_service_restore() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, package) = fixture();
     let backend = FakeBackend {
         conflict_database: Some(path),
@@ -125,6 +127,7 @@ async fn update_retains_custom_port_and_reservation_until_timer_and_service_rest
 
 #[tokio::test]
 async fn required_callback_and_script_failures_never_become_completed_receipts() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     for failure in [
         "retention",
         "installer",
@@ -200,6 +203,7 @@ async fn required_callback_and_script_failures_never_become_completed_receipts()
 
 #[tokio::test]
 async fn stream_disconnect_does_not_drop_worker_owner_or_required_callbacks() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, package) = fixture();
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -242,6 +246,7 @@ async fn stream_disconnect_does_not_drop_worker_owner_or_required_callbacks() {
 
 #[tokio::test]
 async fn dropped_coordinator_is_interrupted_only_after_maintenance_lock_is_available() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, package) = fixture();
     let operation =
         CoordinatedOperation::admit(conn, request("update"), package, vec!["syncthing".into()])
@@ -263,6 +268,7 @@ async fn dropped_coordinator_is_interrupted_only_after_maintenance_lock_is_avail
 
 #[tokio::test]
 async fn in_place_reinstall_pre_stops_active_units_and_restores_on_completion_and_failure() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, mut package) = fixture();
     let lock_path = root.join("install/.syncthing.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
@@ -329,6 +335,7 @@ async fn in_place_reinstall_pre_stops_active_units_and_restores_on_completion_an
 
 #[tokio::test]
 async fn afmp003_stopped_or_retained_application_port_is_never_stolen_by_another_application() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, mut conn, mut package) = fixture();
     // Reset syncthing's own saved config from fixture so we test fresh port allocation for a second app
     conn.execute("DELETE FROM app_ingress_configs", []).unwrap();
@@ -389,6 +396,7 @@ async fn afmp003_stopped_or_retained_application_port_is_never_stolen_by_another
 #[cfg(unix)]
 #[tokio::test]
 async fn afmp_sol_003_symlinked_sonarr_config_fails_closed_without_recording_port() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, _package) = fixture();
     conn.execute("DELETE FROM app_ingress_configs", []).unwrap();
     let sonarr_dir = root.join("var/lib/sonarr");
@@ -451,6 +459,7 @@ async fn afmp_sol_003_symlinked_sonarr_config_fails_closed_without_recording_por
 
 #[tokio::test]
 async fn incomplete_rollback_refuses_to_restart_pre_stopped_units() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = fixture();
     let backend = FakeBackend {
         script_error_message: Some(
@@ -490,6 +499,7 @@ async fn incomplete_rollback_refuses_to_restart_pre_stopped_units() {
 
 #[tokio::test]
 async fn update_rejects_missing_or_invalid_target_version_at_admission() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = fixture();
     let mut req = request("update");
     req.expected_target_version = None;
@@ -510,6 +520,7 @@ async fn update_rejects_missing_or_invalid_target_version_at_admission() {
 
 #[tokio::test]
 async fn update_fails_target_verification_when_live_probe_fails_or_mismatches() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = fixture();
     // Backend does not write target version to .af-version, so live probe will find nothing!
     let backend = FakeBackend::default();
@@ -528,6 +539,7 @@ async fn update_fails_target_verification_when_live_probe_fails_or_mismatches() 
 
 #[tokio::test]
 async fn test_service_restart_inactive_unit_triggers_receipt_and_blueprint_rollback() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = fixture();
     let receipt_file = root.join("var/lib/syncthing/.af-version");
     std::fs::create_dir_all(receipt_file.parent().unwrap()).unwrap();
@@ -577,6 +589,7 @@ async fn test_service_restart_inactive_unit_triggers_receipt_and_blueprint_rollb
 
 #[tokio::test]
 async fn test_service_unit_exiting_during_certification_triggers_receipt_rollback() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = fixture();
     let receipt_file = root.join("var/lib/syncthing/.af-version");
     std::fs::create_dir_all(receipt_file.parent().unwrap()).unwrap();
@@ -623,6 +636,7 @@ async fn test_service_unit_exiting_during_certification_triggers_receipt_rollbac
 
 #[tokio::test]
 async fn test_blueprint_config_rollback_on_target_certification_failure() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, _package) = fixture();
     let sonarr_package = Package {
         name: "sonarr".into(),

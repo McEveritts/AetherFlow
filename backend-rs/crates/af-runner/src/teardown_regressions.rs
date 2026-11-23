@@ -457,6 +457,7 @@ async fn teardown_ignore_errors_cannot_bypass_a_required_stop() {
 
 #[tokio::test]
 async fn teardown_pre_stop_orders_novnc_and_socket_units_before_workers() {
+    let _serial = super::tests::TEST_EXECUTION_SERIALIZER.lock().await;
     let fixture = TeardownFixture::new("");
     let systemd_dir = fixture.root.join("etc/systemd/system");
     fs::create_dir_all(&systemd_dir).unwrap();

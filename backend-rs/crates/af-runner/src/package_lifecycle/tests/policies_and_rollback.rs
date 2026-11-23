@@ -271,6 +271,7 @@ async fn admit_enforces_threadfin_pinned_and_pihole_vendor_exact_version_policie
 
 #[tokio::test]
 async fn failed_reinstall_verified_recovery_vs_incomplete_fresh_and_remove_receipts() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, mut package) = fixture();
     package.lock_file = "/install/.syncthing.lock".into();
     let lock_path = root.join("install/.syncthing.lock");
@@ -391,6 +392,7 @@ async fn failed_reinstall_verified_recovery_vs_incomplete_fresh_and_remove_recei
 
 #[tokio::test]
 async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_retained_ingress() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let (root, path, conn, mut package) = fixture();
     package.name = "rclone".into();
     package.service_name = "rclone".into();
@@ -504,6 +506,7 @@ async fn coordinated_remove_persists_retention_state_and_explicit_purge_clears_r
 
 #[tokio::test]
 async fn coordinated_rclone_split_port_lifecycle_rollback_inactive_retain_purge_and_concurrency() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let role = af_models::RCLONE_RC_API_PORT_ROLE;
     let (root, confined_db, conn, base_pkg) = fixture();
     let mk_pkg = |name: &str, default_port: i32| Package {

@@ -296,6 +296,38 @@ impl Drop for EnvVarGuard {
     }
 }
 
+fn run_in_isolated_subprocess(test_name: &str, child_env: &str) -> bool {
+    if env::var_os(child_env).is_some() {
+        return false;
+    }
+    let mut cmd = std::process::Command::new(env::current_exe().unwrap());
+    cmd.args(["--exact", test_name, "--nocapture"])
+        .env(child_env, "1");
+    for key in [
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+        "AETHERFLOW_RECOVERY_ROOT",
+        "AF_RECOVERY_ROOT",
+        "AETHERFLOW_PACKAGES_CONFIG",
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "AF_PACKAGES_CONFIG",
+        "AF_PACKAGE_AUTOMATION_CONFIG",
+        "AETHERFLOW_MAX_SNAPSHOT_BYTES",
+        "AETHERFLOW_TEST_FORCE_DISK_FULL",
+    ] {
+        cmd.env_remove(key);
+    }
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed"),
+        "isolated subprocess test `{test_name}` failed (status={}):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        output.status
+    );
+    true
+}
+
 mod blueprint_and_apache;
 mod quassel_threadfin_parity;
 mod rclone_and_readiness;

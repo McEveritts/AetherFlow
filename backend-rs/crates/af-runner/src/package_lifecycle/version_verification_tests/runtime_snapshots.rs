@@ -853,16 +853,17 @@ fn test_runtime_snapshot_ordinary_cleanup_and_incomplete_rollback_preservation()
 
 #[test]
 fn test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_from_scratch() {
-    let _guard = ENV_TEST_MUTEX.lock().unwrap();
-    let saved_fs = std::env::var_os("AETHERFLOW_FS_ROOT");
-    let saved_install = std::env::var_os("AETHERFLOW_INSTALL_ROOT");
-    let saved_recovery = std::env::var_os("AETHERFLOW_RECOVERY_ROOT");
-    let saved_af_recovery = std::env::var_os("AF_RECOVERY_ROOT");
-
-    std::env::remove_var("AETHERFLOW_FS_ROOT");
-    std::env::remove_var("AETHERFLOW_INSTALL_ROOT");
-    std::env::remove_var("AETHERFLOW_RECOVERY_ROOT");
-    std::env::remove_var("AF_RECOVERY_ROOT");
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::runtime_snapshots::test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_from_scratch",
+        "AF_LEGACY_ENV_RECOVERY_ROOT_TEST_CHILD",
+    ) {
+        return;
+    }
+    let mut env_vars = ScopedEnvVars::new();
+    env_vars.remove("AETHERFLOW_FS_ROOT");
+    env_vars.remove("AETHERFLOW_INSTALL_ROOT");
+    env_vars.remove("AETHERFLOW_RECOVERY_ROOT");
+    env_vars.remove("AF_RECOVERY_ROOT");
 
     let req = crate::PackageRunnerRequest {
         action: "update".to_string(),
@@ -913,7 +914,7 @@ fn test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_
     );
 
     let fixture_root = std::env::temp_dir().join("af-legacy-env-fixture");
-    std::env::set_var("AETHERFLOW_FS_ROOT", &fixture_root);
+    env_vars.set("AETHERFLOW_FS_ROOT", &fixture_root);
     let mut iso_cmd = tokio::process::Command::new("/bin/true");
     crate::package_executor::apply_legacy_package_environment(&mut iso_cmd, &req);
     let iso_envs: std::collections::HashMap<_, _> = iso_cmd
@@ -932,34 +933,28 @@ fn test_apply_legacy_package_environment_sets_persistent_recovery_root_distinct_
         iso_envs.get(std::ffi::OsStr::new("AF_TRANSACTION_ROOT")),
         Some(&Some(expected_iso))
     );
-
-    for (key, prev) in [
-        ("AETHERFLOW_FS_ROOT", saved_fs),
-        ("AETHERFLOW_INSTALL_ROOT", saved_install),
-        ("AETHERFLOW_RECOVERY_ROOT", saved_recovery),
-        ("AF_RECOVERY_ROOT", saved_af_recovery),
-    ] {
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
 }
 
 #[test]
 fn test_librespeed_and_novnc_unit_catalog_sandbox_and_snapshot_capture_restore() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    if run_in_isolated_subprocess(
+        "package_lifecycle::version_verification_tests::runtime_snapshots::test_librespeed_and_novnc_unit_catalog_sandbox_and_snapshot_capture_restore",
+        "AF_LIBRESPEED_NOVNC_CATALOG_TEST_CHILD",
+    ) {
+        return;
+    }
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
         .unwrap();
-    let saved_pkgs = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
-    let saved_auto = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
-    std::env::set_var(
+    let mut env_vars = ScopedEnvVars::new();
+    env_vars.remove("AF_PACKAGES_CONFIG");
+    env_vars.remove("AF_PACKAGE_AUTOMATION_CONFIG");
+    env_vars.set(
         "AETHERFLOW_PACKAGES_CONFIG",
         repo_root.join("config/packages.json"),
     );
-    std::env::set_var(
+    env_vars.set(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         repo_root.join("config/package_automation.json"),
     );
@@ -1038,13 +1033,4 @@ fn test_librespeed_and_novnc_unit_catalog_sandbox_and_snapshot_capture_restore()
     assert!(std::fs::symlink_metadata(multi_wants.join("novnc-session.service")).is_err());
 
     force_remove_backup_tree(&root);
-    for (key, prev) in [
-        ("AETHERFLOW_PACKAGES_CONFIG", saved_pkgs),
-        ("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", saved_auto),
-    ] {
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
 }

@@ -112,6 +112,7 @@ fn test_restore_candidate_receipts_symlink_swap_does_not_modify_victim() {
 
 #[tokio::test]
 async fn test_snapshot_symlink_or_fifo_fails_closed_and_marks_job_failed() {
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
     let temp_dir =
         std::env::temp_dir().join(format!("af-test-symlink-snap-{}", uuid::Uuid::new_v4()));
     let mut env_cfg = crate::PackageExecutionEnv::default();

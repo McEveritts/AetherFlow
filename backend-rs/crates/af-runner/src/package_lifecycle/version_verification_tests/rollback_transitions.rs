@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn test_rollback_quiesces_initially_inactive_unit_started_during_install() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     let (root, _path, conn, _) = test_fixture();
     let opt_dir = root.join("opt/test-multi-unit");
@@ -26,7 +26,7 @@ async fn test_rollback_quiesces_initially_inactive_unit_started_during_install()
     let hook_a = unit_a_active.clone();
     let hook_b = unit_b_active.clone();
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
+    let _rollback_hook = RollbackHookGuard::set(move |snaps| {
         if snaps
             .iter()
             .any(|s| s.path.to_string_lossy().contains("test-multi-unit"))
@@ -43,7 +43,7 @@ async fn test_rollback_quiesces_initially_inactive_unit_started_during_install()
             );
             hook_events.lock().unwrap().push("rollback".to_string());
         }
-    }));
+    });
 
     struct MultiUnitBackend {
         events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -143,7 +143,7 @@ async fn test_rollback_quiesces_initially_inactive_unit_started_during_install()
     let receipt = op.execute(&backend, &sender).await.unwrap();
     assert_eq!(receipt.status, "failed");
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+    drop(_rollback_hook);
 
     let recorded = events.lock().unwrap().clone();
 
@@ -192,7 +192,7 @@ async fn test_rollback_quiesces_initially_inactive_unit_started_during_install()
 
 #[tokio::test]
 async fn test_fresh_install_script_fail_quiesces_installer_started_unit() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     let (root, _path, conn, _) = test_fixture();
     // Genuine fresh install: no /opt/<package> directory or receipt on disk!
@@ -211,7 +211,7 @@ async fn test_fresh_install_script_fail_quiesces_installer_started_unit() {
     let hook_events = events.clone();
     let hook_unit = fresh_unit_active.clone();
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
+    let _rollback_hook = RollbackHookGuard::set(move |snaps| {
         if snaps
             .iter()
             .any(|s| s.path.to_string_lossy().contains("test-fresh-pkg"))
@@ -223,7 +223,7 @@ async fn test_fresh_install_script_fail_quiesces_installer_started_unit() {
             );
             hook_events.lock().unwrap().push("rollback".to_string());
         }
-    }));
+    });
 
     struct FreshInstallBackend {
         events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -304,7 +304,7 @@ async fn test_fresh_install_script_fail_quiesces_installer_started_unit() {
     let receipt = op.execute(&backend, &sender).await.unwrap();
     assert_eq!(receipt.status, "failed");
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+    drop(_rollback_hook);
 
     let recorded = events.lock().unwrap().clone();
 
@@ -343,7 +343,7 @@ async fn test_fresh_install_script_fail_quiesces_installer_started_unit() {
 
 #[tokio::test]
 async fn test_running_oneshot_quiesced_on_rollback_and_not_restarted() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     let (root, _path, conn, _) = test_fixture();
     let opt_dir = root.join("opt/test-oneshot");
@@ -367,7 +367,7 @@ async fn test_running_oneshot_quiesced_on_rollback_and_not_restarted() {
     let hook_timer = timer_active.clone();
     let hook_oneshot = oneshot_active.clone();
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
+    let _rollback_hook = RollbackHookGuard::set(move |snaps| {
         if snaps
             .iter()
             .any(|s| s.path.to_string_lossy().contains("test-oneshot"))
@@ -384,7 +384,7 @@ async fn test_running_oneshot_quiesced_on_rollback_and_not_restarted() {
             );
             hook_events.lock().unwrap().push("rollback".to_string());
         }
-    }));
+    });
 
     struct OneshotBackend {
         events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -484,7 +484,7 @@ async fn test_running_oneshot_quiesced_on_rollback_and_not_restarted() {
     let receipt = op.execute(&backend, &sender).await.unwrap();
     assert_eq!(receipt.status, "failed");
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+    drop(_rollback_hook);
 
     let recorded = events.lock().unwrap().clone();
 
@@ -538,7 +538,7 @@ async fn test_running_oneshot_quiesced_on_rollback_and_not_restarted() {
 
 #[tokio::test]
 async fn test_unit_in_transitional_state_stopped_before_op_and_restarted_on_rollback() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     // Verify parse_systemd_active_state directly: only "active" is true
     assert!(parse_systemd_active_state("active").unwrap());
@@ -674,7 +674,7 @@ async fn test_unit_in_transitional_state_stopped_before_op_and_restarted_on_roll
 
 #[tokio::test]
 async fn test_transitional_unit_fails_post_start_health_certification() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     let (root, _path, conn, _) = test_fixture();
     let opt_dir = root.join("opt/test-trans-cert");
@@ -818,6 +818,7 @@ async fn test_transitional_unit_fails_post_start_health_certification() {
 
 #[tokio::test]
 async fn test_post_certification_failure_restores_runtime_state_and_receipt() {
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = test_fixture();
 
     let opt_syncthing = root.join("opt/syncthing");
@@ -978,6 +979,7 @@ async fn test_post_certification_failure_restores_runtime_state_and_receipt() {
 
 #[tokio::test]
 async fn test_coordinated_operation_orders_socket_timer_and_novnc_quiesce_and_restore() {
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
     struct RecordingBackend {
         events: std::sync::Mutex<Vec<String>>,
     }

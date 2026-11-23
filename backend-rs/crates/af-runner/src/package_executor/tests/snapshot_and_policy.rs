@@ -72,7 +72,12 @@ async fn test_pc04_cumulative_snapshot_ceiling_rejects_before_copy_across_multip
 
 #[tokio::test]
 async fn test_pc04_incremental_snapshot_admission_free_space_and_budget() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    if run_in_isolated_subprocess(
+        "package_executor::tests::snapshot_and_policy::test_pc04_incremental_snapshot_admission_free_space_and_budget",
+        "AF_PC04_INCREMENTAL_SNAPSHOT_TEST_CHILD",
+    ) {
+        return;
+    }
     let root = create_isolated_test_dir("pc04-incremental-admission");
     let dir_a = root.join("var/lib/app-a");
     let dir_b = root.join("var/lib/app-b");
@@ -128,7 +133,12 @@ async fn test_pc04_incremental_snapshot_admission_free_space_and_budget() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_pc04_snapshot_retains_nofollow_cancellation_and_rollback_restore() {
-    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    if run_in_isolated_subprocess(
+        "package_executor::tests::snapshot_and_policy::test_pc04_snapshot_retains_nofollow_cancellation_and_rollback_restore",
+        "AF_PC04_ROLLBACK_RESTORE_SNAPSHOT_TEST_CHILD",
+    ) {
+        return;
+    }
     let root = create_isolated_test_dir("pc04-nofollow-cancel-rollback");
 
     // 1. No-follow policy rejects symlinks inside snapshotted dir and cleans up partial staging.

@@ -3,6 +3,7 @@ use super::*;
 #[tokio::test]
 async fn test_script_failure_triggers_receipt_and_blueprint_rollback_when_services_restart_cleanly()
 {
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, _) = test_fixture();
     let sonarr_dir = root.join("var/lib/sonarr");
     std::fs::create_dir_all(&sonarr_dir).unwrap();
@@ -123,6 +124,7 @@ async fn test_script_failure_triggers_receipt_and_blueprint_rollback_when_servic
 
 #[tokio::test]
 async fn test_post_commit_rollback_error_persisted_in_diagnostics() {
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
     let (root, _path, conn, package) = test_fixture();
     let req = PackageRunnerRequest {
         package_id: "syncthing".into(),
@@ -201,7 +203,7 @@ async fn test_post_commit_rollback_error_persisted_in_diagnostics() {
 
 #[tokio::test]
 async fn test_coordinated_operation_quiesce_restore_restart_order() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     // Sub-scenario A: Script failure order
     // Expected: stop -> script -> stop -> rollback -> start -> active
@@ -223,7 +225,7 @@ async fn test_coordinated_operation_quiesce_restore_restart_order() {
         let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let events_for_hook = events.clone();
 
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
+        let _rollback_hook = RollbackHookGuard::set(move |snaps| {
             if snaps.iter().any(|s| {
                 s.path
                     .to_string_lossy()
@@ -231,7 +233,7 @@ async fn test_coordinated_operation_quiesce_restore_restart_order() {
             }) {
                 events_for_hook.lock().unwrap().push("rollback".to_string());
             }
-        }));
+        });
 
         struct OrderScriptFailBackend {
             events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -321,7 +323,7 @@ async fn test_coordinated_operation_quiesce_restore_restart_order() {
         let receipt = op.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed");
 
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+        drop(_rollback_hook);
 
         let recorded = events.lock().unwrap().clone();
         assert_eq!(
@@ -366,7 +368,7 @@ async fn test_coordinated_operation_quiesce_restore_restart_order() {
         let events_for_rb = events.clone();
         let events_for_cf = events.clone();
 
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
+        let _rollback_hook = RollbackHookGuard::set(move |snaps| {
             if snaps.iter().any(|s| {
                 s.path
                     .to_string_lossy()
@@ -374,15 +376,15 @@ async fn test_coordinated_operation_quiesce_restore_restart_order() {
             }) {
                 events_for_rb.lock().unwrap().push("rollback".to_string());
             }
-        }));
-        *super::TEST_CERTIFY_FAIL_HOOK.lock().unwrap() = Some(Box::new(move |pkg| {
+        });
+        let _certify_hook = CertifyFailHookGuard::set(move |pkg| {
             if pkg == "syncthing-order-cert-fail" {
                 events_for_cf
                     .lock()
                     .unwrap()
                     .push("certify_fail".to_string());
             }
-        }));
+        });
 
         struct OrderCertFailBackend {
             events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -481,8 +483,8 @@ async fn test_coordinated_operation_quiesce_restore_restart_order() {
         let receipt = op.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed");
 
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
-        *super::TEST_CERTIFY_FAIL_HOOK.lock().unwrap() = None;
+        drop(_certify_hook);
+        drop(_rollback_hook);
 
         let recorded = events.lock().unwrap().clone();
         assert_eq!(
@@ -578,7 +580,7 @@ fn test_is_incomplete_rollback_error_hyphenated_and_diagnostics() {
 
 #[tokio::test]
 async fn test_restore_and_restart_units_quiesce_failure_gates_restoration_and_restart() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     struct QuiesceFailBackend {
         events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -623,9 +625,9 @@ async fn test_restore_and_restart_units_quiesce_failure_gates_restoration_and_re
 
     let rollback_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let rb_called_hook = rollback_called.clone();
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |_| {
+    let _rollback_hook = RollbackHookGuard::set(move |_| {
         rb_called_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-    }));
+    });
 
     let stopped = vec!["mock-unit.service".to_string()];
     let mut receipt_restore_error = None;
@@ -646,7 +648,7 @@ async fn test_restore_and_restart_units_quiesce_failure_gates_restoration_and_re
     )
     .await;
 
-    *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+    drop(_rollback_hook);
 
     // 1. rollback_operation_state must NOT have been called!
     assert!(
@@ -676,7 +678,7 @@ async fn test_restore_and_restart_units_quiesce_failure_gates_restoration_and_re
 
 #[tokio::test]
 async fn test_restore_and_restart_units_snapshot_restore_failure_gates_restart() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     struct SnapshotFailBackend {
         events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -765,7 +767,7 @@ async fn test_restore_and_restart_units_snapshot_restore_failure_gates_restart()
 
 #[tokio::test]
 async fn test_restore_and_restart_units_incomplete_rollback_gates_restart() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     struct IncRollbackBackend {
         events: Arc<std::sync::Mutex<Vec<String>>>,
@@ -842,7 +844,7 @@ async fn test_restore_and_restart_units_incomplete_rollback_gates_restart() {
 
 #[tokio::test]
 async fn test_skipped_runtime_restoration_preserves_recovery_snapshot() {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     struct RecoveryBlockedBackend {
         quiescent: bool,
@@ -950,7 +952,7 @@ async fn test_skipped_runtime_restoration_preserves_recovery_snapshot() {
 #[tokio::test]
 async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_stop_failure_gates_restoration(
 ) {
-    let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+    let _env_lock = crate::ENV_TEST_MUTEX.lock().await;
 
     struct AbsentRollbackBackend {
         fail_as_absent: bool,
@@ -1020,9 +1022,9 @@ async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_st
 
         let rollback_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rb_hook = rollback_called.clone();
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |_| {
+        let _rollback_hook = RollbackHookGuard::set(move |_| {
             rb_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-        }));
+        });
 
         let units = vec!["radarr.service".to_string()];
         let mut receipt_restore_error = None;
@@ -1043,7 +1045,7 @@ async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_st
         )
         .await;
 
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+        drop(_rollback_hook);
 
         // Rollback restoration must NOT be gated because the unit is absent and quiescent!
         assert!(
@@ -1073,9 +1075,9 @@ async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_st
 
         let rollback_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rb_hook = rollback_called.clone();
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |_| {
+        let _rollback_hook = RollbackHookGuard::set(move |_| {
             rb_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-        }));
+        });
 
         let units = vec!["radarr.service".to_string()];
         let mut receipt_restore_error = None;
@@ -1096,7 +1098,7 @@ async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_st
         )
         .await;
 
-        *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
+        drop(_rollback_hook);
 
         // Rollback restoration MUST be gated on non-absent quiesce failure!
         assert!(

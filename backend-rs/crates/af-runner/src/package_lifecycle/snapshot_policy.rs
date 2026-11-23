@@ -338,6 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_runs_off_runtime_thread_and_restore_preserves_excluded_payloads() {
+        let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
         for (package, logical, kept, excluded) in [
             ("plex", "var/lib/plexmediaserver",
              &["Library/Application Support/Plex Media Server/Preferences.xml",
@@ -386,6 +387,7 @@ mod tests {
 
     #[test]
     fn cumulative_preflight_rejects_before_copy() {
+        let _env_guard = crate::ENV_TEST_MUTEX.blocking_lock();
         let (root, env) = fixture();
         let live = env.fs_root.as_ref().unwrap().join("var/lib/sonarr");
         std::fs::create_dir_all(&live).unwrap();
