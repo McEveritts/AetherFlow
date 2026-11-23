@@ -14,7 +14,6 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Extension, Query};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
 use axum::Router;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
@@ -167,12 +166,13 @@ struct QuotaSnapshot {
     quota_bytes: i64,
     used_bytes: i64,
 }
-pub fn router() -> Router {
-    let upload_route = Router::new()
+pub(crate) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{delete, get, post, put, TrackedRouter};
+    let upload_route = TrackedRouter::new()
         .route("/mcbrowser/upload", put(upload_entry))
         .layer(DefaultBodyLimit::max((MAX_UPLOAD_BYTES + 1) as usize));
 
-    Router::new()
+    TrackedRouter::new()
         .route("/mcbrowser/entries", get(list_entries))
         .route("/mcbrowser/directory", post(create_directory))
         .route("/mcbrowser/rename", post(rename_entry))
@@ -180,17 +180,27 @@ pub fn router() -> Router {
         .route("/mcbrowser/download", get(download_entry))
         .route("/mcbrowser/preview", get(preview_entry))
         .merge(upload_route)
-        .merge(policy::router())
-        .merge(events::router())
-        .merge(actions::router())
-        .merge(uploads::router())
-        .merge(operations::router())
-        .merge(media::router())
-        .merge(shares::router())
+        .merge(policy::tracked_router())
+        .merge(events::tracked_router())
+        .merge(actions::tracked_router())
+        .merge(uploads::tracked_router())
+        .merge(operations::tracked_router())
+        .merge(media::tracked_router())
+        .merge(shares::tracked_router())
 }
 
+pub(crate) fn tracked_public_router() -> crate::routes::TrackedRouter {
+    shares::tracked_public_router()
+}
+
+#[allow(dead_code)]
+pub fn router() -> Router {
+    tracked_router().into_router()
+}
+
+#[allow(dead_code)]
 pub fn public_router() -> Router {
-    shares::public_router()
+    tracked_public_router().into_router()
 }
 
 pub(crate) fn user_mutation_stripe(user_id: i64) -> Arc<AsyncMutex<()>> {

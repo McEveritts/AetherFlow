@@ -87,21 +87,50 @@ fn account_mutation_transaction<'connection>(
     Ok(transaction)
 }
 
+pub(super) fn reject_if_peer_account(
+    transaction: &Connection,
+    target_user_id: i64,
+) -> Result<(), McBrowserError> {
+    if !crate::auth::column_exists(transaction, "users", "account_type").map_err(database_error)? {
+        return Ok(());
+    }
+    let account_type: Option<String> = transaction
+        .query_row(
+            "SELECT COALESCE(account_type, 'human') FROM users WHERE id = ?1",
+            [target_user_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?;
+    if account_type.is_some_and(|kind| !kind.trim().eq_ignore_ascii_case("human")) {
+        return Err(McBrowserError::Forbidden(
+            "Manage peer run-as accounts through peer grants".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_other_usable_admin(
     transaction: &Connection,
     target_user_id: i64,
     message: &str,
 ) -> Result<(), McBrowserError> {
+    let human_clause = if crate::auth::column_exists(transaction, "users", "account_type")
+        .map_err(database_error)?
+    {
+        " AND COALESCE(remaining.account_type, 'human') = 'human'"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT COUNT(*) FROM users AS remaining
+         LEFT JOIN user_quotas AS quota ON quota.user_id = remaining.id
+         WHERE remaining.id != ?1 AND remaining.role = 'admin'
+         AND remaining.username NOT LIKE 'plugin:%'{human_clause}
+         AND LOWER(TRIM(COALESCE(quota.status, ''))) IN ('', 'active')"
+    );
     let remaining_admin_count: i64 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM users AS remaining
-             LEFT JOIN user_quotas AS quota ON quota.user_id = remaining.id
-             WHERE remaining.id != ?1 AND remaining.role = 'admin'
-             AND remaining.username NOT LIKE 'plugin:%'
-             AND LOWER(TRIM(COALESCE(quota.status, ''))) IN ('', 'active')",
-            [target_user_id],
-            |row| row.get(0),
-        )
+        .query_row(&sql, [target_user_id], |row| row.get(0))
         .map_err(database_error)?;
     if remaining_admin_count == 0 {
         return Err(McBrowserError::BadRequest(message.to_owned()));
@@ -122,6 +151,7 @@ fn delete_account_with_conn(
     configured_root: Option<&str>,
 ) -> Result<AccountDeletion, McBrowserError> {
     let transaction = account_mutation_transaction(connection, caller, target_user_id)?;
+    reject_if_peer_account(&transaction, target_user_id)?;
     let target_role: Option<String> = transaction
         .query_row(
             "SELECT role FROM users WHERE id = ?1",
@@ -275,6 +305,7 @@ fn update_account_role_with_conn(
         ));
     }
     let transaction = account_mutation_transaction(connection, caller, target_user_id)?;
+    reject_if_peer_account(&transaction, target_user_id)?;
     let current_role: Option<String> = transaction
         .query_row(
             "SELECT role FROM users WHERE id = ?1",

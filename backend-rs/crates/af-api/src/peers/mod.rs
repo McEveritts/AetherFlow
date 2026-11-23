@@ -1,17 +1,21 @@
 //! Peer clustering control plane, tunnel listener lifecycle, pairing, health, and link management.
 
 pub mod errors;
+pub mod grants;
 pub mod health;
 pub mod links;
 pub mod listener;
 pub mod pairing;
+pub mod scopes;
 
 #[cfg(test)]
 mod tests;
 
 use af_runner::{PeerCredentialSecret, PeerNetworkError, PeerNetworkRequest, PeerNetworkResponse};
+use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
-use axum::routing::{delete, get, post, put};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use errors::{redact_sensitive_text, PeerError};
@@ -36,6 +40,7 @@ pub const DEFAULT_PEER_RTT_WARN_MS: f64 = 25.0;
 pub const PUBLIC_PAIRING_BODY_LIMIT_BYTES: usize = 4096;
 pub const HEADER_LINK_TOKEN: &str = "x-af-link-token";
 pub const HEADER_GRANT_TOKEN: &str = "x-af-grant-token";
+pub const HEADER_ORIGIN_OPERATOR: &str = "x-af-origin-operator";
 
 /// Internal durable `peer_links.state` values encoding both lifecycle state and affirmative
 /// WireGuard (`afpeer0`) peer ownership within the existing schema.
@@ -117,10 +122,10 @@ pub(crate) fn public_link_state(state: &str) -> &str {
 
 /// Capabilities advertised on `/health` and tunnel `/health`.
 ///
-/// P3 advertises `["links"]` independent of configured tunnel identity so servers can discover
-/// link-protocol support prior to initial pairing.
+/// P5 advertises `["links", "grants"]` once scoped grant issuance, revocation, reciprocal grant
+/// offers, and scoped tunnel management dispatch are enabled.
 pub fn capabilities() -> Vec<&'static str> {
-    vec!["links"]
+    vec!["links", "grants"]
 }
 
 /// Broadcast events published whenever a link or grant is revoked.
@@ -283,6 +288,7 @@ impl PeerDb {
             #[cfg(test)]
             Self::Isolated(conn_arc) => {
                 let guard = conn_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = af_db::peers::ensure_peer_grant_schema_invariants(&guard);
                 f(&guard)
             }
         }
@@ -313,6 +319,7 @@ impl PeerDb {
             #[cfg(test)]
             Self::Isolated(conn_arc) => {
                 let guard = conn_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = af_db::peers::ensure_peer_grant_schema_invariants(&guard);
                 f(&guard)
             }
         }
@@ -538,7 +545,12 @@ pub struct PeerRuntime {
     pub(crate) public_transport: Arc<dyn PublicPairingTransport>,
     pub(crate) revocation_tx: broadcast::Sender<RevocationEvent>,
     pub(crate) pairing_rate_limiter: pairing::PairingRateLimiter,
+    /// Canonical per-attempt pairing lock (always acquired BEFORE `link_locks` when both are needed,
+    /// and never held across outbound HTTP).
     pub(crate) attempt_locks: KeyedAsyncLockPool,
+    /// Canonical per-link lock serializing endpoint updates, link revocations/cleanups, pending
+    /// sweeps, AND grant receiver writes/revokes/credential cleanups so revalidated live link
+    /// ownership surrounds all credential I/O. Never held across outbound tunnel HTTP.
     pub(crate) link_locks: KeyedAsyncLockPool,
     pub(crate) link_semaphores: StdMutex<HashMap<String, Weak<Semaphore>>>,
     pub(crate) tunnel_clients: StdMutex<HashMap<TunnelClientBindingKey, reqwest::Client>>,
@@ -558,6 +570,8 @@ pub struct PeerRuntime {
     pub(crate) tunnel_port_overrides: RwLock<HashMap<IpAddr, u16>>,
     #[cfg(test)]
     pub(crate) bind_listener_in_handlers: bool,
+    #[cfg(test)]
+    pub(crate) management_router_override: Option<Router>,
 }
 
 static GLOBAL_RUNTIME: Lazy<Arc<PeerRuntime>> = Lazy::new(|| Arc::new(PeerRuntime::production()));
@@ -601,6 +615,8 @@ impl PeerRuntime {
             tunnel_port_overrides: RwLock::new(HashMap::new()),
             #[cfg(test)]
             bind_listener_in_handlers: true,
+            #[cfg(test)]
+            management_router_override: None,
         }
     }
 
@@ -945,6 +961,29 @@ impl PeerRuntime {
         json_body: Option<Vec<u8>>,
         timeout: Duration,
     ) -> Result<(StatusCode, Vec<u8>, f64), TunnelHttpError> {
+        self.send_tunnel_request_with_headers(
+            method,
+            peer_tunnel_ip,
+            path,
+            link_token,
+            &[],
+            json_body,
+            timeout,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn send_tunnel_request_with_headers(
+        &self,
+        method: Method,
+        peer_tunnel_ip: &str,
+        path: &str,
+        link_token: Option<&PeerCredentialSecret>,
+        extra_headers: &[(String, String)],
+        json_body: Option<Vec<u8>>,
+        timeout: Duration,
+    ) -> Result<(StatusCode, Vec<u8>, f64), TunnelHttpError> {
         let url = self.build_tunnel_url(peer_tunnel_ip, path)?;
         let dest_ip: IpAddr = peer_tunnel_ip
             .trim()
@@ -964,6 +1003,20 @@ impl PeerRuntime {
             })?;
             hv.set_sensitive(true);
             req_builder = req_builder.header(HeaderName::from_static(HEADER_LINK_TOKEN), hv);
+        }
+        for (name, value) in extra_headers {
+            let hn = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                TunnelHttpError::InvalidTarget("Invalid tunnel header name".to_string())
+            })?;
+            let mut hv = HeaderValue::from_str(value).map_err(|_| {
+                TunnelHttpError::InvalidTarget("Invalid tunnel header value".to_string())
+            })?;
+            if name.eq_ignore_ascii_case(HEADER_GRANT_TOKEN)
+                || name.eq_ignore_ascii_case(HEADER_LINK_TOKEN)
+            {
+                hv.set_sensitive(true);
+            }
+            req_builder = req_builder.header(hn, hv);
         }
         if let Some(body) = json_body {
             req_builder = req_builder
@@ -1087,13 +1140,37 @@ impl PeerRuntime {
     }
 }
 
+async fn reject_peer_principal_middleware(req: Request, next: Next) -> Response {
+    if req
+        .extensions()
+        .get::<crate::auth::PeerPrincipal>()
+        .is_some()
+    {
+        return PeerError::peer_scope_denied(
+            "local",
+            "peer_admin_local_only",
+            "Peer administration endpoints are local-only and cannot be called through a peer grant",
+        )
+        .into_response();
+    }
+    next.run(req).await
+}
+
 /// Admin router mounted strictly under `/api/v1/admin/peers`.
+#[allow(dead_code)]
 pub fn admin_routes() -> Router {
     admin_routes_with_runtime(PeerRuntime::global())
 }
 
-pub(crate) fn admin_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
-    Router::new()
+pub(crate) fn tracked_admin_routes() -> crate::routes::TrackedRouter {
+    tracked_admin_routes_with_runtime(PeerRuntime::global())
+}
+
+pub(crate) fn tracked_admin_routes_with_runtime(
+    runtime: Arc<PeerRuntime>,
+) -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{delete, get, post, put, TrackedRouter};
+    TrackedRouter::new()
         .route("/", get(links::list_peers))
         .route(
             "/pairing-window",
@@ -1105,17 +1182,38 @@ pub(crate) fn admin_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
         .route("/pairing/:attempt", delete(pairing::cancel_pairing))
         .route("/:id", delete(links::delete_peer))
         .route("/:id/endpoint", put(links::update_peer_endpoint))
+        .route(
+            "/:id/grant",
+            get(grants::get_peer_grant)
+                .put(grants::put_peer_grant)
+                .delete(grants::delete_peer_grant),
+        )
+        .route("/:id/grant-offer", post(grants::send_grant_offer))
+        .layer(middleware::from_fn(reject_peer_principal_middleware))
         .with_state(runtime)
+}
+
+#[allow(dead_code)]
+pub(crate) fn admin_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
+    tracked_admin_routes_with_runtime(runtime).into_router()
 }
 
 /// Public pairing bootstrap router mounted strictly under `/api/v1` outside session auth,
 /// enforcing a strict 4 KiB body limit.
+#[allow(dead_code)]
 pub fn public_routes() -> Router {
     public_routes_with_runtime(PeerRuntime::global())
 }
 
-pub(crate) fn public_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
-    Router::new()
+pub(crate) fn tracked_public_routes() -> crate::routes::TrackedRouter {
+    tracked_public_routes_with_runtime(PeerRuntime::global())
+}
+
+pub(crate) fn tracked_public_routes_with_runtime(
+    runtime: Arc<PeerRuntime>,
+) -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{post, TrackedRouter};
+    TrackedRouter::new()
         .route(
             "/peer-pairing/request",
             post(pairing::public_pairing_request),
@@ -1124,6 +1222,11 @@ pub(crate) fn public_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
             PUBLIC_PAIRING_BODY_LIMIT_BYTES,
         ))
         .with_state(runtime)
+}
+
+#[allow(dead_code)]
+pub(crate) fn public_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
+    tracked_public_routes_with_runtime(runtime).into_router()
 }
 
 /// Subscribes to peer link and grant revocation broadcasts.
@@ -1151,6 +1254,10 @@ pub(crate) async fn start_with_runtime(runtime: Arc<PeerRuntime>) {
             tracing::warn!(%error, "Initial peer link listener bind deferred; health loop will retry once tunnel is ready");
         }
     }
+
+    // Recover any durable pending revoked-grant credential deletions left behind across restarts
+    // (dormant no-op with zero runner calls when no cleanup markers exist).
+    grants::cleanup_pending_received_grant_credentials(&runtime).await;
 
     let mut health_guard = runtime.health_shutdown.lock().await;
     if health_guard.is_none() {

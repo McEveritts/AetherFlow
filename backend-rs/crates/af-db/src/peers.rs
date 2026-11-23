@@ -103,6 +103,65 @@ pub(crate) const PEER_CLUSTERING_MIGRATION_25_SQL: &[&str] = &[
     "ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'human';",
 ];
 
+pub(crate) const PEER_GRANT_METADATA_MIGRATION_27_SQL: &[&str] = &[
+    r#"CREATE TABLE IF NOT EXISTS peer_received_grants (
+        link_id TEXT PRIMARY KEY REFERENCES peer_links(id) ON DELETE CASCADE,
+        grant_id TEXT NOT NULL,
+        run_as_user_id INTEGER NOT NULL,
+        access TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        generation INTEGER NOT NULL DEFAULT 0,
+        revoked_at TEXT,
+        credential_id TEXT,
+        updated_at TEXT NOT NULL
+    );"#,
+    r#"CREATE TABLE IF NOT EXISTS peer_received_grant_cleanups (
+        link_id TEXT NOT NULL REFERENCES peer_links(id) ON DELETE CASCADE,
+        credential_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (link_id, credential_id)
+    );"#,
+    r#"CREATE TABLE IF NOT EXISTS peer_grant_epochs (
+        link_id TEXT PRIMARY KEY REFERENCES peer_links(id) ON DELETE CASCADE,
+        issuer_generation INTEGER NOT NULL DEFAULT 0,
+        active_op_id TEXT,
+        updated_at TEXT NOT NULL
+    );"#,
+];
+
+/// Ensures additive unreleased Migration 27 columns and tables exist even for pre-existing
+/// databases or isolated test schemas created before staged-slot grant metadata was added.
+pub fn ensure_peer_grant_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    let has_received_grants: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'peer_received_grants')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_received_grants {
+        crate::schema::ensure_column(conn, "peer_received_grants", "credential_id", "TEXT")?;
+    }
+    let has_links: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'peer_links')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_links {
+        conn.execute(
+            r#"CREATE TABLE IF NOT EXISTS peer_received_grant_cleanups (
+                link_id TEXT NOT NULL REFERENCES peer_links(id) ON DELETE CASCADE,
+                credential_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (link_id, credential_id)
+            );"#,
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 const REDACTED_DIGEST: &str = "[REDACTED]";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +196,7 @@ impl AccessLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AccessMap {
     #[serde(default)]
     pub services: AccessLevel,
@@ -341,6 +401,48 @@ impl fmt::Debug for PeerGrant {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerReceivedGrant {
+    pub link_id: String,
+    pub grant_id: String,
+    pub run_as_user_id: i64,
+    pub access: AccessMap,
+    pub created_by: String,
+    pub created_at: String,
+    pub generation: i64,
+    pub revoked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    pub updated_at: String,
+}
+
+impl PeerReceivedGrant {
+    /// Returns the runner `GrantToken` credential ID committed for this grant, falling back to
+    /// the canonical `link_id` slot for legacy rows where `credential_id` is `None`.
+    pub fn effective_credential_id(&self) -> &str {
+        self.credential_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(self.link_id.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerReceivedGrantCleanup {
+    pub link_id: String,
+    pub credential_id: String,
+    pub generation: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGrantEpoch {
+    pub link_id: String,
+    pub issuer_generation: i64,
+    pub active_op_id: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingWindow {
     pub id: String,
@@ -436,6 +538,13 @@ const PEER_LINK_COLUMNS: &str = "id, name, wg_pubkey, tunnel_ip, endpoint, wg_po
 const PEER_GRANT_COLUMNS: &str =
     "id, link_id, run_as_user_id, access, token_hash, created_by, created_at, revoked_at";
 
+const PEER_RECEIVED_GRANT_COLUMNS: &str =
+    "link_id, grant_id, run_as_user_id, access, created_by, created_at, generation, revoked_at, credential_id, updated_at";
+
+const PEER_RECEIVED_GRANT_CLEANUP_COLUMNS: &str = "link_id, credential_id, generation, updated_at";
+
+const PEER_GRANT_EPOCH_COLUMNS: &str = "link_id, issuer_generation, active_op_id, updated_at";
+
 const PAIRING_WINDOW_COLUMNS: &str = "id, code_hash, expires_at, consumed_at";
 
 const PAIRING_ATTEMPT_COLUMNS: &str = "id, window_id, remote_name, remote_pubkey, \
@@ -499,6 +608,45 @@ fn map_peer_grant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerGrant> {
         created_by: row.get(5)?,
         created_at: row.get(6)?,
         revoked_at: row.get(7)?,
+    })
+}
+
+fn map_peer_received_grant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerReceivedGrant> {
+    let access_json: String = row.get(3)?;
+    let access: AccessMap = serde_json::from_str(&access_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok(PeerReceivedGrant {
+        link_id: row.get(0)?,
+        grant_id: row.get(1)?,
+        run_as_user_id: row.get(2)?,
+        access,
+        created_by: row.get(4)?,
+        created_at: row.get(5)?,
+        generation: row.get(6)?,
+        revoked_at: row.get(7)?,
+        credential_id: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn map_peer_received_grant_cleanup_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PeerReceivedGrantCleanup> {
+    Ok(PeerReceivedGrantCleanup {
+        link_id: row.get(0)?,
+        credential_id: row.get(1)?,
+        generation: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
+fn map_peer_grant_epoch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerGrantEpoch> {
+    Ok(PeerGrantEpoch {
+        link_id: row.get(0)?,
+        issuer_generation: row.get(1)?,
+        active_op_id: row.get(2)?,
+        updated_at: row.get(3)?,
     })
 }
 
@@ -798,7 +946,7 @@ pub fn get_active_peer_grant_for_link(
 ) -> anyhow::Result<Option<PeerGrant>> {
     let sql = format!(
         "SELECT {PEER_GRANT_COLUMNS} FROM peer_grants \
-         WHERE link_id = ?1 AND revoked_at IS NULL \
+         WHERE link_id = ?1 AND revoked_at IS NULL AND token_hash IS NOT NULL \
          ORDER BY created_at DESC, id DESC LIMIT 1"
     );
     Ok(conn
@@ -870,9 +1018,373 @@ pub fn revoke_peer_grant(conn: &Connection, id: &str, revoked_at: &str) -> anyho
     Ok(changed > 0)
 }
 
+pub fn revoke_active_peer_grants_for_link(
+    conn: &Connection,
+    link_id: &str,
+    revoked_at: &str,
+) -> anyhow::Result<Vec<PeerGrant>> {
+    let sql = format!(
+        "SELECT {PEER_GRANT_COLUMNS} FROM peer_grants \
+         WHERE link_id = ?1 AND revoked_at IS NULL \
+         ORDER BY created_at ASC, id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![link_id], map_peer_grant_row)?;
+    let mut active = Vec::new();
+    for row in rows {
+        active.push(row?);
+    }
+    if !active.is_empty() {
+        conn.execute(
+            "UPDATE peer_grants SET token_hash = NULL, revoked_at = ?2 \
+             WHERE link_id = ?1 AND revoked_at IS NULL",
+            params![link_id, revoked_at],
+        )?;
+    }
+    Ok(active)
+}
+
 pub fn delete_peer_grant(conn: &Connection, id: &str) -> anyhow::Result<bool> {
     let changed = conn.execute("DELETE FROM peer_grants WHERE id = ?1", params![id])?;
     Ok(changed > 0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PeerReceivedGrant & PeerGrantEpoch CRUD (Migration 27)
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn upsert_peer_received_grant(
+    conn: &Connection,
+    grant: &PeerReceivedGrant,
+) -> anyhow::Result<()> {
+    let access_json = grant.access.to_json()?;
+    conn.execute(
+        "INSERT INTO peer_received_grants (\
+            link_id, grant_id, run_as_user_id, access, created_by, created_at, \
+            generation, revoked_at, credential_id, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+         ON CONFLICT(link_id) DO UPDATE SET \
+            grant_id = excluded.grant_id, \
+            run_as_user_id = excluded.run_as_user_id, \
+            access = excluded.access, \
+            created_by = excluded.created_by, \
+            created_at = excluded.created_at, \
+            generation = excluded.generation, \
+            revoked_at = excluded.revoked_at, \
+            credential_id = excluded.credential_id, \
+            updated_at = excluded.updated_at",
+        params![
+            grant.link_id,
+            grant.grant_id,
+            grant.run_as_user_id,
+            access_json,
+            grant.created_by,
+            grant.created_at,
+            grant.generation,
+            grant.revoked_at,
+            grant.credential_id,
+            grant.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_peer_received_grant(
+    conn: &Connection,
+    link_id: &str,
+) -> anyhow::Result<Option<PeerReceivedGrant>> {
+    let sql = format!(
+        "SELECT {PEER_RECEIVED_GRANT_COLUMNS} FROM peer_received_grants WHERE link_id = ?1"
+    );
+    Ok(conn
+        .query_row(&sql, params![link_id], map_peer_received_grant_row)
+        .optional()?)
+}
+
+pub fn get_active_peer_received_grant_for_link(
+    conn: &Connection,
+    link_id: &str,
+) -> anyhow::Result<Option<PeerReceivedGrant>> {
+    let sql = format!(
+        "SELECT {PEER_RECEIVED_GRANT_COLUMNS} FROM peer_received_grants \
+         WHERE link_id = ?1 AND revoked_at IS NULL"
+    );
+    Ok(conn
+        .query_row(&sql, params![link_id], map_peer_received_grant_row)
+        .optional()?)
+}
+
+pub fn list_peer_received_grants(conn: &Connection) -> anyhow::Result<Vec<PeerReceivedGrant>> {
+    let sql = format!(
+        "SELECT {PEER_RECEIVED_GRANT_COLUMNS} FROM peer_received_grants ORDER BY link_id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_peer_received_grant_row)?;
+    let mut grants = Vec::new();
+    for row in rows {
+        grants.push(row?);
+    }
+    Ok(grants)
+}
+
+/// Persists durable cleanup intent for a staged, retired, or revoked runner `GrantToken` slot.
+/// Never stores raw secrets—only the opaque safe runner credential slot identifier.
+pub fn upsert_peer_received_grant_cleanup(
+    conn: &Connection,
+    link_id: &str,
+    credential_id: &str,
+    generation: i64,
+    updated_at: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO peer_received_grant_cleanups (link_id, credential_id, generation, updated_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(link_id, credential_id) DO UPDATE SET \
+            generation = CASE \
+                WHEN excluded.generation > peer_received_grant_cleanups.generation \
+                    THEN excluded.generation \
+                ELSE peer_received_grant_cleanups.generation \
+            END, \
+            updated_at = excluded.updated_at",
+        params![link_id, credential_id, generation, updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_peer_received_grant_cleanup(
+    conn: &Connection,
+    link_id: &str,
+    credential_id: &str,
+) -> anyhow::Result<Option<PeerReceivedGrantCleanup>> {
+    let sql = format!(
+        "SELECT {PEER_RECEIVED_GRANT_CLEANUP_COLUMNS} FROM peer_received_grant_cleanups \
+         WHERE link_id = ?1 AND credential_id = ?2"
+    );
+    Ok(conn
+        .query_row(
+            &sql,
+            params![link_id, credential_id],
+            map_peer_received_grant_cleanup_row,
+        )
+        .optional()?)
+}
+
+pub fn list_peer_received_grant_cleanups(
+    conn: &Connection,
+) -> anyhow::Result<Vec<PeerReceivedGrantCleanup>> {
+    let sql = format!(
+        "SELECT {PEER_RECEIVED_GRANT_CLEANUP_COLUMNS} FROM peer_received_grant_cleanups \
+         ORDER BY link_id ASC, generation ASC, credential_id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_peer_received_grant_cleanup_row)?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(items)
+}
+
+pub fn list_peer_received_grant_cleanups_for_link(
+    conn: &Connection,
+    link_id: &str,
+) -> anyhow::Result<Vec<PeerReceivedGrantCleanup>> {
+    let sql = format!(
+        "SELECT {PEER_RECEIVED_GRANT_CLEANUP_COLUMNS} FROM peer_received_grant_cleanups \
+         WHERE link_id = ?1 ORDER BY generation ASC, credential_id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![link_id], map_peer_received_grant_cleanup_row)?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(items)
+}
+
+/// Removes a cleanup row only when `(link_id, credential_id, generation)` matches exactly.
+pub fn delete_peer_received_grant_cleanup_if_matches(
+    conn: &Connection,
+    link_id: &str,
+    credential_id: &str,
+    generation: i64,
+) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM peer_received_grant_cleanups \
+         WHERE link_id = ?1 AND credential_id = ?2 AND generation = ?3",
+        params![link_id, credential_id, generation],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Removes a staged cleanup intent row when promoting that exact `credential_id` to the active
+/// committed grant slot inside an atomic `IMMEDIATE` transaction.
+pub fn delete_peer_received_grant_cleanup_slot(
+    conn: &Connection,
+    link_id: &str,
+    credential_id: &str,
+) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM peer_received_grant_cleanups \
+         WHERE link_id = ?1 AND credential_id = ?2",
+        params![link_id, credential_id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Clears all received-grant cleanup rows for `link_id` after full link revocation cleanup has
+/// verified deletion of all staged and canonical credentials.
+pub fn clear_peer_received_grant_cleanups_for_link(
+    conn: &Connection,
+    link_id: &str,
+) -> anyhow::Result<usize> {
+    let removed = conn.execute(
+        "DELETE FROM peer_received_grant_cleanups WHERE link_id = ?1",
+        params![link_id],
+    )?;
+    Ok(removed)
+}
+
+/// Applies a received grant revocation fence for `link_id` if `generation` is at least the
+/// currently recorded generation (or if no row exists yet), atomically queuing durable runner
+/// credential cleanup for the committed slot (or canonical `link_id` fallback).
+/// Returns `Ok(true)` when applied and `Ok(false)` when rejected as stale (`generation < existing.generation`).
+pub fn mark_peer_received_grant_revoked(
+    conn: &Connection,
+    link_id: &str,
+    generation: i64,
+    revoked_at: &str,
+) -> anyhow::Result<bool> {
+    let existing = get_peer_received_grant(conn, link_id)?;
+    if let Some(current) = existing {
+        if generation < current.generation {
+            return Ok(false);
+        }
+        let changed = conn.execute(
+            "UPDATE peer_received_grants \
+             SET generation = ?2, \
+                 revoked_at = COALESCE(revoked_at, ?3), \
+                 credential_id = NULL, \
+                 updated_at = ?3 \
+             WHERE link_id = ?1 AND generation <= ?2",
+            params![link_id, generation, revoked_at],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        if current.revoked_at.is_none() {
+            let slot_id = current.effective_credential_id();
+            upsert_peer_received_grant_cleanup(conn, link_id, slot_id, generation, revoked_at)?;
+        } else {
+            if let Some(ref cid) = current.credential_id {
+                if !cid.is_empty() {
+                    upsert_peer_received_grant_cleanup(conn, link_id, cid, generation, revoked_at)?;
+                }
+            }
+            let pending = list_peer_received_grant_cleanups_for_link(conn, link_id)?;
+            if pending.is_empty() {
+                upsert_peer_received_grant_cleanup(conn, link_id, link_id, generation, revoked_at)?;
+            } else {
+                for item in pending {
+                    upsert_peer_received_grant_cleanup(
+                        conn,
+                        link_id,
+                        &item.credential_id,
+                        generation,
+                        revoked_at,
+                    )?;
+                }
+            }
+        }
+        Ok(true)
+    } else {
+        let empty_access = AccessMap::none().to_json()?;
+        conn.execute(
+            "INSERT INTO peer_received_grants (\
+                link_id, grant_id, run_as_user_id, access, created_by, created_at, \
+                generation, revoked_at, credential_id, updated_at\
+             ) VALUES (?1, '', 0, ?2, '', '', ?3, ?4, NULL, ?4)",
+            params![link_id, empty_access, generation, revoked_at],
+        )?;
+        upsert_peer_received_grant_cleanup(conn, link_id, link_id, generation, revoked_at)?;
+        Ok(true)
+    }
+}
+
+pub fn delete_peer_received_grant(conn: &Connection, link_id: &str) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM peer_received_grants WHERE link_id = ?1",
+        params![link_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn get_peer_grant_epoch(
+    conn: &Connection,
+    link_id: &str,
+) -> anyhow::Result<Option<PeerGrantEpoch>> {
+    let sql =
+        format!("SELECT {PEER_GRANT_EPOCH_COLUMNS} FROM peer_grant_epochs WHERE link_id = ?1");
+    Ok(conn
+        .query_row(&sql, params![link_id], map_peer_grant_epoch_row)
+        .optional()?)
+}
+
+pub fn begin_peer_grant_op(
+    conn: &Connection,
+    link_id: &str,
+    op_id: &str,
+    updated_at: &str,
+) -> anyhow::Result<i64> {
+    let next_generation = get_peer_grant_epoch(conn, link_id)?
+        .map(|row| row.issuer_generation.saturating_add(1))
+        .unwrap_or(1);
+    conn.execute(
+        "INSERT INTO peer_grant_epochs (link_id, issuer_generation, active_op_id, updated_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(link_id) DO UPDATE SET \
+            issuer_generation = excluded.issuer_generation, \
+            active_op_id = excluded.active_op_id, \
+            updated_at = excluded.updated_at",
+        params![link_id, next_generation, op_id, updated_at],
+    )?;
+    Ok(next_generation)
+}
+
+pub fn clear_peer_grant_op_if_matches(
+    conn: &Connection,
+    link_id: &str,
+    generation: i64,
+    op_id: &str,
+    updated_at: &str,
+) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE peer_grant_epochs \
+         SET active_op_id = NULL, updated_at = ?4 \
+         WHERE link_id = ?1 AND issuer_generation = ?2 AND active_op_id = ?3",
+        params![link_id, generation, op_id, updated_at],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn bump_peer_grant_epoch_for_revoke(
+    conn: &Connection,
+    link_id: &str,
+    updated_at: &str,
+) -> anyhow::Result<i64> {
+    let next_generation = get_peer_grant_epoch(conn, link_id)?
+        .map(|row| row.issuer_generation.saturating_add(1))
+        .unwrap_or(1);
+    conn.execute(
+        "INSERT INTO peer_grant_epochs (link_id, issuer_generation, active_op_id, updated_at) \
+         VALUES (?1, ?2, NULL, ?3) \
+         ON CONFLICT(link_id) DO UPDATE SET \
+            issuer_generation = excluded.issuer_generation, \
+            active_op_id = NULL, \
+            updated_at = excluded.updated_at",
+        params![link_id, next_generation, updated_at],
+    )?;
+    Ok(next_generation)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1449,6 +1961,13 @@ mod tests {
             PEER_CLUSTERING_MIGRATION_25_SQL,
         )
         .expect("apply migration 25");
+        migrate(
+            &conn,
+            27,
+            "Peer grant direction metadata",
+            PEER_GRANT_METADATA_MIGRATION_27_SQL,
+        )
+        .expect("apply migration 27");
         conn
     }
 
@@ -1499,11 +2018,8 @@ mod tests {
         let rw_json = rw.to_json().unwrap();
         assert_eq!(AccessMap::from_json(&rw_json).unwrap(), rw);
 
-        // Partial JSON defaults missing areas to none (fail closed), and unknown future keys are ignored
-        let partial = AccessMap::from_json(
-            r#"{"services":"read","transcoding":"write","future_area":"write"}"#,
-        )
-        .unwrap();
+        // Partial JSON defaults omitted areas to none (fail closed); unknown fields are rejected
+        let partial = AccessMap::from_json(r#"{"services":"read","transcoding":"write"}"#).unwrap();
         assert_eq!(partial.services, AccessLevel::Read);
         assert_eq!(partial.transcoding, AccessLevel::Write);
         assert_eq!(partial.marketplace, AccessLevel::None);
@@ -1512,6 +2028,10 @@ mod tests {
         assert_eq!(partial.users, AccessLevel::None);
         assert_eq!(partial.network, AccessLevel::None);
         assert_eq!(partial.updates, AccessLevel::None);
+        assert!(AccessMap::from_json(
+            r#"{"services":"read","transcoding":"write","future_area":"write"}"#,
+        )
+        .is_err());
 
         let mut mutable = AccessMap::none();
         assert!(mutable.set("files", AccessLevel::Write));
@@ -2148,5 +2668,253 @@ mod tests {
         assert!(window_debug.contains(REDACTED_DIGEST));
         assert!(!window_json.contains(code_digest));
         assert!(!window_json.contains("code_hash"));
+    }
+
+    #[test]
+    fn peer_received_grant_and_epoch_fencing_and_cascade() {
+        let conn = open_migrated_in_memory_db();
+        let link = sample_link("link-1", "media-2", "pk-media-2", "10.231.0.2");
+        insert_peer_link(&conn, &link).unwrap();
+
+        // Missing token_hash on peer_grants is not treated as an active grant
+        let incomplete_grant = PeerGrant {
+            id: "grant-incomplete".to_string(),
+            link_id: "link-1".to_string(),
+            run_as_user_id: 9,
+            access: AccessMap::read_only_all(),
+            token_hash: None,
+            created_by: "alice".to_string(),
+            created_at: "2026-11-23T05:00:00Z".to_string(),
+            revoked_at: None,
+        };
+        insert_peer_grant(&conn, &incomplete_grant).unwrap();
+        assert_eq!(
+            get_active_peer_grant_for_link(&conn, "link-1").unwrap(),
+            None
+        );
+
+        let complete_grant = PeerGrant {
+            id: "grant-live".to_string(),
+            link_id: "link-1".to_string(),
+            run_as_user_id: 9,
+            access: AccessMap::read_only_all(),
+            token_hash: Some("sha256:live-digest".to_string()),
+            created_by: "alice".to_string(),
+            created_at: "2026-11-23T05:01:00Z".to_string(),
+            revoked_at: None,
+        };
+        insert_peer_grant(&conn, &complete_grant).unwrap();
+        assert_eq!(
+            get_active_peer_grant_for_link(&conn, "link-1").unwrap(),
+            Some(complete_grant.clone())
+        );
+
+        let revoked =
+            revoke_active_peer_grants_for_link(&conn, "link-1", "2026-11-23T05:05:00Z").unwrap();
+        assert_eq!(revoked.len(), 2);
+        assert_eq!(
+            get_active_peer_grant_for_link(&conn, "link-1").unwrap(),
+            None
+        );
+
+        // Epoch fencing
+        let gen1 = begin_peer_grant_op(&conn, "link-1", "op-1", "2026-11-23T05:10:00Z").unwrap();
+        assert_eq!(gen1, 1);
+        let gen2 = begin_peer_grant_op(&conn, "link-1", "op-2", "2026-11-23T05:10:01Z").unwrap();
+        assert_eq!(gen2, 2);
+        assert!(!clear_peer_grant_op_if_matches(
+            &conn,
+            "link-1",
+            gen1,
+            "op-1",
+            "2026-11-23T05:10:02Z"
+        )
+        .unwrap());
+        assert!(clear_peer_grant_op_if_matches(
+            &conn,
+            "link-1",
+            gen2,
+            "op-2",
+            "2026-11-23T05:10:02Z"
+        )
+        .unwrap());
+        let gen3 =
+            bump_peer_grant_epoch_for_revoke(&conn, "link-1", "2026-11-23T05:10:03Z").unwrap();
+        assert_eq!(gen3, 3);
+        let epoch = get_peer_grant_epoch(&conn, "link-1").unwrap().unwrap();
+        assert_eq!(epoch.issuer_generation, 3);
+        assert_eq!(epoch.active_op_id, None);
+
+        // Received grants, staged credential slots, durable cleanup queue, & monotonic tombstones
+        let mut received = PeerReceivedGrant {
+            link_id: "link-1".to_string(),
+            grant_id: "remote-grant-1".to_string(),
+            run_as_user_id: 21,
+            access: AccessMap::read_write_all(),
+            created_by: "remote-admin".to_string(),
+            created_at: "2026-11-23T05:11:00Z".to_string(),
+            generation: 2,
+            revoked_at: None,
+            credential_id: Some("grant-slot-gen2".to_string()),
+            updated_at: "2026-11-23T05:11:00Z".to_string(),
+        };
+        assert_eq!(received.effective_credential_id(), "grant-slot-gen2");
+        upsert_peer_received_grant(&conn, &received).unwrap();
+        assert_eq!(
+            get_active_peer_received_grant_for_link(&conn, "link-1").unwrap(),
+            Some(received.clone())
+        );
+        assert_eq!(list_peer_received_grants(&conn).unwrap().len(), 1);
+        assert!(list_peer_received_grant_cleanups(&conn).unwrap().is_empty());
+
+        // Stale revocation (gen 1 < 2) must be rejected without queuing cleanup
+        assert!(
+            !mark_peer_received_grant_revoked(&conn, "link-1", 1, "2026-11-23T05:12:00Z").unwrap()
+        );
+        assert!(get_active_peer_received_grant_for_link(&conn, "link-1")
+            .unwrap()
+            .is_some());
+        assert!(list_peer_received_grant_cleanups(&conn).unwrap().is_empty());
+
+        // Fresh revocation (gen 3 >= 2) marks revoked, preserves generation fence, and queues
+        // durable cleanup for the exact committed slot (`grant-slot-gen2`).
+        assert!(
+            mark_peer_received_grant_revoked(&conn, "link-1", 3, "2026-11-23T05:13:00Z").unwrap()
+        );
+        assert_eq!(
+            get_active_peer_received_grant_for_link(&conn, "link-1").unwrap(),
+            None
+        );
+        let tombstone = get_peer_received_grant(&conn, "link-1").unwrap().unwrap();
+        assert_eq!(tombstone.generation, 3);
+        assert_eq!(
+            tombstone.revoked_at.as_deref(),
+            Some("2026-11-23T05:13:00Z")
+        );
+        assert_eq!(tombstone.credential_id, None);
+        let cleanups = list_peer_received_grant_cleanups_for_link(&conn, "link-1").unwrap();
+        assert_eq!(cleanups.len(), 1);
+        assert_eq!(cleanups[0].credential_id, "grant-slot-gen2");
+        assert_eq!(cleanups[0].generation, 3);
+
+        // Guarded cleanup deletion rejects mismatched generation or slot ID
+        assert!(!delete_peer_received_grant_cleanup_if_matches(
+            &conn,
+            "link-1",
+            "grant-slot-gen2",
+            2
+        )
+        .unwrap());
+        assert!(
+            get_peer_received_grant_cleanup(&conn, "link-1", "grant-slot-gen2")
+                .unwrap()
+                .is_some()
+        );
+
+        // Matching `(link_id, credential_id, generation)` removes the cleanup row
+        assert!(delete_peer_received_grant_cleanup_if_matches(
+            &conn,
+            "link-1",
+            "grant-slot-gen2",
+            3
+        )
+        .unwrap());
+        assert!(list_peer_received_grant_cleanups(&conn).unwrap().is_empty());
+
+        // Pre-staging cleanup intent can be promoted atomically out of cleanups while retiring old slot
+        upsert_peer_received_grant_cleanup(
+            &conn,
+            "link-1",
+            "grant-slot-gen4",
+            4,
+            "2026-11-23T05:14:00Z",
+        )
+        .unwrap();
+        assert!(
+            delete_peer_received_grant_cleanup_slot(&conn, "link-1", "grant-slot-gen4").unwrap()
+        );
+        received.grant_id = "remote-grant-2".to_string();
+        received.generation = 4;
+        received.revoked_at = None;
+        received.credential_id = Some("grant-slot-gen4".to_string());
+        upsert_peer_received_grant(&conn, &received).unwrap();
+        let active_gen4 = get_active_peer_received_grant_for_link(&conn, "link-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(active_gen4.grant_id, "remote-grant-2");
+        assert_eq!(active_gen4.effective_credential_id(), "grant-slot-gen4");
+
+        // Multiple pending cleanups on a link can be listed and cascaded on link deletion
+        upsert_peer_received_grant_cleanup(
+            &conn,
+            "link-1",
+            "grant-slot-orphan-a",
+            5,
+            "2026-11-23T05:15:00Z",
+        )
+        .unwrap();
+        upsert_peer_received_grant_cleanup(
+            &conn,
+            "link-1",
+            "grant-slot-orphan-b",
+            6,
+            "2026-11-23T05:15:01Z",
+        )
+        .unwrap();
+        assert_eq!(
+            list_peer_received_grant_cleanups_for_link(&conn, "link-1")
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Deleting link cascades peer_received_grants, peer_received_grant_cleanups, and peer_grant_epochs
+        assert!(delete_peer_link(&conn, "link-1").unwrap());
+        assert_eq!(get_peer_received_grant(&conn, "link-1").unwrap(), None);
+        assert!(list_peer_received_grant_cleanups_for_link(&conn, "link-1")
+            .unwrap()
+            .is_empty());
+        assert_eq!(get_peer_grant_epoch(&conn, "link-1").unwrap(), None);
+    }
+
+    #[test]
+    fn ensure_peer_grant_schema_invariants_upgrades_legacy_v27_table_idempotently() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE peer_links (
+                 id TEXT PRIMARY KEY
+             );
+             CREATE TABLE peer_received_grants (
+                 link_id TEXT PRIMARY KEY REFERENCES peer_links(id) ON DELETE CASCADE,
+                 grant_id TEXT NOT NULL,
+                 run_as_user_id INTEGER NOT NULL,
+                 access TEXT NOT NULL,
+                 created_by TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 generation INTEGER NOT NULL DEFAULT 0,
+                 revoked_at TEXT,
+                 updated_at TEXT NOT NULL
+             );
+             INSERT INTO peer_links (id) VALUES ('link-legacy');
+             INSERT INTO peer_received_grants (
+                 link_id, grant_id, run_as_user_id, access, created_by, created_at, generation, revoked_at, updated_at
+             ) VALUES (
+                 'link-legacy', 'g-1', 5, '{\"services\":\"read\"}', 'alice', '2026-11-23T05:00:00Z', 1, NULL, '2026-11-23T05:00:00Z'
+             );",
+        )
+        .unwrap();
+
+        ensure_peer_grant_schema_invariants(&conn).unwrap();
+        ensure_peer_grant_schema_invariants(&conn).unwrap();
+
+        let loaded = get_peer_received_grant(&conn, "link-legacy")
+            .unwrap()
+            .expect("legacy received grant row preserved");
+        assert_eq!(loaded.grant_id, "g-1");
+        assert_eq!(loaded.generation, 1);
+        assert_eq!(loaded.credential_id, None);
+        assert_eq!(loaded.effective_credential_id(), "link-legacy");
+        assert!(list_peer_received_grant_cleanups(&conn).unwrap().is_empty());
     }
 }

@@ -1,5 +1,5 @@
 use super::marketplace::system_update_lifecycle_block;
-use crate::auth::{api_error, AuthUser};
+use crate::auth::{api_error, AuthUser, PeerPrincipal};
 use crate::ws::extract_client_ip;
 use axum::extract::{Extension, Path, Query};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -345,6 +345,7 @@ pub(super) fn reconcile_core_restart_receipt_by_unit(
 
 pub(crate) async fn reconcile_pending_action(
     mut action: af_db::PendingAction,
+    persist: bool,
 ) -> af_db::PendingAction {
     if action.status != "queued" {
         return action;
@@ -352,8 +353,10 @@ pub(crate) async fn reconcile_pending_action(
     let unit = action.job_unit.as_deref().map(str::trim).unwrap_or("");
     if !is_valid_core_restart_job_unit(unit) {
         let log = "Deferred core restart action is missing a valid receipt identity; check service state and logs before retrying.";
-        if let Ok(Some(updated)) = af_db::mark_action_unavailable(action.id, None, log) {
-            return updated;
+        if persist {
+            if let Ok(Some(updated)) = af_db::mark_action_unavailable(action.id, None, log) {
+                return updated;
+            }
         }
         action.status = "unavailable".into();
         action.execution_log = Some(log.into());
@@ -386,19 +389,22 @@ pub(crate) async fn reconcile_pending_action(
                 | CoreRestartReceiptOutcome::TransientUnavailable => unreachable!(),
             };
             let log = core_restart_outcome_log(unit, &outcome).unwrap_or_default();
-            match af_db::finalize_queued_action_by_id(action.id, unit, final_status, &log) {
-                Ok(Some(updated)) => updated,
-                _ => {
-                    action.status = final_status.into();
-                    action.execution_log = Some(log);
-                    action
+            if persist {
+                if let Ok(Some(updated)) =
+                    af_db::finalize_queued_action_by_id(action.id, unit, final_status, &log)
+                {
+                    return updated;
                 }
             }
+            action.status = final_status.into();
+            action.execution_log = Some(log);
+            action
         }
     }
 }
 
 pub(super) async fn get_core_restart_status(
+    peer: Option<Extension<PeerPrincipal>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let unit = query.get("job_unit").map(String::as_str).unwrap_or("");
@@ -423,7 +429,9 @@ pub(super) async fn get_core_restart_status(
         job_unit: unit.to_string(),
     };
     let result = af_runner::dispatch_self_update_status_request(&status_req).await;
-    let outcome = classify_core_restart_receipt(unit, &result);
-    reconcile_core_restart_receipt_by_unit(unit, &outcome);
+    if peer.is_none_or(|Extension(peer)| peer.access.services.allows_write()) {
+        let outcome = classify_core_restart_receipt(unit, &result);
+        reconcile_core_restart_receipt_by_unit(unit, &outcome);
+    }
     crate::storage::render_self_update_status_response(unit, result)
 }

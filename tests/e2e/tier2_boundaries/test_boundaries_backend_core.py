@@ -212,8 +212,8 @@ class TestB10PeerRoutesExcludeLegacyAlias(TestCase):
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         routes = inspector.read_file(ROUTES_RS) or ""
         self.assert_true(
-            'let v1 = build_v1_router_with_options(true)' in routes
-            and 'let legacy = build_v1_router_with_options(false)' in routes
+            'let v1 = build_v1_tracked_router_with_options(true)' in routes
+            and 'let legacy = build_v1_tracked_router_with_options(false)' in routes
             and '.nest("/api/v1", v1)' in routes and '.nest("/api", legacy)' in routes,
             "B10: enable peer routes only in the versioned API router",
         )

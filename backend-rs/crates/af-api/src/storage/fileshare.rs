@@ -342,6 +342,7 @@ pub(super) fn append_fileshare_chunk(
 
 pub async fn upload_file(
     axum::Extension(user): axum::Extension<AuthUser>,
+    peer: Option<axum::Extension<crate::auth::PeerPrincipal>>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
@@ -451,14 +452,19 @@ pub async fn upload_file(
             );
         }
         let response_name = filename.clone();
+        let peer_principal = peer.as_ref().map(|axum::Extension(p)| p.clone());
         let shared = accounting::MUTATIONS.clone().lock_owned().await;
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let _permit = permit;
             let _shared = shared;
             let root = get_upload_dir();
             let conn = af_db::get_conn()?;
-            crate::auth::load_active_human_subject(&conn, user.user_id)
-                .map_err(|_| anyhow::anyhow!("Fileshare account is no longer active"))?;
+            crate::auth::load_active_subject_for_request(
+                &conn,
+                user.user_id,
+                peer_principal.as_ref(),
+            )
+            .map_err(|_| anyhow::anyhow!("Fileshare account is no longer active"))?;
             if chunked {
                 let mut sessions = FILESHARE_UPLOADS
                     .lock()

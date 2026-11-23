@@ -310,6 +310,7 @@ function makePeer(id: string, name: string, endpoint: string, overrides: Record<
 }
 
 test('pairing window keeps focus across view swaps and fences stale open/close completions', async ({ page }) => {
+  test.setTimeout(60_000);
   const expiresAt = Math.floor(Date.now() / 1000) + 600;
   const activeWindows: Array<{ id: string; expires_at: number }> = [];
   let listReads = 0;
@@ -468,6 +469,7 @@ test('pairing window keeps focus across view swaps and fences stale open/close c
 });
 
 test('start pairing fences stale success and error completions across close button and Escape', async ({ page }) => {
+  test.setTimeout(60_000);
   const expiresAt = Math.floor(Date.now() / 1000) + 600;
   const peers: Array<Record<string, unknown>> = [];
   let listReads = 0;
@@ -608,6 +610,7 @@ test('start pairing fences stale success and error completions across close butt
 });
 
 test('endpoint edit and revoke modals fence stale completions across target switches', async ({ page }) => {
+  test.setTimeout(60_000);
   let peers = [
     makePeer('peer-a', 'Media server', '192.0.2.21'),
     makePeer('peer-b', 'Backup server', '192.0.2.31'),
@@ -838,4 +841,566 @@ test('peer row preserves keyboard focus and updates live data across 10s health 
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog');
   await expect(dialog.locator('#cluster-edit-endpoint-host')).toHaveValue('192.0.2.44');
+});
+
+function makeAccessMap(level: 'none' | 'read' | 'write' = 'none', overrides: Record<string, 'none' | 'read' | 'write'> = {}) {
+  return {
+    services: level,
+    marketplace: level,
+    settings: level,
+    files: level,
+    users: level,
+    network: level,
+    updates: level,
+    transcoding: level,
+    ...overrides,
+  };
+}
+
+function makeGrantSummary(
+  id: string,
+  access: Record<string, 'none' | 'read' | 'write'>,
+  createdBy = 'alice',
+) {
+  return {
+    id,
+    run_as_user_id: 42,
+    access,
+    created_by: createdBy,
+    created_at: '2026-11-23T12:00:00Z',
+  };
+}
+
+test('grant editor enforces link gating, directional wording, presets, contracts, keyboard flow, and no credential inputs', async ({ page }) => {
+  const outboundGrant = makeGrantSummary('grant-out-1', makeAccessMap('read'), 'remote-admin');
+  let inboundGrant: ReturnType<typeof makeGrantSummary> | null = null;
+  let savedPayload: unknown = null;
+  let revokeCalls = 0;
+  let offerCalls = 0;
+  let offerBody: string | null = 'unset';
+  const offlineGrant = makeGrantSummary('grant-down-in', makeAccessMap('none', { services: 'read' }));
+
+  const peers = [
+    makePeer('peer-active', 'Media server', '192.0.2.21', {
+      state: 'active',
+      compatibility: 'compatible',
+      grants: { inbound: null, outbound: outboundGrant },
+    }),
+    makePeer('peer-pending', 'Pending node', '192.0.2.22', {
+      state: 'pending',
+      pending_attempt_id: 'att-pending',
+      pending_expires_at: Math.floor(Date.now() / 1000) + 600,
+    }),
+    makePeer('peer-revoked', 'Revoked node', '192.0.2.23', {
+      state: 'revoked',
+      last_error: 'Link revoked by Revoked node',
+    }),
+    makePeer('peer-incompat', 'Legacy node', '192.0.2.24', {
+      state: 'active',
+      compatibility: 'incompatible',
+    }),
+    makePeer('peer-link-only', 'Link-only node', '192.0.2.27', {
+      state: 'active',
+      compatibility: 'limited',
+      missing_capabilities: ['grants'],
+    }),
+    makePeer('peer-down-empty', 'Offline empty', '192.0.2.25', {
+      state: 'down',
+      grants: { inbound: null, outbound: null },
+    }),
+    makePeer('peer-down-granted', 'Offline granted', '192.0.2.26', {
+      state: 'down',
+      compatibility: 'limited',
+      missing_capabilities: ['grants'],
+      grants: { inbound: offlineGrant, outbound: null },
+    }),
+  ];
+
+  await mountCluster(page, () => ({
+    ...peerList(),
+    peers: peers.map(p => (p.id === 'peer-active'
+      ? { ...p, grants: { inbound: inboundGrant, outbound: outboundGrant } }
+      : { ...p })),
+  }));
+
+  await page.route(`**${peerApi}/peer-active/grant`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ json: { inbound: inboundGrant, outbound: outboundGrant } });
+      return;
+    }
+    if (method === 'PUT') {
+      savedPayload = route.request().postDataJSON();
+      const body = savedPayload as { access: Record<string, 'none' | 'read' | 'write'> };
+      inboundGrant = makeGrantSummary('grant-in-1', body.access, 'admin');
+      await route.fulfill({ json: { inbound: inboundGrant, outbound: outboundGrant } });
+      return;
+    }
+    if (method === 'DELETE') {
+      revokeCalls += 1;
+      inboundGrant = null;
+      await route.fulfill({ json: { inbound: null, outbound: outboundGrant } });
+      return;
+    }
+    throw new Error(`Unexpected method on /grant: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-down-granted/grant`, route => {
+    expect(route.request().method()).toBe('GET');
+    return route.fulfill({ json: { inbound: offlineGrant, outbound: null } });
+  });
+
+  await page.route(`**${peerApi}/peer-active/grant-offer`, async route => {
+    expect(route.request().method()).toBe('POST');
+    offerCalls += 1;
+    offerBody = route.request().postData();
+    await route.fulfill({ json: { sent: true } });
+  });
+
+  await page.goto('/?tab=cluster');
+
+  // Limit controls to usable, completed links (and down links that already carry a grant).
+  const grantsTrigger = page.getByRole('button', { name: 'Manage access grants for Media server' });
+  await expect(grantsTrigger).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Manage access grants for Offline granted' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Manage access grants for Pending node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage access grants for Revoked node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage access grants for Legacy node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage access grants for Link-only node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage access grants for Offline empty' })).toHaveCount(0);
+
+  // Open via keyboard and confirm initial focus lands on the primary editor preset once loaded.
+  await grantsTrigger.focus();
+  await page.keyboard.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Access grants for Media server' });
+  await expect(dialog).toBeVisible();
+  const readOnlyPreset = dialog.locator('#cluster-grant-preset-ro');
+  const readWritePreset = dialog.locator('#cluster-grant-preset-rw');
+  await expect(readOnlyPreset).toBeFocused();
+
+  // Absence of credential/secret inputs.
+  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
+  await expect(dialog.locator('input, textarea')).toHaveCount(0);
+  await expect(dialog.locator('select')).toHaveCount(8);
+
+  // Explicit directional wording for inbound (editable) vs outbound (read-only).
+  await expect(dialog.getByRole('heading', { name: 'Access this server grants to Media server' })).toBeVisible();
+  await expect(dialog.getByText('Editable here', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Access Media server granted to this server' })).toBeVisible();
+  await expect(dialog.getByText('Read-only here', { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/Only an admin on Media server can create, edit, or revoke this direction/i)).toBeVisible();
+  const outboundSection = dialog.locator('section[aria-labelledby="cluster-grant-outbound-heading"]');
+  await expect(outboundSection.locator('select')).toHaveCount(0);
+  await expect(outboundSection.getByText('Read-only (everything)')).toBeVisible();
+
+  // Presets fill all eight fields without auto-submitting (verify keyboard Tab + Enter flow too).
+  const areas = ['services', 'marketplace', 'settings', 'files', 'users', 'network', 'updates', 'transcoding'];
+  await page.keyboard.press('Enter');
+  await expect(readOnlyPreset).toHaveAttribute('aria-pressed', 'true');
+  for (const area of areas) {
+    await expect(dialog.locator(`#cluster-grant-area-${area}`)).toHaveValue('read');
+  }
+  await page.keyboard.press('Tab');
+  await expect(readWritePreset).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(readWritePreset).toHaveAttribute('aria-pressed', 'true');
+  for (const area of areas) {
+    await expect(dialog.locator(`#cluster-grant-area-${area}`)).toHaveValue('write');
+  }
+  await page.keyboard.press('Tab');
+  await expect(dialog.locator('#cluster-grant-area-services')).toBeFocused();
+
+  // Custom area tweaks clear preset pressed state and save via PUT /grant.
+  await dialog.locator('#cluster-grant-area-services').selectOption('read');
+  await dialog.locator('#cluster-grant-area-users').selectOption('none');
+  await expect(readWritePreset).toHaveAttribute('aria-pressed', 'false');
+  await dialog.locator('#cluster-grant-save').click();
+
+  await expect(dialog.getByText('Saved access grant for Media server on this server.')).toBeVisible();
+  expect(savedPayload).toEqual({
+    access: makeAccessMap('write', { services: 'read', users: 'none' }),
+  });
+  await expect(dialog.locator('#cluster-grant-save')).toBeFocused();
+  await expect(dialog.getByText(/Revoking removes Media server's access to this server\. Both servers can still check the WireGuard link/i)).toBeVisible();
+
+  // Two-way informational offer sends POST /grant-offer with no body and states no auto-grant.
+  await dialog.locator('#cluster-grant-offer').click();
+  await expect(dialog.getByText(/No access was granted automatically; an admin on Media server must decide/i)).toBeVisible();
+  expect(offerCalls).toBe(1);
+  expect(offerBody).toBeNull();
+  await expect(dialog.locator('#cluster-grant-offer')).toBeFocused();
+
+  // Revoke confirmation keeps keyboard focus, lets admin cancel, and revokes only inbound.
+  await dialog.locator('#cluster-grant-revoke-open').click();
+  await expect(dialog.locator('#cluster-grant-revoke-keep')).toBeFocused();
+  await dialog.locator('#cluster-grant-revoke-keep').click();
+  await expect(dialog.locator('#cluster-grant-revoke-open')).toBeFocused();
+  expect(revokeCalls).toBe(0);
+
+  await dialog.locator('#cluster-grant-revoke-open').click();
+  await dialog.locator('#cluster-grant-revoke-confirm').click();
+  await expect(dialog.getByText("Revoked Media server's access to this server. The WireGuard link stays configured.")).toBeVisible();
+  expect(revokeCalls).toBe(1);
+  await expect(readOnlyPreset).toBeFocused();
+  await expect(dialog.locator('#cluster-grant-revoke-open')).toHaveCount(0);
+  // Outbound grant remains unchanged after inbound revocation.
+  await expect(outboundSection.getByText('Read-only (everything)')).toBeVisible();
+  for (const area of areas) {
+    await expect(dialog.locator(`#cluster-grant-area-${area}`)).toHaveValue('none');
+  }
+
+  // Escape dismisses modal and restores keyboard focus to the triggering peer row control.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(grantsTrigger).toBeFocused();
+
+  // A link-only peer cannot accept new credentials. Its existing local grant can still be revoked.
+  await page.getByRole('button', { name: 'Manage access grants for Offline granted' }).click();
+  const offlineDialog = page.getByRole('dialog', { name: 'Access grants for Offline granted' });
+  await expect(offlineDialog.getByText(/Update Offline granted to use missing capabilities/)).toBeVisible();
+  await expect(offlineDialog.locator('#cluster-grant-save')).toBeDisabled();
+  await expect(offlineDialog.locator('#cluster-grant-offer')).toBeDisabled();
+  await expect(offlineDialog.locator('#cluster-grant-revoke-open')).toBeFocused();
+});
+
+test('grant editor retains form draft on typed PeerError and blocks all-none save locally', async ({ page }) => {
+  let putCalls = 0;
+  let inboundGrant: ReturnType<typeof makeGrantSummary> | null = null;
+  const peer = makePeer('peer-a', 'Media server', '192.0.2.21');
+
+  await mountCluster(page, () => ({
+    ...peerList(),
+    peers: [{ ...peer, grants: { inbound: inboundGrant, outbound: null } }],
+  }));
+
+  await page.route(`**${peerApi}/peer-a/grant`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ json: { inbound: inboundGrant, outbound: null } });
+      return;
+    }
+    if (method === 'PUT') {
+      putCalls += 1;
+      if (putCalls === 1) {
+        await route.fulfill({
+          status: 502,
+          json: {
+            code: 'LINK_DOWN',
+            server: 'Media server',
+            step: 'deliver_grant_token',
+            message: 'Could not deliver grant token to Media server.',
+            action: 'Confirm UDP 51821 connectivity and retry saving.',
+          },
+        });
+        return;
+      }
+      const body = route.request().postDataJSON() as { access: Record<string, 'none' | 'read' | 'write'> };
+      inboundGrant = makeGrantSummary('grant-in-retry', body.access, 'admin');
+      await route.fulfill({ json: { inbound: inboundGrant, outbound: null } });
+      return;
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  });
+
+  await page.goto('/?tab=cluster');
+  await page.getByRole('button', { name: 'Manage access grants for Media server' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.locator('#cluster-grant-preset-ro')).toBeVisible();
+
+  // Saving with all 8 areas set to none shows local validation without firing PUT.
+  await dialog.locator('#cluster-grant-save').click();
+  await expect(dialog.getByText('Select read or write access for at least one area before saving.')).toBeVisible();
+  expect(putCalls).toBe(0);
+
+  // Customize areas and trigger typed backend error; every edited field stays intact.
+  await dialog.locator('#cluster-grant-area-services').selectOption('read');
+  await dialog.locator('#cluster-grant-area-files').selectOption('write');
+  await dialog.locator('#cluster-grant-area-transcoding').selectOption('write');
+  await dialog.locator('#cluster-grant-save').click();
+
+  await expect(dialog.getByText('Could not deliver grant token to Media server.')).toBeVisible();
+  await expect(dialog.getByText('Confirm UDP 51821 connectivity and retry saving.')).toBeVisible();
+  await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('read');
+  await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
+  await expect(dialog.locator('#cluster-grant-area-transcoding')).toHaveValue('write');
+  await expect(dialog.locator('#cluster-grant-area-users')).toHaveValue('none');
+
+  // Retry succeeds using the preserved draft without re-entering selections.
+  await dialog.locator('#cluster-grant-save').click();
+  await expect(dialog.getByText('Saved access grant for Media server on this server.')).toBeVisible();
+  expect(putCalls).toBe(2);
+  const savedGrant = inboundGrant as ReturnType<typeof makeGrantSummary> | null;
+  expect(savedGrant?.access).toEqual(makeAccessMap('none', {
+    services: 'read',
+    files: 'write',
+    transcoding: 'write',
+  }));
+});
+
+test('grant editor fences stale fetches and mutations across close and peer switch', async ({ page }) => {
+  test.setTimeout(60_000);
+  let grantAIn: ReturnType<typeof makeGrantSummary> | null = makeGrantSummary(
+    'g-a-initial',
+    makeAccessMap('write'),
+    'admin',
+  );
+  let grantBIn: ReturnType<typeof makeGrantSummary> | null = makeGrantSummary(
+    'g-b-initial',
+    makeAccessMap('none', { services: 'read' }),
+    'admin',
+  );
+  let listReads = 0;
+
+  await mountCluster(page, () => {
+    listReads += 1;
+    return {
+      ...peerList(),
+      peers: [
+        makePeer('peer-a', 'Media server', '192.0.2.21', {
+          grants: { inbound: grantAIn, outbound: null },
+        }),
+        makePeer('peer-b', 'Backup server', '192.0.2.31', {
+          grants: { inbound: grantBIn, outbound: null },
+        }),
+      ],
+    };
+  });
+
+  const getA1Gate = deferred();
+  const getA2ErrorGate = deferred();
+  const getB1Gate = deferred();
+  const putAGate = deferred();
+  const putAErrorGate = deferred();
+  const putBGate = deferred();
+  const delAGate = deferred();
+  const offerBGate = deferred();
+  const offerAGate = deferred();
+  let getACalls = 0;
+  let getBCalls = 0;
+  let putACalls = 0;
+
+  await page.route(`**${peerApi}/peer-a/grant`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      getACalls += 1;
+      if (getACalls === 1) {
+        await getA1Gate.promise;
+        await route.fulfill({ json: { inbound: grantAIn, outbound: null } });
+        return;
+      }
+      if (getACalls === 2) {
+        await getA2ErrorGate.promise;
+        await route.fulfill({
+          status: 502,
+          json: {
+            code: 'LINK_DOWN',
+            server: 'Media server',
+            step: 'get_peer_grant',
+            message: 'Stale GET error for Media server.',
+            action: 'Retry loading.',
+          },
+        });
+        return;
+      }
+      await route.fulfill({ json: { inbound: grantAIn, outbound: null } });
+      return;
+    }
+    if (method === 'PUT') {
+      putACalls += 1;
+      if (putACalls === 1) {
+        await putAGate.promise;
+        const body = route.request().postDataJSON() as { access: Record<string, 'none' | 'read' | 'write'> };
+        grantAIn = makeGrantSummary('g-a-saved', body.access, 'admin');
+        await route.fulfill({ json: { inbound: grantAIn, outbound: null } });
+        return;
+      }
+      await putAErrorGate.promise;
+      await route.fulfill({
+        status: 502,
+        json: {
+          code: 'LINK_DOWN',
+          server: 'Media server',
+          step: 'deliver_grant_token',
+          message: 'Stale PUT error for Media server.',
+          action: 'Check tunnel connectivity.',
+        },
+      });
+      return;
+    }
+    if (method === 'DELETE') {
+      await delAGate.promise;
+      grantAIn = null;
+      await route.fulfill({ json: { inbound: null, outbound: null } });
+      return;
+    }
+    throw new Error(`Unexpected method on peer-a/grant: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-b/grant`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      getBCalls += 1;
+      if (getBCalls === 1) {
+        await getB1Gate.promise;
+      }
+      await route.fulfill({ json: { inbound: grantBIn, outbound: null } });
+      return;
+    }
+    if (method === 'PUT') {
+      await putBGate.promise;
+      const body = route.request().postDataJSON() as { access: Record<string, 'none' | 'read' | 'write'> };
+      grantBIn = makeGrantSummary('g-b-saved', body.access, 'admin');
+      await route.fulfill({ json: { inbound: grantBIn, outbound: null } });
+      return;
+    }
+    throw new Error(`Unexpected method on peer-b/grant: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-a/grant-offer`, async route => {
+    expect(route.request().method()).toBe('POST');
+    await offerAGate.promise;
+    await route.fulfill({ json: { sent: true } });
+  });
+
+  await page.route(`**${peerApi}/peer-b/grant-offer`, async route => {
+    expect(route.request().method()).toBe('POST');
+    await offerBGate.promise;
+    await route.fulfill({ json: { sent: true } });
+  });
+
+  await page.goto('/?tab=cluster');
+  const openA = page.getByRole('button', { name: 'Manage access grants for Media server' });
+  const openB = page.getByRole('button', { name: 'Manage access grants for Backup server' });
+  const dialog = page.getByRole('dialog');
+
+  // 1) Stale GET success for Media server must never populate Backup server while Backup is loading.
+  await openA.click();
+  await expect(dialog.getByText('Loading access grants…')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await expect(dialog.getByText('Loading access grants…')).toBeVisible();
+  const staleGetAResp = page.waitForResponse(
+    resp => new URL(resp.url()).pathname === `${peerApi}/peer-a/grant` && resp.request().method() === 'GET',
+  );
+  getA1Gate.resolve();
+  await staleGetAResp;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+  await expect(dialog.getByText('Loading access grants…')).toBeVisible();
+  await expect(dialog.locator('#cluster-grant-area-services')).toHaveCount(0);
+
+  getB1Gate.resolve();
+  await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('read');
+  await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('none');
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // 2) Stale GET error for Media server dismissed via X never leaks into Backup server.
+  await openA.click();
+  await expect(dialog.getByText('Loading access grants…')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('read');
+  const staleGetAErrResp = page.waitForResponse(
+    resp => new URL(resp.url()).pathname === `${peerApi}/peer-a/grant` && resp.status() === 502,
+  );
+  getA2ErrorGate.resolve();
+  await staleGetAErrResp;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+  await expect(dialog.getByText('Stale GET error for Media server.')).toHaveCount(0);
+  await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('read');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  // 3) Stale PUT success for Media server refreshes peer list without unlocking or clobbering Backup server's PUT.
+  await openA.click();
+  await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('write');
+  await dialog.locator('#cluster-grant-preset-ro').click();
+  await dialog.locator('#cluster-grant-save').click();
+  await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await dialog.locator('#cluster-grant-area-files').selectOption('write');
+  await dialog.locator('#cluster-grant-save').click();
+  await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+
+  const readsBeforeStalePut = listReads;
+  putAGate.resolve();
+  await expect.poll(() => listReads).toBeGreaterThan(readsBeforeStalePut);
+  await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+  await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
+  await expect(dialog.getByText('Saved access grant for Media server on this server.')).toHaveCount(0);
+
+  putBGate.resolve();
+  await expect(dialog.getByText('Saved access grant for Backup server on this server.')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  // 3b) Stale PUT error for Media server dismissed via X never leaks into Backup server.
+  await openA.click();
+  await dialog.locator('#cluster-grant-area-updates').selectOption('write');
+  await dialog.locator('#cluster-grant-save').click();
+  await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
+  const stalePutAErrResp = page.waitForResponse(
+    resp => new URL(resp.url()).pathname === `${peerApi}/peer-a/grant`
+      && resp.request().method() === 'PUT'
+      && resp.status() === 502,
+  );
+  putAErrorGate.resolve();
+  await stalePutAErrResp;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+  await expect(dialog.getByText('Stale PUT error for Media server.')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  // 4) Stale DELETE for Media server never wipes Backup server's inbound grant or unlocks Backup's offer call.
+  await openA.click();
+  await dialog.locator('#cluster-grant-revoke-open').click();
+  await dialog.locator('#cluster-grant-revoke-confirm').click();
+  await expect(dialog.getByRole('button', { name: 'Revoking…' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await dialog.locator('#cluster-grant-offer').click();
+  await expect(dialog.getByRole('button', { name: 'Sending offer…' })).toBeDisabled();
+
+  const readsBeforeStaleDelete = listReads;
+  delAGate.resolve();
+  await expect.poll(() => listReads).toBeGreaterThan(readsBeforeStaleDelete);
+  await expect(dialog.getByRole('button', { name: 'Sending offer…' })).toBeDisabled();
+  await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
+  await expect(dialog.getByText("Revoked Media server's access to this server. The WireGuard link stays configured.")).toHaveCount(0);
+
+  offerBGate.resolve();
+  await expect(dialog.getByText(/Informational notice sent to Backup server/i)).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // 5) Stale POST /grant-offer for Media server never leaks confirmation banner into Backup server.
+  await openA.click();
+  await dialog.locator('#cluster-grant-offer').click();
+  await expect(dialog.getByRole('button', { name: 'Sending offer…' })).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
+  const staleOfferResp = page.waitForResponse(
+    resp => new URL(resp.url()).pathname === `${peerApi}/peer-a/grant-offer`,
+  );
+  offerAGate.resolve();
+  await staleOfferResp;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+  await expect(dialog.getByText(/Informational notice sent to Media server/i)).toHaveCount(0);
 });

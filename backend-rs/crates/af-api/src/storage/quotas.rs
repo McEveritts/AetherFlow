@@ -140,12 +140,20 @@ pub(super) fn query_user_quota_record_conn(
 pub(super) fn list_user_quota_records_conn(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<Vec<UserQuotaRecord>> {
-    let mut stmt = conn.prepare(
+    let sql = if crate::auth::column_exists(conn, "users", "account_type")? {
         "SELECT u.id, u.username, COALESCE(q.quota_bytes, 0), COALESCE(q.used_bytes, 0), \
          COALESCE(q.status, 'active'), COALESCE(q.source, 'manual'), \
          COALESCE(q.updated_at, '') \
-         FROM users u LEFT JOIN user_quotas q ON q.user_id = u.id ORDER BY u.username ASC",
-    )?;
+         FROM users u LEFT JOIN user_quotas q ON q.user_id = u.id \
+         WHERE COALESCE(u.account_type, 'human') = 'human' \
+         ORDER BY u.username ASC"
+    } else {
+        "SELECT u.id, u.username, COALESCE(q.quota_bytes, 0), COALESCE(q.used_bytes, 0), \
+         COALESCE(q.status, 'active'), COALESCE(q.source, 'manual'), \
+         COALESCE(q.updated_at, '') \
+         FROM users u LEFT JOIN user_quotas q ON q.user_id = u.id ORDER BY u.username ASC"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |r| {
         Ok(normalize_quota_record(UserQuotaRecord {
             user_id: r.get(0)?,

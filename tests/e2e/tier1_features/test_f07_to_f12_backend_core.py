@@ -197,7 +197,7 @@ class TestF10PeerListRoute(TestCase):
         api = inspector.read_file(ROUTES_RS) or ""
         peers = inspector.read_file(PEERS_RS) or ""
         self.assert_true(
-            'nest("/peers", crate::peers::admin_routes())' in api and "get(links::list_peers)" in peers,
+            'nest("/peers", crate::peers::tracked_admin_routes())' in api and "get(links::list_peers)" in peers,
             "F10: the admin router must mount the peer list",
         )
 

@@ -65,6 +65,7 @@ async fn ai_models_support_context_modes_and_non_admin_error_sanitization() {
     };
     let err_resp = run_chat_session(
         Some(non_admin),
+        true,
         "",
         "",
         "",
@@ -186,6 +187,7 @@ async fn flowai_chat_only_advertises_committed_proposals_and_recovers_plain_repl
     let (st, body) = parse_body(
         run_chat_session(
             Some(non_admin),
+            true,
             "127.0.0.1",
             "test",
             "",
@@ -202,10 +204,42 @@ async fn flowai_chat_only_advertises_committed_proposals_and_recovers_plain_repl
     assert!(body.get("proposed_action").is_none());
     assert_eq!(af_db::count_pending_actions().unwrap(), 0);
 
+    // A settings-only peer can chat, but its reply cannot queue a service action.
+    let mut req = axum::extract::Request::new(axum::body::Body::from(
+        serde_json::json!({
+            "message": "help with apache",
+            "model": "fixture-installed-model",
+            "provider": "localai",
+        })
+        .to_string(),
+    ));
+    req.extensions_mut().insert(admin.clone());
+    req.extensions_mut().insert(crate::auth::PeerPrincipal {
+        link_id: "fixture-peer".into(),
+        link_name: "fixture".into(),
+        local_server: "managed-fixture".into(),
+        grant_id: "fixture-grant".into(),
+        run_as_user_id: admin.user_id,
+        run_as_username: admin.username.clone(),
+        access: af_db::peers::AccessMap {
+            settings: af_db::peers::AccessLevel::Write,
+            services: af_db::peers::AccessLevel::Read,
+            ..af_db::peers::AccessMap::none()
+        },
+        origin_operator: None,
+        request_id: "fixture".into(),
+    });
+    let (status, body) = parse_body(super::flowai::ai_chat(req).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["reply"], reply_msg);
+    assert!(body.get("proposed_action").is_none());
+    assert_eq!(af_db::count_pending_actions().unwrap(), 0);
+
     // 2. Admin receives a committed positive row ID and matching audit entry.
     let (st, body) = parse_body(
         run_chat_session(
             Some(admin.clone()),
+            true,
             "127.0.0.1",
             "test",
             "",
@@ -269,6 +303,7 @@ async fn flowai_chat_only_advertises_committed_proposals_and_recovers_plain_repl
     let (st, body) = parse_body(
         run_chat_session(
             Some(admin.clone()),
+            true,
             "127.0.0.1",
             "test",
             "",
@@ -302,6 +337,7 @@ async fn flowai_chat_only_advertises_committed_proposals_and_recovers_plain_repl
     let (st, body) = parse_body(
         run_chat_session(
             Some(admin),
+            true,
             "127.0.0.1",
             "test",
             "",

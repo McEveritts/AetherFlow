@@ -574,6 +574,7 @@ async fn local_provider_rejects_locality_aliases_and_dispatches_installed_model_
     ] {
         let rejected = run_chat_session(
             None,
+            true,
             "",
             "",
             "",
@@ -596,6 +597,7 @@ async fn local_provider_rejects_locality_aliases_and_dispatches_installed_model_
 
     let accepted = run_chat_session(
         None,
+        true,
         "",
         "",
         "",
@@ -677,6 +679,7 @@ async fn anthropic_local_uses_messages_protocol_and_credentials() {
 
     let resp = run_chat_session(
         None,
+        true,
         "",
         "",
         "",

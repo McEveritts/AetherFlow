@@ -23,19 +23,22 @@ pub(in crate::routes) fn parse_require_auth(query: &MarketplaceQuery) -> bool {
 
 pub(in crate::routes) async fn get_marketplace_apps(
     Query(query): Query<MarketplaceQuery>,
+    peer: Option<Extension<crate::auth::PeerPrincipal>>,
     headers: HeaderMap,
 ) -> Response {
     let require_auth = parse_require_auth(&query);
-    let mut response =
-        tokio::task::spawn_blocking(move || get_marketplace_apps_blocking(headers, require_auth))
-            .await
-            .unwrap_or_else(|_| {
-                api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "STATUS_UNAVAILABLE",
-                    "Marketplace status unavailable",
-                )
-            });
+    let peer_authenticated = peer.is_some();
+    let mut response = tokio::task::spawn_blocking(move || {
+        get_marketplace_apps_blocking_for_peer(headers, require_auth, peer_authenticated)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STATUS_UNAVAILABLE",
+            "Marketplace status unavailable",
+        )
+    });
     // The same URL serves public catalog metadata and credential-dependent inventory.
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -107,11 +110,24 @@ pub(in crate::routes) fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool
     (false, false)
 }
 
+#[cfg(test)]
 pub(in crate::routes) fn get_marketplace_apps_blocking(
     headers: HeaderMap,
     require_auth: bool,
 ) -> Response {
-    let (is_authenticated, diagnostics_allowed) = get_marketplace_auth_info(&headers);
+    get_marketplace_apps_blocking_for_peer(headers, require_auth, false)
+}
+
+fn get_marketplace_apps_blocking_for_peer(
+    headers: HeaderMap,
+    require_auth: bool,
+    peer_authenticated: bool,
+) -> Response {
+    let (is_authenticated, diagnostics_allowed) = if peer_authenticated {
+        (true, true)
+    } else {
+        get_marketplace_auth_info(&headers)
+    };
     if require_auth && !is_authenticated {
         return api_error(
             StatusCode::UNAUTHORIZED,

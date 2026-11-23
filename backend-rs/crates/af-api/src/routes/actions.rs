@@ -3,7 +3,7 @@ use super::services::{
     is_valid_core_restart_job_unit, reconcile_pending_action, validate_service_control_request,
     ServiceControlReq,
 };
-use crate::auth::{api_error, AuthUser};
+use crate::auth::{api_error, AuthUser, PeerPrincipal};
 use crate::ws::extract_client_ip;
 use axum::extract::{Extension, Path, Query};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -17,7 +17,7 @@ pub(super) async fn reconcile_queued_actions_for_list() -> HashMap<i64, (String,
     };
     for action in queued {
         let id = action.id;
-        let reconciled = reconcile_pending_action(action).await;
+        let reconciled = reconcile_pending_action(action, true).await;
         if reconciled.status == "unavailable" {
             if let Ok(Some(persisted)) = af_db::get_pending_action_by_id(id) {
                 if persisted.status == "queued" {
@@ -29,7 +29,10 @@ pub(super) async fn reconcile_queued_actions_for_list() -> HashMap<i64, (String,
     transient_overlays
 }
 
-pub(super) async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Response {
+pub(super) async fn list_pending_actions(
+    peer: Option<Extension<PeerPrincipal>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let status_filter = q
         .get("status")
         .map(|s| s.trim())
@@ -67,7 +70,8 @@ pub(super) async fn list_pending_actions(Query(q): Query<HashMap<String, String>
         .unwrap_or(0)
         .min(i64::MAX as usize);
 
-    let transient_overlays = if !matches!(status_filter, "pending" | "rejected") {
+    let may_reconcile = peer.is_none_or(|Extension(peer)| peer.access.services.allows_write());
+    let transient_overlays = if may_reconcile && !matches!(status_filter, "pending" | "rejected") {
         reconcile_queued_actions_for_list().await
     } else {
         HashMap::new()
@@ -188,7 +192,7 @@ pub(super) fn is_ambiguous_core_restart_dispatch_error(error: &anyhow::Error) ->
 }
 
 pub(super) async fn already_resolved_conflict_response(existing: af_db::PendingAction) -> Response {
-    let reconciled = reconcile_pending_action(existing).await;
+    let reconciled = reconcile_pending_action(existing, true).await;
     let message = match reconciled.status.as_str() {
         "queued" => match reconciled.job_unit.as_deref() {
             Some(unit) => format!(

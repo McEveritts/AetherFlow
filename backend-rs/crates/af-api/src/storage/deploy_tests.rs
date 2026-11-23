@@ -1,8 +1,9 @@
 use super::backups::{get_optimal_backup_window, set_backup_schedule};
 use super::deploy::{
-    af_common, allocate_or_verify_deploy_port, deploy_sse_session_still_authorized_with_conn,
-    deployment_ingress_config, ensure_or_reuse_deploy_stream, handle_deploy_stream,
-    is_terminal_deploy_event, load_mediaflow_initial_snapshot_conn, publish_deploy_json_event,
+    af_common, allocate_or_verify_deploy_port,
+    deploy_sse_session_still_authorized_for_peer_with_conn, deployment_ingress_config,
+    ensure_or_reuse_deploy_stream, handle_deploy_stream, is_terminal_deploy_event,
+    load_mediaflow_initial_snapshot_conn, publish_deploy_json_event,
     release_deploy_stream_if_matching, DEPLOY_STREAMS,
 };
 use super::deploy_rollback::{
@@ -80,7 +81,7 @@ async fn test_handle_deploy_stream_requires_admin_and_redacts_secrets() {
     };
     let mut q = HashMap::new();
     q.insert("appName".to_string(), "radarr".to_string());
-    let resp = handle_deploy_stream(axum::Extension(non_admin), Query(q)).await;
+    let resp = handle_deploy_stream(axum::Extension(non_admin), None, Query(q)).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     let redacted = af_common::redact::redact_secrets(
@@ -145,7 +146,7 @@ async fn test_mediaflow_engine_deploy_stream_returns_200_json_sse_and_closes_on_
     };
     let mut q = HashMap::new();
     q.insert("appName".to_string(), app_name.clone());
-    let resp = handle_deploy_stream(axum::Extension(admin), Query(q)).await;
+    let resp = handle_deploy_stream(axum::Extension(admin), None, Query(q)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
 
@@ -189,7 +190,7 @@ async fn test_mediaflow_engine_progress_stream_subscribes_worker_broadcasts_and_
     };
     let mut q = HashMap::new();
     q.insert("appName".to_string(), "mediaflow_engine".to_string());
-    let resp = handle_deploy_stream(axum::Extension(admin), Query(q)).await;
+    let resp = handle_deploy_stream(axum::Extension(admin), None, Query(q)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
 
@@ -817,7 +818,7 @@ fn deploy_sse_session_authorization_fails_closed_on_sqlite_table_check_error() {
         plugin_scopes: Vec::new(),
     };
     assert!(
-        !deploy_sse_session_still_authorized_with_conn(&conn, &admin, None),
+        !deploy_sse_session_still_authorized_for_peer_with_conn(&conn, &admin, None, None),
         "SQLite error checking users table must fail closed instead of authorizing SSE"
     );
 

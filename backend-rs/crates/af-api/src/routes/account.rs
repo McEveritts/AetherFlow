@@ -445,10 +445,15 @@ pub(super) async fn get_users(Extension(user): Extension<AuthUser>) -> Response 
 
 pub(super) fn read_users() -> anyhow::Result<Vec<User>> {
     let conn = af_db::get_read_conn()?;
-    let mut stmt = conn.prepare(
+    let sql = if crate::auth::column_exists(&conn, "users", "account_type")? {
         "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
-         COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users",
-    )?;
+         COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users \
+         WHERE COALESCE(account_type, 'human') = 'human'"
+    } else {
+        "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
+         COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         let google_id: String = row.get(5)?;
         Ok(User {

@@ -8,7 +8,6 @@ mod types;
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::{get, post};
 use axum::Router;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
@@ -155,8 +154,9 @@ static ARCHIVE_SEMAPHORE: Lazy<Arc<Semaphore>> =
 static ARCHIVE_TICKET_STORE: Lazy<ArchiveTicketStore> =
     Lazy::new(|| ArchiveTicketStore::new(MAX_ARCHIVE_TICKETS, ARCHIVE_TICKET_TTL));
 
-pub fn router() -> Router {
-    let content_routes = Router::new()
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{get, post, TrackedRouter};
+    let content_routes = TrackedRouter::new()
         .route(
             "/mcbrowser/content",
             get(editor::get_content).put(editor::put_content),
@@ -165,7 +165,7 @@ pub fn router() -> Router {
         .layer(DefaultBodyLimit::max(CONTENT_BODY_LIMIT_BYTES))
         .layer(middleware::from_fn(editor::limit_editor_requests));
 
-    Router::new()
+    TrackedRouter::new()
         .route("/mcbrowser/search", get(search::search_entries))
         .route("/mcbrowser/copy", post(copy::copy_entry))
         .route(
@@ -183,6 +183,11 @@ pub fn router() -> Router {
             get(archive::download_archive_by_ticket),
         )
         .merge(content_routes)
+}
+
+#[allow(dead_code)]
+pub fn router() -> Router {
+    tracked_router().into_router()
 }
 
 #[cfg(test)]

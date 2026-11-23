@@ -4,10 +4,9 @@ use super::errors::PeerError;
 use super::health::evaluate_compatibility;
 use super::listener::authenticate_active_link;
 use super::pairing::{
-    cleanup_pending_link_locked, delete_link_credentials_idempotent,
-    delete_pending_issuer_credential_idempotent, derive_comparison_code,
-    ensure_active_pending_link_row, has_active_pending_expiry, is_active_expiry,
-    is_valid_credential_id, map_runner_error, remove_owned_wg_peer_locked, validate_endpoint_host,
+    cleanup_pending_link_locked, derive_comparison_code, ensure_active_pending_link_row,
+    has_active_pending_expiry, is_active_expiry, is_valid_credential_id, map_runner_error,
+    pending_issuer_credential_id, remove_owned_wg_peer_locked, validate_endpoint_host,
 };
 use super::{
     capabilities, detect_local_endpoints, is_live_link_state, is_pending_link_state,
@@ -17,7 +16,7 @@ use super::{
 use crate::auth::AuthUser;
 use crate::ws::{extract_client_ip_for_peer, PeerIp};
 use af_db::peers::{self as db_peers, AccessMap, PeerExport, PeerLink, PeerMount, TranscodeWorker};
-use af_runner::{PeerCredentialSlot, PeerNetworkRequest};
+use af_runner::{PeerCredentialSlot, PeerNetworkError, PeerNetworkRequest};
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -94,16 +93,10 @@ fn build_link_view(
         .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
         .unwrap_or_default();
     let compat = evaluate_compatibility(link.peer_protocol, &parsed_caps);
-    let inbound_grant = db_peers::get_active_peer_grant_for_link(conn, &link.id)
-        .ok()
-        .flatten()
-        .map(|g| GrantSummaryView {
-            id: g.id,
-            run_as_user_id: g.run_as_user_id,
-            access: g.access,
-            created_by: g.created_by,
-            created_at: g.created_at,
-        });
+    let grants = super::grants::load_link_grants_view(conn, &link.id).unwrap_or(LinkGrantsView {
+        inbound: None,
+        outbound: None,
+    });
     let exports = db_peers::list_peer_exports_for_link(conn, &link.id).unwrap_or_default();
     let mounts = db_peers::list_peer_mounts_for_link(conn, &link.id).unwrap_or_default();
     let transcode_worker = db_peers::get_transcode_worker(conn, &link.id)
@@ -137,10 +130,7 @@ fn build_link_view(
         pending_expires_at: link.pending_expires_at.filter(|_| pending_pairing),
         created_at: link.created_at,
         updated_at: link.updated_at,
-        grants: LinkGrantsView {
-            inbound: inbound_grant,
-            outbound: None,
-        },
+        grants,
         exports,
         mounts,
         transcode_worker,
@@ -525,6 +515,82 @@ pub(crate) struct RemoteRevocationOutcome {
     pub(crate) notice_message: String,
 }
 
+/// Deletes held outbound link & grant credentials for `link_id`, verifying the typed runner
+/// deletion acknowledgement and treating `NotFound` as already absent.
+async fn delete_link_credentials_verified(
+    runtime: &PeerRuntime,
+    link_id: &str,
+    server: &str,
+    step: &str,
+) -> Result<(), PeerError> {
+    if !is_valid_credential_id(link_id) {
+        return Ok(());
+    }
+    match runtime
+        .runner
+        .dispatch(&PeerNetworkRequest::DeleteLinkCredentials {
+            link_id: link_id.to_string(),
+        })
+        .await
+    {
+        Ok(resp) => {
+            let ack = resp
+                .into_link_credentials_deleted()
+                .map_err(|err| map_runner_error(err, server, step))?;
+            if ack.link_id != link_id {
+                return Err(map_runner_error(
+                    PeerNetworkError::Runtime(
+                        "Runner did not confirm peer link credential deletion for the requested link"
+                            .into(),
+                    ),
+                    server,
+                    step,
+                ));
+            }
+            Ok(())
+        }
+        Err(PeerNetworkError::NotFound(_)) => Ok(()),
+        Err(err) => Err(map_runner_error(err, server, step)),
+    }
+}
+
+/// Deletes the temporary `PendingIssuerToken` for `link_id`, verifying the typed runner deletion
+/// acknowledgement and treating `NotFound` as already absent.
+async fn delete_pending_issuer_credential_verified(
+    runtime: &PeerRuntime,
+    link_id: &str,
+    server: &str,
+    step: &str,
+) -> Result<(), PeerError> {
+    let cred_id = pending_issuer_credential_id(link_id);
+    match runtime
+        .runner
+        .dispatch(&PeerNetworkRequest::DeleteCredential {
+            slot: PeerCredentialSlot::PendingIssuerToken,
+            id: cred_id.clone(),
+        })
+        .await
+    {
+        Ok(resp) => {
+            let ack = resp
+                .into_credential_deleted()
+                .map_err(|err| map_runner_error(err, server, step))?;
+            if ack.slot != PeerCredentialSlot::PendingIssuerToken || ack.id != cred_id {
+                return Err(map_runner_error(
+                    PeerNetworkError::Runtime(
+                        "Runner did not confirm pending issuer credential deletion".into(),
+                    ),
+                    server,
+                    step,
+                ));
+            }
+            Ok(())
+        }
+        Err(PeerNetworkError::NotFound(_)) => Ok(()),
+        Err(err) => Err(map_runner_error(err, server, step)),
+    }
+}
+
 /// Removes owned WireGuard peer (strictly when durable affirmative ownership holds) and all
 /// runner-managed credentials for a currently owned `revoked*` or `revoking*` link row.
 /// Caller must hold `runtime.lock_link(link_id)`.
@@ -571,8 +637,12 @@ async fn cleanup_revoked_link_resources_locked(
         return Ok(false);
     };
 
-    delete_link_credentials_idempotent(runtime, link_id, peer_name, step).await?;
-    delete_pending_issuer_credential_idempotent(runtime, link_id, peer_name, step).await?;
+    super::grants::delete_revoked_link_staged_grant_credentials_locked(
+        runtime, link_id, peer_name, step,
+    )
+    .await?;
+    delete_link_credentials_verified(runtime, link_id, peer_name, step).await?;
+    delete_pending_issuer_credential_verified(runtime, link_id, peer_name, step).await?;
     remove_owned_wg_peer_locked(runtime, &link, step).await?;
     Ok(true)
 }
@@ -682,6 +752,9 @@ pub(crate) async fn apply_remote_revocation(
             if changed != 1 {
                 return Ok(None);
             }
+            let grant_revocation = super::grants::revoke_all_grants_for_link_revocation_in_tx(
+                &tx, &link_id_c, &now_rfc, &server_c, step,
+            )?;
             tx.commit().map_err(|err| {
                 PeerError::internal(
                     &server_c,
@@ -689,13 +762,15 @@ pub(crate) async fn apply_remote_revocation(
                     format!("Failed committing revocation: {err}"),
                 )
             })?;
-            Ok(Some((peer_name, notice_message)))
+            Ok(Some((peer_name, notice_message, grant_revocation)))
         })
         .await?;
 
-    let Some((peer_name, notice_message)) = committed else {
+    let Some((peer_name, notice_message, grant_revocation)) = committed else {
         return Ok(None);
     };
+
+    super::grants::finalize_grant_revocation_events(runtime, &grant_revocation);
 
     // Publish, notify, and audit immediately after authorization is durably disabled.
     runtime.publish_revocation(RevocationEvent::LinkRevoked {
@@ -744,12 +819,26 @@ pub(crate) async fn apply_remote_revocation(
             let _ = runtime
                 .db
                 .write(&server, step, move |conn| {
-                    let _ = conn.execute(
-                        "UPDATE peer_links SET pending_expires_at = NULL, updated_at = ?3 \
-                         WHERE id = ?1 AND wg_pubkey = ?2 \
-                           AND state IN ('revoked', 'revoked_unowned') AND pending_expires_at = 0",
-                        params![clear_id, clear_pk, clear_ts],
-                    );
+                    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+                        .map_err(|err| {
+                            PeerError::internal("local", "revocation_cleanup", err.to_string())
+                        })?;
+                    let changed = tx
+                        .execute(
+                            "UPDATE peer_links SET pending_expires_at = NULL, updated_at = ?3 \
+                             WHERE id = ?1 AND wg_pubkey = ?2 \
+                               AND state IN ('revoked', 'revoked_unowned') AND pending_expires_at = 0",
+                            params![clear_id, clear_pk, clear_ts],
+                        )
+                        .map_err(|err| {
+                            PeerError::internal("local", "revocation_cleanup", err.to_string())
+                        })?;
+                    if changed == 1 {
+                        let _ = db_peers::clear_peer_received_grant_cleanups_for_link(
+                            &tx, &clear_id,
+                        );
+                    }
+                    let _ = tx.commit();
                     Ok(())
                 })
                 .await;
@@ -842,17 +931,45 @@ pub(crate) async fn retry_revocation_cleanup(
         runtime
             .db
             .write(&server, step, move |conn| {
-                conn.execute(
-                    "UPDATE peer_links SET pending_expires_at = NULL, updated_at = ?3 \
-                     WHERE id = ?1 AND state IN ('revoked', 'revoked_unowned') \
-                       AND wg_pubkey = ?2 AND pending_expires_at IS NOT NULL",
-                    params![upd_id, upd_pk, now_rfc],
-                )
-                .map_err(|err| {
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(
+                    |err| {
+                        PeerError::internal(
+                            "local",
+                            "revocation_cleanup_retry",
+                            format!("Failed starting revocation cleanup clear transaction: {err}"),
+                        )
+                    },
+                )?;
+                let changed = tx
+                    .execute(
+                        "UPDATE peer_links SET pending_expires_at = NULL, updated_at = ?3 \
+                         WHERE id = ?1 AND state IN ('revoked', 'revoked_unowned') \
+                           AND wg_pubkey = ?2 AND pending_expires_at IS NOT NULL",
+                        params![upd_id, upd_pk, now_rfc],
+                    )
+                    .map_err(|err| {
+                        PeerError::internal(
+                            "local",
+                            "revocation_cleanup_retry",
+                            format!("Failed clearing revocation cleanup marker: {err}"),
+                        )
+                    })?;
+                if changed == 1 {
+                    db_peers::clear_peer_received_grant_cleanups_for_link(&tx, &upd_id).map_err(
+                        |err| {
+                            PeerError::internal(
+                                "local",
+                                "revocation_cleanup_retry",
+                                format!("Failed clearing received grant cleanup entries: {err}"),
+                            )
+                        },
+                    )?;
+                }
+                tx.commit().map_err(|err| {
                     PeerError::internal(
                         "local",
                         "revocation_cleanup_retry",
-                        format!("Failed clearing revocation cleanup marker: {err}"),
+                        format!("Failed committing revocation cleanup clear: {err}"),
                     )
                 })?;
                 Ok(())
@@ -989,7 +1106,7 @@ async fn delete_peer_inner(
 
     // Phase A: Under link_lock, immediately disable incoming authorization and persist
     // durable `revoking` state before any network or runner call.
-    let (link, prev_state, transitioned) = {
+    let (link, prev_state, transitioned, grant_revocation) = {
         let _link_guard = runtime.lock_link(link_id, step).await?;
         let id_c = link_id.to_string();
         let now_rfc = runtime.now().to_rfc3339();
@@ -1064,6 +1181,9 @@ async fn delete_peer_inner(
                         "Refresh the Cluster page and retry",
                     ));
                 }
+                let grant_revocation = super::grants::revoke_all_grants_for_link_revocation_in_tx(
+                    &tx, &link.id, &now_rfc, &server_c, step,
+                )?;
                 tx.commit().map_err(|err| {
                     PeerError::internal(
                         &server_c,
@@ -1072,10 +1192,12 @@ async fn delete_peer_inner(
                     )
                 })?;
                 let first_transition = !is_revoking_state(&prev_state);
-                Ok((link, prev_state, first_transition))
+                Ok((link, prev_state, first_transition, grant_revocation))
             })
             .await?
     };
+
+    super::grants::finalize_grant_revocation_events(runtime, &grant_revocation);
 
     let was_live = is_live_link_state(&prev_state);
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);

@@ -1,5 +1,5 @@
 use super::tokens::{
-    api_error, blocking_response, create_session_jwt_in_conn, create_standard_jwt,
+    api_error, blocking_response, column_exists, create_session_jwt_in_conn, create_standard_jwt,
     load_active_human_subject, secure_cookie_enabled, table_exists, AuthUser, SubjectStatusError,
     SESSION_COOKIE_MAX_AGE,
 };
@@ -26,6 +26,18 @@ pub struct CredentialsRequest {
     pub setup_token: Option<String>,
 }
 
+fn count_human_users(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    if column_exists(conn, "users", "account_type")? {
+        conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE COALESCE(account_type, 'human') = 'human'",
+            [],
+            |r| r.get(0),
+        )
+    } else {
+        conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+    }
+}
+
 pub async fn check_setup_needed() -> Response {
     blocking_response(check_setup_needed_blocking).await
 }
@@ -38,7 +50,7 @@ fn check_setup_needed_blocking() -> Response {
             "Database unavailable",
         );
     };
-    let Ok(count) = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0)) else {
+    let Ok(count) = count_human_users(&conn) else {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "SERVICE_UNAVAILABLE",
@@ -155,8 +167,7 @@ pub fn ensure_setup_bootstrap_token() {
     let Ok(conn) = af_db::get_conn() else {
         return;
     };
-    let Ok(user_count) = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0))
-    else {
+    let Ok(user_count) = count_human_users(&conn) else {
         return;
     };
     if user_count > 0 || !configured_setup_bootstrap_tokens().is_empty() {
@@ -231,7 +242,7 @@ pub(super) fn setup_admin_blocking(
         );
     };
 
-    let Ok(count) = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0)) else {
+    let Ok(count) = count_human_users(&conn) else {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "SERVICE_UNAVAILABLE",
@@ -332,7 +343,7 @@ pub(super) fn setup_admin_blocking(
             );
         }
     };
-    let live_count = match tx.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0)) {
+    let live_count = match count_human_users(&tx) {
         Ok(c) => c,
         Err(_) => {
             return api_error(

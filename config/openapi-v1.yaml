@@ -1083,6 +1083,131 @@ paths:
           $ref: '#/components/responses/PeerError'
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
+  /admin/peers/{id}/grant:
+    servers:
+      - url: /api/v1
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        description: Peer link identifier
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: Read both grant directions
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Current inbound and outbound grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerGrants'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+    put:
+      tags:
+        - Cluster
+        - Operator
+      summary: Grant the peer access to this server
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Grant directions after the local grant is saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerGrants'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - access
+              properties:
+                access:
+                  $ref: '#/components/schemas/PeerGrantAccess'
+              additionalProperties: false
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Revoke the access this server granted to the peer
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Grant directions after revocation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerGrants'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/peers/{id}/grant-offer:
+    servers:
+      - url: /api/v1
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        description: Peer link identifier
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Send an informational prompt for a reciprocal grant
+      description: Prompts the peer administrator to decide what access to grant on their server.
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: The remote server accepted the prompt
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - sent
+                properties:
+                  sent:
+                    type: boolean
+                    const: true
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
   /admin/peers/{id}/endpoint:
     servers:
       - url: /api/v1
@@ -6441,6 +6566,69 @@ components:
           type: string
         action:
           type: string
+    PeerGrantLevel:
+      type: string
+      enum:
+        - none
+        - read
+        - write
+    PeerGrantAccess:
+      type: object
+      description: Omitted areas default to none. Select read or write access in at least one area.
+      properties:
+        services:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        marketplace:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        settings:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        files:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        users:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        network:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        updates:
+          $ref: '#/components/schemas/PeerGrantLevel'
+        transcoding:
+          $ref: '#/components/schemas/PeerGrantLevel'
+      additionalProperties: false
+    PeerGrantSummary:
+      type: object
+      required:
+        - id
+        - run_as_user_id
+        - access
+        - created_by
+        - created_at
+      properties:
+        id:
+          type: string
+        run_as_user_id:
+          type: integer
+        access:
+          $ref: '#/components/schemas/PeerGrantAccess'
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    PeerGrants:
+      type: object
+      required:
+        - inbound
+        - outbound
+      properties:
+        inbound:
+          description: Access this server grants to the peer.
+          oneOf:
+            - $ref: '#/components/schemas/PeerGrantSummary'
+            - type: 'null'
+        outbound:
+          description: Access the peer grants to this server.
+          oneOf:
+            - $ref: '#/components/schemas/PeerGrantSummary'
+            - type: 'null'
     PeerLink:
       type: object
       required:
@@ -6502,7 +6690,7 @@ components:
             - 'null'
           description: Pending deadline as Unix seconds
         grants:
-          $ref: '#/components/schemas/GenericObject'
+          $ref: '#/components/schemas/PeerGrants'
     ErrorResponse:
       type: object
       required:

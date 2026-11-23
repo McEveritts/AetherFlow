@@ -156,8 +156,10 @@ pub(crate) async fn run_health_tick(runtime: &Arc<PeerRuntime>) {
         }
     }
 
-    // Always clean up expired pending attempts/links.
+    // Always clean up expired pending attempts/links and retry any durable revoked-grant
+    // credential deletions (independent of outbound credentials for link health & notifications).
     pairing::cleanup_expired_pending(runtime).await;
+    super::grants::cleanup_pending_received_grant_credentials(runtime).await;
 
     // Reload links after pending/revocation cleanup and filter to checkable active/down links.
     let checkable_links: Vec<PeerLink> = runtime

@@ -1,34 +1,50 @@
-//! Isolated tunnel-IP peer listener (P3 link-only slice).
+//! Isolated tunnel-IP peer listener (P3 link protocol + P5 scoped management dispatch).
 //!
 //! Binds strictly to `<own tunnel IP>:AF_PEER_LISTEN_PORT` once peer identity exists.
-//! Serves only:
+//! Serves:
 //! - `POST /peer/v1/hello` (attempt-bound pre-activation bootstrap and authenticated acknowledge)
 //! - `GET /health` (link-authenticated health & capability exchange)
 //! - `GET /peer/v1/link` (link-authenticated link status view)
 //! - `POST /peer/v1/revoke-notice` (link-authenticated peer revocation notice)
+//! - `POST /peer/v1/grant-token` (link-authenticated inbound grant token delivery)
+//! - `POST /peer/v1/grant-revoke` (link-authenticated inbound grant revocation notice)
+//! - `POST /peer/v1/grant-offer` (link-authenticated informational grant review offer)
+//! - Scoped `/api/v1/*` management routes (authenticated by tunnel source IP + link token +
+//!   active grant token digest + active `account_type = 'peer'` run-as user + `peers::scopes`
+//!   canonicalization and method/area policy), dispatched into `routes::build_router()`.
 //!
-//! All other routes—including management `/api/v1/*` and unknown internal routes—fail closed
-//! and are audited.
+//! All unknown, ambiguous, non-versioned, or forbidden targets fail closed and are audited.
 
-use super::errors::PeerError;
+use super::errors::{redact_sensitive_text, PeerError};
 use super::pairing::sha256_prefixed;
+use super::scopes::{self, RouteDecision};
 use super::{
-    capabilities, is_live_link_state, is_revoked_or_revoking_state, links, pairing, ListenerHandle,
-    PeerRuntime, HEADER_LINK_TOKEN, PEER_PROTOCOL_VERSION,
+    capabilities, grants, is_live_link_state, is_revoked_or_revoking_state, links, pairing,
+    ListenerHandle, PeerRuntime, HEADER_GRANT_TOKEN, HEADER_LINK_TOKEN, HEADER_ORIGIN_OPERATOR,
+    PEER_PROTOCOL_VERSION,
 };
+use crate::auth::{AuthUser, PeerPrincipal, SessionAuthTime};
 use af_db::peers::{self as db_peers, PeerLink};
 use af_models::constant_time_eq;
 use axum::extract::connect_info::ConnectInfo;
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{OriginalUri, Request, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::watch;
+use tower::ServiceExt as _;
+use uuid::Uuid;
 
 pub(crate) const TUNNEL_INTERNAL_BODY_LIMIT_BYTES: usize = 8192;
+
+#[derive(Clone)]
+struct ListenerState {
+    runtime: Arc<PeerRuntime>,
+    management_router: Router,
+}
 
 /// Verified identity of an active peer link calling the tunnel listener.
 #[derive(Debug, Clone)]
@@ -161,6 +177,68 @@ pub(crate) async fn audit_listener_denial(
         .await;
 }
 
+fn sanitize_origin_operator(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(HEADER_ORIGIN_OPERATOR)
+        .and_then(|v| v.to_str().ok())?;
+    let redacted = redact_sensitive_text(raw.trim());
+    let cleaned: String = redacted
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(64)
+        .collect();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn extract_or_generate_request_id(headers: &HeaderMap) -> String {
+    if let Some(raw) = headers.get("x-request-id").and_then(|v| v.to_str().ok()) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty()
+            && trimmed.len() <= 128
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        {
+            return trimmed.to_string();
+        }
+    }
+    Uuid::new_v4().to_string()
+}
+
+fn strip_untrusted_peer_headers(headers: &mut HeaderMap) {
+    for name in [
+        header::COOKIE,
+        header::AUTHORIZATION,
+        header::HOST,
+        header::ORIGIN,
+        header::REFERER,
+        HeaderName::from_static("forwarded"),
+        HeaderName::from_static("x-forwarded-for"),
+        HeaderName::from_static("x-forwarded-host"),
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderName::from_static("x-forwarded-server"),
+        HeaderName::from_static("x-real-ip"),
+        HeaderName::from_static("x-csrf-token"),
+        HeaderName::from_static("x-reauth-password"),
+        HeaderName::from_static("x-reauth-password-encoded"),
+        HeaderName::from_static("x-reauth-totp"),
+        HeaderName::from_static("x-reauth-confirm"),
+    ] {
+        headers.remove(&name);
+    }
+
+    let af_headers: Vec<HeaderName> = headers
+        .keys()
+        .filter(|k| k.as_str().starts_with("x-af-"))
+        .cloned()
+        .collect();
+    for name in af_headers {
+        headers.remove(&name);
+    }
+}
+
 /// Link-authenticated `GET /health` over the WireGuard tunnel.
 async fn tunnel_health(
     State(runtime): State<Arc<PeerRuntime>>,
@@ -186,48 +264,414 @@ async fn tunnel_health(
         .into_response()
 }
 
-/// Fail-closed fallback rejecting every route outside the P3 internal link routes
-/// (including `/api/v1/*` management routes, unknown `/peer/v1/*` routes, and disallowed methods).
-async fn tunnel_fail_closed_fallback(
-    State(runtime): State<Arc<PeerRuntime>>,
+/// Scoped management dispatch and fail-closed fallback for all routes outside the explicit
+/// `/peer/v1/*` and `GET /health` internal endpoints.
+async fn tunnel_management_or_deny_fallback(
+    State(state): State<ListenerState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
-    req: Request,
+    mut req: Request,
 ) -> Response {
+    let runtime = &state.runtime;
     let route_label = "unclassified tunnel request";
     let local_server = runtime.local_server_name();
 
-    let auth_res =
-        authenticate_active_link(&runtime, connect_info, req.headers(), route_label).await;
-    let (_auth, _permit) = match auth_res {
-        Ok(ok) => ok,
+    let (auth, _permit) =
+        match authenticate_active_link(runtime, connect_info, req.headers(), route_label).await {
+            Ok(ok) => ok,
+            Err(err) => return err.into_response(),
+        };
+
+    let source_ip_str = auth.source_ip.to_string();
+    let remote_addr = connect_info
+        .map(|ConnectInfo(addr)| addr)
+        .unwrap_or_else(|| SocketAddr::new(auth.source_ip, 0));
+
+    // 1. Canonicalize path once; fail closed on any smuggling, control, dot-segment, or encoding
+    //    ambiguity without logging untrusted raw path text.
+    let canonical = match scopes::canonicalize(req.uri().path()) {
+        Ok(c) => c,
+        Err(_) => {
+            let err = PeerError::peer_route_unclassified(
+                &local_server,
+                "tunnel_dispatch",
+                "Request path failed canonicalization and was rejected",
+            );
+            audit_listener_denial(runtime, route_label, &source_ip_str, err.code()).await;
+            return err.into_response();
+        }
+    };
+
+    // 2. Reject every non-versioned or non-`/api/v1/` path (including unknown `/peer/v1/*`,
+    //    disallowed methods on `/health`, legacy `/api/*`, `/metrics`, etc.) without leaking raw
+    //    unknown paths into audit records.
+    if !canonical.as_str().starts_with("/api/v1/") {
+        let err = PeerError::peer_route_unclassified(
+            &local_server,
+            "tunnel_dispatch",
+            "Route is not an allowed peer internal or versioned management endpoint",
+        );
+        audit_listener_denial(runtime, route_label, &source_ip_str, err.code()).await;
+        return err.into_response();
+    }
+
+    let origin_operator = sanitize_origin_operator(req.headers());
+    let operator_display = origin_operator.as_deref().unwrap_or("unspecified");
+    let request_id = extract_or_generate_request_id(req.headers());
+    let method = req.method().clone();
+
+    // 3. Verify active inbound grant and independent `X-AF-Grant-Token` digest BEFORE route/method
+    //    authorization checks.
+    let link_id_lookup = auth.link.id.clone();
+    let local_server_c = local_server.clone();
+    let active_grant = match runtime
+        .db
+        .read(&local_server, "tunnel_grant_auth", move |conn| {
+            db_peers::get_active_peer_grant_for_link(conn, &link_id_lookup).map_err(|err| {
+                PeerError::internal(&local_server_c, "tunnel_grant_auth", err.to_string())
+            })
+        })
+        .await
+    {
+        Ok(g) => g,
         Err(err) => return err.into_response(),
     };
 
-    let source_ip = connect_info
-        .map(|ConnectInfo(addr)| addr.ip().to_canonical().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let trimmed_path = req.uri().path().trim_start_matches('/');
-    let err = if trimmed_path == "api" || trimmed_path.starts_with("api/") {
-        PeerError::peer_scope_denied(
+    let Some(grant) = active_grant else {
+        let err = PeerError::peer_scope_denied(
             &local_server,
-            "tunnel_dispatch",
-            "Management routes are not enabled on this link-only peer listener",
-        )
-    } else {
-        PeerError::peer_route_unclassified(
-            &local_server,
-            "tunnel_dispatch",
-            "Route is not an allowed peer internal endpoint",
-        )
+            "tunnel_grant_auth",
+            format!(
+                "No active management grant is configured for peer '{}'",
+                auth.link.name
+            ),
+        );
+        runtime
+            .db
+            .record_audit(
+                0,
+                format!("peer-{}", auth.link.name),
+                "peer_management_denied".to_string(),
+                "peer_link".to_string(),
+                auth.link.id.clone(),
+                format!(
+                    "Denied management request via {} (operator={}, request_id={}, reason=no_active_grant)",
+                    auth.link.name, operator_display, request_id
+                ),
+                source_ip_str,
+                String::new(),
+            )
+            .await;
+        return err.into_response();
     };
-    audit_listener_denial(&runtime, route_label, &source_ip, err.code()).await;
-    err.into_response()
+
+    let Some(presented_grant_token) = req
+        .headers()
+        .get(HEADER_GRANT_TOKEN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        let err = PeerError::peer_scope_denied(
+            &local_server,
+            "tunnel_grant_auth",
+            "Missing X-AF-Grant-Token header for management request",
+        );
+        runtime
+            .db
+            .record_audit(
+                grant.run_as_user_id,
+                format!("peer-{}", auth.link.name),
+                "peer_management_denied".to_string(),
+                "peer_grant".to_string(),
+                grant.id.clone(),
+                format!(
+                    "Denied management request via {} (operator={}, request_id={}, reason=missing_grant_token)",
+                    auth.link.name, operator_display, request_id
+                ),
+                source_ip_str,
+                String::new(),
+            )
+            .await;
+        return err.into_response();
+    };
+
+    let Some(expected_grant_hash) = grant.token_hash.as_deref() else {
+        let err = PeerError::peer_scope_denied(
+            &local_server,
+            "tunnel_grant_auth",
+            "Active management grant has no valid token digest",
+        );
+        audit_listener_denial(runtime, route_label, &source_ip_str, err.code()).await;
+        return err.into_response();
+    };
+
+    let presented_grant_hash = sha256_prefixed(presented_grant_token);
+    if !constant_time_eq(
+        presented_grant_hash.as_bytes(),
+        expected_grant_hash.as_bytes(),
+    ) {
+        let err = PeerError::unauthorized(
+            &local_server,
+            "tunnel_grant_auth",
+            "Invalid X-AF-Grant-Token credential",
+        );
+        runtime
+            .db
+            .record_audit(
+                grant.run_as_user_id,
+                format!("peer-{}", auth.link.name),
+                "peer_management_denied".to_string(),
+                "peer_grant".to_string(),
+                grant.id.clone(),
+                format!(
+                    "Denied management request via {} (operator={}, request_id={}, reason=invalid_grant_token)",
+                    auth.link.name, operator_display, request_id
+                ),
+                source_ip_str,
+                String::new(),
+            )
+            .await;
+        return err.into_response();
+    }
+
+    // 4. Classify `(method, canonical_path)` and check area/mode permissions.
+    let decision = scopes::classify(&method, &canonical);
+    let requirement = match decision {
+        RouteDecision::Unclassified => {
+            let err = PeerError::peer_route_unclassified(
+                &local_server,
+                "tunnel_scope",
+                "Requested route or HTTP method is not classified for peer management",
+            );
+            audit_listener_denial(runtime, route_label, &source_ip_str, err.code()).await;
+            return err.into_response();
+        }
+        RouteDecision::Forbidden => {
+            let err = PeerError::peer_scope_denied(
+                &local_server,
+                "tunnel_scope",
+                "Requested endpoint is never reachable through a peer grant",
+            );
+            runtime
+                .db
+                .record_audit(
+                    grant.run_as_user_id,
+                    format!("peer-{}", auth.link.name),
+                    "peer_management_denied".to_string(),
+                    "peer_grant".to_string(),
+                    grant.id.clone(),
+                    format!(
+                        "Denied forbidden route {} {} via {} (operator={}, request_id={}, code=PEER_SCOPE_DENIED)",
+                        method,
+                        canonical.as_str(),
+                        auth.link.name,
+                        operator_display,
+                        request_id
+                    ),
+                    source_ip_str,
+                    String::new(),
+                )
+                .await;
+            return err.into_response();
+        }
+        RouteDecision::Allowed(requirement) => requirement,
+    };
+
+    if !scopes::access_allows(&grant.access, requirement) {
+        let err = PeerError::peer_scope_denied(
+            &local_server,
+            "tunnel_scope",
+            format!(
+                "Peer '{}' grant does not permit {} ({})",
+                auth.link.name,
+                method,
+                requirement.label()
+            ),
+        );
+        runtime
+            .db
+            .record_audit(
+                grant.run_as_user_id,
+                format!("peer-{}", auth.link.name),
+                "peer_management_denied".to_string(),
+                "peer_grant".to_string(),
+                grant.id.clone(),
+                format!(
+                    "Denied {} {} via {} (operator={}, request_id={}, required={}, code=PEER_SCOPE_DENIED)",
+                    method,
+                    canonical.as_str(),
+                    auth.link.name,
+                    operator_display,
+                    request_id,
+                    requirement.label()
+                ),
+                source_ip_str,
+                String::new(),
+            )
+            .await;
+        return err.into_response();
+    }
+
+    // 5. Verify dedicated `account_type = 'peer'` run-as admin subject is active in SQLite.
+    let run_as_uid = grant.run_as_user_id;
+    let local_server_c = local_server.clone();
+    let run_as_subject = match runtime
+        .db
+        .read(&local_server, "tunnel_grant_subject", move |conn| {
+            Ok(crate::auth::load_active_peer_subject(conn, run_as_uid))
+        })
+        .await
+    {
+        Ok(Ok(subj)) if subj.role == "admin" => subj,
+        Ok(_) => {
+            let err = PeerError::peer_scope_denied(
+                &local_server_c,
+                "tunnel_grant_subject",
+                "Peer run-as account is inactive or not authorized",
+            );
+            runtime
+                .db
+                .record_audit(
+                    grant.run_as_user_id,
+                    format!("peer-{}", auth.link.name),
+                    "peer_management_denied".to_string(),
+                    "peer_grant".to_string(),
+                    grant.id.clone(),
+                    format!(
+                        "Denied {} {} via {} (operator={}, request_id={}, reason=run_as_inactive)",
+                        method,
+                        canonical.as_str(),
+                        auth.link.name,
+                        operator_display,
+                        request_id
+                    ),
+                    source_ip_str,
+                    String::new(),
+                )
+                .await;
+            return err.into_response();
+        }
+        Err(err) => return err.into_response(),
+    };
+
+    // 6. Reconcile request URI to the validated canonical path so Axum routing cannot diverge
+    //    from the path we authorized.
+    let reconciled_uri = match scopes::reconcile_uri(req.uri(), &canonical) {
+        Some(uri) => uri,
+        None => {
+            let err = PeerError::peer_route_unclassified(
+                &local_server,
+                "tunnel_dispatch",
+                "Failed reconciling canonical request URI",
+            );
+            audit_listener_denial(runtime, route_label, &source_ip_str, err.code()).await;
+            return err.into_response();
+        }
+    };
+    *req.uri_mut() = reconciled_uri;
+
+    // 7. Strip browser/peer auth, forwarding, reauth, and audit headers and untrusted extensions,
+    //    then inject trusted `PeerPrincipal`, constrained run-as `AuthUser`, `ConnectInfo`, and
+    //    `X-Request-ID`.
+    strip_untrusted_peer_headers(req.headers_mut());
+    if let Ok(hv) = HeaderValue::from_str(&request_id) {
+        req.headers_mut().insert("x-request-id", hv);
+    }
+
+    let exts = req.extensions_mut();
+    exts.remove::<PeerPrincipal>();
+    exts.remove::<AuthUser>();
+    exts.remove::<SessionAuthTime>();
+    exts.remove::<crate::plugins::PluginTokenClaims>();
+    exts.remove::<crate::ws::InboundProxyForwarded>();
+    exts.remove::<OriginalUri>();
+
+    let run_as_username = run_as_subject.username.clone();
+    let principal = PeerPrincipal {
+        link_id: auth.link.id.clone(),
+        link_name: auth.link.name.clone(),
+        local_server: local_server.clone(),
+        grant_id: grant.id.clone(),
+        run_as_user_id: run_as_subject.user_id,
+        run_as_username: run_as_username.clone(),
+        access: grant.access.clone(),
+        origin_operator: origin_operator.clone(),
+        request_id: request_id.clone(),
+    };
+    let run_as_auth_user = AuthUser {
+        user_id: run_as_subject.user_id,
+        username: run_as_username.clone(),
+        role: "admin".to_string(),
+        jti: format!("peer-grant:{}", grant.id),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    };
+
+    exts.insert(ConnectInfo(remote_addr));
+    exts.insert(principal);
+    exts.insert(run_as_auth_user);
+
+    // The management handler can deny access based on the requested changes.
+    let mut response = match state.management_router.clone().oneshot(req).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    let (audit_action, outcome) = match response.extensions_mut().remove::<PeerError>() {
+        Some(PeerError::PeerScopeDenied(denial)) => (
+            "peer_management_denied",
+            format!(
+                "code=PEER_SCOPE_DENIED, step={}, reason={}",
+                denial.step, denial.message
+            ),
+        ),
+        _ if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) =>
+        {
+            (
+                "peer_management_denied",
+                format!("status={}", response.status().as_u16()),
+            )
+        }
+        _ => (
+            "peer_management_allowed",
+            format!("scope={}", requirement.label()),
+        ),
+    };
+    runtime
+        .db
+        .record_audit(
+            run_as_subject.user_id,
+            run_as_username,
+            audit_action.to_string(),
+            "peer_grant".to_string(),
+            grant.id,
+            format!(
+                "{method} {} via {} (server={local_server}, operator={operator_display}, request_id={request_id}, {outcome})",
+                canonical.as_str(),
+                auth.link.name,
+            ),
+            source_ip_str,
+            String::new(),
+        )
+        .await;
+    response
 }
 
-/// Builds the isolated link-only Axum router for the peer listener.
+/// Builds the isolated peer listener Axum router:
+/// - Internal `/peer/v1/*` and `GET /health` endpoints with strict 8 KiB body cap
+/// - Scoped management dispatch + fail-closed fallback using the production management router
 pub(crate) fn build_listener_router(runtime: Arc<PeerRuntime>) -> Router {
-    Router::new()
+    #[cfg(test)]
+    let management_router = runtime
+        .management_router_override
+        .clone()
+        .unwrap_or_else(crate::routes::build_router);
+    #[cfg(not(test))]
+    let management_router = crate::routes::build_router();
+
+    let internal_routes = Router::new()
         .route("/peer/v1/hello", post(pairing::handle_tunnel_hello))
         .route("/health", get(tunnel_health))
         .route("/peer/v1/link", get(links::handle_tunnel_link_view))
@@ -235,12 +679,33 @@ pub(crate) fn build_listener_router(runtime: Arc<PeerRuntime>) -> Router {
             "/peer/v1/revoke-notice",
             post(links::handle_tunnel_revoke_notice),
         )
-        .fallback(tunnel_fail_closed_fallback)
-        .method_not_allowed_fallback(tunnel_fail_closed_fallback)
+        .route(
+            "/peer/v1/grant-token",
+            post(grants::handle_tunnel_grant_token),
+        )
+        .route(
+            "/peer/v1/grant-revoke",
+            post(grants::handle_tunnel_grant_revoke),
+        )
+        .route(
+            "/peer/v1/grant-offer",
+            post(grants::handle_tunnel_grant_offer),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(
             TUNNEL_INTERNAL_BODY_LIMIT_BYTES,
         ))
-        .with_state(runtime)
+        .with_state(Arc::clone(&runtime));
+
+    let listener_state = ListenerState {
+        runtime,
+        management_router,
+    };
+
+    Router::new()
+        .merge(internal_routes)
+        .fallback(tunnel_management_or_deny_fallback)
+        .method_not_allowed_fallback(tunnel_management_or_deny_fallback)
+        .with_state(listener_state)
 }
 
 /// Binds and spawns the peer listener strictly on `<tunnel_ip>:<port>`, constraining production

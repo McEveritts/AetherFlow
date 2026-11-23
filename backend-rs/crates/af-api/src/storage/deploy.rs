@@ -427,16 +427,17 @@ async fn cleanup_deploy_channel() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
-pub(super) fn deploy_sse_session_still_authorized_with_conn(
+pub(super) fn deploy_sse_session_still_authorized_for_peer_with_conn(
     conn: &rusqlite::Connection,
     auth_user: &AuthUser,
+    peer: Option<&crate::auth::PeerPrincipal>,
     initial_revoked_after: Option<i64>,
 ) -> bool {
     if auth_user.plugin_id.is_some() || auth_user.role != "admin" {
         return false;
     }
     match crate::auth::table_exists(conn, "users") {
-        Ok(false) => return true,
+        Ok(false) => return peer.is_none(),
         Ok(true) => {}
         Err(error) => {
             tracing::warn!(
@@ -446,7 +447,22 @@ pub(super) fn deploy_sse_session_still_authorized_with_conn(
             return false;
         }
     }
-    if !auth_user.jti.is_empty()
+    if let Some(principal) = peer {
+        if principal.run_as_user_id != auth_user.user_id {
+            return false;
+        }
+        let Ok(Some(live_grant)) =
+            af_db::peers::get_active_peer_grant_for_link(conn, &principal.link_id)
+        else {
+            return false;
+        };
+        if live_grant.id != principal.grant_id
+            || live_grant.run_as_user_id != principal.run_as_user_id
+            || live_grant.access != principal.access
+        {
+            return false;
+        }
+    } else if !auth_user.jti.is_empty()
         && crate::auth::is_session_token_revoked_beyond_grace_with_conn(
             conn,
             &auth_user.jti,
@@ -455,7 +471,8 @@ pub(super) fn deploy_sse_session_still_authorized_with_conn(
     {
         return false;
     }
-    let Ok(subj) = crate::auth::load_active_human_subject(conn, auth_user.user_id) else {
+    let Ok(subj) = crate::auth::load_active_subject_for_request(conn, auth_user.user_id, peer)
+    else {
         return false;
     };
     if subj.role != "admin" {
@@ -471,6 +488,7 @@ pub(super) fn deploy_sse_session_still_authorized_with_conn(
 
 fn deploy_sse_session_still_authorized(
     auth_user: &AuthUser,
+    peer: Option<&crate::auth::PeerPrincipal>,
     initial_revoked_after: Option<i64>,
 ) -> bool {
     if auth_user.plugin_id.is_some() || auth_user.role != "admin" {
@@ -479,16 +497,23 @@ fn deploy_sse_session_still_authorized(
     let Ok(conn) = af_db::get_read_conn() else {
         return false;
     };
-    deploy_sse_session_still_authorized_with_conn(&conn, auth_user, initial_revoked_after)
+    deploy_sse_session_still_authorized_for_peer_with_conn(
+        &conn,
+        auth_user,
+        peer,
+        initial_revoked_after,
+    )
 }
 
 async fn deploy_sse_session_still_authorized_async(
     auth_user: &AuthUser,
+    peer: Option<&crate::auth::PeerPrincipal>,
     initial_revoked_after: Option<i64>,
 ) -> bool {
     let cloned = auth_user.clone();
+    let peer_cloned = peer.cloned();
     crate::auth::blocking_auth_work(move || {
-        deploy_sse_session_still_authorized(&cloned, initial_revoked_after)
+        deploy_sse_session_still_authorized(&cloned, peer_cloned.as_ref(), initial_revoked_after)
     })
     .await
     .unwrap_or(false)
@@ -548,22 +573,33 @@ fn build_sse_response(body: Body) -> Response {
 
 pub async fn handle_deploy_stream(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
+    peer: Option<axum::Extension<crate::auth::PeerPrincipal>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = require_admin(&auth_user) {
         return resp;
     }
+    let peer_principal = peer.map(|axum::Extension(p)| p);
     let uid = auth_user.user_id;
+    let peer_for_init = peer_principal.clone();
     let initial_revoked_after = crate::auth::blocking_auth_work(move || {
         af_db::get_read_conn()
             .ok()
-            .and_then(|c| crate::auth::load_active_human_subject(&c, uid).ok())
+            .and_then(|c| {
+                crate::auth::load_active_subject_for_request(&c, uid, peer_for_init.as_ref()).ok()
+            })
             .map(|s| s.sessions_revoked_after)
     })
     .await
     .ok()
     .flatten();
-    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+    if !deploy_sse_session_still_authorized_async(
+        &auth_user,
+        peer_principal.as_ref(),
+        initial_revoked_after,
+    )
+    .await
+    {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
@@ -630,14 +666,14 @@ pub async fn handle_deploy_stream(
             loop {
                 tokio::select! {
                     _ = revalidate_tick.tick() => {
-                        if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                        if !deploy_sse_session_still_authorized_async(&auth_user, peer_principal.as_ref(), initial_revoked_after).await {
                             break;
                         }
                     }
                     recv_res = rx.recv() => {
                         match recv_res {
                             Ok(msg) => {
-                                if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                                if !deploy_sse_session_still_authorized_async(&auth_user, peer_principal.as_ref(), initial_revoked_after).await {
                                     break;
                                 }
                                 let safe_msg = af_common::redact::redact_secrets(&msg);
@@ -693,14 +729,14 @@ pub async fn handle_deploy_stream(
         loop {
             tokio::select! {
                 _ = revalidate_tick.tick() => {
-                    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                    if !deploy_sse_session_still_authorized_async(&auth_user, peer_principal.as_ref(), initial_revoked_after).await {
                         break;
                     }
                 }
                 recv_res = rx.recv() => {
                     match recv_res {
                         Ok(msg) => {
-                            if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                            if !deploy_sse_session_still_authorized_async(&auth_user, peer_principal.as_ref(), initial_revoked_after).await {
                                 break;
                             }
                             let safe_msg = af_common::redact::redact_secrets(&msg);

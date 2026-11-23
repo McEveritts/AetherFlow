@@ -197,7 +197,7 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
     def test_openapi_v1_route_parity_with_rust_router(self) -> None:
         routes_rs = (ROOT / "backend-rs/crates/af-api/src/routes.rs").read_text(encoding="utf-8")
         v1_sec = routes_rs.split(
-            "fn build_v1_router_with_options(include_peer_routes: bool) -> Router {", 1
+            "fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRouter {", 1
         )[1].split("\n}\n", 1)[0]
 
         blocks = {}
@@ -212,7 +212,7 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             "compat_routes",
             "ingress_compat_routes",
         ):
-            m = re.search(rf"let {name}\s*=\s*Router::new\(\)(.*?);", v1_sec, re.S)
+            m = re.search(rf"let {name}\s*=\s*TrackedRouter::new\(\)(.*?);", v1_sec, re.S)
             blocks[name] = _extract_router_routes(m.group(1)) if m else []
 
         mcb_auth: list[tuple[str, list[str]]] = []
@@ -223,13 +223,13 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         for f in mcb_files:
             txt = f.read_text(encoding="utf-8")
             if f.name == "shares.rs":
-                p1 = txt.split("fn router_with_runtime", 1)[1].split("fn public_router_with_runtime", 1)[0]
-                p2 = txt.split("fn public_router_with_runtime", 1)[1].split("// ───", 1)[0]
+                p1 = txt.split("fn tracked_router_with_runtime", 1)[1].split("\n}\n", 1)[0]
+                p2 = txt.split("fn tracked_public_router_with_runtime", 1)[1].split("\n}\n", 1)[0]
                 mcb_auth.extend(_extract_router_routes(p1))
                 mcb_pub.extend(_extract_router_routes(p2))
             else:
                 for fn_m in re.finditer(
-                    r"pub(?:\([^)]*\))?\s+fn\s+router\(\)\s*->\s*Router\s*\{(.*?)\n\}",
+                    r"pub(?:\([^)]*\))?\s+fn\s+tracked_router\(\)\s*->\s*crate::routes::TrackedRouter\s*\{(.*?)\n\}",
                     txt,
                     re.S,
                 ):
@@ -254,10 +254,10 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         add("/auth", blocks["auth_routes"] + blocks["ai_limited_auth"] + mcb_auth)
         add("/admin", blocks["admin_routes"] + blocks["quota_guarded_upload"])
         add("", blocks["compat_routes"] + blocks["ingress_compat_routes"])
-        peer_admin_routes = peer_routes("admin_routes_with_runtime")
-        peer_public_routes = peer_routes("public_routes_with_runtime")
-        self.assertIn('.nest("/peers", crate::peers::admin_routes())', v1_sec)
-        self.assertIn('router.merge(crate::peers::public_routes())', v1_sec)
+        peer_admin_routes = peer_routes("tracked_admin_routes_with_runtime")
+        peer_public_routes = peer_routes("tracked_public_routes_with_runtime")
+        self.assertIn('.nest("/peers", crate::peers::tracked_admin_routes())', v1_sec)
+        self.assertIn('router.merge(crate::peers::tracked_public_routes())', v1_sec)
         add("/admin/peers", peer_admin_routes)
         add("", peer_public_routes)
 

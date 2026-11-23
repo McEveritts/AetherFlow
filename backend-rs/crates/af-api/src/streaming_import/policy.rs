@@ -215,17 +215,27 @@ pub fn upsert_user_link(
 
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let res = (|| -> ImportResult<()> {
-        let user_exists: Option<i64> = conn
+        let account_type_column = if crate::auth::column_exists(conn, "users", "account_type")? {
+            "COALESCE(account_type, 'human')"
+        } else {
+            "'human'"
+        };
+        let account_type: Option<String> = conn
             .query_row(
-                "SELECT id FROM users WHERE id = ?1",
+                &format!("SELECT {account_type_column} FROM users WHERE id = ?1"),
                 params![request.af_user_id],
                 |row| row.get(0),
             )
             .optional()?;
-        if user_exists.is_none() {
+        let Some(account_type) = account_type else {
             return Err(StreamingImportError::bad_request(
                 "unknown_af_user",
                 format!("AetherFlow user id={} does not exist", request.af_user_id),
+            ));
+        };
+        if !account_type.trim().eq_ignore_ascii_case("human") {
+            return Err(StreamingImportError::forbidden(
+                "Streaming identity links require a human AetherFlow account",
             ));
         }
         conn.execute(

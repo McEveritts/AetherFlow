@@ -682,7 +682,10 @@ async fn health_endpoint_reports_peer_protocol_and_links_capability() {
     ));
     assert!(payload["db_latency_ms"].is_i64());
     assert_eq!(payload["peer_protocol"].as_i64(), Some(1));
-    assert_eq!(payload["capabilities"], serde_json::json!(["links"]));
+    assert_eq!(
+        payload["capabilities"],
+        serde_json::json!(["links", "grants"])
+    );
 
     let live_resp = app
         .oneshot(

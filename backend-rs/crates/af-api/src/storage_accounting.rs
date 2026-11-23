@@ -681,11 +681,12 @@ async fn run_quota_operation(
         let conn = af_db::get_conn()?;
         ensure_no_reserved_uploads(&conn, user_id)?;
         reconcile_pending_fileshare_publishes_for_user(&conn, user_id)?;
-        Ok(
-            conn.query_row("SELECT username FROM users WHERE id=?1", [user_id], |row| {
-                row.get(0)
-            })?,
-        )
+        let user_sql = if crate::auth::column_exists(&conn, "users", "account_type")? {
+            "SELECT username FROM users WHERE id = ?1 AND COALESCE(account_type, 'human') = 'human'"
+        } else {
+            "SELECT username FROM users WHERE id = ?1"
+        };
+        Ok(conn.query_row(user_sql, [user_id], |row| row.get(0))?)
     })
     .await??;
     let usage = af_runner::quota::dispatch(&af_runner::quota::UsageRequest {

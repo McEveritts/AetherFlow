@@ -63,6 +63,29 @@ pub struct AuthUser {
     pub plugin_scopes: Vec<String>,
 }
 
+/// Trusted identity injected exclusively by the authenticated WireGuard peer
+/// listener after verifying tunnel source IP, active link token, active grant
+/// token digest, active `account_type = 'peer'` run-as user, and route scope.
+/// Never carries raw secret tokens or token digests.
+#[derive(Clone, Debug)]
+pub struct PeerPrincipal {
+    pub link_id: String,
+    pub link_name: String,
+    pub local_server: String,
+    pub grant_id: String,
+    pub run_as_user_id: i64,
+    pub run_as_username: String,
+    pub access: af_db::peers::AccessMap,
+    pub origin_operator: Option<String>,
+    pub request_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubjectAccountContext {
+    HumanOnly,
+    PeerOnly,
+}
+
 /// Cryptographically verified initial authentication timestamp (`auth_time` fallback `iat`)
 /// extracted from the validated session JWT in `auth_middleware`.
 #[derive(Clone, Copy, Debug)]
@@ -111,61 +134,104 @@ pub(crate) fn load_active_human_subject(
     conn: &rusqlite::Connection,
     user_id: i64,
 ) -> Result<ActiveSubject, SubjectStatusError> {
+    load_active_subject(conn, user_id, SubjectAccountContext::HumanOnly)
+}
+
+pub(crate) fn load_active_peer_subject(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+) -> Result<ActiveSubject, SubjectStatusError> {
+    load_active_subject(conn, user_id, SubjectAccountContext::PeerOnly)
+}
+
+pub(crate) fn load_active_subject_for_request(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    peer: Option<&PeerPrincipal>,
+) -> Result<ActiveSubject, SubjectStatusError> {
+    if let Some(principal) = peer {
+        if principal.run_as_user_id != user_id {
+            return Err(SubjectStatusError::MissingOrPlugin);
+        }
+        load_active_peer_subject(conn, user_id)
+    } else {
+        load_active_human_subject(conn, user_id)
+    }
+}
+
+pub(crate) fn load_active_subject(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    context: SubjectAccountContext,
+) -> Result<ActiveSubject, SubjectStatusError> {
     if user_id <= 0 {
         return Err(SubjectStatusError::MissingOrPlugin);
     }
     let has_ver = column_exists(conn, "users", "sessions_revoked_after")
         .map_err(|_| SubjectStatusError::DbError)?;
     let has_role = column_exists(conn, "users", "role").map_err(|_| SubjectStatusError::DbError)?;
-    let sql = match (has_role, has_ver) {
-        (true, true) => {
-            "SELECT id, COALESCE(username, ''), COALESCE(role, 'user'), COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1"
-        }
-        (true, false) => {
-            "SELECT id, COALESCE(username, ''), COALESCE(role, 'user'), 0 FROM users WHERE id = ?1"
-        }
-        (false, true) => {
-            "SELECT id, COALESCE(username, ''), 'user', COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1"
-        }
-        (false, false) => {
-            "SELECT id, COALESCE(username, ''), 'user', 0 FROM users WHERE id = ?1"
-        }
+    let has_account_type =
+        column_exists(conn, "users", "account_type").map_err(|_| SubjectStatusError::DbError)?;
+    if context == SubjectAccountContext::PeerOnly && !has_account_type {
+        return Err(SubjectStatusError::MissingOrPlugin);
+    }
+    let acct_expr = if has_account_type {
+        "COALESCE(account_type, 'human')"
+    } else {
+        "'human'"
     };
-    let row =
+    let role_expr = if has_role {
+        "COALESCE(role, 'user')"
+    } else {
+        "'user'"
+    };
+    let ver_expr = if has_ver {
+        "COALESCE(sessions_revoked_after, 0)"
+    } else {
+        "0"
+    };
+    let username_expr =
         if column_exists(conn, "users", "username").map_err(|_| SubjectStatusError::DbError)? {
-            conn.query_row(sql, params![user_id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })
-            .optional()
-            .map_err(|_| SubjectStatusError::DbError)?
+            "COALESCE(username, '')"
         } else {
-            let role_sql = if has_role {
-                "SELECT id, COALESCE(role, 'user') FROM users WHERE id = ?1"
-            } else {
-                "SELECT id, 'user' FROM users WHERE id = ?1"
-            };
-            conn.query_row(role_sql, params![user_id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    String::new(),
-                    r.get::<_, String>(1)?,
-                    0i64,
-                ))
-            })
-            .optional()
-            .map_err(|_| SubjectStatusError::DbError)?
+            "''"
         };
+    let sql = format!(
+        "SELECT id, {username_expr}, {role_expr}, {ver_expr}, {acct_expr} FROM users WHERE id = ?1"
+    );
+    let row = conn
+        .query_row(&sql, params![user_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .optional()
+        .map_err(|_| SubjectStatusError::DbError)?;
 
-    let Some((id, username, role, sessions_revoked_after)) = row else {
+    let Some((id, username, role, sessions_revoked_after, account_type)) = row else {
         return Err(SubjectStatusError::MissingOrPlugin);
     };
     if username.trim().to_ascii_lowercase().starts_with("plugin:") {
         return Err(SubjectStatusError::MissingOrPlugin);
+    }
+    let trimmed_account_type = account_type.trim();
+    match context {
+        SubjectAccountContext::HumanOnly => {
+            if !trimmed_account_type.is_empty()
+                && !trimmed_account_type.eq_ignore_ascii_case("human")
+            {
+                return Err(SubjectStatusError::MissingOrPlugin);
+            }
+        }
+        SubjectAccountContext::PeerOnly => {
+            if !trimmed_account_type.eq_ignore_ascii_case("peer") {
+                return Err(SubjectStatusError::MissingOrPlugin);
+            }
+        }
     }
 
     if table_exists(conn, "user_quotas").map_err(|_| SubjectStatusError::DbError)? {

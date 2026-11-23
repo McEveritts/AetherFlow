@@ -794,9 +794,26 @@ pub fn init_db() -> anyhow::Result<()> {
         "Legacy master/worker clustering removal migration v26 failed"
     );
 
+    migrate(
+        &conn,
+        27,
+        "Peer grant direction metadata",
+        peers::PEER_GRANT_METADATA_MIGRATION_27_SQL,
+    )?;
+    let peer_grant_metadata_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 27",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        peer_grant_metadata_migration == 1,
+        "Peer grant direction metadata migration v27 failed"
+    );
+
     ensure_security_schema_invariants(&conn)?;
     ensure_notification_schema_invariants(&conn)?;
     ensure_pending_actions_schema_invariants(&conn)?;
+    peers::ensure_peer_grant_schema_invariants(&conn)?;
     // Streaming owns version 24. Reconcile MediaFlow independently of that epoch.
     ensure_mediaflow_schema_invariants(&conn)?;
     conn.execute_batch(ACCOUNT_STORAGE_CLEANUP_SCHEMA)?;

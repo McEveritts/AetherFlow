@@ -71,7 +71,6 @@ use axum::response::Response;
 #[cfg(test)]
 #[allow(unused_imports)]
 use axum::response::{IntoResponse, Json};
-use axum::routing::{delete, get, post, put};
 use axum::Router;
 use chrono::Utc;
 use once_cell::sync::Lazy;
@@ -101,11 +100,16 @@ mod actions;
 mod blueprints_ingress;
 mod fs_browser;
 mod health;
+pub(crate) mod inventory;
 mod marketplace;
 mod notifications;
 mod services;
 mod settings;
 mod streaming;
+
+#[cfg(test)]
+pub(crate) use inventory::RegisteredRoute;
+pub(crate) use inventory::TrackedRouter;
 
 use account::{
     delete_avatar, delete_user, get_users, issue_ws_ticket, update_avatar, update_password,
@@ -415,9 +419,20 @@ fn make_http_request_span(req: &Request) -> tracing::Span {
 }
 
 pub fn build_router() -> Router {
-    let v1 = build_v1_router_with_options(true);
-    let legacy = build_v1_router_with_options(false);
-    let top_level_plugins = Router::new()
+    build_tracked_router().into_router()
+}
+
+#[cfg(test)]
+pub(crate) fn registered_production_routes() -> Vec<RegisteredRoute> {
+    build_tracked_router().into_routes()
+}
+
+fn build_tracked_router() -> TrackedRouter {
+    use inventory::get;
+
+    let v1 = build_v1_tracked_router_with_options(true);
+    let legacy = build_v1_tracked_router_with_options(false);
+    let top_level_plugins = TrackedRouter::new()
         .route("/plugins/:id/ui", get(serve_plugin_ui_handler))
         .route(
             "/plugins/:id/proxy",
@@ -439,9 +454,9 @@ pub fn build_router() -> Router {
         .layer(middleware::from_fn(auth_middleware));
 
     let public_well_known =
-        Router::new().route("/.well-known/openid-configuration", get(oidc_discovery));
+        TrackedRouter::new().route("/.well-known/openid-configuration", get(oidc_discovery));
 
-    Router::new()
+    TrackedRouter::new()
         .nest("/api/v1", v1)
         .nest("/api", legacy)
         .merge(top_level_plugins)
@@ -462,18 +477,20 @@ pub fn build_router() -> Router {
 
 #[cfg(test)]
 fn build_v1_router() -> Router {
-    build_v1_router_with_options(true)
+    build_v1_tracked_router_with_options(true).into_router()
 }
 
-fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
-    let auth_limited_public = Router::new()
+fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRouter {
+    use inventory::{delete, get, post, put};
+
+    let auth_limited_public = TrackedRouter::new()
         .route("/auth/login", post(local_login))
         .route("/auth/mfa/verify", post(mfa_login_verify))
         .route("/auth/setup", post(setup_admin))
         .route("/auth/refresh", post(refresh_session_with_peer))
         .layer(middleware::from_fn(auth_rate_limit_middleware));
 
-    let oidc_limited_public = Router::new()
+    let oidc_limited_public = TrackedRouter::new()
         .route("/auth/google/login", get(google_login))
         .route("/auth/google/callback", get(google_callback))
         .route("/oidc/authorize", get(oidc_authorize))
@@ -484,8 +501,8 @@ fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
         .route("/oidc/device/authorize", post(oidc_device_authorize))
         .layer(middleware::from_fn(oidc_rate_limit_middleware));
 
-    let public_routes = Router::new()
-        .merge(crate::mcbrowser::public_router())
+    let public_routes = TrackedRouter::new()
+        .merge(crate::mcbrowser::tracked_public_router())
         .route("/openapi.yaml", get(get_openapi_spec))
         .route("/swagger", get(crate::openapi_ui::swagger_redirect))
         .route("/swagger/", get(crate::openapi_ui::swagger_index))
@@ -498,13 +515,13 @@ fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
         .merge(auth_limited_public)
         .merge(oidc_limited_public);
 
-    let ai_limited_auth = Router::new()
+    let ai_limited_auth = TrackedRouter::new()
         .route("/ai/chat", post(ai_chat))
         .route("/ai/support", post(ai_support))
         .layer(middleware::from_fn(ai_rate_limit_middleware));
 
-    let auth_routes = Router::new()
-        .merge(crate::mcbrowser::router())
+    let auth_routes = TrackedRouter::new()
+        .merge(crate::mcbrowser::tracked_router())
         .route("/ws", get(handle_websocket))
         .route("/ws/ticket", get(issue_ws_ticket))
         .route("/ws/logs", get(handle_log_websocket))
@@ -624,14 +641,14 @@ fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
-    let quota_guarded_upload = Router::new()
+    let quota_guarded_upload = TrackedRouter::new()
         .route("/fileshare/upload", post(upload_file))
         // Allow multipart framing above the 50 MiB legacy whole-file cap.
         // The handler separately enforces 5 MiB chunks and 50 MiB total files.
         .layer(axum::extract::DefaultBodyLimit::max(51 * 1024 * 1024))
         .layer(middleware::from_fn(quota_upload_guard_middleware));
 
-    let admin_routes = Router::new()
+    let admin_routes = TrackedRouter::new()
         .route("/plugins", get(list_plugins_handler))
         .route("/plugins/:id/control", post(control_plugin_handler))
         .route("/plugins/:id/token", post(mint_plugin_token_handler))
@@ -814,7 +831,7 @@ fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
         )
         .route("/streaming/demo", post(handle_streaming_demo));
     let admin_routes = if include_peer_routes {
-        admin_routes.nest("/peers", crate::peers::admin_routes())
+        admin_routes.nest("/peers", crate::peers::tracked_admin_routes())
     } else {
         admin_routes
     };
@@ -823,26 +840,26 @@ fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
-    let compat_routes = Router::new()
+    let compat_routes = TrackedRouter::new()
         .route("/deploy/stream", get(handle_deploy_stream))
         .route("/fs", get(browse_directories))
         .layer(middleware::from_fn(auth_middleware));
 
-    let ingress_compat_routes = Router::new()
+    let ingress_compat_routes = TrackedRouter::new()
         .route("/ingress/configs", get(get_ingress_configs))
         .route("/ingress/apps/:appName", put(update_app_ingress_config))
         .layer(middleware::from_fn(admin_only_middleware))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
-    let router = Router::new()
+    let router = TrackedRouter::new()
         .nest("/public", public_routes)
         .nest("/auth", auth_routes)
         .nest("/admin", admin_routes)
         .merge(compat_routes)
         .merge(ingress_compat_routes);
     if include_peer_routes {
-        router.merge(crate::peers::public_routes())
+        router.merge(crate::peers::tracked_public_routes())
     } else {
         router
     }

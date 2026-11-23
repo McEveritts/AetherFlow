@@ -121,7 +121,7 @@ Interfaces with the multi-provider FlowAI engine (`af-api::intelligence`). See [
 
 ### 8. Peer Clustering
 
-The Cluster tab administers local peer links. Admin routes require an administrator session, and writes also require a CSRF token. These routes are versioned under `/api/v1`.
+The Cluster tab administers local peer links and grants. Admin routes require an administrator session, and writes also require a CSRF token. These routes are versioned under `/api/v1`.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
@@ -133,10 +133,20 @@ The Cluster tab administers local peer links. Admin routes require an administra
 | `POST` | `/api/v1/admin/peers/pairing/{attempt}/confirm` | Confirms the receiving server's pending attempt after the operators compare codes. Accepts an optional local peer name. |
 | `DELETE` | `/api/v1/admin/peers/pairing/{attempt}` | Cancels a pending attempt and schedules cleanup of its resources. |
 | `PUT` | `/api/v1/admin/peers/{id}/endpoint` | Changes the peer's WireGuard endpoint using `endpoint` and optional `wg_port`. |
+| `GET` | `/api/v1/admin/peers/{id}/grant` | Returns the peer's two grant directions. |
+| `PUT` | `/api/v1/admin/peers/{id}/grant` | Sets the access this server grants to the peer. Returns both directions. |
+| `DELETE` | `/api/v1/admin/peers/{id}/grant` | Revokes the access this server granted to the peer. Returns both directions. |
+| `POST` | `/api/v1/admin/peers/{id}/grant-offer` | Prompts the peer administrator to review their local grant. Returns `{"sent":true}` when the prompt is delivered. |
 | `DELETE` | `/api/v1/admin/peers/{id}` | Revokes a link and attempts to notify the other server. The response reports whether it delivered the notice. |
 | `POST` | `/api/v1/peer-pairing/request` | Receives a server-to-server HTTPS bootstrap using the one-use code. Requests are limited to 4 KiB and five per minute per trusted source IP. |
 
-`GET /health` advertises `peer_protocol: 1` and the `links` capability before pairing. The separate `afpeer0` listener handles tunnel hello, authenticated health, link view, and revoke notice. Peer lifecycle errors include `code`, `server`, `step`, `message`, and `action`. Treat pairing strings as credentials and use them only for the intended pairing. [Peer clustering operator guide](peer-clustering.md)
+Grant responses contain nullable `inbound` and `outbound` fields. Inbound is the access this server gives the peer. Outbound is the access the peer gives this server. The PUT body supplies an `access` object with `none`, `read`, or `write` for each of `services`, `marketplace`, `settings`, `files`, `users`, `network`, `updates`, and `transcoding`. Omitted areas default to `none`. A grant requires read or write access in at least one area. Use DELETE to revoke an existing grant.
+
+`GET /health` advertises `peer_protocol: 1` and the supported capabilities. The separate `afpeer0` listener authenticates link operations, grant delivery, and grant offers. Management requests additionally need an active grant and sufficient access for their route and method. Revoking a grant preserves link health.
+
+Upload discovery and resume can reconcile staging files and require Files write access. Changes that affect multiple areas require access in each of those areas. Peers with Services read access see stored receipt states in the Approval Inbox list. Receipt details and restart status can check current state without persisting it.
+
+Peer errors include `code`, `server`, `step`, `message`, and `action`. Treat pairing strings as credentials and use them only for the intended pairing. [Peer clustering operator guide](peer-clustering.md)
 
 ---
 

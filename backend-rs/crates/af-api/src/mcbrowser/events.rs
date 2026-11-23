@@ -3,7 +3,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path as AxumPath, Query};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post};
+#[cfg(test)]
 use axum::Router;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -350,8 +350,9 @@ pub(super) struct AcknowledgeQueueTaskResponse {
     pub task: McBrowserQueuedEventTask,
 }
 
-pub(super) fn router() -> Router {
-    Router::new()
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{get, post, TrackedRouter};
+    TrackedRouter::new()
         .route("/mcbrowser/events", get(get_admin_audit_events))
         .route("/mcbrowser/audit-events", get(get_admin_audit_events))
         .route(
@@ -364,6 +365,11 @@ pub(super) fn router() -> Router {
             post(post_admin_ack_event_queue_task),
         )
         .layer(DefaultBodyLimit::max(MAX_EVENTS_BODY_BYTES))
+}
+
+#[cfg(test)]
+pub(super) fn router() -> Router {
+    tracked_router().into_router()
 }
 
 fn no_store_json<T: Serialize>(status: StatusCode, payload: T) -> Response {

@@ -15,8 +15,8 @@ use super::pairing::{
 use super::{
     admin_routes_with_runtime, public_routes_with_runtime, start_with_runtime, KeyedAsyncLockPool,
     PeerDb, PeerRunner, PeerRuntime, ProductionPublicPairingTransport, PublicPairingTransport,
-    RevocationEvent, TunnelTransportBinding, PEER_LOCK_WAIT_TIMEOUT, PEER_PROTOCOL_VERSION,
-    PUBLIC_PAIRING_BODY_LIMIT_BYTES,
+    RevocationEvent, TunnelTransportBinding, HEADER_GRANT_TOKEN, HEADER_ORIGIN_OPERATOR,
+    PEER_LOCK_WAIT_TIMEOUT, PEER_PROTOCOL_VERSION, PUBLIC_PAIRING_BODY_LIMIT_BYTES,
 };
 use crate::auth::AuthUser;
 use af_db::peers::{self as db_peers, PeerIdentity, PeerLink};
@@ -30,6 +30,7 @@ use axum::body::{to_bytes, Body};
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::response::IntoResponse;
+use axum::Json;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -44,6 +45,9 @@ use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as TokioMutex, Notify};
 use tower::ServiceExt;
 use url::Url;
+
+#[path = "grant_lifecycle_tests.rs"]
+mod grant_lifecycle_tests;
 
 static LOOPBACK_IP_OCTET: AtomicU16 = AtomicU16::new(20);
 
@@ -74,8 +78,43 @@ fn open_isolated_peer_db() -> Arc<StdMutex<Connection>> {
         CREATE TABLE users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
+            password_hash TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            avatar_url TEXT DEFAULT '',
             role TEXT NOT NULL DEFAULT 'admin',
+            sessions_revoked_after INTEGER NOT NULL DEFAULT 0,
             account_type TEXT NOT NULL DEFAULT 'human'
+        );
+        CREATE TABLE user_quotas (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            quota_bytes INTEGER DEFAULT 0,
+            used_bytes INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            source TEXT DEFAULT 'manual',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE active_sessions (
+            jti TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            ip_address TEXT DEFAULT '',
+            user_agent TEXT DEFAULT '',
+            expires_at TEXT NOT NULL,
+            last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
+            family_id TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE revoked_tokens (
+            jti TEXT PRIMARY KEY,
+            expires_at TEXT NOT NULL,
+            family_id TEXT,
+            user_id INTEGER
+        );
+        CREATE TABLE mfa_challenges (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL,
+            credential_ver INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE admin_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +174,23 @@ fn open_isolated_peer_db() -> Arc<StdMutex<Connection>> {
             created_by TEXT NOT NULL,
             created_at TEXT NOT NULL,
             revoked_at TEXT
+        );
+        CREATE TABLE peer_received_grants (
+            link_id TEXT PRIMARY KEY REFERENCES peer_links(id) ON DELETE CASCADE,
+            grant_id TEXT NOT NULL,
+            run_as_user_id INTEGER NOT NULL,
+            access TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            generation INTEGER NOT NULL DEFAULT 0,
+            revoked_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE peer_grant_epochs (
+            link_id TEXT PRIMARY KEY REFERENCES peer_links(id) ON DELETE CASCADE,
+            issuer_generation INTEGER NOT NULL DEFAULT 0,
+            active_op_id TEXT,
+            updated_at TEXT NOT NULL
         );
         CREATE TABLE peer_pairing_windows (
             id TEXT PRIMARY KEY,
@@ -719,6 +775,7 @@ fn build_test_runtime_with_db_and_timeout(
         tunnel_request_timeout: Duration::from_secs(3),
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: bind_listener,
+        management_router_override: None,
     })
 }
 
@@ -1551,7 +1608,7 @@ async fn end_to_end_pairing_health_listener_isolation_endpoint_edit_and_revocati
     assert!(a_link_after_health.rtt_ms.is_some());
     assert_eq!(
         a_link_after_health.capabilities.as_deref(),
-        Some(r#"["links"]"#)
+        Some(r#"["links","grants"]"#)
     );
 
     // `present_live == false` (explicitly removed from live afpeer0) marks link down on first tick!
@@ -2103,7 +2160,17 @@ fn compatibility_matrix_reports_compatible_limited_incompatible_and_unknown() {
     );
     let limited = evaluate_compatibility(Some(1), &[]);
     assert_eq!(limited.status, CompatibilityStatus::Limited);
-    assert_eq!(limited.missing_capabilities, vec!["links".to_string()]);
+    assert_eq!(
+        limited.missing_capabilities,
+        vec!["links".to_string(), "grants".to_string()]
+    );
+
+    let p3_link_only = evaluate_compatibility(Some(1), &["links".to_string()]);
+    assert_eq!(p3_link_only.status, CompatibilityStatus::Limited);
+    assert_eq!(
+        p3_link_only.missing_capabilities,
+        vec!["grants".to_string()]
+    );
 
     let compat = evaluate_compatibility(Some(1), &["links".to_string(), "grants".to_string()]);
     assert_eq!(compat.status, CompatibilityStatus::Compatible);
@@ -2198,7 +2265,7 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_r
     let health_json: Value =
         serde_json::from_slice(&to_bytes(health_resp.into_body(), 16_384).await.unwrap()).unwrap();
     assert_eq!(health_json["peer_protocol"], 1);
-    assert_eq!(health_json["capabilities"], json!(["links"]));
+    assert_eq!(health_json["capabilities"], json!(["links", "grants"]));
 
     // 2. Unauthenticated request to /api/v1/admin/peers -> 401.
     let unauth = app
@@ -2250,7 +2317,7 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_r
             .unwrap();
     assert!(admin_json["identity"].is_null());
     assert_eq!(admin_json["peers"], json!([]));
-    assert_eq!(admin_json["capabilities"], json!(["links"]));
+    assert_eq!(admin_json["capabilities"], json!(["links", "grants"]));
 
     // 5. Cookie-authenticated POST to /api/v1/admin/peers/pairing-window WITHOUT CSRF token -> 403!
     let no_csrf = app
@@ -8317,4 +8384,1444 @@ async fn commit_pending_wg_ownership_fallback_no_reissued_remove_and_no_unverifi
         );
         assert!(base_runner_a.has_peer(&pk_b));
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 15. P5 Scoped Peer Grants, Concurrency, Offer, Isolation & Real-Router Dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn call_admin_raw_body(
+    rt: &Arc<PeerRuntime>,
+    method: Method,
+    uri: &str,
+    body: Vec<u8>,
+    with_peer_principal: Option<crate::auth::PeerPrincipal>,
+) -> (StatusCode, Value) {
+    let app = admin_routes_with_runtime(Arc::clone(rt));
+    let mut builder = Request::builder().method(method).uri(uri);
+    if !body.is_empty() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    let mut req = builder.body(Body::from(body)).unwrap();
+    req.extensions_mut().insert(admin_user());
+    if let Some(principal) = with_peer_principal {
+        req.extensions_mut().insert(principal);
+    }
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 128 * 1024).await.unwrap();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
+    (status, json)
+}
+
+#[tokio::test]
+async fn p5_grant_lifecycle_directional_separation_rotation_idempotent_revoke_and_offer() {
+    let (ip_a, ip_b) = next_loopback_pair();
+    let clock = FakeClock::new(1_800_500_000);
+    let pk_a = fixture_wg_pubkey(111);
+    let pk_b = fixture_wg_pubkey(112);
+
+    let runner_a = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(pk_b.clone(), ip_b, 51821);
+
+    let (rt_b, db_b) = build_test_runtime(
+        "server-b",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        true,
+    );
+    let (rt_a, db_a) = build_test_runtime(
+        "server-a",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 31], 45100)),
+        }),
+        &clock,
+        true,
+    );
+
+    let (a_link_id, b_link_id, _att) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "server-b").await;
+    let mut rev_rx_a = rt_a.subscribe_revocations();
+
+    // 1. Initial GET /grant returns {inbound: null, outbound: null} matching GET /peers.
+    let (st, grant_a0) = call_admin(&rt_a, Method::GET, &format!("/{a_link_id}/grant"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(grant_a0, json!({ "inbound": null, "outbound": null }));
+    let (st, list_a0) = call_admin(&rt_a, Method::GET, "/", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list_a0["peers"][0]["grants"], grant_a0);
+
+    // Reject unknown fields and empty grants before issuing credentials.
+    for invalid in [
+        json!({ "unknown": true }),
+        json!({ "access": { "service": "write" } }),
+        json!({ "access": {} }),
+        json!({ "access": af_db::peers::AccessMap::none() }),
+    ] {
+        let (st, bad_put) = call_admin(
+            &rt_a,
+            Method::PUT,
+            &format!("/{a_link_id}/grant"),
+            Some(invalid),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_put["code"], "INVALID_REQUEST");
+    }
+
+    // 3. POST /grant-offer accepts empty body and {} and never changes grant state on either side.
+    let b_notif_before = notification_row_count(&db_b);
+    let (st, offer1) = call_admin_raw_body(
+        &rt_a,
+        Method::POST,
+        &format!("/{a_link_id}/grant-offer"),
+        Vec::new(),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "offer1={offer1}");
+    assert_eq!(offer1, json!({ "sent": true }));
+    let (st, offer2) = call_admin(
+        &rt_a,
+        Method::POST,
+        &format!("/{a_link_id}/grant-offer"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "offer2={offer2}");
+    assert_eq!(offer2, json!({ "sent": true }));
+    assert_eq!(notification_row_count(&db_b), b_notif_before + 2);
+    assert!(audit_entries_text(&db_a).contains("peer_grant_offer_sent"));
+    assert!(audit_entries_text(&db_b).contains("peer_grant_offer_received"));
+    let (_, ga_after_offer) =
+        call_admin(&rt_a, Method::GET, &format!("/{a_link_id}/grant"), None).await;
+    let (_, gb_after_offer) =
+        call_admin(&rt_b, Method::GET, &format!("/{b_link_id}/grant"), None).await;
+    assert_eq!(ga_after_offer, json!({ "inbound": null, "outbound": null }));
+    assert_eq!(gb_after_offer, json!({ "inbound": null, "outbound": null }));
+
+    // 4. PUT /grant on A grants B `services: read`, `files: write`.
+    let mut partial = af_db::peers::AccessMap::none();
+    partial.services = af_db::peers::AccessLevel::Read;
+    partial.files = af_db::peers::AccessLevel::Write;
+    let (st, saved_a) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": partial })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "saved_a={saved_a}");
+    assert!(saved_a["inbound"].is_object());
+    assert!(saved_a["outbound"].is_null());
+    assert_eq!(saved_a["inbound"]["access"]["services"], "read");
+    assert_eq!(saved_a["inbound"]["access"]["files"], "write");
+    assert_eq!(saved_a["inbound"]["access"]["users"], "none");
+    assert_eq!(saved_a["inbound"]["created_by"], "alice");
+    let first_grant_id = saved_a["inbound"]["id"].as_str().unwrap().to_string();
+    let run_as_uid = saved_a["inbound"]["run_as_user_id"].as_i64().unwrap();
+    assert!(run_as_uid > 0);
+
+    // B sees the exact grant under `outbound` while its own `inbound` stays null!
+    let (st, view_b) = call_admin(&rt_b, Method::GET, &format!("/{b_link_id}/grant"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(view_b["inbound"].is_null());
+    assert_eq!(view_b["outbound"], saved_a["inbound"]);
+    let (st, list_b) = call_admin(&rt_b, Method::GET, "/", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list_b["peers"][0]["grants"], view_b);
+
+    // Independent token storage: raw 64-hex token on B (distinct from LinkToken); only sha256 digest on A.
+    let b_link_tok = runner_b
+        .credential(PeerCredentialSlot::LinkToken, &b_link_id)
+        .expect("B must hold link token");
+    let (_, b_grant_secret_1) =
+        super::grants::read_committed_received_grant_token(&rt_b, &b_link_id)
+            .await
+            .unwrap()
+            .expect("B must hold grant token");
+    let b_grant_tok_1 = b_grant_secret_1.expose_secret().to_string();
+    assert_ne!(b_grant_tok_1, b_link_tok);
+    assert_eq!(b_grant_tok_1.len(), 64);
+
+    let a_db_grant = db_peers::get_active_peer_grant_for_link(&db_a.lock().unwrap(), &a_link_id)
+        .unwrap()
+        .expect("active grant on A");
+    let expected_digest_1 = super::pairing::sha256_prefixed(&b_grant_tok_1);
+    assert_eq!(
+        a_db_grant.token_hash.as_deref(),
+        Some(expected_digest_1.as_str())
+    );
+
+    // Verify dedicated `peer-server-b` user on A has `account_type = 'peer'` and active quota status.
+    {
+        let conn = db_a.lock().unwrap();
+        let (uname, role, acct, pw): (String, String, String, String) = conn
+            .query_row(
+                "SELECT username, role, account_type, password_hash FROM users WHERE id = ?1",
+                rusqlite::params![run_as_uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(uname, "peer-server-b");
+        assert_eq!(role, "admin");
+        assert_eq!(acct, "peer");
+        assert!(pw.is_empty());
+        let qstatus: String = conn
+            .query_row(
+                "SELECT status FROM user_quotas WHERE user_id = ?1",
+                rusqlite::params![run_as_uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qstatus, "active");
+    }
+
+    // 5. Grant opposite direction on B for A (`read_write_all`): both directions stay separate.
+    let (st, saved_b) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": af_db::peers::AccessMap::read_write_all() })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "saved_b={saved_b}");
+    assert!(saved_b["inbound"].is_object());
+    assert_eq!(saved_b["outbound"]["id"], first_grant_id);
+    let (_, view_a_both) =
+        call_admin(&rt_a, Method::GET, &format!("/{a_link_id}/grant"), None).await;
+    assert_eq!(view_a_both["inbound"]["id"], first_grant_id);
+    assert_eq!(view_a_both["outbound"]["id"], saved_b["inbound"]["id"]);
+
+    // 6. Rotate A's inbound grant to read_only_all: emits GrantRevoked for old grant, rotates token.
+    let (st, rotated_a) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": af_db::peers::AccessMap::read_only_all() })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "rotated_a={rotated_a}");
+    let second_grant_id = rotated_a["inbound"]["id"].as_str().unwrap().to_string();
+    assert_ne!(second_grant_id, first_grant_id);
+    assert_eq!(
+        rotated_a["inbound"]["run_as_user_id"].as_i64(),
+        Some(run_as_uid)
+    );
+    let ev = rev_rx_a
+        .try_recv()
+        .expect("rotation must publish GrantRevoked");
+    assert_eq!(
+        ev,
+        RevocationEvent::GrantRevoked {
+            link_id: a_link_id.clone(),
+            grant_id: first_grant_id.clone(),
+            run_as_user_id: run_as_uid,
+        }
+    );
+    let (b_grant_row_2, b_grant_secret_2) =
+        super::grants::read_committed_received_grant_token(&rt_b, &b_link_id)
+            .await
+            .unwrap()
+            .expect("rotated grant token on B");
+    let b_grant_slot_2 =
+        super::grants::committed_received_grant_credential_id(&b_grant_row_2).to_string();
+    let b_grant_tok_2 = b_grant_secret_2.expose_secret().to_string();
+    assert_ne!(b_grant_tok_2, b_grant_tok_1);
+
+    // Old grant token is immediately rejected (401 PEER_UNAUTHORIZED) on A's tunnel listener!
+    let (old_st, old_body, _) = rt_b
+        .send_tunnel_request_with_headers(
+            Method::GET,
+            &ip_a.to_string(),
+            "/api/v1/admin/services",
+            Some(&PeerCredentialSecret::new(b_link_tok.clone())),
+            &[(HEADER_GRANT_TOKEN.to_string(), b_grant_tok_1.clone())],
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old_st, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&old_body).unwrap()["code"],
+        "PEER_UNAUTHORIZED"
+    );
+
+    // An empty save preserves the already-active grant.
+    let (st, all_none_a) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": af_db::peers::AccessMap::none() })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "all_none_a={all_none_a}");
+    assert_eq!(all_none_a["code"], "INVALID_REQUEST");
+    assert!(matches!(
+        rev_rx_a.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        super::grants::read_committed_received_grant_token(&rt_b, &b_link_id)
+            .await
+            .unwrap()
+            .map(|(_, secret)| secret.expose_secret().to_string()),
+        Some(b_grant_tok_2.clone()),
+    );
+    let (_, after_empty_save) =
+        call_admin(&rt_a, Method::GET, &format!("/{a_link_id}/grant"), None).await;
+    assert_eq!(after_empty_save, rotated_a);
+
+    // 8. DELETE /grant revokes inbound direction, suspends run-as user, emits GrantRevoked,
+    //    clears B's outbound & GrantToken, and preserves link token, tunnel health, and opposite direction!
+    let (st, del_a) = call_admin(&rt_a, Method::DELETE, &format!("/{a_link_id}/grant"), None).await;
+    assert_eq!(st, StatusCode::OK, "del_a={del_a}");
+    assert!(del_a["inbound"].is_null());
+    assert_eq!(del_a["outbound"]["id"], saved_b["inbound"]["id"]);
+    assert_eq!(
+        rev_rx_a.try_recv().unwrap(),
+        RevocationEvent::GrantRevoked {
+            link_id: a_link_id.clone(),
+            grant_id: second_grant_id,
+            run_as_user_id: run_as_uid,
+        }
+    );
+    assert!(
+        super::grants::read_committed_received_grant_token(&rt_b, &b_link_id)
+            .await
+            .unwrap()
+            .is_none()
+            && runner_b
+                .credential(PeerCredentialSlot::GrantToken, &b_grant_slot_2)
+                .is_none()
+            && runner_b
+                .credential(PeerCredentialSlot::GrantToken, &b_link_id)
+                .is_none(),
+        "B must clear GrantToken on remote grant revoke"
+    );
+    let (_, view_b_after_del) =
+        call_admin(&rt_b, Method::GET, &format!("/{b_link_id}/grant"), None).await;
+    assert!(view_b_after_del["outbound"].is_null());
+    assert!(
+        view_b_after_del["inbound"].is_object(),
+        "opposite direction grant on B must remain active"
+    );
+
+    let quota_status: String = db_a
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM user_quotas WHERE user_id = ?1",
+            [run_as_uid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(quota_status, "suspended");
+    let (overview_status, overview_body, _) = rt_b
+        .send_tunnel_request_with_headers(
+            Method::GET,
+            &ip_a.to_string(),
+            "/api/v1/auth/ready",
+            Some(&PeerCredentialSecret::new(b_link_tok.clone())),
+            &[(HEADER_GRANT_TOKEN.to_string(), b_grant_tok_2.clone())],
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overview_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&overview_body).unwrap()["code"],
+        "PEER_SCOPE_DENIED",
+    );
+
+    // Idempotent second DELETE succeeds cleanly.
+    let (st, del_a2) =
+        call_admin(&rt_a, Method::DELETE, &format!("/{a_link_id}/grant"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(del_a2, del_a);
+
+    // Link token and tunnel health stay intact after grant revocation.
+    let (hlth_st, _, _) = rt_b
+        .send_tunnel_request(
+            Method::GET,
+            &ip_a.to_string(),
+            "/health",
+            Some(&PeerCredentialSecret::new(b_link_tok.clone())),
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hlth_st, StatusCode::OK);
+
+    // 9. Zero secrets or SHA-256 digests leaked in admin JSON or audit logs on either server.
+    let all_serialized = format!(
+        "{saved_a}{saved_b}{rotated_a}{all_none_a}{del_a}{view_b}{list_b}{}{}",
+        audit_entries_text(&db_a),
+        audit_entries_text(&db_b)
+    );
+    for secret in [
+        &b_link_tok,
+        &b_grant_tok_1,
+        &b_grant_tok_2,
+        &expected_digest_1,
+    ] {
+        assert!(
+            !all_serialized.contains(secret.as_str()),
+            "secret or digest leaked in response or audit log"
+        );
+    }
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn p5_grant_delivery_failure_concurrency_p3_interop_and_link_revocation_cleanup() {
+    let (ip_a, ip_b) = next_loopback_pair();
+    let clock = FakeClock::new(1_800_600_000);
+    let pk_a = fixture_wg_pubkey(121);
+    let pk_b = fixture_wg_pubkey(122);
+
+    let runner_a = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(pk_b.clone(), ip_b, 51821);
+
+    let (rt_b, db_b) = build_test_runtime(
+        "peer-b-race",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        true,
+    );
+    let (rt_a, db_a) = build_test_runtime(
+        "peer-a-race",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 31], 45100)),
+        }),
+        &clock,
+        true,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "peer-b-race").await;
+
+    // 1. Delivery failure (peer B listener stopped) fails closed without activating any grant.
+    rt_b.shutdown_all().await;
+    let (st, fail_val) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": af_db::peers::AccessMap::read_only_all() })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "fail_val={fail_val}");
+    assert_eq!(fail_val["code"], "LINK_DOWN");
+    assert!(
+        db_peers::get_active_peer_grant_for_link(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .is_none(),
+        "failed grant delivery must NEVER activate local grant"
+    );
+    // Run-as user created during prepare must stay suspended!
+    {
+        let conn = db_a.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT q.status FROM user_quotas q JOIN users u ON u.id = q.user_id \
+                 WHERE u.account_type = 'peer' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "suspended");
+    }
+
+    // 2. Malformed ack & P3 link-only interop (stub server on ip_b).
+    let stub_listener = tokio::net::TcpListener::bind(SocketAddr::new(ip_b, 0))
+        .await
+        .unwrap();
+    let stub_port = stub_listener.local_addr().unwrap().port();
+    rt_a.tunnel_port_overrides
+        .write()
+        .unwrap()
+        .insert(ip_b, stub_port);
+    let (stub_tx, mut stub_rx) = tokio::sync::watch::channel(false);
+    let stub_app = axum::Router::new()
+        .route(
+            "/health",
+            axum::routing::get(|| async {
+                Json(json!({
+                    "status": "ok",
+                    "version": "4.0.0-p3",
+                    "peer_protocol": 1,
+                    "capabilities": ["links"]
+                }))
+            }),
+        )
+        .route(
+            "/peer/v1/grant-token",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "code": "PEER_ROUTE_UNCLASSIFIED",
+                        "server": "p3-peer",
+                        "step": "tunnel_dispatch",
+                        "message": "Route is not an allowed peer internal endpoint",
+                        "action": "Upgrade"
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/peer/v1/grant-offer",
+            axum::routing::post(|| async { (StatusCode::OK, Json(json!({ "accepted": false }))) }),
+        );
+    let stub_task = tokio::spawn(async move {
+        let _ = axum::serve(stub_listener, stub_app)
+            .with_graceful_shutdown(async move {
+                while !*stub_rx.borrow() {
+                    if stub_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+    });
+
+    // P3 link-only server health check succeeds with compatibility=limited, missing=["grants"].
+    runner_a.set_peer_live_state(&pk_b, true, Some(5));
+    run_health_tick(&rt_a).await;
+    let (_, list_p3) = call_admin(&rt_a, Method::GET, "/", None).await;
+    assert_eq!(list_p3["peers"][0]["compatibility"], "limited");
+    assert_eq!(
+        list_p3["peers"][0]["missing_capabilities"],
+        json!(["grants"])
+    );
+
+    // PUT /grant against P3 link-only server returns 422 VERSION_INCOMPATIBLE and does not activate.
+    let (st, p3_err) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": af_db::peers::AccessMap::read_only_all() })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "p3_err={p3_err}");
+    assert_eq!(p3_err["code"], "VERSION_INCOMPATIBLE");
+    assert!(
+        db_peers::get_active_peer_grant_for_link(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let (offer_status, offer_error) = call_admin(
+        &rt_a,
+        Method::POST,
+        &format!("/{a_link_id}/grant-offer"),
+        None,
+    )
+    .await;
+    assert!(!offer_status.is_success());
+    assert_eq!(offer_error["code"], "LINK_DOWN");
+    assert!(!audit_entries_text(&db_a).contains("peer_grant_offer_sent"));
+
+    let _ = stub_tx.send(true);
+    let _ = stub_task.await;
+
+    // 3. Restart B's real listener and execute mutual simultaneous two-way PUT /grant (deadlock test!).
+    let b_addr = rt_b.ensure_listener_started().await.unwrap().unwrap();
+    rt_a.tunnel_port_overrides
+        .write()
+        .unwrap()
+        .insert(ip_b, b_addr.port());
+
+    let grant_path_a = format!("/{a_link_id}/grant");
+    let grant_path_b = format!("/{b_link_id}/grant");
+    let (res_a, res_b) = tokio::join!(
+        call_admin(
+            &rt_a,
+            Method::PUT,
+            &grant_path_a,
+            Some(json!({ "access": af_db::peers::AccessMap::read_only_all() })),
+        ),
+        call_admin(
+            &rt_b,
+            Method::PUT,
+            &grant_path_b,
+            Some(json!({ "access": af_db::peers::AccessMap::read_write_all() })),
+        ),
+    );
+    assert_eq!(res_a.0, StatusCode::OK, "mutual A->B failed: {:?}", res_a.1);
+    assert_eq!(res_b.0, StatusCode::OK, "mutual B->A failed: {:?}", res_b.1);
+    let (_, ga) = call_admin(&rt_a, Method::GET, &format!("/{a_link_id}/grant"), None).await;
+    let (_, gb) = call_admin(&rt_b, Method::GET, &format!("/{b_link_id}/grant"), None).await;
+    assert!(ga["inbound"].is_object() && ga["outbound"].is_object());
+    assert!(gb["inbound"].is_object() && gb["outbound"].is_object());
+
+    // 4. Stale generation fencing on receiver (/peer/v1/grant-token & /peer/v1/grant-revoke).
+    let a_link_tok = runner_a
+        .credential(PeerCredentialSlot::LinkToken, &a_link_id)
+        .unwrap();
+    let (stale_tok_st, stale_tok_body, _) = rt_a
+        .send_tunnel_request(
+            Method::POST,
+            &ip_b.to_string(),
+            "/peer/v1/grant-token",
+            Some(&PeerCredentialSecret::new(a_link_tok.clone())),
+            Some(
+                serde_json::to_vec(&json!({
+                    "grant_id": "stale-grant-id",
+                    "run_as_user_id": 999,
+                    "access": af_db::peers::AccessMap::read_write_all(),
+                    "created_by": "alice",
+                    "created_at": "2026-11-23T00:00:00Z",
+                    "generation": 1,
+                    "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }))
+                .unwrap(),
+            ),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_tok_st, StatusCode::CONFLICT);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&stale_tok_body).unwrap()["code"],
+        "PEER_CONFLICT"
+    );
+
+    // 5. Link revocation disables grants and suspends run-as accounts on BOTH sides and emits GrantRevoked!
+    let mut rev_rx_a = rt_a.subscribe_revocations();
+    let mut rev_rx_b = rt_b.subscribe_revocations();
+    let (del_st, del_link) =
+        call_admin(&rt_a, Method::DELETE, &format!("/{a_link_id}"), None).await;
+    assert_eq!(del_st, StatusCode::OK, "del_link={del_link}");
+    assert_eq!(del_link["revoked"], true);
+
+    let mut a_events = Vec::new();
+    while let Ok(ev) = rev_rx_a.try_recv() {
+        a_events.push(ev);
+    }
+    assert!(
+        a_events
+            .iter()
+            .any(|e| matches!(e, RevocationEvent::GrantRevoked { .. })),
+        "local link delete must emit GrantRevoked: {a_events:?}"
+    );
+    assert!(
+        a_events
+            .iter()
+            .any(|e| matches!(e, RevocationEvent::LinkRevoked { .. })),
+        "local link delete must emit LinkRevoked: {a_events:?}"
+    );
+
+    let mut b_events = Vec::new();
+    while let Ok(ev) = rev_rx_b.try_recv() {
+        b_events.push(ev);
+    }
+    assert!(
+        b_events
+            .iter()
+            .any(|e| matches!(e, RevocationEvent::GrantRevoked { .. })),
+        "remote revoke-notice must emit GrantRevoked: {b_events:?}"
+    );
+    assert!(
+        db_peers::get_active_peer_grant_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_none(),
+        "remote link revocation must revoke B's active inbound grant"
+    );
+    {
+        let conn = db_b.lock().unwrap();
+        let b_status: String = conn
+            .query_row(
+                "SELECT q.status FROM user_quotas q JOIN users u ON u.id = q.user_id \
+                 WHERE u.account_type = 'peer' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(b_status, "suspended");
+    }
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer_user_isolation() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!("af-peer-p5-e2e-{}", uuid::Uuid::new_v4()));
+    let backup_dir = root.join("backups");
+    std::fs::create_dir_all(&backup_dir).unwrap();
+    for key in [
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_CONFIG_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+    ] {
+        std::env::set_var(key, &root);
+    }
+    let db_path = root.join("p5.sqlite");
+    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+        std::env::set_var(key, &db_path);
+    }
+    std::env::set_var("AETHERFLOW_BACKUP_DIR", &backup_dir);
+    std::env::set_var("ALLOWED_HOSTS", "localhost");
+    std::env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+    std::env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+    std::env::set_var(
+        "JWT_SECRET",
+        "p5-test-jwt-secret-key-at-least-32-bytes-long",
+    );
+    std::env::remove_var("CSRF_DISABLED");
+    af_db::init_db().unwrap();
+
+    // Seed single human admin with real bcrypt password.
+    let pw_hash = bcrypt::hash("SuperSecretAdmin123!", 4).unwrap();
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, email, role, account_type) \
+             VALUES (1, 'human-admin', ?1, 'admin@example.test', 'admin', 'human')",
+            rusqlite::params![pw_hash],
+        )
+        .unwrap();
+    }
+
+    // Create a genuine verified SQLite backup artifact for backup download testing.
+    let created_backup = crate::storage::perform_system_backup().expect("create fixture backup");
+
+    // Set up Server B backed by PeerDb::Production + REAL routes::build_router(), and Server A isolated.
+    let (ip_a, ip_b) = next_loopback_pair();
+    let clock = FakeClock::new(1_800_700_000);
+    let pk_a = fixture_wg_pubkey(131);
+    let pk_b = fixture_wg_pubkey(132);
+    let runner_a = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(pk_b.clone(), ip_b, 51821);
+
+    let (rev_tx_b, _) = broadcast::channel(64);
+    let rt_b = Arc::new(PeerRuntime {
+        db: PeerDb::Production,
+        runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        public_transport: Arc::new(UnreachablePublicTransport),
+        revocation_tx: rev_tx_b,
+        pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
+            super::pairing::PAIRING_RATE_LIMIT_PER_MIN,
+            Duration::from_secs(60),
+        ),
+        attempt_locks: KeyedAsyncLockPool::new(),
+        link_locks: KeyedAsyncLockPool::new(),
+        link_semaphores: StdMutex::new(HashMap::new()),
+        tunnel_clients: StdMutex::new(HashMap::new()),
+        listener_state: TokioMutex::new(None),
+        health_shutdown: TokioMutex::new(None),
+        clock: clock.as_fn(),
+        monotonic_clock: clock.as_monotonic_fn(),
+        lock_wait_timeout: Duration::from_secs(5),
+        listen_port: 0,
+        max_conn_per_link: 64,
+        rtt_warn_ms: 25.0,
+        server_name_override: Some("managed-b".to_string()),
+        version_override: Some("4.0.0-p5".to_string()),
+        tunnel_binding: TunnelTransportBinding::LoopbackFixture,
+        tunnel_request_timeout: Duration::from_secs(3),
+        tunnel_port_overrides: RwLock::new(HashMap::new()),
+        bind_listener_in_handlers: true,
+        management_router_override: None,
+    });
+    let (rt_a, _db_a) = build_test_runtime(
+        "manager-a",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 31], 45100)),
+        }),
+        &clock,
+        true,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "managed-b").await;
+
+    // B grants A read access to services, settings and files.
+    let mut read_access = af_db::peers::AccessMap::none();
+    read_access.services = af_db::peers::AccessLevel::Read;
+    read_access.settings = af_db::peers::AccessLevel::Read;
+    read_access.files = af_db::peers::AccessLevel::Read;
+    let (st, grant_resp) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": read_access })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "grant_resp={grant_resp}");
+    let peer_uid = grant_resp["inbound"]["run_as_user_id"].as_i64().unwrap();
+
+    let a_link_tok = runner_a
+        .credential(PeerCredentialSlot::LinkToken, &a_link_id)
+        .unwrap();
+    let (_, a_grant_secret) = super::grants::read_committed_received_grant_token(&rt_a, &a_link_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let a_grant_tok = a_grant_secret.expose_secret().to_string();
+
+    // A. Verify normal browser auth, Host, CSRF, and peer run-as account isolation on REAL build_router().
+    let app = crate::routes::build_router();
+    let mut ua_hdrs = axum::http::HeaderMap::new();
+    ua_hdrs.insert(header::USER_AGENT, "p5-browser-test".parse().unwrap());
+    let (human_jwt, _) = crate::auth::create_standard_jwt(1, &ua_hdrs).unwrap();
+    let (peer_jwt, _) = crate::auth::create_standard_jwt(peer_uid, &ua_hdrs).unwrap();
+
+    // 1. Untrusted Host rejected for normal browser requests.
+    let bad_host = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/services")
+                .header(header::HOST, "evil.example")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_host.status(), StatusCode::BAD_REQUEST);
+
+    // 2. Cookie-auth PUT without CSRF rejected for normal browser requests.
+    let bad_csrf = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/admin/settings")
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::COOKIE, format!("aetherflow_session={human_jwt}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"language":"en"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_csrf.status(), StatusCode::FORBIDDEN);
+
+    // 3. Peer run-as user is rejected by local_login and session JWT middleware!
+    let peer_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/public/auth/login")
+                .header(header::HOST, "localhost")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"username":"peer-manager-a","password":"anypassword"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(peer_login.status(), StatusCode::UNAUTHORIZED);
+
+    let peer_jwt_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/services")
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {peer_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(peer_jwt_resp.status(), StatusCode::UNAUTHORIZED);
+
+    // 4. Peer run-as user is hidden from /admin/users and /admin/quotas, undeletable, un-demotable,
+    //    and does NOT allow deleting the sole human admin!
+    let users_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(users_resp.status(), StatusCode::OK);
+    let users_json: Value =
+        serde_json::from_slice(&to_bytes(users_resp.into_body(), 64 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(users_json.as_array().unwrap().len(), 1);
+    assert_eq!(users_json[0]["username"], "human-admin");
+
+    let quotas_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/quotas")
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(quotas_resp.status(), StatusCode::OK);
+    let quotas_json: Value =
+        serde_json::from_slice(&to_bytes(quotas_resp.into_body(), 64 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(quotas_json["quotas"].as_array().unwrap().len(), 1);
+    assert_eq!(quotas_json["quotas"][0]["username"], "human-admin");
+
+    let del_peer_user = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/api/v1/admin/users/{peer_uid}"))
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_peer_user.status(), StatusCode::FORBIDDEN);
+
+    let role_peer_user = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/api/v1/admin/users/{peer_uid}/role"))
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"role":"user"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(role_peer_user.status(), StatusCode::FORBIDDEN);
+
+    let del_sole_human = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/v1/admin/users/1")
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        del_sole_human.status(),
+        StatusCode::BAD_REQUEST,
+        "peer run-as admin must NOT allow deleting the last human admin"
+    );
+
+    for (method, uri, body) in [
+        (
+            Method::GET,
+            format!("/api/v1/auth/mcbrowser/policy/{peer_uid}"),
+            Body::empty(),
+        ),
+        (
+            Method::PUT,
+            "/api/v1/admin/streaming/user-links".to_string(),
+            Body::from(
+                json!({
+                    "afUserId": peer_uid,
+                    "provider": "jellyfin",
+                    "serverId": "fixture",
+                    "providerUserId": "fixture-user",
+                })
+                .to_string(),
+            ),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "p5-browser-test")
+                    .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // 5. Defense-in-depth: PeerPrincipal injected directly on admin_routes is rejected!
+    let (st, direct_peer_deny) = call_admin_raw_body(
+        &rt_b,
+        Method::GET,
+        "/",
+        Vec::new(),
+        Some(crate::auth::PeerPrincipal {
+            link_id: b_link_id.clone(),
+            link_name: "manager-a".to_string(),
+            local_server: "managed-b".to_string(),
+            grant_id: "g".to_string(),
+            run_as_user_id: peer_uid,
+            run_as_username: "peer-manager-a".to_string(),
+            access: af_db::peers::AccessMap::read_write_all(),
+            origin_operator: Some("alice".to_string()),
+            request_id: "req-direct".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(direct_peer_deny["code"], "PEER_SCOPE_DENIED");
+
+    // B. Scoped tunnel dispatch through REAL build_router() on B's tunnel listener.
+    let link_secret = PeerCredentialSecret::new(a_link_tok.clone());
+
+    // 1. Allowed read route + double-slash canonicalization + forged browser/forwarding headers stripped!
+    let (st, body, _) = rt_a
+        .send_tunnel_request_with_headers(
+            Method::GET,
+            &ip_b.to_string(),
+            "//api//v1/admin/settings",
+            Some(&link_secret),
+            &[
+                (HEADER_GRANT_TOKEN.to_string(), a_grant_tok.clone()),
+                (HEADER_ORIGIN_OPERATOR.to_string(), "ops-alice".to_string()),
+                ("x-request-id".to_string(), "req-p5-e2e-1".to_string()),
+                (
+                    "cookie".to_string(),
+                    "aetherflow_session=forged".to_string(),
+                ),
+                ("authorization".to_string(), "Bearer forged".to_string()),
+                ("x-forwarded-for".to_string(), "203.0.113.99".to_string()),
+                ("x-forwarded-host".to_string(), "evil.example".to_string()),
+            ],
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "canonicalized settings read should succeed: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let mut settings: Value = serde_json::from_slice(&body).unwrap();
+    settings["language"] = json!("fr");
+
+    // 2. Read overview route succeeds with partial read access.
+    let (st, _, _) = rt_a
+        .send_tunnel_request_with_headers(
+            Method::GET,
+            &ip_b.to_string(),
+            "/api/v1/auth/ready",
+            Some(&link_secret),
+            &[(HEADER_GRANT_TOKEN.to_string(), a_grant_tok.clone())],
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, StatusCode::OK);
+
+    let (head_status, _, _) = rt_a
+        .send_tunnel_request_with_headers(
+            Method::HEAD,
+            &ip_b.to_string(),
+            "/api/v1/admin/settings",
+            Some(&link_secret),
+            &[(HEADER_GRANT_TOKEN.to_string(), a_grant_tok.clone())],
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head_status, StatusCode::OK);
+
+    // Read-only receipt polling can project status, but must preserve the stored action.
+    let queued_action = {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO pending_actions (source, action, status) VALUES ('fixture', 'Observe receipt', 'queued')",
+            [],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    for (path, expected_status) in [
+        (
+            format!("/api/v1/admin/actions/{queued_action}"),
+            "unavailable",
+        ),
+        (
+            "/api/v1/admin/actions/pending?status=queued".into(),
+            "queued",
+        ),
+    ] {
+        let (status, body, _) = rt_a
+            .send_tunnel_request_with_headers(
+                Method::GET,
+                &ip_b.to_string(),
+                &path,
+                Some(&link_secret),
+                &[(HEADER_GRANT_TOKEN.to_string(), a_grant_tok.clone())],
+                None,
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let receipt = if path.contains('?') {
+            &body["actions"][0]
+        } else {
+            &body
+        };
+        assert_eq!(receipt["id"], queued_action);
+        assert_eq!(receipt["status"], expected_status);
+        assert_eq!(
+            af_db::get_pending_action_by_id(queued_action)
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued",
+        );
+    }
+
+    // 3. Denied: write route on read-only area, uncovered area, mutating GETs, forbidden routes,
+    //    non-versioned routes, traversal smuggling.
+    for (method, path, expected_code) in [
+        (Method::PUT, "/api/v1/admin/settings", "PEER_SCOPE_DENIED"),
+        (Method::GET, "/api/v1/admin/users", "PEER_SCOPE_DENIED"),
+        (
+            Method::GET,
+            "/api/v1/auth/mcbrowser/uploads",
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::HEAD,
+            "/api/v1/auth/mcbrowser/uploads/sample-id",
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::GET,
+            "/api/v1/auth/mcbrowser/policy/1",
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::GET,
+            &format!("/api/v1/admin/backup/download/{}", created_backup.filename),
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::POST,
+            &format!("/api/v1/admin/backup/download/{}", created_backup.filename),
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::GET,
+            "/api/v1/auth/mcbrowser/archive/tkt-1",
+            "PEER_SCOPE_DENIED",
+        ),
+        (Method::GET, "/api/v1/admin/peers", "PEER_SCOPE_DENIED"),
+        (
+            Method::PUT,
+            &format!("/api/v1/admin/peers/{b_link_id}/grant"),
+            "PEER_SCOPE_DENIED",
+        ),
+        (Method::GET, "/api/v1/auth/session", "PEER_SCOPE_DENIED"),
+        (
+            Method::POST,
+            "/api/v1/admin/oidc/clients",
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::POST,
+            "/api/v1/admin/plugins/demo/token",
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::POST,
+            "/api/v1/admin/apps/launch",
+            "PEER_SCOPE_DENIED",
+        ),
+        (Method::GET, "/api/v1/auth/ws", "PEER_SCOPE_DENIED"),
+        (
+            Method::GET,
+            "/api/admin/settings",
+            "PEER_ROUTE_UNCLASSIFIED",
+        ),
+        // The HTTP client resolves the dot segment. The listener then denies the
+        // resulting peer-admin route. The canonicalization unit test covers the raw path.
+        (
+            Method::GET,
+            "/api/v1/admin/%2e%2e/admin/peers",
+            "PEER_SCOPE_DENIED",
+        ),
+        (
+            Method::GET,
+            "/api/v1/admin/unknown-route-xyz",
+            "PEER_ROUTE_UNCLASSIFIED",
+        ),
+    ] {
+        let (st, resp_body, _) = rt_a
+            .send_tunnel_request_with_headers(
+                method.clone(),
+                &ip_b.to_string(),
+                path,
+                Some(&link_secret),
+                &[(HEADER_GRANT_TOKEN.to_string(), a_grant_tok.clone())],
+                None,
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(st, StatusCode::FORBIDDEN, "for {method} {path}");
+        if method != Method::HEAD {
+            let parsed: Value = serde_json::from_slice(&resp_body).unwrap();
+            assert_eq!(
+                parsed["code"], expected_code,
+                "for {method} {path}: {parsed}"
+            );
+        }
+    }
+
+    // 4. Upgrade grant to `settings: write`: mutating PUT (no CSRF) AND backup password-recheck
+    //    GET/POST both succeed cleanly via PeerPrincipal, while browser without password still gets 403!
+    let mut write_settings = af_db::peers::AccessMap::none();
+    write_settings.settings = af_db::peers::AccessLevel::Write;
+    let (st, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": write_settings })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, a_grant_secret_write) =
+        super::grants::read_committed_received_grant_token(&rt_a, &a_link_id)
+            .await
+            .unwrap()
+            .unwrap();
+    let a_grant_tok_write = a_grant_secret_write.expose_secret().to_string();
+
+    let denied_settings_updates = [
+        (
+            "baseDomain",
+            "fixture.example.test",
+            "req-p5-deny-domain",
+            "Network and Marketplace",
+        ),
+        ("updateChannel", "nightly", "req-p5-deny-channel", "Updates"),
+    ];
+    for (field, value, request_id, required_areas) in denied_settings_updates {
+        let mut cross_area_update = settings.clone();
+        cross_area_update[field] = json!(value);
+        let (status, body, _) = rt_a
+            .send_tunnel_request_with_headers(
+                Method::PUT,
+                &ip_b.to_string(),
+                "/api/v1/admin/settings",
+                Some(&link_secret),
+                &[
+                    (HEADER_GRANT_TOKEN.to_string(), a_grant_tok_write.clone()),
+                    ("x-request-id".to_string(), request_id.to_string()),
+                ],
+                Some(serde_json::to_vec(&cross_area_update).unwrap()),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{field}");
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["code"], "PEER_SCOPE_DENIED");
+        assert_eq!(error["server"], "managed-b");
+        assert!(error["message"].as_str().unwrap().contains(required_areas));
+    }
+
+    let (st, put_body, _) = rt_a
+        .send_tunnel_request_with_headers(
+            Method::PUT,
+            &ip_b.to_string(),
+            "/api/v1/admin/settings",
+            Some(&link_secret),
+            &[
+                (HEADER_GRANT_TOKEN.to_string(), a_grant_tok_write.clone()),
+                (HEADER_ORIGIN_OPERATOR.to_string(), "ops-alice".to_string()),
+                ("x-request-id".to_string(), "req-p5-write-1".to_string()),
+            ],
+            Some(serde_json::to_vec(&settings).unwrap()),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "settings write without CSRF must succeed with PeerPrincipal: {}",
+        String::from_utf8_lossy(&put_body)
+    );
+
+    let stored_language: String = af_db::get_read_conn()
+        .unwrap()
+        .query_row("SELECT language FROM settings WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored_language, "fr");
+
+    // Browser admin without password on backup download still gets 403!
+    let browser_no_pw = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/admin/backup/download/{}",
+                    created_backup.filename
+                ))
+                .header(header::HOST, "localhost")
+                .header(header::USER_AGENT, "p5-browser-test")
+                .header(header::AUTHORIZATION, format!("Bearer {human_jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(browser_no_pw.status(), StatusCode::FORBIDDEN);
+
+    // Peer with `settings: write` satisfies backup password re-check on both POST and GET!
+    let (prep_st, prep_body, _) = rt_a
+        .send_tunnel_request_with_headers(
+            Method::POST,
+            &ip_b.to_string(),
+            &format!("/api/v1/admin/backup/download/{}", created_backup.filename),
+            Some(&link_secret),
+            &[(HEADER_GRANT_TOKEN.to_string(), a_grant_tok_write.clone())],
+            Some(b"{}".to_vec()),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prep_st,
+        StatusCode::OK,
+        "backup prepare failed: {}",
+        String::from_utf8_lossy(&prep_body)
+    );
+
+    // The management listener streams the download. The control-message helper
+    // buffers and caps replies, so use the same bound HTTP client directly.
+    let binding = rt_a.resolve_outbound_tunnel_binding(ip_b).await.unwrap();
+    let client = rt_a.get_or_build_tunnel_client(&binding).unwrap();
+    let download_url = rt_a
+        .build_tunnel_url(
+            &ip_b.to_string(),
+            &format!("/api/v1/admin/backup/download/{}", created_backup.filename),
+        )
+        .unwrap();
+    let download = client
+        .get(download_url)
+        .header(super::HEADER_LINK_TOKEN, link_secret.expose_secret())
+        .header(HEADER_GRANT_TOKEN, &a_grant_tok_write)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    let dl_body = download.bytes().await.unwrap();
+    assert!(
+        dl_body.starts_with(b"SQLite format 3\0"),
+        "expected valid SQLite backup stream"
+    );
+
+    // 5. Audit log on B records trusted peer identity, origin operator, and request IDs with zero secrets.
+    let audit_rows: Vec<(i64, String, String, String)> = {
+        let conn = af_db::get_read_conn().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT user_id, username, action, detail FROM admin_audit_log")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert!(
+        audit_rows.iter().any(|(uid, uname, action, detail)| {
+            *uid == peer_uid
+                && uname == "peer-manager-a"
+                && action == "peer_management_allowed"
+                && detail.contains("via manager-a")
+                && detail.contains("operator=ops-alice")
+                && detail.contains("request_id=req-p5-e2e-1")
+        }),
+        "expected trusted peer audit row: {audit_rows:?}"
+    );
+    assert!(
+        audit_rows
+            .iter()
+            .any(|(_, _, action, _)| action == "peer_management_denied"),
+        "expected denied management audit row"
+    );
+    for (_, _, request_id, required_areas) in denied_settings_updates {
+        let rows: Vec<_> = audit_rows
+            .iter()
+            .filter(|(_, _, _, detail)| detail.contains(&format!("request_id={request_id},")))
+            .collect();
+        assert_eq!(rows.len(), 1, "{request_id} audit rows: {rows:?}");
+        let (user_id, username, action, detail) = rows[0];
+        assert_eq!(*user_id, peer_uid);
+        assert_eq!(username, "peer-manager-a");
+        assert_eq!(action, "peer_management_denied");
+        assert!(detail.contains("PUT /api/v1/admin/settings via manager-a"));
+        assert!(detail.contains("server=managed-b"));
+        assert!(detail.contains("code=PEER_SCOPE_DENIED, step=update_settings"));
+        assert!(detail.contains(required_areas));
+    }
+    let audit_blob = format!("{audit_rows:?}");
+    assert!(!audit_blob.contains(&a_link_tok));
+    assert!(!audit_blob.contains(&a_grant_tok));
+    assert!(!audit_blob.contains(&a_grant_tok_write));
+    assert!(!audit_blob.contains("unknown-route-xyz"));
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+    let _ = std::fs::remove_dir_all(&root);
 }

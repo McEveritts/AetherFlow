@@ -593,6 +593,9 @@ impl IntoResponse for PeerError {
             resp.headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
         }
+        if matches!(self, Self::PeerScopeDenied(_)) {
+            resp.extensions_mut().insert(self);
+        }
         resp
     }
 }

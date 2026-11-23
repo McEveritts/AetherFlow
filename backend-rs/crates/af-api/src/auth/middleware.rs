@@ -3,7 +3,7 @@ use super::tokens::{
     api_error, attach_logout_clear_cookie, blocking_auth_work, decode_session_claims,
     legacy_client_fingerprint, load_active_human_subject, matches_client_fingerprint,
     resolve_raw_token, secure_cookie_enabled, session_auth_time, ActiveSubject, AuthUser,
-    SessionAuthTime, SubjectStatusError,
+    PeerPrincipal, SessionAuthTime, SubjectStatusError,
 };
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
 use axum::extract::Request;
@@ -31,6 +31,27 @@ fn is_logout_path(path: &str) -> bool {
 }
 
 pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
+    if let Some(peer) = req.extensions().get::<PeerPrincipal>().cloned() {
+        let valid_peer_user = req.extensions().get::<AuthUser>().is_some_and(|user| {
+            user.user_id > 0
+                && user.user_id == peer.run_as_user_id
+                && user.username == peer.run_as_username
+                && user.role == "admin"
+                && user.plugin_id.is_none()
+                && user.plugin_scopes.is_empty()
+        });
+        if !valid_peer_user
+            || req
+                .extensions()
+                .get::<crate::plugins::PluginTokenClaims>()
+                .is_some()
+        {
+            return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+        }
+        req.extensions_mut().remove::<SessionAuthTime>();
+        return next.run(req).await;
+    }
+
     let path = req
         .extensions()
         .get::<axum::extract::OriginalUri>()
@@ -371,6 +392,10 @@ pub(super) fn is_csrf_disabled_for_env(
 }
 
 pub async fn csrf_middleware(req: Request, next: Next) -> Response {
+    if req.extensions().get::<PeerPrincipal>().is_some() {
+        return next.run(req).await;
+    }
+
     let csrf_disabled = env::var("CSRF_DISABLED").ok();
     let af_env = env::var("AETHERFLOW_ENV").ok();
     if is_csrf_disabled_for_env(csrf_disabled.as_deref(), af_env.as_deref()) {

@@ -2,7 +2,8 @@ use super::blueprints_ingress::{
     apply_ingress_vhost_policy, blueprint_sync_failure_response, restore_ingress_config,
     sync_ingress_vhost,
 };
-use crate::auth::{api_error, AuthUser};
+use crate::auth::{api_error, AuthUser, PeerPrincipal};
+use crate::peers::errors::PeerError;
 use af_models::AppIngressConfig;
 use axum::extract::Extension;
 use axum::http::StatusCode;
@@ -161,6 +162,7 @@ pub(super) static BASE_DOMAIN_SYNC_STAGE_HOOK: Lazy<
 
 pub(super) async fn update_settings(
     Extension(user): Extension<AuthUser>,
+    peer: Option<Extension<PeerPrincipal>>,
     Json(mut req): Json<SettingsPayload>,
 ) -> Response {
     if let Err(response) = crate::auth::require_admin(&user) {
@@ -264,11 +266,11 @@ pub(super) async fn update_settings(
         );
     };
 
-    let (prev_anth_endpoint, prev_anth_key, prev_base_domain_raw): (String, String, String) = match conn
+    let (prev_anth_endpoint, prev_anth_key, prev_base_domain_raw, prev_channel): (String, String, String, String) = match conn
         .query_row(
-            "SELECT COALESCE(anthropic_endpoint, ''), COALESCE(anthropic_api_key, ''), COALESCE(base_domain, '') FROM settings WHERE id = 1",
+            "SELECT COALESCE(anthropic_endpoint, ''), COALESCE(anthropic_api_key, ''), COALESCE(base_domain, ''), COALESCE(update_channel, 'stable') FROM settings WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ) {
         Ok(values) => values,
         Err(rusqlite::Error::QueryReturnedNoRows) => Default::default(),
@@ -332,6 +334,21 @@ pub(super) async fn update_settings(
 
     let sync_needed =
         !norm_domain.is_empty() && (norm_domain != db_prev_base_domain || pending_sync.is_some());
+    if let Some(Extension(peer)) = peer {
+        let missing_access = if (sync_needed || norm_domain != db_prev_base_domain)
+            && !(peer.access.network.allows_write() && peer.access.marketplace.allows_write())
+        {
+            Some("Changing or synchronizing the base domain requires write access to Network and Marketplace")
+        } else if channel != prev_channel && !peer.access.updates.allows_write() {
+            Some("Changing the update channel requires write access to Updates")
+        } else {
+            None
+        };
+        if let Some(message) = missing_access {
+            return PeerError::peer_scope_denied(&peer.local_server, "update_settings", message)
+                .into_response();
+        }
+    }
     if !sync_needed {
         let saved = (|| -> anyhow::Result<()> {
             let transaction =

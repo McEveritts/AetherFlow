@@ -245,9 +245,15 @@ pub(super) fn resolve_google_user(
     }
     let avatar = info.get("picture").and_then(|v| v.as_str()).unwrap_or("");
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let has_account_type = crate::auth::column_exists(&tx, "users", "account_type")?;
+    let human_clause = if has_account_type {
+        " AND COALESCE(account_type, 'human') = 'human'"
+    } else {
+        ""
+    };
     let existing: Option<(i64, bool)> = tx
         .query_row(
-            "SELECT id, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?1",
+            &format!("SELECT id, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?1{human_clause}"),
             params![google_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -261,7 +267,7 @@ pub(super) fn resolve_google_user(
         user
     } else {
         let matches: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM users WHERE email = ?1 COLLATE NOCASE",
+            &format!("SELECT COUNT(*) FROM users WHERE email = ?1 COLLATE NOCASE{human_clause}"),
             params![email],
             |r| r.get(0),
         )?;
@@ -272,13 +278,13 @@ pub(super) fn resolve_google_user(
             let has_pw_col = crate::auth::column_exists(&tx, "users", "password_hash")?;
             let (id, linked, mfa, pw_hash): (i64, String, bool, String) = if has_pw_col {
                 tx.query_row(
-                    "SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE email = ?1 COLLATE NOCASE",
+                    &format!("SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE email = ?1 COLLATE NOCASE{human_clause}"),
                     params![email],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )?
             } else {
                 tx.query_row(
-                    "SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users WHERE email = ?1 COLLATE NOCASE",
+                    &format!("SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users WHERE email = ?1 COLLATE NOCASE{human_clause}"),
                     params![email],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, String::new())),
                 )?

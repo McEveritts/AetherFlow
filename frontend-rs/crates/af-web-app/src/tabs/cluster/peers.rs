@@ -1,5 +1,6 @@
 //! Peer list projection, direction/access formatting, endpoint editing, and revocation consent.
 
+use super::grants::GrantEditorModal;
 use super::{
     copy_text_to_clipboard, format_countdown, peer_api_request, peer_endpoint_path,
     peer_revoke_path, CompletionScope, DialogGate, PeerApiError, PeerErrorAlert,
@@ -331,15 +332,17 @@ pub fn summarize_access_map(locale: &str, access: &AccessMapView) -> String {
 /// links are bidirectional WireGuard tunnels while management access is granted separately
 /// in each direction (`grants.inbound` = peer can manage this server, `grants.outbound` = this
 /// server can manage peer).
-pub fn direction_summary(locale: &str, peer: &PeerLinkView) -> String {
-    let outbound = peer
-        .grants
+pub fn direction_summary_for_grants(
+    locale: &str,
+    peer_name: &str,
+    grants: &LinkGrantsView,
+) -> String {
+    let outbound = grants
         .outbound
         .as_ref()
         .filter(|grant| grant.access.has_any_access())
         .map(|grant| summarize_access_map(locale, &grant.access));
-    let inbound = peer
-        .grants
+    let inbound = grants
         .inbound
         .as_ref()
         .filter(|grant| grant.access.has_any_access())
@@ -350,7 +353,7 @@ pub fn direction_summary(locale: &str, peer: &PeerLinkView) -> String {
             locale,
             "Cluster.directionTwoWay",
             &[
-                ("peer", &peer.name),
+                ("peer", peer_name),
                 ("outbound", &out_sum),
                 ("inbound", &in_sum),
             ],
@@ -358,15 +361,19 @@ pub fn direction_summary(locale: &str, peer: &PeerLinkView) -> String {
         (Some(out_sum), None) => translate_with(
             locale,
             "Cluster.directionOutboundOnly",
-            &[("peer", &peer.name), ("outbound", &out_sum)],
+            &[("peer", peer_name), ("outbound", &out_sum)],
         ),
         (None, Some(in_sum)) => translate_with(
             locale,
             "Cluster.directionInboundOnly",
-            &[("peer", &peer.name), ("inbound", &in_sum)],
+            &[("peer", peer_name), ("inbound", &in_sum)],
         ),
         (None, None) => translate(locale, "Cluster.directionBidirectionalNoGrants"),
     }
+}
+
+pub fn direction_summary(locale: &str, peer: &PeerLinkView) -> String {
+    direction_summary_for_grants(locale, &peer.name, &peer.grants)
 }
 
 pub fn access_summary(locale: &str, peer: &PeerLinkView) -> String {
@@ -410,6 +417,20 @@ pub fn access_summary(locale: &str, peer: &PeerLinkView) -> String {
 
 pub fn can_edit_endpoint(state: &str) -> bool {
     state != "revoked"
+}
+
+pub(super) fn supports_grant_delivery(peer: &PeerLinkView) -> bool {
+    peer.compatibility != "incompatible"
+        && !peer.missing_capabilities.iter().any(|cap| cap == "grants")
+}
+
+pub fn can_manage_grants(peer: &PeerLinkView) -> bool {
+    let has_grant = peer.grants.inbound.is_some() || peer.grants.outbound.is_some();
+    match peer.state.as_str() {
+        "active" => supports_grant_delivery(peer) || has_grant,
+        "down" => has_grant,
+        _ => false,
+    }
 }
 
 pub fn revoke_dialog_mode(state: &str) -> RevokeMode {
@@ -479,6 +500,8 @@ pub fn PeerListSection(
     let context = app();
     let edit_target = RwSignal::new(None::<PeerLinkView>);
     let edit_open = RwSignal::new(false);
+    let grant_target = RwSignal::new(None::<PeerLinkView>);
+    let grant_open = RwSignal::new(false);
     let revoke_target = RwSignal::new(None::<PeerLinkView>);
     let revoke_open = RwSignal::new(false);
     let detail_target = RwSignal::new(None::<PeerLinkView>);
@@ -494,6 +517,15 @@ pub fn PeerListSection(
                 detail_target.set(None);
             }
         }
+        if let Some(selected) = grant_target.get_untracked() {
+            let updated = latest.into_iter().find(|peer| {
+                peer.id == selected.id && matches!(peer.state.as_str(), "active" | "down")
+            });
+            if updated.is_none() {
+                grant_open.set(false);
+            }
+            grant_target.set(updated);
+        }
     });
 
     let peer_ids = Memo::new(move |_| {
@@ -502,6 +534,10 @@ pub fn PeerListSection(
     let on_inspect = Callback::new(move |peer: PeerLinkView| {
         detail_target.set(Some(peer));
         detail_open.set(true);
+    });
+    let on_manage_grants = Callback::new(move |peer: PeerLinkView| {
+        grant_target.set(Some(peer));
+        grant_open.set(true);
     });
     let on_edit = Callback::new(move |peer: PeerLinkView| {
         edit_target.set(Some(peer));
@@ -543,6 +579,7 @@ pub fn PeerListSection(
                                     rtt_warn_ms=rtt_warn_ms
                                     now_secs=now_secs
                                     on_inspect=on_inspect
+                                    on_manage_grants=on_manage_grants
                                     on_edit=on_edit
                                     on_revoke=on_revoke
                                 />
@@ -552,6 +589,11 @@ pub fn PeerListSection(
                 </div>
             </Show>
 
+            <GrantEditorModal
+                open=grant_open
+                target=grant_target
+                on_refresh=on_refresh
+            />
             <EditEndpointModal
                 open=edit_open
                 target=edit_target
@@ -578,6 +620,7 @@ fn PeerRowCard(
     rtt_warn_ms: Signal<f64>,
     now_secs: RwSignal<i64>,
     on_inspect: Callback<PeerLinkView>,
+    on_manage_grants: Callback<PeerLinkView>,
     on_edit: Callback<PeerLinkView>,
     on_revoke: Callback<PeerLinkView>,
 ) -> impl IntoView {
@@ -600,6 +643,8 @@ fn PeerRowCard(
                 .unwrap_or(("Unknown", "muted"))
         })
     });
+    let grants_manageable =
+        Memo::new(move |_| peer.with(|p| p.as_ref().is_some_and(can_manage_grants)));
     let editable =
         Memo::new(move |_| peer.with(|p| p.as_ref().is_some_and(|p| can_edit_endpoint(&p.state))));
     let revoke_mode = Memo::new(move |_| {
@@ -672,6 +717,25 @@ fn PeerRowCard(
                     >
                         {move || tt(context, "Cluster.inspectPeer")}
                     </button>
+                    <Show when=move || grants_manageable.get()>
+                        <button
+                            type="button"
+                            class="glass-button px-3 py-1.5 text-sm"
+                            aria-label=move || {
+                                let name = peer.with(|p| {
+                                    p.as_ref().map(|p| p.name.clone()).unwrap_or_default()
+                                });
+                                tt_with(context, "Cluster.manageGrantsAria", &[("peer", &name)])
+                            }
+                            on:click=move |_| {
+                                if let Some(current) = peer.get_untracked() {
+                                    on_manage_grants.run(current);
+                                }
+                            }
+                        >
+                            {move || tt(context, "Cluster.manageGrantsAction")}
+                        </button>
+                    </Show>
                     <Show when=move || editable.get()>
                         <button
                             type="button"
@@ -1706,5 +1770,75 @@ mod tests {
             );
             assert!(can_edit_endpoint(&updated.state));
         });
+    }
+
+    #[test]
+    fn grant_controls_are_limited_to_usable_completed_links() {
+        let active_compatible = PeerLinkView {
+            state: "active".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(can_manage_grants(&active_compatible));
+
+        let active_limited = PeerLinkView {
+            state: "active".into(),
+            compatibility: "limited".into(),
+            ..Default::default()
+        };
+        assert!(can_manage_grants(&active_limited));
+
+        let mut link_only = active_limited.clone();
+        link_only.missing_capabilities.push("grants".into());
+        assert!(!can_manage_grants(&link_only));
+        link_only.grants.inbound = Some(GrantSummaryView::default());
+        assert!(can_manage_grants(&link_only));
+        assert!(!supports_grant_delivery(&link_only));
+
+        let active_incompatible = PeerLinkView {
+            state: "active".into(),
+            compatibility: "incompatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_grants(&active_incompatible));
+
+        let pending = PeerLinkView {
+            state: "pending".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_grants(&pending));
+
+        let revoked = PeerLinkView {
+            state: "revoked".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_grants(&revoked));
+
+        let down_no_grants = PeerLinkView {
+            state: "down".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_grants(&down_no_grants));
+
+        let down_with_inbound = PeerLinkView {
+            state: "down".into(),
+            compatibility: "compatible".into(),
+            grants: LinkGrantsView {
+                inbound: Some(GrantSummaryView {
+                    id: "g-in".into(),
+                    access: AccessMapView {
+                        services: AccessLevel::Read,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                outbound: None,
+            },
+            ..Default::default()
+        };
+        assert!(can_manage_grants(&down_with_inbound));
     }
 }

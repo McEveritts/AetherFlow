@@ -1,6 +1,7 @@
 //! Peer Clustering tab (`/?tab=cluster`): link list, pairing window, pairing flow,
-//! comparison-code confirmation, endpoint editing, and link revocation.
+//! comparison-code confirmation, endpoint editing, access grants, and link revocation.
 
+pub mod grants;
 pub mod pairing;
 pub mod peers;
 
@@ -55,6 +56,20 @@ pub fn peer_endpoint_path(link_id: &str) -> String {
 pub fn peer_revoke_path(link_id: &str) -> String {
     format!(
         "/api/v1/admin/peers/{}",
+        percent_encode_header_component(link_id)
+    )
+}
+
+pub fn peer_grant_path(link_id: &str) -> String {
+    format!(
+        "/api/v1/admin/peers/{}/grant",
+        percent_encode_header_component(link_id)
+    )
+}
+
+pub fn peer_grant_offer_path(link_id: &str) -> String {
+    format!(
+        "/api/v1/admin/peers/{}/grant-offer",
         percent_encode_header_component(link_id)
     )
 }
@@ -333,12 +348,17 @@ impl DialogGate {
         self.generation.get_untracked()
     }
 
-    /// Marks the current dialog generation busy and binds a generation-checked `BusyGuard`.
-    pub(super) fn begin(self, session_epoch: RwSignal<u64>) -> (MutationToken, BusyGuard) {
-        let token = MutationToken {
+    /// Captures the current session epoch and dialog generation without altering busy state.
+    pub(super) fn current_token(self, session_epoch: RwSignal<u64>) -> MutationToken {
+        MutationToken {
             session_epoch: session_epoch.get_untracked(),
             generation: self.generation.get_untracked(),
-        };
+        }
+    }
+
+    /// Marks the current dialog generation busy and binds a generation-checked `BusyGuard`.
+    pub(super) fn begin(self, session_epoch: RwSignal<u64>) -> (MutationToken, BusyGuard) {
+        let token = self.current_token(session_epoch);
         self.busy.set(true);
         let guard = BusyGuard::for_generation(self.busy, self.generation, token.generation);
         (token, guard)
@@ -790,6 +810,9 @@ mod tests {
         let cancel_attempt = pairing_cancel_path("att-123");
         let update_endpoint = peer_endpoint_path("link-42");
         let revoke_link = peer_revoke_path("link-42");
+        let peer_grant = peer_grant_path("link-42");
+        let peer_grant_encoded = peer_grant_path("link 42/a");
+        let peer_grant_offer = peer_grant_offer_path("link-42");
 
         assert_eq!(list, "/api/v1/admin/peers");
         assert_eq!(open_window, "/api/v1/admin/peers/pairing-window");
@@ -805,6 +828,12 @@ mod tests {
         assert_eq!(cancel_attempt, "/api/v1/admin/peers/pairing/att-123");
         assert_eq!(update_endpoint, "/api/v1/admin/peers/link-42/endpoint");
         assert_eq!(revoke_link, "/api/v1/admin/peers/link-42");
+        assert_eq!(peer_grant, "/api/v1/admin/peers/link-42/grant");
+        assert_eq!(
+            peer_grant_encoded,
+            "/api/v1/admin/peers/link%2042%2Fa/grant"
+        );
+        assert_eq!(peer_grant_offer, "/api/v1/admin/peers/link-42/grant-offer");
 
         // Even while a remote peer server is active, all peer-clustering management controls
         // MUST remain on the local managing origin and never get prefixed with `/api/v1/peers/{id}`.
@@ -817,6 +846,8 @@ mod tests {
             &cancel_attempt,
             &update_endpoint,
             &revoke_link,
+            &peer_grant,
+            &peer_grant_offer,
         ] {
             assert_eq!(
                 api_url(route),
@@ -827,6 +858,7 @@ mod tests {
 
         // Read does not attach CSRF; all state-changing admin peer routes do.
         assert!(!should_attach_csrf("GET", &list, None));
+        assert!(!should_attach_csrf("GET", &peer_grant, None));
         assert!(should_attach_csrf("POST", &open_window, None));
         assert!(should_attach_csrf("DELETE", &open_window, None));
         assert!(should_attach_csrf("DELETE", &close_window, None));
@@ -835,6 +867,9 @@ mod tests {
         assert!(should_attach_csrf("DELETE", &cancel_attempt, None));
         assert!(should_attach_csrf("PUT", &update_endpoint, None));
         assert!(should_attach_csrf("DELETE", &revoke_link, None));
+        assert!(should_attach_csrf("PUT", &peer_grant, None));
+        assert!(should_attach_csrf("DELETE", &peer_grant, None));
+        assert!(should_attach_csrf("POST", &peer_grant_offer, None));
 
         set_active_server(None);
     }

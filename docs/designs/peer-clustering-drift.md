@@ -84,6 +84,12 @@ File 12 advertises `["links"]` on `/health` once the linking implementation is a
 - The API retirement updates mixed intelligence tests, the backup schema assertion, and the peer router fixture. The retired cluster routes return 404 under both API prefixes. The E2E and OpenAPI parity fixtures follow the versioned peer routes.
 - The Cluster tab keeps `/?tab=cluster`, displays the full peer error action, and describes link direction from the API's independent grant slots. The example environment lists the supported peer variables. The operator guide identifies later-phase controls by phase.
 
+## P5 integration decisions
+
+- Migration 27 adds `peer_received_grants` for the peer's grant metadata, `peer_grant_epochs` to order overlapping operations, and `peer_received_grant_cleanups` for restart-safe removal. A server's own grants use `peer_grants` to store issued credential digests. A received rotation stages a separate runner file and switches the committed credential ID after the write succeeds.
+- The production router records its registered paths and methods for the route coverage test. The OpenAPI parity fixture follows those same registrations, including the versioned-only grant operations.
+- The Cluster editor uses the peer's capability report to decide whether to enable grant delivery. An existing local grant can still be revoked when the peer lacks grant support or the link is down.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.

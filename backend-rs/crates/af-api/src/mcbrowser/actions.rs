@@ -41,7 +41,6 @@ use axum::extract::{DefaultBodyLimit, Extension, Request};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::post;
 use axum::Router;
 use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
@@ -417,11 +416,17 @@ async fn limit_action_requests(request: Request, next: Next) -> Response {
     response
 }
 
-pub fn router() -> Router {
-    Router::new()
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{post, TrackedRouter};
+    TrackedRouter::new()
         .route("/mcbrowser/actions", post(dispatch_action))
         .layer(DefaultBodyLimit::max(MAX_ACTION_BODY_BYTES))
         .layer(middleware::from_fn(limit_action_requests))
+}
+
+#[allow(dead_code)]
+pub fn router() -> Router {
+    tracked_router().into_router()
 }
 
 fn no_store_json_status<T: Serialize>(status: StatusCode, payload: T) -> Response {

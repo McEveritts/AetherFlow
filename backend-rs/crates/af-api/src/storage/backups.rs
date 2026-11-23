@@ -579,6 +579,9 @@ pub(super) async fn authorize_backup_password(
     matches!(
         blocking_auth_work(move || -> anyhow::Result<bool> {
             let conn = af_db::get_read_conn()?;
+            if crate::auth::load_active_human_subject(&conn, uid).is_err() {
+                return Ok(false);
+            }
             let (hash, totp_enabled): (String, i64) = conn.query_row(
                 "SELECT COALESCE(password_hash, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
                 params![uid],
@@ -629,6 +632,14 @@ pub(super) async fn authorize_backup_password(
     )
 }
 
+fn peer_backup_download_authorized(peer: &crate::auth::PeerPrincipal, user: &AuthUser) -> bool {
+    peer.run_as_user_id == user.user_id
+        && user.user_id > 0
+        && user.role == "admin"
+        && user.plugin_id.is_none()
+        && peer.access.settings.allows_write()
+}
+
 pub async fn prepare_backup_download(Path(filename): Path<String>, req: Request) -> Response {
     let Some(user) = req.extensions().get::<AuthUser>().cloned() else {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Invalid session");
@@ -643,22 +654,31 @@ pub async fn prepare_backup_download(Path(filename): Path<String>, req: Request)
             "Invalid backup path",
         );
     }
+    let peer = req
+        .extensions()
+        .get::<crate::auth::PeerPrincipal>()
+        .cloned();
     let session_auth_time = req
         .extensions()
         .get::<crate::auth::SessionAuthTime>()
         .map(|t| t.0);
     let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, 8192).await {
-        Ok(body) => body,
-        Err(_) => {
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "BAD_REQUEST",
-                "Re-authentication body could not be read within the 8192 byte limit",
-            )
-        }
+    let authorized = if let Some(peer) = peer {
+        peer_backup_download_authorized(&peer, &user)
+    } else {
+        let body = match axum::body::to_bytes(body, 8192).await {
+            Ok(body) => body,
+            Err(_) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "BAD_REQUEST",
+                    "Re-authentication body could not be read within the 8192 byte limit",
+                )
+            }
+        };
+        authorize_backup_password(&user, session_auth_time, &parts.headers, &body).await
     };
-    if !authorize_backup_password(&user, session_auth_time, &parts.headers, &body).await {
+    if !authorized {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",
@@ -869,17 +889,28 @@ pub async fn download_backup(
     if user.role != "admin" {
         return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
     }
-    let ticket = extract_cookie(req.headers(), BACKUP_DOWNLOAD_COOKIE);
-    let ticket_authorized = ticket
-        .as_deref()
-        .is_some_and(|token| redeem_backup_download_ticket(token, &user, &filename));
-    let session_auth_time = req
+    let peer = req
         .extensions()
-        .get::<crate::auth::SessionAuthTime>()
-        .map(|t| t.0);
-    if !ticket_authorized
-        && !authorize_backup_password(&user, session_auth_time, req.headers(), &[]).await
-    {
+        .get::<crate::auth::PeerPrincipal>()
+        .cloned();
+    let (authorized, ticket_authorized) = if let Some(peer) = peer {
+        (peer_backup_download_authorized(&peer, &user), false)
+    } else {
+        let ticket = extract_cookie(req.headers(), BACKUP_DOWNLOAD_COOKIE);
+        let ticket_authorized = ticket
+            .as_deref()
+            .is_some_and(|token| redeem_backup_download_ticket(token, &user, &filename));
+        let session_auth_time = req
+            .extensions()
+            .get::<crate::auth::SessionAuthTime>()
+            .map(|t| t.0);
+        (
+            ticket_authorized
+                || authorize_backup_password(&user, session_auth_time, req.headers(), &[]).await,
+            ticket_authorized,
+        )
+    };
+    if !authorized {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",

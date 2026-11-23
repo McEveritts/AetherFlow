@@ -368,7 +368,7 @@ The shim folder also has an `ffprobe` symlink pointing at the real `ffprobe`. Th
 
 Turning it off removes the drop-in, reloads systemd and restarts Jellyfin. AetherFlow's sandbox drop-in is never edited.
 
-### Data model (migrations 25 and 26 in `af-db`)
+### Data model (migrations 25–27 in `af-db`)
 
 **Migration 25: "Peer clustering"**
 
@@ -409,11 +409,15 @@ DROP TABLE IF EXISTS cluster_enrollment_tokens;
 DROP TABLE IF EXISTS cluster_nodes;
 ```
 
+**Migration 27. Peer grant metadata**
+
+`peer_received_grants` tracks the access a peer grants this server and the ID of its committed credential. `peer_grant_epochs` orders grant delivery and revocation. `peer_received_grant_cleanups` records staged and superseded credential IDs until the runner confirms deletion. Rotation stages a new runner file before committing its ID, so interrupted writes leave the prior committed file available.
+
 Raw secrets live in runner-managed files.
 
 *   WireGuard private key: `/etc/aetherflow/peers/afpeer0.key` (0600)
 *   Held link token: `/etc/aetherflow/peers/tokens/<link>.token` (0640, group `aetherflow`).
-*   Held grant token: `/etc/aetherflow/peers/tokens/<link>.grant.token` (0640, group `aetherflow`).
+*   Held grant tokens use `/etc/aetherflow/peers/tokens/<credential-id>.grant.token` (0640, group `aetherflow`). Existing grant rows without a credential ID use the link ID.
 *   Pending issuer tokens for handshake retries are attempt-scoped (0600). Clean them up after acknowledgement, cancellation or expiry.
 
 ## Alternatives Considered

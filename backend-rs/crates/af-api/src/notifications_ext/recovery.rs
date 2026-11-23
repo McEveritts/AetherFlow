@@ -1,5 +1,7 @@
 use super::models::RegenerateRecoveryReq;
-use crate::auth::{api_error, generate_recovery_codes, store_recovery_codes, AuthUser};
+use crate::auth::{
+    api_error, generate_recovery_codes, store_recovery_codes, AuthUser, PeerPrincipal,
+};
 use crate::ws::extract_client_ip;
 use axum::extract::{Extension, Path};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -137,10 +139,14 @@ pub async fn regenerate_2fa_recovery_codes(
 // 2. Action Approval Gate Lookup (`GET /actions/:id`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn get_pending_action(Path(id): Path<i64>) -> Response {
+pub async fn get_pending_action(
+    peer: Option<Extension<PeerPrincipal>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let persist = peer.is_none_or(|Extension(peer)| peer.access.services.allows_write());
     match af_db::get_pending_action_by_id(id) {
         Ok(Some(action)) => {
-            let reconciled = crate::routes::reconcile_pending_action(action).await;
+            let reconciled = crate::routes::reconcile_pending_action(action, persist).await;
             Json(reconciled).into_response()
         }
         Ok(None) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Action not found"),

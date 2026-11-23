@@ -6,7 +6,7 @@ use super::ai_providers::{
     ALLOWED_AI_MODELS,
 };
 use super::telemetry::{get_system_metrics_context, AUDIT_LOG_FALLBACK_SQL};
-use crate::auth::{api_error, AuthUser};
+use crate::auth::{api_error, AuthUser, PeerPrincipal};
 use crate::ws::extract_client_ip;
 use axum::extract::Request;
 use axum::http::{header, StatusCode};
@@ -193,6 +193,7 @@ pub(super) fn extract_proposed_action(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_chat_session(
     user: Option<AuthUser>,
+    can_propose_actions: bool,
     ip: &str,
     ua: &str,
     system_prompt_override: &str,
@@ -372,7 +373,7 @@ pub(super) async fn run_chat_session(
         }
     };
 
-    if is_admin {
+    if is_admin && can_propose_actions {
         if let Some(mut proposal) = extract_proposed_action(&reply_text, &message) {
             // Invariant: only advertise a proposal or record its audit event after
             // SQLite commits a positive pending_actions row ID.
@@ -434,7 +435,14 @@ pub(super) async fn run_chat_session(
     Json(serde_json::json!({ "reply": reply_text })).into_response()
 }
 
+fn can_propose_service_actions(req: &Request) -> bool {
+    req.extensions()
+        .get::<PeerPrincipal>()
+        .is_none_or(|peer| peer.access.services.allows_write())
+}
+
 pub async fn ai_chat(req: Request) -> Response {
+    let can_propose_actions = can_propose_service_actions(&req);
     let user = req.extensions().get::<AuthUser>().cloned();
     let ip = extract_client_ip(req.headers());
     let ua = req
@@ -478,7 +486,18 @@ pub async fn ai_chat(req: Request) -> Response {
             .unwrap_or_default(),
     );
 
-    run_chat_session(user, &ip, &ua, "", &model, &provider, history, message).await
+    run_chat_session(
+        user,
+        can_propose_actions,
+        &ip,
+        &ua,
+        "",
+        &model,
+        &provider,
+        history,
+        message,
+    )
+    .await
 }
 
 fn sanitize_bounded_support_text(raw: &str, max_bytes: usize) -> String {
@@ -628,6 +647,7 @@ pub(super) fn build_support_prompt(
 }
 
 pub async fn ai_support(req: Request) -> Response {
+    let can_propose_actions = can_propose_service_actions(&req);
     let user = req.extensions().get::<AuthUser>().cloned();
     if user.as_ref().map(|u| u.role.as_str()) != Some("admin") {
         return api_error(
@@ -695,6 +715,7 @@ pub async fn ai_support(req: Request) -> Response {
 
     run_chat_session(
         user,
+        can_propose_actions,
         &ip,
         &ua,
         &support_prompt,

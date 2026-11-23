@@ -149,6 +149,7 @@ async fn settings_can_clear_keys_and_keep_masked_placeholders() {
             plugin_id: None,
             plugin_scopes: Vec::new(),
         }),
+        None,
         Json(SettingsPayload {
             ai_model: "qwen2.5:14b".into(),
             local_provider: "ollama".into(),
@@ -202,7 +203,8 @@ async fn settings_persistence_failure_does_not_report_success_or_change_saved_fi
                 plugin_id: None,
                 plugin_scopes: Vec::new(),
             }),
-            Json(payload)
+            None,
+            Json(payload),
         )
         .await
         .status(),

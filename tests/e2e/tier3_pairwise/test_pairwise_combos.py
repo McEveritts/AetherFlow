@@ -102,7 +102,7 @@ class TestComboPeerClusterManagement(TestCase):
         routes_code = inspector.read_file(ROUTES_RS) or ""
         cluster_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/cluster/mod.rs")
         self.assert_true(
-            "peers::start().await" in main_code and cluster_ui and 'nest("/peers", crate::peers::admin_routes())' in routes_code,
+            "peers::start().await" in main_code and cluster_ui and 'nest("/peers", crate::peers::tracked_admin_routes())' in routes_code,
             "Combo 06: the peer runtime, Cluster tab, and admin peer routes must be connected",
         )
 

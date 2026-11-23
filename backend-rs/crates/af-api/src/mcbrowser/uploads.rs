@@ -37,7 +37,6 @@ mod session;
 mod staging;
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{head, post};
 use axum::Router;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -132,8 +131,9 @@ fn session_lock(upload_id: &str) -> Arc<AsyncMutex<()>> {
     )
 }
 
-pub fn router() -> Router {
-    Router::new()
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{head, post, TrackedRouter};
+    TrackedRouter::new()
         .route(
             "/mcbrowser/uploads",
             post(handlers::create_upload).get(handlers::discover_uploads),
@@ -145,6 +145,11 @@ pub fn router() -> Router {
                 .delete(handlers::delete_upload)
                 .layer(DefaultBodyLimit::max((MAX_CHUNK_BYTES as usize) + 65_536)),
         )
+}
+
+#[allow(dead_code)]
+pub fn router() -> Router {
+    tracked_router().into_router()
 }
 
 #[cfg(test)]

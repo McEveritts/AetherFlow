@@ -99,6 +99,14 @@ pub(crate) fn is_trusted_request_host(candidate_raw: &str) -> bool {
 }
 
 pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
+    if req
+        .extensions()
+        .get::<crate::auth::PeerPrincipal>()
+        .is_some()
+    {
+        return next.run(req).await;
+    }
+
     let raw_allowed = env::var("ALLOWED_HOSTS").unwrap_or_default();
     let allowed_set: HashSet<String> = raw_allowed
         .split(',')

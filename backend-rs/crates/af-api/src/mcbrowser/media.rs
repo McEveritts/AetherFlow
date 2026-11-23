@@ -41,8 +41,9 @@ pub struct MediaMetadataResponse {
     pub subtitles: Vec<SubtitleTrackInfo>,
 }
 
-pub(super) fn router() -> Router {
-    Router::new()
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{get, TrackedRouter};
+    TrackedRouter::new()
         .route("/mcbrowser/media", get(media))
         .route("/mcbrowser/media-info", get(media_info))
         .route("/mcbrowser/thumbnail", get(thumbnail))

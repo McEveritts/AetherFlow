@@ -58,7 +58,6 @@ use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, RawQuery, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post};
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -379,23 +378,41 @@ pub(crate) struct StoredShareRow {
 // Routers
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub fn router() -> Router {
     router_with_runtime(ShareRuntime::Production)
 }
 
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    tracked_router_with_runtime(ShareRuntime::Production)
+}
+
+pub(super) fn tracked_public_router() -> crate::routes::TrackedRouter {
+    tracked_public_router_with_runtime(ShareRuntime::Production)
+}
+
+#[allow(dead_code)]
 pub fn public_router() -> Router {
     public_router_with_runtime(ShareRuntime::Production)
 }
 
-pub(crate) fn router_with_runtime(runtime: ShareRuntime) -> Router {
-    Router::new()
+pub(crate) fn tracked_router_with_runtime(runtime: ShareRuntime) -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{delete, get, TrackedRouter};
+    TrackedRouter::new()
         .route("/mcbrowser/shares", get(list_shares).post(create_share))
         .route("/mcbrowser/shares/:id", delete(delete_share))
         .with_state(runtime)
 }
 
-pub(crate) fn public_router_with_runtime(runtime: ShareRuntime) -> Router {
-    Router::new()
+pub(crate) fn router_with_runtime(runtime: ShareRuntime) -> Router {
+    tracked_router_with_runtime(runtime).into_router()
+}
+
+pub(crate) fn tracked_public_router_with_runtime(
+    runtime: ShareRuntime,
+) -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{get, post, TrackedRouter};
+    TrackedRouter::new()
         .route("/mcbrowser/shares/:token", get(get_public_share_metadata))
         .route("/mcbrowser/shares/:token/unlock", post(unlock_public_share))
         .route(
@@ -407,6 +424,10 @@ pub(crate) fn public_router_with_runtime(runtime: ShareRuntime) -> Router {
             get(download_public_share_entry),
         )
         .with_state(runtime)
+}
+
+pub(crate) fn public_router_with_runtime(runtime: ShareRuntime) -> Router {
+    tracked_public_router_with_runtime(runtime).into_router()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

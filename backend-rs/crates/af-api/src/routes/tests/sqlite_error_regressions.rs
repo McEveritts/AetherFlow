@@ -191,6 +191,7 @@ async fn route_handlers_report_sqlite_failures_instead_of_returning_empty_ok() {
     assert_eq!(
         update_settings(
             Extension(admin.clone()),
+            None,
             Json(SettingsPayload {
                 ai_model: "gemini-4-argon".into(),
                 language: "en".into(),

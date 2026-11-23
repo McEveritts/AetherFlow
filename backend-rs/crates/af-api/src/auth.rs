@@ -55,9 +55,11 @@ pub(crate) use tokens::query_user_credential_version;
 pub use tokens::{
     api_error, client_fingerprint, create_standard_jwt, decode_session_claims, jwt_secret_bytes,
     legacy_client_fingerprint, matches_client_fingerprint, resolve_raw_token,
-    secure_cookie_enabled, validate_startup_jwt_secret, AuthUser, SessionAuthTime, SessionClaims,
+    secure_cookie_enabled, validate_startup_jwt_secret, AuthUser, PeerPrincipal, SessionAuthTime,
+    SessionClaims,
 };
 pub(crate) use tokens::{
     blocking_auth_work, blocking_response, column_exists, create_session_jwt_in_conn,
-    load_active_human_subject, set_session_cookie, table_exists, ActiveSubject, SubjectStatusError,
+    load_active_human_subject, load_active_peer_subject, load_active_subject_for_request,
+    set_session_cookie, table_exists, ActiveSubject, SubjectStatusError,
 };

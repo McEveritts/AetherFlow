@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path};
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
+#[cfg(test)]
 use axum::Router;
 use once_cell::sync::Lazy;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -374,8 +374,9 @@ pub(super) struct UsageResponse {
     pub status: String,
 }
 
-pub(super) fn router() -> Router {
-    Router::new()
+pub(super) fn tracked_router() -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{get, TrackedRouter};
+    TrackedRouter::new()
         .route("/mcbrowser/policy", get(get_own_policy))
         .route(
             "/mcbrowser/policy/:user_id",
@@ -387,6 +388,11 @@ pub(super) fn router() -> Router {
         )
         .route("/mcbrowser/usage", get(get_own_usage))
         .layer(DefaultBodyLimit::max(MAX_POLICY_BODY_BYTES))
+}
+
+#[cfg(test)]
+pub(super) fn router() -> Router {
+    tracked_router().into_router()
 }
 
 fn no_store_json<T: Serialize>(payload: T) -> Response {
@@ -1004,6 +1010,7 @@ pub(super) fn load_target_user_policy_conn(
         ));
     }
 
+    super::lifecycle::reject_if_peer_account(conn, target_user_id)?;
     load_user_policy_conn(conn, target_user_id)
 }
 
@@ -1062,6 +1069,7 @@ pub(super) fn save_user_policy_conn(
             ));
         }
 
+        super::lifecycle::reject_if_peer_account(conn, target_user_id)?;
         conn.execute(
             "INSERT INTO mcbrowser_policies (
                 user_id, perm_read, perm_create, perm_rename, perm_modify,
