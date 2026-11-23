@@ -16,13 +16,13 @@ RUNNER_RS = "backend-rs/crates/af-runner/src/lib.rs"
 SERVICES_LIB_RS = "backend-rs/crates/af-services/src/lib.rs"
 WORKERS_RS = "backend-rs/crates/af-services/src/workers.rs"
 MUTATORS_RS = "backend-rs/crates/af-services/src/mutators.rs"
-CLUSTER_DAEMON_RS = "backend-rs/crates/af-services/src/cluster_daemon.rs"
+PEERS_RS = "backend-rs/crates/af-api/src/peers/mod.rs"
 DB_RS = "backend-rs/crates/af-db/src/lib.rs"
 MODELS_RS = "backend-rs/crates/af-models/src/lib.rs"
 MAIN_RS = "backend-rs/crates/af-api/src/main.rs"
 ROUTES_RS = "backend-rs/crates/af-api/src/routes.rs"
 AUTH_RS = "backend-rs/crates/af-api/src/auth.rs"
-INTELLIGENCE_RS = "backend-rs/crates/af-api/src/intelligence.rs"
+PEER_TESTS_RS = "backend-rs/crates/af-api/src/peers/tests.rs"
 
 
 class TestF07RunnerSandboxEndpoint(TestCase):
@@ -165,50 +165,68 @@ class TestF09Migration17Idempotency(TestCase):
         self.assert_true(bool(db_code and "CREATE TABLE IF NOT EXISTS app_ingress_configs" in db_code), "F09: Migration 17 must use CREATE TABLE IF NOT EXISTS")
 
 
-class TestF10ClusterManagerInitInMain(TestCase):
+class TestF10PeerRuntimeLifecycle(TestCase):
     def __init__(self):
-        super().__init__("T1_F10_01", "F10", 1, "backend-rs/crates/af-api/src/main.rs initializes cluster runtime cleanly before serving")
+        super().__init__("T1_F10_01", "F10", 1, "API starts and shuts down the peer runtime")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        main_code = inspector.read_file(MAIN_RS)
-        self.assert_true(bool(main_code and "start_cluster_runtime" in main_code), "F10: af-api main.rs must invoke start_cluster_runtime")
+        code = inspector.read_file(MAIN_RS) or ""
+        self.assert_true(
+            "peers::start().await" in code and "peers::shutdown().await" in code,
+            "F10: the API must manage the peer runtime lifecycle",
+        )
 
 
-class TestF10ClusterManagerNonNilGuard(TestCase):
+class TestF10PeerRuntimeDormant(TestCase):
     def __init__(self):
-        super().__init__("T1_F10_02", "F10", 1, "Cluster runtime and handlers respond safely")
+        super().__init__("T1_F10_02", "F10", 1, "Peer listener startup handles an unlinked server")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        intel_code = inspector.read_file(INTELLIGENCE_RS)
-        cluster_code = inspector.read_file(CLUSTER_DAEMON_RS)
-        self.assert_true(bool(intel_code and "get_cluster_nodes" in intel_code and cluster_code and "start_cluster_runtime" in cluster_code), "F10: Cluster runtime and node handlers must be present")
+        code = inspector.read_file(PEERS_RS) or ""
+        self.assert_true(
+            "ensure_listener_started().await" in code and "Ok(None)" in code,
+            "F10: peer listener startup must handle missing identity",
+        )
 
 
-class TestF10ClusterListNodesRoute(TestCase):
+class TestF10PeerListRoute(TestCase):
     def __init__(self):
-        super().__init__("T1_F10_03", "F10", 1, "GET /api/v1/admin/cluster/nodes returns node list")
+        super().__init__("T1_F10_03", "F10", 1, "Versioned admin router mounts the peer list")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        routes = inspector.read_file(ROUTES_RS)
-        self.assert_true(bool(routes and '/cluster/nodes' in routes), "F10: GET /api/v1/admin/cluster/nodes must be registered")
+        api = inspector.read_file(ROUTES_RS) or ""
+        peers = inspector.read_file(PEERS_RS) or ""
+        self.assert_true(
+            'nest("/peers", crate::peers::admin_routes())' in api and "get(links::list_peers)" in peers,
+            "F10: the admin router must mount the peer list",
+        )
 
 
-class TestF10ClusterEnrollRoute(TestCase):
+class TestF10PeerPairingRoutes(TestCase):
     def __init__(self):
-        super().__init__("T1_F10_04", "F10", 1, "POST /api/v1/admin/cluster/enroll generates worker join token")
+        super().__init__("T1_F10_04", "F10", 1, "Admin peer router opens pairing windows and starts pairing")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        routes = inspector.read_file(ROUTES_RS)
-        self.assert_true(bool(routes and '/cluster/enroll' in routes), "F10: POST /api/v1/admin/cluster/enroll must be registered")
+        peers = inspector.read_file(PEERS_RS) or ""
+        self.assert_true(
+            '"/pairing-window"' in peers and '"/pair"' in peers
+            and "post(pairing::open_pairing_window)" in peers and "post(pairing::start_pairing)" in peers,
+            "F10: admin peer pairing must expose the window and initiation routes",
+        )
 
 
-class TestF10ClusterMetricsRoute(TestCase):
+class TestF10LegacyClusterRoutesRetired(TestCase):
     def __init__(self):
-        super().__init__("T1_F10_05", "F10", 1, "GET /api/v1/admin/cluster/nodes/:id/metrics returns node telemetry")
+        super().__init__("T1_F10_05", "F10", 1, "Legacy cluster routes and runtime are retired")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        routes = inspector.read_file(ROUTES_RS)
-        self.assert_true(bool(routes and '/cluster/nodes/:id/metrics' in routes), "F10: Node metrics route must be registered")
+        routes = inspector.read_file(ROUTES_RS) or ""
+        self.assert_true(bool(routes), "F10: API router source must be present")
+        self.assert_false('/cluster/' in routes, "F10: the router must not register legacy cluster endpoints")
+        self.assert_false(
+            inspector.file_exists("backend-rs/crates/af-services/src/cluster_daemon.rs"),
+            "F10: the legacy cluster runtime must be removed",
+        )
 
 
 class TestF11NextJsFsRouteDeleted(TestCase):
@@ -305,14 +323,17 @@ class TestF12RunnerSocketExtensionsUnitTestsExist(TestCase):
         self.assert_true(bool(runner_code and "test_handle_sandbox_and_quota_graceful_fallback" in runner_code), "F12: af-runner lib.rs must test runner socket endpoints")
 
 
-class TestF12ClusterUnitTestsExist(TestCase):
+class TestF12PeerLifecycleTestsExist(TestCase):
     def __init__(self):
-        super().__init__("T1_F12_05", "F12", 1, "Unit tests exist for cluster runtime and node telemetry")
+        super().__init__("T1_F12_05", "F12", 1, "Peer API fixtures cover dormant startup and link lifecycle")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        intel_code = inspector.read_file(INTELLIGENCE_RS)
-        has_cluster_tests = bool(intel_code and "get_worker_metrics" in intel_code and "#[tokio::test]" in intel_code)
-        self.assert_true(has_cluster_tests, "F12: Cluster unit tests must be present in af-api intelligence.rs")
+        peers = inspector.read_file(PEER_TESTS_RS) or ""
+        self.assert_true(
+            "standalone_startup_is_dormant_until_identity_is_configured" in peers
+            and "end_to_end_pairing_health_listener_isolation_endpoint_edit_and_revocation" in peers,
+            "F12: peer API fixtures must cover dormant startup, pairing, health, and revocation",
+        )
 
 
 def get_tests():
@@ -320,7 +341,7 @@ def get_tests():
         TestF07RunnerSandboxEndpoint(), TestF07RunnerHostsEndpoint(), TestF07RunnerNetworkEndpoint(), TestF07RunnerQuotaEndpoint(), TestF07RunnerSocketPermissions(),
         TestF08AfHealMigrated(), TestF08ArrInjectorMigrated(), TestF08DeployOrchestratorMigrated(), TestF08SystemdSandboxMigrated(), TestF08LocalDnsAndQuotaMigrated(),
         TestF09Migration17Exists(), TestF09Migration17TableSchema(), TestF09Migration17PrimaryKey(), TestF09Migration17RustModel(), TestF09Migration17Idempotency(),
-        TestF10ClusterManagerInitInMain(), TestF10ClusterManagerNonNilGuard(), TestF10ClusterListNodesRoute(), TestF10ClusterEnrollRoute(), TestF10ClusterMetricsRoute(),
+        TestF10PeerRuntimeLifecycle(), TestF10PeerRuntimeDormant(), TestF10PeerListRoute(), TestF10PeerPairingRoutes(), TestF10LegacyClusterRoutesRetired(),
         TestF11NextJsFsRouteDeleted(), TestF11NextStaticExportConfigured(), TestF11NoDynamicAppApiRoutesRemaining(), TestF11PathSelectorTargetsBackendEndpoint(), TestF11ZeroNodeFsImportsInFrontend(),
-        TestF12FsHandlerUnitTestsExist(), TestF12AuthRefreshUnitTestsExist(), TestF12IngressCrudUnitTestsExist(), TestF12RunnerSocketExtensionsUnitTestsExist(), TestF12ClusterUnitTestsExist()
+        TestF12FsHandlerUnitTestsExist(), TestF12AuthRefreshUnitTestsExist(), TestF12IngressCrudUnitTestsExist(), TestF12RunnerSocketExtensionsUnitTestsExist(), TestF12PeerLifecycleTestsExist()
     ]

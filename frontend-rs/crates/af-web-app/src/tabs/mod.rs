@@ -59,3 +59,16 @@ pub fn TabRouter() -> impl IntoView {
         }}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::state::{clamp_tab_for_role, TabId};
+
+    #[test]
+    fn cluster_tab_routing_keeps_cluster_query_key_and_admin_restriction() {
+        assert_eq!(TabId::from_key("cluster"), TabId::Cluster);
+        assert_eq!(TabId::Cluster.key(), "cluster");
+        assert_eq!(clamp_tab_for_role(TabId::Cluster, true), TabId::Cluster);
+        assert_eq!(clamp_tab_for_role(TabId::Cluster, false), TabId::Overview);
+    }
+}

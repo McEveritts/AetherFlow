@@ -78,6 +78,12 @@ The file 7 scan confirmed more direct authenticated browser URLs in `af-web-app/
 
 File 12 advertises `["links"]` on `/health` once the linking implementation is available. The capability describes protocol support before first pairing. The peer listener itself waits for a configured tunnel identity. The P3 API lane also owns the existing `/health` regression in `af-api/src/routes/tests/security_and_account.rs` for this change. Update its exact capability assertion and keep its protocol, response header and liveness coverage.
 
+## P4 integration decisions
+
+- Migration 26 drops `cluster_nodes`, `cluster_enrollment_tokens`, and `cluster_commands`. SQLite drops their indexes with the tables. The upgrade fixtures verify that peer, authentication, and application data survive the migration.
+- The API retirement updates mixed intelligence tests, the backup schema assertion, and the peer router fixture. The retired cluster routes return 404 under both API prefixes. The E2E and OpenAPI parity fixtures follow the versioned peer routes.
+- The Cluster tab keeps `/?tab=cluster`, displays the full peer error action, and describes link direction from the API's independent grant slots. The example environment lists the supported peer variables. The operator guide identifies later-phase controls by phase.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.

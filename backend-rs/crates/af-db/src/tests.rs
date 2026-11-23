@@ -212,7 +212,7 @@ fn test_round3_64hex_aes_key_schema24_and_revoked_lineage_epoch_mfa() {
     let max_ver: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(max_ver, 25, "MAX(schema_versions.version) must be 25");
+    assert_eq!(max_ver, 26, "MAX(schema_versions.version) must be 26");
 
     conn.execute(
         "INSERT INTO users (id, username, role) VALUES (777, 'r3_db_user', 'user')",
@@ -667,28 +667,279 @@ fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
         .collect()
 }
 
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn sqlite_object_exists(conn: &Connection, obj_type: &str, name: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2)",
+        params![obj_type, name],
+        |r| r.get(0),
+    )
+    .expect("query sqlite_master")
+}
+
+fn assert_no_legacy_cluster_objects(conn: &Connection) {
+    for table in [
+        "cluster_nodes",
+        "cluster_enrollment_tokens",
+        "cluster_commands",
+    ] {
+        assert!(
+            !sqlite_object_exists(conn, "table", table),
+            "legacy table {table} must not exist after migration 26"
+        );
+    }
+    for index in [
+        "idx_cluster_nodes_status",
+        "idx_cluster_commands_node_status",
+    ] {
+        assert!(
+            !sqlite_object_exists(conn, "index", index),
+            "legacy index {index} must not exist after migration 26"
+        );
+    }
+}
+
+fn assert_db_integrity(conn: &Connection) {
+    let mut fk_stmt = conn
+        .prepare("PRAGMA foreign_key_check")
+        .expect("prepare PRAGMA foreign_key_check");
+    let fk_violations: Vec<String> = fk_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("run PRAGMA foreign_key_check")
+        .map(|row| row.expect("read foreign_key_check row"))
+        .collect();
+    assert!(
+        fk_violations.is_empty(),
+        "database must have zero foreign key violations, found: {fk_violations:?}"
+    );
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .expect("run PRAGMA integrity_check");
+    assert_eq!(integrity, "ok", "PRAGMA integrity_check must return ok");
+}
+
+fn seed_legacy_master_worker_tables(conn: &Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS cluster_nodes (
+            id TEXT PRIMARY KEY,
+            hostname TEXT NOT NULL,
+            address TEXT NOT NULL,
+            psk_hash TEXT NOT NULL,
+            role TEXT DEFAULT 'worker',
+            status TEXT DEFAULT 'offline',
+            last_heartbeat DATETIME,
+            enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_seen DATETIME,
+            cpu_usage REAL DEFAULT 0.0,
+            ram_usage REAL DEFAULT 0.0,
+            disk_usage REAL DEFAULT 0.0,
+            peer_cert_sha256 TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_cluster_nodes_status ON cluster_nodes(status);
+
+        CREATE TABLE IF NOT EXISTS cluster_enrollment_tokens (
+            token_hash TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            consumed_by TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS cluster_commands (
+            id TEXT PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            cmd_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL,
+            leased_until INTEGER,
+            lease_generation INTEGER NOT NULL DEFAULT 0,
+            result_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cluster_commands_node_status
+            ON cluster_commands(node_id, status, created_at);
+
+        INSERT INTO cluster_nodes (
+            id, hostname, address, psk_hash, role, status,
+            last_heartbeat, last_seen, cpu_usage, ram_usage, disk_usage, peer_cert_sha256
+        ) VALUES
+            ('legacy-node-1', 'worker-1', '10.0.0.5', 'sha256:legacy-hash-1', 'worker', 'online',
+             '2026-11-22T12:00:00Z', '2026-11-22T12:00:00Z', 14.5, 41.2, 62.0, 'aabbccdd'),
+            ('legacy-node-2', 'worker-2', '10.0.0.6', 'sha256:legacy-hash-2', 'worker', 'offline',
+             '2026-11-21T08:30:00Z', '2026-11-21T08:30:00Z', 0.0, 0.0, 0.0, 'eeff0011');
+
+        INSERT INTO cluster_enrollment_tokens (token_hash, created_at, expires_at, consumed_by)
+        VALUES
+            ('sha256:enroll-active', '2026-11-22T10:00:00Z', 1800000000, NULL),
+            ('sha256:enroll-used', '2026-11-20T10:00:00Z', 1799900000, 'legacy-node-1');
+
+        INSERT INTO cluster_commands (
+            id, node_id, cmd_type, target, status, leased_until, lease_generation,
+            result_message, created_at, updated_at
+        ) VALUES
+            ('cmd-1', 'legacy-node-1', 'systemctl', 'restart:radarr', 'queued', NULL, 0,
+             NULL, '2026-11-22T11:55:00Z', '2026-11-22T11:55:00Z'),
+            ('cmd-2', 'legacy-node-1', 'ping', 'health', 'executed', 1795350000, 2,
+             'pong', '2026-11-22T11:50:00Z', '2026-11-22T11:50:05Z');
+        "#,
+    )
+    .expect("seed legacy master/worker cluster tables");
+}
+
+fn expected_peer_table_columns() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        (
+            "peer_identity",
+            &["id", "wg_pubkey", "tunnel_ip", "wg_port", "created_at"],
+        ),
+        (
+            "peer_links",
+            &[
+                "id",
+                "name",
+                "wg_pubkey",
+                "tunnel_ip",
+                "endpoint",
+                "wg_port",
+                "state",
+                "peer_version",
+                "peer_protocol",
+                "capabilities",
+                "rtt_ms",
+                "last_ok_at",
+                "last_error",
+                "consecutive_failures",
+                "inbound_token_hash",
+                "pending_attempt_id",
+                "pending_expires_at",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "peer_grants",
+            &[
+                "id",
+                "link_id",
+                "run_as_user_id",
+                "access",
+                "token_hash",
+                "created_by",
+                "created_at",
+                "revoked_at",
+            ],
+        ),
+        (
+            "peer_pairing_windows",
+            &["id", "code_hash", "expires_at", "consumed_at"],
+        ),
+        (
+            "peer_pairing_attempts",
+            &[
+                "id",
+                "window_id",
+                "remote_name",
+                "remote_pubkey",
+                "remote_tunnel_ip",
+                "remote_endpoint",
+                "source_ip",
+                "status",
+                "error_code",
+                "expires_at",
+                "created_at",
+            ],
+        ),
+        (
+            "peer_exports",
+            &[
+                "id",
+                "link_id",
+                "path",
+                "writable",
+                "squash_uid",
+                "squash_gid",
+                "created_at",
+            ],
+        ),
+        (
+            "peer_mounts",
+            &[
+                "id",
+                "link_id",
+                "remote_path",
+                "mount_path",
+                "unit_name",
+                "writable",
+                "purpose",
+                "state",
+                "last_error",
+            ],
+        ),
+        (
+            "transcode_workers",
+            &[
+                "link_id",
+                "enabled",
+                "weight",
+                "max_jobs",
+                "ffmpeg_version",
+                "encoders",
+                "render_node",
+                "parity_ok",
+                "parity_error",
+            ],
+        ),
+        (
+            "transcode_jobs",
+            &[
+                "id",
+                "link_id",
+                "started_at",
+                "ended_at",
+                "exit_code",
+                "request_id",
+                "ran_locally",
+            ],
+        ),
+    ]
+}
+
 #[test]
-fn migration_v25_fresh_db_creates_peer_tables_and_preserves_v24_and_legacy_tables() {
+fn migration_v26_fresh_db_creates_peer_tables_and_omits_legacy_cluster_tables() {
     let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _db_path_guard = TestDbPathGuard(env::var_os("DB_PATH"));
 
-    let dir = env::temp_dir().join(format!(
-        "af-peer-v25-fresh-{}-{}",
+    let dir = TempDirGuard(env::temp_dir().join(format!(
+        "af-peer-v26-fresh-{}-{}",
         std::process::id(),
         rand::random::<u64>()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    let db_file = dir.join("fresh.sqlite");
+    )));
+    fs::create_dir_all(&dir.0).unwrap();
+    let db_file = dir.0.join("fresh.sqlite");
     env::set_var("DB_PATH", &db_file);
 
-    init_db().expect("fresh init_db must apply migration 25");
+    init_db().expect("fresh init_db must apply migrations through 26");
 
     {
         let conn = get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 25);
+        assert_eq!(max_ver, 26);
+
+        let version_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version_count, 26, "versions 1..=26 must all be recorded");
 
         let v25_desc: String = conn
             .query_row(
@@ -699,145 +950,61 @@ fn migration_v25_fresh_db_creates_peer_tables_and_preserves_v24_and_legacy_table
             .unwrap();
         assert_eq!(v25_desc, "Peer clustering");
 
-        let v24_count: i64 = conn
+        let v26_desc: String = conn
             .query_row(
-                "SELECT COUNT(*) FROM schema_versions WHERE version = 24",
+                "SELECT description FROM schema_versions WHERE version = 26",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v24_count, 1, "streaming v24 migration must remain recorded");
+        assert_eq!(v26_desc, "Remove legacy master/worker clustering");
 
-        // Legacy cluster_nodes and v24 streaming_history_read_revision remain intact in P0
-        for preserved_table in ["cluster_nodes", "streaming_history_read_revision"] {
-            let exists: i64 = conn
+        for expected_ver in [5, 19, 20, 21, 22, 23, 24, 25, 26] {
+            let count: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    params![preserved_table],
+                    "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
+                    params![expected_ver],
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(exists, 1, "table {preserved_table} must be preserved in P0");
+            assert_eq!(
+                count, 1,
+                "schema_versions must record version {expected_ver} exactly once"
+            );
+        }
+
+        // Legacy master/worker tables and indexes must never be created on a fresh DB
+        assert_no_legacy_cluster_objects(&conn);
+
+        // Unrelated app, auth, and streaming tables remain intact
+        for preserved_table in [
+            "settings",
+            "users",
+            "active_sessions",
+            "mfa_challenges",
+            "revoked_tokens",
+            "recovery_codes",
+            "oidc_clients",
+            "oidc_consents",
+            "plugins_registry",
+            "streaming_servers",
+            "streaming_history",
+            "streaming_history_read_revision",
+            "mediaflow_queue",
+            "app_ingress_configs",
+            "pending_actions",
+            "admin_audit_log",
+            "notifications",
+            "notification_reads",
+        ] {
+            assert!(
+                sqlite_object_exists(&conn, "table", preserved_table),
+                "table {preserved_table} must exist on fresh v26 DB"
+            );
         }
 
         // Verify exact column layout for all nine peer clustering tables
-        let expected_tables: &[(&str, &[&str])] = &[
-            (
-                "peer_identity",
-                &["id", "wg_pubkey", "tunnel_ip", "wg_port", "created_at"],
-            ),
-            (
-                "peer_links",
-                &[
-                    "id",
-                    "name",
-                    "wg_pubkey",
-                    "tunnel_ip",
-                    "endpoint",
-                    "wg_port",
-                    "state",
-                    "peer_version",
-                    "peer_protocol",
-                    "capabilities",
-                    "rtt_ms",
-                    "last_ok_at",
-                    "last_error",
-                    "consecutive_failures",
-                    "inbound_token_hash",
-                    "pending_attempt_id",
-                    "pending_expires_at",
-                    "created_at",
-                    "updated_at",
-                ],
-            ),
-            (
-                "peer_grants",
-                &[
-                    "id",
-                    "link_id",
-                    "run_as_user_id",
-                    "access",
-                    "token_hash",
-                    "created_by",
-                    "created_at",
-                    "revoked_at",
-                ],
-            ),
-            (
-                "peer_pairing_windows",
-                &["id", "code_hash", "expires_at", "consumed_at"],
-            ),
-            (
-                "peer_pairing_attempts",
-                &[
-                    "id",
-                    "window_id",
-                    "remote_name",
-                    "remote_pubkey",
-                    "remote_tunnel_ip",
-                    "remote_endpoint",
-                    "source_ip",
-                    "status",
-                    "error_code",
-                    "expires_at",
-                    "created_at",
-                ],
-            ),
-            (
-                "peer_exports",
-                &[
-                    "id",
-                    "link_id",
-                    "path",
-                    "writable",
-                    "squash_uid",
-                    "squash_gid",
-                    "created_at",
-                ],
-            ),
-            (
-                "peer_mounts",
-                &[
-                    "id",
-                    "link_id",
-                    "remote_path",
-                    "mount_path",
-                    "unit_name",
-                    "writable",
-                    "purpose",
-                    "state",
-                    "last_error",
-                ],
-            ),
-            (
-                "transcode_workers",
-                &[
-                    "link_id",
-                    "enabled",
-                    "weight",
-                    "max_jobs",
-                    "ffmpeg_version",
-                    "encoders",
-                    "render_node",
-                    "parity_ok",
-                    "parity_error",
-                ],
-            ),
-            (
-                "transcode_jobs",
-                &[
-                    "id",
-                    "link_id",
-                    "started_at",
-                    "ended_at",
-                    "exit_code",
-                    "request_id",
-                    "ran_locally",
-                ],
-            ),
-        ];
-
-        for (table, expected_cols) in expected_tables {
+        for (table, expected_cols) in expected_peer_table_columns() {
             let actual = table_columns(&conn, table);
             let expected: Vec<String> = expected_cols.iter().map(|c| (*c).to_string()).collect();
             assert_eq!(actual, expected, "column layout mismatch on table {table}");
@@ -857,28 +1024,45 @@ fn migration_v25_fresh_db_creates_peer_tables_and_preserves_v24_and_legacy_table
             )
             .unwrap();
         assert_eq!(account_type, "human");
+        assert_db_integrity(&conn);
     }
 
-    let _ = fs::remove_dir_all(&dir);
+    // Repeated init_db() must be idempotent and never recreate legacy cluster tables/indexes
+    for _ in 0..2 {
+        init_db().expect("repeated fresh init_db must succeed");
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 26);
+        assert_no_legacy_cluster_objects(&conn);
+        let account_type: String = conn
+            .query_row(
+                "SELECT account_type FROM users WHERE username = 'fresh-human'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_type, "human");
+        assert_db_integrity(&conn);
+    }
 }
 
 #[test]
-fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
+fn migration_v25_preserves_legacy_v24_rows_and_v26_owns_legacy_deletion() {
     let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _db_path_guard = TestDbPathGuard(env::var_os("DB_PATH"));
 
-    let dir = env::temp_dir().join(format!(
-        "af-peer-v25-legacy-{}-{}",
+    let dir = TempDirGuard(env::temp_dir().join(format!(
+        "af-peer-v24-to-v26-{}-{}",
         std::process::id(),
         rand::random::<u64>()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    let db_file = dir.join("legacy.sqlite");
-    env::set_var("DB_PATH", &db_file);
+    )));
+    fs::create_dir_all(&dir.0).unwrap();
 
-    // Initialize full DB first, then roll it back into a pre-v25 (v24) legacy snapshot with existing rows
-    init_db().unwrap();
-    {
+    let prepare_v24_snapshot = |db_file: &std::path::Path| {
+        env::set_var("DB_PATH", db_file);
+        init_db().unwrap();
         let conn = get_conn().unwrap();
         conn.execute_batch(
             "PRAGMA foreign_keys = OFF;
@@ -891,7 +1075,7 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
              DROP TABLE peer_grants;
              DROP TABLE peer_links;
              DROP TABLE peer_identity;
-             DELETE FROM schema_versions WHERE version = 25;
+             DELETE FROM schema_versions WHERE version IN (25, 26);
              DROP TABLE users;
              CREATE TABLE users (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -910,13 +1094,14 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
              INSERT INTO users (id, username, role) VALUES
                  (1, 'legacy-admin', 'admin'),
                  (2, 'legacy-member', 'user');
-             INSERT INTO cluster_nodes (id, hostname, address, psk_hash, role, status)
-                 VALUES ('legacy-node-1', 'worker-1', '10.0.0.5', 'legacy-hash', 'worker', 'online');
+             INSERT INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, family_id)
+                 VALUES ('legacy-sess-1', 1, '127.0.0.1', 'af-test', '2099-01-01T00:00:00Z', 'fam-legacy');
              INSERT INTO plugins_registry (plugin_id, enabled)
                  VALUES ('legacy-plugin', 1);
              PRAGMA foreign_keys = ON;",
         )
-        .expect("prepare pre-v25 legacy fixture");
+        .expect("prepare pre-v25 legacy snapshot");
+        seed_legacy_master_worker_tables(&conn);
 
         assert!(
             !table_columns(&conn, "users").contains(&"account_type".to_string()),
@@ -926,13 +1111,23 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(pre_max, 24);
-    }
+    };
 
-    // Upgrade legacy v24 DB to v25
-    init_db().expect("upgrading pre-v25 legacy database must succeed");
+    // Part 1: Stepwise v24 -> v25 (P0 preservation contract) -> v26 (legacy deletion)
+    let stepwise_db = dir.0.join("stepwise.sqlite");
+    prepare_v24_snapshot(&stepwise_db);
 
     {
         let conn = get_conn().unwrap();
+        // Exercise migration 25 directly to verify P0 preservation contracts still hold
+        migrate(
+            &conn,
+            25,
+            "Peer clustering",
+            peers::PEER_CLUSTERING_MIGRATION_25_SQL,
+        )
+        .expect("applying migration 25 directly to v24 snapshot must succeed");
+
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
@@ -951,9 +1146,10 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
                 ("legacy-admin".to_string(), "human".to_string()),
                 ("legacy-member".to_string(), "human".to_string()),
             ],
-            "existing legacy users must be preserved with default account_type='human'"
+            "migration 25 must preserve existing users with default account_type='human'"
         );
 
+        // Migration 25 itself must NOT delete legacy master/worker tables
         let preserved_cluster: String = conn
             .query_row(
                 "SELECT hostname FROM cluster_nodes WHERE id = 'legacy-node-1'",
@@ -962,17 +1158,24 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
             )
             .unwrap();
         assert_eq!(preserved_cluster, "worker-1");
+        assert!(sqlite_object_exists(
+            &conn,
+            "table",
+            "cluster_enrollment_tokens"
+        ));
+        assert!(sqlite_object_exists(&conn, "table", "cluster_commands"));
+        assert!(sqlite_object_exists(
+            &conn,
+            "index",
+            "idx_cluster_nodes_status"
+        ));
+        assert!(sqlite_object_exists(
+            &conn,
+            "index",
+            "idx_cluster_commands_node_status"
+        ));
 
-        let preserved_plugin: bool = conn
-            .query_row(
-                "SELECT enabled FROM plugins_registry WHERE plugin_id = 'legacy-plugin'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(preserved_plugin);
-
-        // Seed v25 peer data before restarting init_db()
+        // Seed v25 peer data before migration 26 runs via init_db()
         peers::upsert_peer_identity(
             &conn,
             &peers::PeerIdentity {
@@ -985,10 +1188,16 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
         .unwrap();
     }
 
-    // Re-running init_db() across simulated restarts must be idempotent and retain all rows
+    // Now run init_db(): migration 26 owns legacy-table deletion while keeping v25 peer & app rows
+    init_db().expect("upgrading v25 database to v26 via init_db must succeed");
+
     for _ in 0..2 {
-        init_db().expect("restart init_db on v25 database must be idempotent");
         let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 26);
+
         let v25_rows: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM schema_versions WHERE version = 25",
@@ -997,21 +1206,707 @@ fn migration_v25_upgrades_legacy_v24_rows_and_is_idempotent_across_restarts() {
             )
             .unwrap();
         assert_eq!(v25_rows, 1);
+        let v26_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = 26",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v26_rows, 1);
+
+        assert_no_legacy_cluster_objects(&conn);
 
         let identity = peers::get_peer_identity(&conn)
             .unwrap()
-            .expect("peer identity must survive restart");
+            .expect("peer identity must survive migration 26 and restarts");
         assert_eq!(identity.wg_pubkey, "pk-local-restart");
 
-        let account_type: String = conn
+        let legacy_users: Vec<(String, String)> = conn
+            .prepare("SELECT username, account_type FROM users ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            legacy_users,
+            vec![
+                ("legacy-admin".to_string(), "human".to_string()),
+                ("legacy-member".to_string(), "human".to_string()),
+            ]
+        );
+
+        let preserved_plugin: bool = conn
+            .query_row(
+                "SELECT enabled FROM plugins_registry WHERE plugin_id = 'legacy-plugin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(preserved_plugin);
+
+        let preserved_session_family: String = conn
+            .query_row(
+                "SELECT family_id FROM active_sessions WHERE jti = 'legacy-sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_session_family, "fam-legacy");
+        assert_db_integrity(&conn);
+
+        drop(conn);
+        init_db().expect("repeated restart init_db on v26 database must be idempotent");
+    }
+
+    // Part 2: Direct v24 -> v26 upgrade in a single init_db() call
+    let direct_db = dir.0.join("direct_v24_to_v26.sqlite");
+    prepare_v24_snapshot(&direct_db);
+    init_db().expect("direct v24 -> v26 upgrade via init_db must succeed");
+    {
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 26);
+        assert_no_legacy_cluster_objects(&conn);
+        for (table, _) in expected_peer_table_columns() {
+            assert!(
+                sqlite_object_exists(&conn, "table", table),
+                "peer table {table} must be created during direct v24 -> v26 upgrade"
+            );
+        }
+        let admin_type: String = conn
             .query_row(
                 "SELECT account_type FROM users WHERE username = 'legacy-admin'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(account_type, "human");
+        assert_eq!(admin_type, "human");
+        assert_db_integrity(&conn);
+    }
+}
+
+#[test]
+fn migration_v26_upgrades_real_v25_legacy_fixture_and_preserves_peer_auth_and_app_data() {
+    let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _db_path_guard = TestDbPathGuard(env::var_os("DB_PATH"));
+
+    let dir = TempDirGuard(env::temp_dir().join(format!(
+        "af-peer-v26-v25-fixture-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    )));
+    fs::create_dir_all(&dir.0).unwrap();
+    let db_file = dir.0.join("v25_legacy_fixture.sqlite");
+    env::set_var("DB_PATH", &db_file);
+
+    // Bootstrap schema then pin fixture to real migration-25 state (v1..=v25, no v26)
+    init_db().unwrap();
+
+    let expected_identity = peers::PeerIdentity {
+        wg_pubkey: "pk-server-a-local".to_string(),
+        tunnel_ip: "10.231.0.1".to_string(),
+        wg_port: 51821,
+        created_at: "2026-11-23T06:00:00Z".to_string(),
+    };
+    let expected_active_link = peers::PeerLink {
+        id: "link-media-2".to_string(),
+        name: "media-2".to_string(),
+        wg_pubkey: "pk-server-b-active".to_string(),
+        tunnel_ip: "10.231.0.2".to_string(),
+        endpoint: "198.51.100.20".to_string(),
+        wg_port: 51821,
+        state: "active".to_string(),
+        peer_version: Some("4.0.0".to_string()),
+        peer_protocol: Some(1),
+        capabilities: Some(r#"["links"]"#.to_string()),
+        rtt_ms: Some(1.42),
+        last_ok_at: Some("2026-11-23T11:59:00Z".to_string()),
+        last_error: None,
+        consecutive_failures: 0,
+        inbound_token_hash: Some("sha256:inbound-token-b".to_string()),
+        pending_attempt_id: None,
+        pending_expires_at: None,
+        created_at: "2026-11-23T06:10:00Z".to_string(),
+        updated_at: "2026-11-23T11:59:00Z".to_string(),
+    };
+    let expected_pending_link = peers::PeerLink {
+        id: "link-gpu-3".to_string(),
+        name: "gpu-3".to_string(),
+        wg_pubkey: "pk-server-c-pending".to_string(),
+        tunnel_ip: "10.231.0.3".to_string(),
+        endpoint: "198.51.100.30".to_string(),
+        wg_port: 51821,
+        state: "pending".to_string(),
+        peer_version: None,
+        peer_protocol: None,
+        capabilities: None,
+        rtt_ms: None,
+        last_ok_at: None,
+        last_error: None,
+        consecutive_failures: 0,
+        inbound_token_hash: Some("sha256:inbound-token-c".to_string()),
+        pending_attempt_id: Some("attempt-pending-1".to_string()),
+        pending_expires_at: Some(1_800_000_600),
+        created_at: "2026-11-23T11:50:00Z".to_string(),
+        updated_at: "2026-11-23T11:50:00Z".to_string(),
+    };
+    let expected_grant = peers::PeerGrant {
+        id: "grant-media-2".to_string(),
+        link_id: "link-media-2".to_string(),
+        run_as_user_id: 10,
+        access: peers::AccessMap::read_only_all(),
+        token_hash: Some("sha256:grant-token-b".to_string()),
+        created_by: "alice".to_string(),
+        created_at: "2026-11-23T06:15:00Z".to_string(),
+        revoked_at: None,
+    };
+    let expected_window_open = peers::PairingWindow {
+        id: "win-open".to_string(),
+        code_hash: "sha256:code-open".to_string(),
+        expires_at: 1_800_000_900,
+        consumed_at: None,
+    };
+    let expected_window_used = peers::PairingWindow {
+        id: "win-used".to_string(),
+        code_hash: "sha256:code-used".to_string(),
+        expires_at: 1_800_000_300,
+        consumed_at: Some(1_795_340_000),
+    };
+    let expected_attempt = peers::PairingAttempt {
+        id: "attempt-pending-1".to_string(),
+        window_id: Some("win-used".to_string()),
+        remote_name: Some("gpu-3".to_string()),
+        remote_pubkey: Some("pk-server-c-pending".to_string()),
+        remote_tunnel_ip: Some("10.231.0.3".to_string()),
+        remote_endpoint: Some("198.51.100.30".to_string()),
+        source_ip: Some("198.51.100.30".to_string()),
+        status: "pending_confirm".to_string(),
+        error_code: None,
+        expires_at: 1_800_000_600,
+        created_at: "2026-11-23T11:50:00Z".to_string(),
+    };
+    let expected_export = peers::PeerExport {
+        id: "exp-movies".to_string(),
+        link_id: "link-media-2".to_string(),
+        path: "/srv/media/movies".to_string(),
+        writable: false,
+        squash_uid: Some(1000),
+        squash_gid: Some(1000),
+        created_at: "2026-11-23T06:20:00Z".to_string(),
+    };
+    let expected_mount = peers::PeerMount {
+        id: "mnt-movies".to_string(),
+        link_id: "link-media-2".to_string(),
+        remote_path: "/srv/media/movies".to_string(),
+        mount_path: "/mnt/af-peers/media-2/movies".to_string(),
+        unit_name: "mnt-af\\x2dpeers-media\\x2d2-movies.mount".to_string(),
+        writable: false,
+        purpose: "media".to_string(),
+        state: "mounted".to_string(),
+        last_error: None,
+    };
+    let expected_worker = peers::TranscodeWorker {
+        link_id: "link-media-2".to_string(),
+        enabled: true,
+        weight: 2,
+        max_jobs: 4,
+        ffmpeg_version: Some("8.1.3-1-trixie".to_string()),
+        encoders: Some(r#"["h264_vaapi","hevc_vaapi"]"#.to_string()),
+        render_node: Some("/dev/dri/renderD128".to_string()),
+        parity_ok: true,
+        parity_error: None,
+    };
+    let expected_job = peers::TranscodeJob {
+        id: "job-vaapi-1".to_string(),
+        link_id: Some("link-media-2".to_string()),
+        started_at: "2026-11-23T11:40:00Z".to_string(),
+        ended_at: Some("2026-11-23T11:42:00Z".to_string()),
+        exit_code: Some(0),
+        request_id: Some("req-transcode-1".to_string()),
+        ran_locally: false,
+    };
+
+    {
+        let conn = get_conn().unwrap();
+        conn.execute("DELETE FROM schema_versions WHERE version = 26", [])
+            .unwrap();
+        seed_legacy_master_worker_tables(&conn);
+
+        // Auth & users rows (human + peer run-as + sessions + MFA + OIDC)
+        conn.execute_batch(
+            r#"
+            INSERT INTO users (
+                id, username, password_hash, email, role, totp_secret, totp_enabled,
+                last_totp_step, sessions_revoked_after, account_type
+            ) VALUES
+                (1, 'alice', '$argon2id$alice', 'alice@example.test', 'admin',
+                 'enc:v1:alice-totp', 1, 42, 1700000000, 'human'),
+                (2, 'bob', '$argon2id$bob', 'bob@example.test', 'user',
+                 '', 0, -1, 0, 'human'),
+                (10, 'peer-media-2', '', '', 'admin',
+                 '', 0, -1, 0, 'peer');
+
+            INSERT INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, family_id)
+                VALUES ('sess-alice-1', 1, '192.0.2.10', 'af-browser', '2099-01-01T00:00:00Z', 'fam-alice');
+            INSERT INTO mfa_challenges (token, user_id, attempts, expires_at, credential_ver)
+                VALUES ('mfa-tok-alice', 1, 1, 1899999999, 3);
+            INSERT INTO revoked_tokens (jti, expires_at, family_id, user_id)
+                VALUES ('revoked-jti-1', '2099-01-01T00:00:00Z', 'fam-old', 1);
+            INSERT INTO recovery_codes (user_id, code_hash, used)
+                VALUES (1, 'sha256:recovery-1', 0);
+            INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris)
+                VALUES ('oidc-app-1', 'sha256:client-secret', 'Media Portal', '["https://portal.example/cb"]');
+            INSERT INTO oidc_consents (user_id, client_id, scope)
+                VALUES (1, 'oidc-app-1', 'openid profile');
+
+            UPDATE settings
+               SET setup_completed = 1,
+                   base_domain = 'home.example',
+                   local_provider = 'ollama',
+                   local_model = 'qwen3'
+             WHERE id = 1;
+            INSERT INTO plugins_registry (plugin_id, enabled, allocated_port, status)
+                VALUES ('plugin-alpha', 1, 9101, 'running');
+            INSERT INTO streaming_servers (provider, name, url, api_key, enabled, server_id, server_version)
+                VALUES ('jellyfin', 'Main JF', 'http://127.0.0.1:8096', 'enc:v1:jf', 1, 'srv-jf-1', '12.4');
+            INSERT INTO streaming_history (session_key, provider, server_id, user_name, item_id, item_name, provenance)
+                VALUES ('jf-sess-1', 'jellyfin', 'srv-jf-1', 'alice', 'item-1', 'Dune', 'observed_session');
+            UPDATE streaming_history_read_revision SET revision = 7 WHERE id = 1;
+            INSERT INTO mediaflow_queue (file_path, status, original_codec)
+                VALUES ('/srv/media/clip.mkv', 'PENDING_APPROVAL', 'h264');
+            INSERT INTO app_ingress_configs (app_name, public_domain, external_access_enabled, listen_port, tls_enabled)
+                VALUES ('jellyfin', 'jf.home.example', 1, 8096, 1);
+            INSERT INTO pending_actions (classification, source, action, reason, status)
+                VALUES ('warn', 'system', 'restart:jellyfin', 'upgrade', 'pending');
+            INSERT INTO admin_audit_log (user_id, username, action, target_type, target_id, detail)
+                VALUES (1, 'alice', 'peer_pair_confirm', 'peer_link', 'link-media-2', 'confirmed');
+            INSERT INTO notifications (id, user_id, level, title, message, read)
+                VALUES (50, 1, 'info', 'Peer paired', 'media-2 linked', 0);
+            INSERT INTO notification_reads (notification_id, user_id)
+                VALUES (50, 1);
+            "#,
+        )
+        .expect("seed auth and unrelated app rows");
+
+        // Seed representative P0/P3 peer rows across all 9 peer tables
+        peers::upsert_peer_identity(&conn, &expected_identity).unwrap();
+        peers::insert_peer_link(&conn, &expected_active_link).unwrap();
+        peers::insert_peer_link(&conn, &expected_pending_link).unwrap();
+        peers::insert_peer_grant(&conn, &expected_grant).unwrap();
+        peers::insert_pairing_window(&conn, &expected_window_open).unwrap();
+        peers::insert_pairing_window(&conn, &expected_window_used).unwrap();
+        peers::insert_pairing_attempt(&conn, &expected_attempt).unwrap();
+        peers::insert_peer_export(&conn, &expected_export).unwrap();
+        peers::insert_peer_mount(&conn, &expected_mount).unwrap();
+        peers::upsert_transcode_worker(&conn, &expected_worker).unwrap();
+        peers::insert_transcode_job(&conn, &expected_job).unwrap();
+
+        // Confirm pre-upgrade fixture truly represents a live migration-25 legacy DB
+        let pre_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pre_max, 25);
+        for (tbl, expected_rows) in [
+            ("cluster_nodes", 2i64),
+            ("cluster_enrollment_tokens", 2i64),
+            ("cluster_commands", 2i64),
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {tbl}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, expected_rows, "fixture must seed rows in {tbl}");
+        }
+        assert!(sqlite_object_exists(
+            &conn,
+            "index",
+            "idx_cluster_nodes_status"
+        ));
+        assert!(sqlite_object_exists(
+            &conn,
+            "index",
+            "idx_cluster_commands_node_status"
+        ));
     }
 
-    let _ = fs::remove_dir_all(&dir);
+    // Upgrade migration-25 fixture -> migration 26, then run two more restarts (repeated init)
+    for pass in 0..3 {
+        init_db().unwrap_or_else(|e| panic!("init_db pass {pass} failed: {e}"));
+        let conn = get_conn().unwrap();
+
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 26);
+
+        let total_versions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            total_versions, 26,
+            "all prior migrations 1..=25 plus 26 must be preserved"
+        );
+        let v26_desc: String = conn
+            .query_row(
+                "SELECT description FROM schema_versions WHERE version = 26",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v26_desc, "Remove legacy master/worker clustering");
+
+        // All legacy master/worker tables and indexes must be removed
+        assert_no_legacy_cluster_objects(&conn);
+
+        // Verify all 9 P0/P3 peer tables and seeded rows survived untouched
+        assert_eq!(
+            peers::get_peer_identity(&conn).unwrap(),
+            Some(expected_identity.clone())
+        );
+        assert_eq!(
+            peers::get_peer_link(&conn, "link-media-2").unwrap(),
+            Some(expected_active_link.clone())
+        );
+        assert_eq!(
+            peers::get_peer_link(&conn, "link-gpu-3").unwrap(),
+            Some(expected_pending_link.clone())
+        );
+        assert_eq!(
+            peers::get_peer_grant(&conn, "grant-media-2").unwrap(),
+            Some(expected_grant.clone())
+        );
+        assert_eq!(
+            peers::get_pairing_window(&conn, "win-open").unwrap(),
+            Some(expected_window_open.clone())
+        );
+        assert_eq!(
+            peers::get_pairing_window(&conn, "win-used").unwrap(),
+            Some(expected_window_used.clone())
+        );
+        assert_eq!(
+            peers::get_pairing_attempt(&conn, "attempt-pending-1").unwrap(),
+            Some(expected_attempt.clone())
+        );
+        assert_eq!(
+            peers::get_peer_export(&conn, "exp-movies").unwrap(),
+            Some(expected_export.clone())
+        );
+        assert_eq!(
+            peers::get_peer_mount(&conn, "mnt-movies").unwrap(),
+            Some(expected_mount.clone())
+        );
+        assert_eq!(
+            peers::get_transcode_worker(&conn, "link-media-2").unwrap(),
+            Some(expected_worker.clone())
+        );
+        assert_eq!(
+            peers::get_transcode_job(&conn, "job-vaapi-1").unwrap(),
+            Some(expected_job.clone())
+        );
+
+        // Verify auth & users tables survived untouched
+        let users_rows: Vec<(i64, String, String, String, i64, i64)> = conn
+            .prepare(
+                "SELECT id, username, role, account_type, last_totp_step, sessions_revoked_after
+                 FROM users ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            users_rows,
+            vec![
+                (
+                    1,
+                    "alice".to_string(),
+                    "admin".to_string(),
+                    "human".to_string(),
+                    42,
+                    1_700_000_000,
+                ),
+                (
+                    2,
+                    "bob".to_string(),
+                    "user".to_string(),
+                    "human".to_string(),
+                    -1,
+                    0,
+                ),
+                (
+                    10,
+                    "peer-media-2".to_string(),
+                    "admin".to_string(),
+                    "peer".to_string(),
+                    -1,
+                    0,
+                ),
+            ]
+        );
+
+        let session_fam: String = conn
+            .query_row(
+                "SELECT family_id FROM active_sessions WHERE jti = 'sess-alice-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_fam, "fam-alice");
+        let mfa_ver: i64 = conn
+            .query_row(
+                "SELECT credential_ver FROM mfa_challenges WHERE token = 'mfa-tok-alice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mfa_ver, 3);
+        let revoked_fam: String = conn
+            .query_row(
+                "SELECT family_id FROM revoked_tokens WHERE jti = 'revoked-jti-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked_fam, "fam-old");
+        let recovery_cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recovery_codes WHERE user_id = 1 AND code_hash = 'sha256:recovery-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovery_cnt, 1);
+        let oidc_scope: String = conn
+            .query_row(
+                "SELECT scope FROM oidc_consents WHERE user_id = 1 AND client_id = 'oidc-app-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(oidc_scope, "openid profile");
+
+        // Verify unrelated app tables & migrations survived untouched
+        let (setup_done, base_domain, local_model): (bool, String, String) = conn
+            .query_row(
+                "SELECT setup_completed, base_domain, local_model FROM settings WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(setup_done);
+        assert_eq!(base_domain, "home.example");
+        assert_eq!(local_model, "qwen3");
+
+        let plugin_status: String = conn
+            .query_row(
+                "SELECT status FROM plugins_registry WHERE plugin_id = 'plugin-alpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(plugin_status, "running");
+
+        let stream_item: String = conn
+            .query_row(
+                "SELECT item_name FROM streaming_history WHERE session_key = 'jf-sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stream_item, "Dune");
+
+        let read_rev: i64 = conn
+            .query_row(
+                "SELECT revision FROM streaming_history_read_revision WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(read_rev, 7);
+
+        let mediaflow_status: String = conn
+            .query_row(
+                "SELECT status FROM mediaflow_queue WHERE file_path = '/srv/media/clip.mkv'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mediaflow_status, "PENDING_APPROVAL");
+
+        let ingress_domain: String = conn
+            .query_row(
+                "SELECT public_domain FROM app_ingress_configs WHERE app_name = 'jellyfin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ingress_domain, "jf.home.example");
+
+        let pending_cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_actions WHERE action = 'restart:jellyfin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_cnt, 1);
+
+        let audit_detail: String = conn
+            .query_row(
+                "SELECT detail FROM admin_audit_log WHERE action = 'peer_pair_confirm'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_detail, "confirmed");
+
+        let notif_read_cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notification_reads WHERE notification_id = 50 AND user_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notif_read_cnt, 1);
+
+        assert_db_integrity(&conn);
+    }
+}
+
+#[test]
+fn migration_v26_is_atomic_on_failure_and_handles_partial_legacy_tables() {
+    // Part A: Atomicity rollback if the final DROP fails under PRAGMA foreign_keys = ON
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE schema_versions (
+             version INTEGER PRIMARY KEY,
+             description TEXT NOT NULL,
+             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO schema_versions (version, description) VALUES (25, 'Peer clustering');",
+    )
+    .unwrap();
+    seed_legacy_master_worker_tables(&conn);
+    conn.execute_batch(
+        "CREATE TABLE legacy_fk_blocker (
+             id INTEGER PRIMARY KEY,
+             node_id TEXT NOT NULL REFERENCES cluster_nodes(id)
+         );
+         INSERT INTO legacy_fk_blocker (id, node_id) VALUES (1, 'legacy-node-1');",
+    )
+    .unwrap();
+
+    let err = migrate(
+        &conn,
+        26,
+        "Remove legacy master/worker clustering",
+        LEGACY_CLUSTER_REMOVAL_MIGRATION_26_SQL,
+    )
+    .expect_err("FK reference on cluster_nodes must fail migration 26 and roll back atomically");
+    assert!(!err.to_string().is_empty());
+    assert!(
+        conn.is_autocommit(),
+        "connection must return to autocommit after atomic rollback"
+    );
+
+    // Earlier drops (cluster_commands, cluster_enrollment_tokens) MUST have rolled back too
+    for (table, expected_rows) in [
+        ("cluster_commands", 2i64),
+        ("cluster_enrollment_tokens", 2i64),
+        ("cluster_nodes", 2i64),
+    ] {
+        assert!(
+            sqlite_object_exists(&conn, "table", table),
+            "rolled-back migration 26 must retain {table}"
+        );
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, expected_rows,
+            "rolled-back rows in {table} must stay intact"
+        );
+    }
+    let v26_recorded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 26",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v26_recorded, 0);
+
+    // Removing the blocker allows migration 26 to commit all three drops cleanly
+    conn.execute_batch("DROP TABLE legacy_fk_blocker;").unwrap();
+    migrate(
+        &conn,
+        26,
+        "Remove legacy master/worker clustering",
+        LEGACY_CLUSTER_REMOVAL_MIGRATION_26_SQL,
+    )
+    .expect("migration 26 must succeed once FK blocker is removed");
+    assert_no_legacy_cluster_objects(&conn);
+    let v26_recorded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 26",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v26_recorded, 1);
+
+    // Part B: Partial legacy DB (only base cluster_nodes existed; cluster_daemon never ran)
+    let partial_conn = Connection::open_in_memory().unwrap();
+    partial_conn
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE schema_versions (
+                 version INTEGER PRIMARY KEY,
+                 description TEXT NOT NULL,
+                 applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+             );
+             INSERT INTO schema_versions (version, description) VALUES (25, 'Peer clustering');
+             CREATE TABLE cluster_nodes (
+                 id TEXT PRIMARY KEY,
+                 hostname TEXT NOT NULL,
+                 address TEXT NOT NULL,
+                 psk_hash TEXT NOT NULL,
+                 role TEXT DEFAULT 'worker',
+                 status TEXT DEFAULT 'offline'
+             );
+             CREATE INDEX idx_cluster_nodes_status ON cluster_nodes(status);
+             INSERT INTO cluster_nodes (id, hostname, address, psk_hash)
+                 VALUES ('solo-node', 'worker-solo', '10.0.0.9', 'sha256:solo');",
+        )
+        .unwrap();
+    migrate(
+        &partial_conn,
+        26,
+        "Remove legacy master/worker clustering",
+        LEGACY_CLUSTER_REMOVAL_MIGRATION_26_SQL,
+    )
+    .expect("migration 26 must succeed when only a subset of legacy tables exist");
+    assert_no_legacy_cluster_objects(&partial_conn);
+    let partial_v26: i64 = partial_conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 26",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(partial_v26, 1);
 }

@@ -90,7 +90,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
           '/api/v1/admin/network/status': { platform: 'linux', runner_available: false },
           '/api/v1/admin/ingress/configs': { configs: [] },
           '/api/v1/admin/services': [],
-          '/api/v1/admin/cluster/nodes': { nodes: [] },
+          '/api/v1/admin/peers': {
+            identity: null, peer_protocol: 1, capabilities: ['links'], rtt_warn_ms: 120,
+            peers: [], pairing_windows: [], pairing_attempts: [], detected_endpoints: [],
+          },
           '/api/v1/admin/users': { users: [] },
           '/api/v1/admin/audit-log': { entries: [], total: 0 },
           '/api/v1/admin/quotas': { quotas: [] },

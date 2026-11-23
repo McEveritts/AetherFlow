@@ -4,7 +4,7 @@ Features:
 - F24: Network & VPN Operator Panel
 - F25: Notifications & Alerting Panel
 - F26: Storage Quotas Panel
-- F27: Cluster Nodes Panel
+- F27: Cluster Peer Links Panel
 """
 
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
@@ -16,7 +16,10 @@ WIREGUARD_RS = "frontend-rs/crates/af-web-app/src/tabs/network/wireguard.rs"
 TAILSCALE_RS = "frontend-rs/crates/af-web-app/src/tabs/network/tailscale.rs"
 NOTIFICATIONS_RS = "frontend-rs/crates/af-web-app/src/tabs/notifications.rs"
 QUOTAS_RS = "frontend-rs/crates/af-web-app/src/tabs/quotas.rs"
-CLUSTER_RS = "frontend-rs/crates/af-web-app/src/tabs/cluster.rs"
+CLUSTER_DIR = "frontend-rs/crates/af-web-app/src/tabs/cluster"
+CLUSTER_MOD = f"{CLUSTER_DIR}/mod.rs"
+CLUSTER_PEERS = f"{CLUSTER_DIR}/peers.rs"
+CLUSTER_PAIRING = f"{CLUSTER_DIR}/pairing.rs"
 
 
 class TestF24NetworkTabComponentExists(TestCase):
@@ -166,48 +169,64 @@ class TestF26QuotaRefreshTrigger(TestCase):
 
 class TestF27ClusterTabExists(TestCase):
     def __init__(self):
-        super().__init__("T1_F27_01", "F27", 1, "ClusterTab exists in frontend-rs/crates/af-web-app/src/tabs/")
+        super().__init__("T1_F27_01", "F27", 1, "ClusterTab contains peer listing and pairing modules")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(inspector.file_exists(CLUSTER_RS), "F27: cluster.rs must exist")
+        self.assert_true(
+            all(inspector.file_exists(path) for path in (CLUSTER_MOD, CLUSTER_PEERS, CLUSTER_PAIRING)),
+            "F27: ClusterTab, peer listing, and pairing modules must be present",
+        )
 
 
 class TestF27ClusterTabMountedInSidebar(TestCase):
     def __init__(self):
-        super().__init__("T1_F27_02", "F27", 1, "ClusterTab is registered in TabId navigation and TabRouter")
+        super().__init__("T1_F27_02", "F27", 1, "ClusterTab remains mounted in TabRouter")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        state = inspector.read_file(STATE_RS)
-        tabs = inspector.read_file(TABS_MOD)
-        mounted = bool(state and "TabId::Cluster" in state and tabs and "cluster::ClusterTab" in tabs)
-        self.assert_true(mounted, "F27: ClusterTab must be navigable via TabId::Cluster and mounted in TabRouter")
+        state = inspector.read_file(STATE_RS) or ""
+        tabs = inspector.read_file(TABS_MOD) or ""
+        self.assert_true(
+            "TabId::Cluster" in state and "cluster::ClusterTab" in tabs,
+            "F27: ClusterTab must remain navigable via TabId::Cluster",
+        )
 
 
-class TestF27ClusterNodesList(TestCase):
+class TestF27ClusterPeerList(TestCase):
     def __init__(self):
-        super().__init__("T1_F27_03", "F27", 1, "ClusterTab lists worker nodes with status, CPU, and memory")
+        super().__init__("T1_F27_03", "F27", 1, "ClusterTab lists peers using the peer admin API")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "/api/v1/admin/cluster/nodes" in tab), "F27: cluster.rs must display cluster nodes")
+        tab = inspector.read_file(CLUSTER_MOD) or ""
+        peers = inspector.read_file(CLUSTER_PEERS) or ""
+        self.assert_true(
+            "/api/v1/admin/peers" in tab + peers and "rtt_ms" in tab + peers,
+            "F27: ClusterTab must load peer links and their RTT",
+        )
 
 
-class TestF27ClusterEnrollWorkerModal(TestCase):
+class TestF27ClusterPairingControls(TestCase):
     def __init__(self):
-        super().__init__("T1_F27_04", "F27", 1, "ClusterTab provides Enroll Worker modal with join token")
+        super().__init__("T1_F27_04", "F27", 1, "ClusterTab opens pairing windows and submits pairing strings")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "/api/v1/admin/cluster/enroll" in tab and "enrollment_token" in tab), "F27: cluster.rs must provide worker enrollment modal")
+        pairing = inspector.read_file(CLUSTER_PAIRING) or ""
+        self.assert_true(
+            "PAIRING_WINDOW_PATH" in pairing and "pairing_string" in pairing and "comparison_code" in pairing,
+            "F27: the pairing controls must support pairing windows, strings, and comparison codes",
+        )
 
 
-class TestF27ClusterNodeRemovalAction(TestCase):
+class TestF27ClusterPeerRevocation(TestCase):
     def __init__(self):
-        super().__init__("T1_F27_05", "F27", 1, "ClusterTab wires node removal to DELETE /api/v1/admin/cluster/nodes/:id")
+        super().__init__("T1_F27_05", "F27", 1, "ClusterTab offers a link revocation action")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "/api/v1/admin/cluster/nodes/{}" in tab and ".delete(" in tab), "F27: cluster.rs must support removing worker nodes")
+        peers = inspector.read_file(CLUSTER_PEERS) or ""
+        tab = inspector.read_file(CLUSTER_MOD) or ""
+        self.assert_true(
+            "peer_revoke_path" in peers + tab and '"DELETE"' in peers,
+            "F27: peer links must have an explicit revocation action",
+        )
 
 
 def get_tests():
@@ -215,5 +234,5 @@ def get_tests():
         TestF24NetworkTabComponentExists(), TestF24NetworkTabMountedInSidebar(), TestF24WireGuardPeersDisplay(), TestF24TailscaleRoutesControls(), TestF24NetworkBackendEndpointsWired(),
         TestF25NotificationsTabExists(), TestF25NotificationsTabMountedInSidebar(), TestF25NotificationRulesList(), TestF25NotificationChannelsManagement(), TestF25TestNotificationChannelTrigger(),
         TestF26QuotasTabExists(), TestF26QuotasMountedInSidebar(), TestF26UserQuotasTable(), TestF26QuotaEditModal(), TestF26QuotaRefreshTrigger(),
-        TestF27ClusterTabExists(), TestF27ClusterTabMountedInSidebar(), TestF27ClusterNodesList(), TestF27ClusterEnrollWorkerModal(), TestF27ClusterNodeRemovalAction()
+        TestF27ClusterTabExists(), TestF27ClusterTabMountedInSidebar(), TestF27ClusterPeerList(), TestF27ClusterPairingControls(), TestF27ClusterPeerRevocation()
     ]

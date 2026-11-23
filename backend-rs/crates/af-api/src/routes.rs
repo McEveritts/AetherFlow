@@ -10,11 +10,10 @@ use crate::auth::{api_error, AuthUser};
 use crate::embed::spa_fallback_handler;
 use crate::intelligence::{
     ai_chat, ai_support, analyze_predictions, approve_mediaflow_item, bandwidth_analyze,
-    bandwidth_apply, bookmark_log, decline_mediaflow_item, dispatch_worker_command, enroll_worker,
-    get_auth_metrics_history, get_bookmarks, get_cluster_nodes, get_log_sources,
-    get_mediaflow_queue, get_metrics_history, get_predictions, get_system_topology,
-    get_worker_metrics, list_worker_commands, metadata_results, metadata_scan, metadata_status,
-    remove_worker, test_ai_connection, trigger_mediaflow_scan,
+    bandwidth_apply, bookmark_log, decline_mediaflow_item, get_auth_metrics_history, get_bookmarks,
+    get_log_sources, get_mediaflow_queue, get_metrics_history, get_predictions,
+    get_system_topology, metadata_results, metadata_scan, metadata_status, test_ai_connection,
+    trigger_mediaflow_scan,
 };
 use crate::middlewares::{
     ai_rate_limit_middleware, auth_rate_limit_middleware, host_validation_middleware,
@@ -677,12 +676,6 @@ fn build_v1_router_with_options(include_peer_routes: bool) -> Router {
             "/fileshare/:filename",
             delete(delete_shared_file).layer(middleware::from_fn(quota_upload_guard_middleware)),
         )
-        .route("/cluster/nodes", get(get_cluster_nodes))
-        .route("/cluster/enroll", post(enroll_worker))
-        .route("/cluster/commands", get(list_worker_commands))
-        .route("/cluster/nodes/:id", delete(remove_worker))
-        .route("/cluster/nodes/:id/metrics", get(get_worker_metrics))
-        .route("/cluster/nodes/:id/commands", post(dispatch_worker_command))
         .route(
             "/oidc/clients",
             get(get_oidc_clients).post(create_oidc_client),

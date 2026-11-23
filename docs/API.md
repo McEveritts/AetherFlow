@@ -119,24 +119,24 @@ Interfaces with the multi-provider FlowAI engine (`af-api::intelligence`). See [
 | `GET` | `/api/v1/admin/actions/{id}` | Returns a single Approval Inbox action record, reconciling any queued deferred core-restart `job_unit` receipt against `af-runner`'s durable status. |
 | `POST` | `/api/v1/admin/actions/{id}/approve` | Authorizes and executes a pending action, recording an entry in `admin_audit_log`. Deferred `aetherflow-api`/`aetherflow-runner` restarts return `202 Accepted` (`status: "queued"`) with the persisted `job_unit` receipt instead of claiming immediate execution, and retries return `409 Conflict` without replaying. |
 
-### 8. Cluster Master & Worker (`/api/v1/admin/cluster`)
-Multi-node enrollment, telemetry heartbeats, and durable worker command orchestration (`af-services::cluster_daemon`; worker mTLS listener on `:50051` serves `/cluster/v1/register` and `/cluster/v1/heartbeat`).
+### 8. Peer Clustering
+
+The Cluster tab administers local peer links. Admin routes require an administrator session, and writes also require a CSRF token. These routes are versioned under `/api/v1`.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/v1/admin/cluster/enroll` | Issues a cluster enrollment token (`enrollment_token`) and worker mTLS onboarding instructions. |
-| `GET` | `/api/v1/admin/cluster/nodes` | Lists registered cluster worker nodes, health status, and last-seen telemetry. |
-| `DELETE` | `/api/v1/admin/cluster/nodes/{id}` | Removes a cluster worker node registration. |
-| `GET` | `/api/v1/admin/cluster/nodes/{id}/metrics` | Returns recent telemetry metrics for a registered cluster worker node. |
-| `GET` | `/api/v1/admin/cluster/commands` | Lists durable cluster worker commands and execution states (`queued`, `leased`, `executed`, `failed`, `unknown`). |
-| `POST` | `/api/v1/admin/cluster/nodes/{id}/commands` | Enqueues a durable remote command for a registered cluster worker node. |
+| `GET` | `/api/v1/admin/peers` | Lists links, health, pending pairings, open windows, and detected local endpoints. An unlinked server can report `identity: null` and `peers: []`. |
+| `POST` | `/api/v1/admin/peers/pairing-window` | Opens a ten-minute, single-use window and returns its secret `pairing_string`. Optionally supply `https_url`, `endpoint`, or `wg_port`. |
+| `DELETE` | `/api/v1/admin/peers/pairing-window` | Closes the open pairing windows. Returns the number closed. |
+| `DELETE` | `/api/v1/admin/peers/pairing-window/{id}` | Closes the selected pairing window. |
+| `POST` | `/api/v1/admin/peers/pair` | Starts a pairing with `pairing_string` and optional local endpoint and display names. Returns the pending link, attempt ID, comparison code, and expiry. |
+| `POST` | `/api/v1/admin/peers/pairing/{attempt}/confirm` | Confirms the receiving server's pending attempt after the operators compare codes. Accepts an optional local peer name. |
+| `DELETE` | `/api/v1/admin/peers/pairing/{attempt}` | Cancels a pending attempt and schedules cleanup of its resources. |
+| `PUT` | `/api/v1/admin/peers/{id}/endpoint` | Changes the peer's WireGuard endpoint using `endpoint` and optional `wg_port`. |
+| `DELETE` | `/api/v1/admin/peers/{id}` | Revokes a link and attempts to notify the other server. The response reports whether it delivered the notice. |
+| `POST` | `/api/v1/peer-pairing/request` | Receives a server-to-server HTTPS bootstrap using the one-use code. Requests are limited to 4 KiB and five per minute per trusted source IP. |
 
-> [!NOTE]
-> **Worker Command Delivery Durability, `unknown` Outcomes & Recovery Limits**:
-> - Before invoking an admitted non-idempotent service mutation (`restart_service`, `start_service`, `stop_service`, `reload_service`, `systemctl`), the worker persists a confined `0600` execution intent receipt (`cluster_worker_command_receipts.json`, `O_NOFOLLOW`, `flock`, `fsync`) alongside its `0600` ACK outbox (`cluster_worker_ack_outbox.json`). If intent persistence fails, the mutation is refused and the command remains genuinely unstarted for normal lease retry.
-> - **Operator-visible `unknown` status**: If a worker crashes or restarts after persisting execution intent and before persisting a final outcome, startup recovery transitions that receipt to terminal status `unknown` (with a diagnostic `result_message`) rather than guessing `executed`/`failed` or automatically replaying the mutation. The master records `unknown` and stops re-leasing the command; operators should inspect the target worker's service state and logs before issuing a new command.
-> - **Lease fencing & reattachment**: Completed results (`executed`, `failed`, `unknown`) are persisted before ACK. Master lease fencing rejects delayed ACKs carrying stale `lease_generation` values. When a lost response or lease expiration causes the master to re-lease an already attempted command with a higher `lease_generation`, the worker validates command identity (`node_id`, `cmd_type`, `target`, `action`), reattaches the durable result to the freshly observed `lease_generation` without rerunning the host mutation, and rejects stale lease deliveries or conflicting command identities.
-> - **Recovery limits**: Both the worker receipt ledger and ACK outbox are bounded to 256 entries and 512 KiB each; only master-confirmed terminal receipts are recycled. When all slots or byte budget are occupied by unconfirmed outcomes or active intents, new command dispatches fail closed with backpressure while existing in-flight commands, reattachments, and ACKs continue to drain. Deleting or corrupting the worker state directory removes local intent/outcome history (corrupt/symlinked/oversized receipt or outbox storage fails closed against new mutations). Legacy outbox records lacking identity metadata remain reattachable by command ID on newer leases until confirmed. Crashes before vs. after the underlying `systemctl`/service call within the intent window cannot be distinguished without host inspection and therefore resolve conservatively to `unknown`.
+`GET /health` advertises `peer_protocol: 1` and the `links` capability before pairing. The separate `afpeer0` listener handles tunnel hello, authenticated health, link view, and revoke notice. Peer lifecycle errors include `code`, `server`, `step`, `message`, and `action`. Treat pairing strings as credentials and use them only for the intended pairing. [Peer clustering operator guide](peer-clustering.md)
 
 ---
 

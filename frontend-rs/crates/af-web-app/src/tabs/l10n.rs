@@ -82,4 +82,52 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn cluster_peer_translations_replace_legacy_coordinator_wording_across_locales() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let context = AppContext::new();
+            let heading = Memo::new(move |_| tt(context, "Tabs.clusterHeading"));
+            let summary = Memo::new(move |_| {
+                tt_with(
+                    context,
+                    "Cluster.peersSummary",
+                    &[("total", "2"), ("healthy", "1"), ("protocol", "1")],
+                )
+            });
+            for (locale, expected_heading) in [
+                ("en", "Peer Clustering"),
+                ("de", "Peer-Clustering"),
+                ("dk", "Peer-klyngedrift"),
+                ("es", "Clúster entre pares"),
+                ("fr", "Clustering entre pairs"),
+                ("zh", "对等集群"),
+            ] {
+                context.locale.set(locale.into());
+                assert_eq!(heading.get(), expected_heading, "{locale}");
+                let rendered = summary.get();
+                assert!(
+                    rendered.contains('2') && rendered.contains('1'),
+                    "{locale}: {rendered}"
+                );
+                assert_ne!(rendered, "Cluster.peersSummary", "{locale}");
+            }
+            for retired in [
+                "AetherFlow coordinator",
+                "Cluster.coordinatorView",
+                "Cluster.nodesSummary",
+                "Enroll Worker Node",
+                "Remove this worker node?",
+            ] {
+                for locale in ["en", "de"] {
+                    assert_eq!(
+                        af_web_core::i18n::translate(locale, retired),
+                        retired,
+                        "retired legacy cluster key still present ({locale}): {retired}"
+                    );
+                }
+            }
+        });
+    }
 }

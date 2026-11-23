@@ -83,7 +83,7 @@ The 4-tier E2E suite covers all 37 core platform features (F01–F37):
   3. `test_combo_pathselector_fs_mediaflow`: DirectoryPicker (F01, F20) + FS Handler (F01) + MediaFlow Transcoding + Token Fixes (F20).
   4. `test_combo_quota_runner`: Quotas Panel (F26) + Runner Quota Socket (F07, F08) + Storage Quota Enforcement (F26).
   5. `test_combo_network_wireguard_tailscale`: Network Panel (F24) + Runner Network Socket (F07, F08) + Key Generation.
-  6. `test_combo_cluster_telemetry_mgmt`: Cluster Manager Startup (F10) + Cluster Panel (F27) + Worker Enrollment + Node Metrics.
+  6. `TestComboPeerClusterManagement` checks the peer runtime (F10), Cluster tab (F27), and peer admin routes.
   7. `test_combo_wasm_binary_spa_tokens`: External WASM Build (F32) + External `web/dist` Serving (F32) + Obsidian CSS (F13, F14) + Legacy Purge (F11).
   8. `test_combo_privilege_boundary_sandbox`: Systemd Privilege Units (F33) + Sudoers Purge (F34) + Caller Migration (F08) + Runner Sandboxing (F07).
   9. `test_combo_debian13_apt_packaging`: APT Template (F28) + Core OS Detection (F29) + Package Modernization (F30) + Keyring Migration (F31).
@@ -190,7 +190,7 @@ bash scripts/run_embedded_e2e.sh --binary backend-rs/target/release/aetherflow-a
 | **F07** | `/run/aetherflow/runner.sock` (`/v1/sandbox`, `/v1/hosts`, `/v1/network`, `/v1/quota`) | HTTP/1.1 over UNIX domain socket, mode 0660 root:aetherflow. Max body 4096 bytes. Safe ID validation. Strict allowlist execution. |
 | **F08** | Caller Refactoring (`af-services`, `af-runner`) | Zero direct `sudo` or mutating `systemctl` calls in core services. All route via `af-runner` socket (`dispatch_runner_systemctl_unix`, `/v1/*`). |
 | **F09** | SQLite Migration 17 (`app_ingress_configs`) | Schema: `app_ingress_configs(app_name TEXT PRIMARY KEY, public_domain TEXT, external_access_enabled INTEGER, listen_port INTEGER, tls_enabled INTEGER, updated_at DATETIME)`. Idempotent. |
-| **F10** | Cluster Manager Startup | `backend-rs/crates/af-api/src/main.rs` calls `start_cluster_runtime()` before HTTP serving. Handlers respond cleanly. |
+| **F10** | Peer Runtime | The API manages peer runtime startup and shutdown. The listener waits for a configured identity, and the versioned admin router serves the peer list and pairing controls. |
 | **F11** | Retire Legacy Next.js Frontend | Legacy `frontend/` directory and `frontend/src/app/api/fs/route.ts` completely deleted; Playwright tests live in `e2e/` and UI lives in `frontend-rs/`. |
 | **F12** | Backend Unit Tests | `cargo test --workspace --locked` in `backend-rs/` passes 100% of crates, including fs, auth, profile, ingress, and runner socket tests. |
 | **F13** | Obsidian V2 CSS Foundation | `frontend-rs/styles/input.css` defines `--obs-bg-base: #000000`, `body::before` 3-orb radial aurora + base gradient, `body::after` fractal micro-grain + edge vignette. |
@@ -207,7 +207,7 @@ bash scripts/run_embedded_e2e.sh --binary backend-rs/target/release/aetherflow-a
 | **F24** | Network & VPN Panel | `tabs/network/` manages WireGuard peers/keygen and Tailscale status/peers/routes. |
 | **F25** | Notifications & Alerting Panel | `tabs/notifications.rs` manages notification rules and channels (with test alert trigger). |
 | **F26** | Storage Quotas Panel | `tabs/quotas.rs` manages user storage quotas, usage thresholds, and manual disk usage refresh. |
-| **F27** | Cluster Nodes Panel | `tabs/cluster.rs` displays node telemetry, worker enrollment join tokens, and node removal. |
+| **F27** | Cluster Peer Links | `tabs/cluster/` displays peer links and supports pairing windows, comparison-code confirmation, endpoint changes, and link revocation. |
 | **F28** | Modernize Debian APT Template | `setup/templates/apt.sources/debian.template` uses `https://deb.debian.org/debian` with `non-free-firmware`. |
 | **F29** | Debian 13 Core OS Detection | `setup/modules/00-core.sh` supports Trixie without `VERSION_ID` and detects PHP 8.4 natively. |
 | **F30** | Modernize Package Dependencies | `setup/modules/02-packages.sh` removes `software-properties-common`, updates `pcregrep` -> `pcre2-utils`, `libncurses-dev`, drops dead packages. |

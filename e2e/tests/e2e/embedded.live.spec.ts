@@ -356,6 +356,8 @@ test.describe('Real Rust API and external WASM frontend E2E (Zero Mocks)', () =>
     await expect(page).toHaveURL(/\/api\/v1\/public\/swagger\/index\.html$/);
     await expect(page.locator('#stats-row')).toContainText(/Showing [1-9][0-9]* of/);
     await expect(page.locator('#endpoints-root .tag-section').first()).toBeVisible();
+    await expect(page.locator('#endpoints-root').getByText('/admin/peers/pairing-window', { exact: true }).first()).toBeVisible();
+    await expect(page.locator('#endpoints-root').getByText('/peer-pairing/request', { exact: true }).first()).toBeVisible();
     await page.getByRole('button', { name: 'Raw YAML' }).click();
     await expect(page.getByRole('dialog', { name: 'openapi-v1.yaml' })).toBeVisible();
     await expect(page.locator('#raw-yaml-pre')).toContainText('openapi: 3.1.0');

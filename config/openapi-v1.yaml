@@ -38,7 +38,7 @@ tags:
   - name: AI
     description: FlowAI assistant, metadata scanning, bandwidth optimization, and predictive scaling
   - name: Cluster
-    description: Multi-node worker enrollment and telemetry
+    description: Peer pairing, WireGuard link health, and revocation
   - name: Network
     description: WireGuard, Tailscale, and host network diagnostics
   - name: Operator
@@ -726,26 +726,134 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/GenericObject'
-  /admin/cluster/enroll:
-    post:
+  /admin/peers:
+    servers:
+      - url: /api/v1
+    get:
       tags:
         - Cluster
         - Operator
-      summary: Issue worker cluster enrollment token
-      description: Generates and persists a cluster enrollment PSK (`enrollment_token`) and worker setup instructions using HTTPS REST heartbeats against the cluster listener (`CLUSTER_MASTER_ADDR=https://<this-server>:50051`) with mTLS client certificates.
+      summary: List peer links, pending pairings, and local endpoints
+      security:
+        - cookieAuth: []
       responses:
         '200':
-          description: OK
+          description: Peer link status
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: object
+                required:
+                  - identity
+                  - peer_protocol
+                  - capabilities
+                  - rtt_warn_ms
+                  - peers
+                  - pairing_windows
+                  - pairing_attempts
+                  - detected_endpoints
+                properties:
+                  identity:
+                    oneOf:
+                      - $ref: '#/components/schemas/GenericObject'
+                      - type: 'null'
+                  peer_protocol:
+                    type: integer
+                  capabilities:
+                    type: array
+                    items:
+                      type: string
+                  rtt_warn_ms:
+                    type: number
+                  peers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PeerLink'
+                  pairing_windows:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - expires_at
+                      properties:
+                        id:
+                          type: string
+                        expires_at:
+                          type: integer
+                          description: Expiration as Unix seconds
+                  pairing_attempts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GenericObject'
+                  detected_endpoints:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GenericObject'
         '401':
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+  /admin/peers/pairing-window:
+    servers:
+      - url: /api/v1
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Open a single-use pairing window
       security:
         - cookieAuth: []
+      responses:
+        '201':
+          description: Pairing window opened
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - window_id
+                  - expires_at
+                  - ttl_seconds
+                  - pairing_string
+                  - https_url
+                  - endpoint
+                  - wg_port
+                  - tunnel_ip
+                  - wg_pubkey
+                properties:
+                  window_id:
+                    type: string
+                  expires_at:
+                    type: integer
+                    description: Expiration as Unix seconds
+                  ttl_seconds:
+                    type: integer
+                  pairing_string:
+                    type: string
+                    description: Secret one-use pairing string. Handle it like a password.
+                  https_url:
+                    type: string
+                  endpoint:
+                    type: string
+                    description: Host name or bare IP address reachable by the peer
+                  wg_port:
+                    type: integer
+                    description: WireGuard UDP port
+                    minimum: 1
+                    maximum: 65535
+                  tunnel_ip:
+                    type: string
+                  wg_pubkey:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
       requestBody:
@@ -753,95 +861,129 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
-  /admin/cluster/nodes:
-    get:
-      tags:
-        - Cluster
-        - Operator
-      summary: Get cluster nodes
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GenericObject'
-        '401':
-          $ref: '#/components/responses/Error'
-        '403':
-          $ref: '#/components/responses/Error'
-      security:
-        - cookieAuth: []
-  /admin/cluster/nodes/{id}:
-    parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: integer
+              type: object
+              properties:
+                https_url:
+                  type: string
+                  description: Public HTTPS origin of this server
+                endpoint:
+                  type: string
+                  description: Host name or bare IP address reachable by the peer
+                wg_port:
+                  type: integer
+                  description: WireGuard UDP port
+                  minimum: 1
+                  maximum: 65535
+              additionalProperties: false
     delete:
       tags:
         - Cluster
         - Operator
-      summary: Delete cluster nodes
+      summary: Close the open pairing windows
+      security:
+        - cookieAuth: []
       responses:
         '200':
-          description: OK
+          description: Number of closed windows
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GenericObject'
+                type: object
+                required:
+                  - closed
+                properties:
+                  closed:
+                    type: integer
+                    minimum: 0
         '401':
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
-      security:
-        - cookieAuth: []
+        default:
+          $ref: '#/components/responses/PeerError'
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
-  /admin/cluster/commands:
-    get:
-      tags:
-        - Cluster
-        - Operator
-      summary: List cluster worker commands and execution states
-      parameters:
-        - in: query
-          name: node_id
-          required: false
-          schema:
-            type: string
-        - in: query
-          name: limit
-          required: false
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GenericObject'
-        '401':
-          $ref: '#/components/responses/Error'
-        '403':
-          $ref: '#/components/responses/Error'
-      security:
-        - cookieAuth: []
-  /admin/cluster/nodes/{id}/commands:
+  /admin/peers/pairing-window/{id}:
+    servers:
+      - url: /api/v1
     parameters:
       - in: path
         name: id
         required: true
         schema:
           type: string
+        description: Pairing window identifier
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Close one pairing window
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Pairing window closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/peers/pair:
+    servers:
+      - url: /api/v1
     post:
       tags:
         - Cluster
         - Operator
-      summary: Enqueue a durable remote command for a cluster worker node
+      summary: Start pairing with a server
+      security:
+        - cookieAuth: []
+      responses:
+        '201':
+          description: Pairing attempt created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - link_id
+                  - attempt_id
+                  - name
+                  - remote_server_name
+                  - comparison_code
+                  - expires_at
+                  - state
+                properties:
+                  link_id:
+                    type: string
+                  attempt_id:
+                    type: string
+                  name:
+                    type: string
+                  remote_server_name:
+                    type: string
+                  comparison_code:
+                    type: string
+                    pattern: ^[0-9]{6}$
+                  expires_at:
+                    type: integer
+                    description: Expiration as Unix seconds
+                  state:
+                    type: string
+                    const: pending
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
       requestBody:
@@ -849,39 +991,176 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GenericObject'
+              type: object
+              required:
+                - pairing_string
+              properties:
+                pairing_string:
+                  type: string
+                  description: Secret one-use pairing string. Handle it like a password.
+                name:
+                  type: string
+                  description: Local display name for the peer
+                endpoint:
+                  type: string
+                  description: Host name or bare IP address reachable by the peer
+                local_name:
+                  type: string
+                  description: Display name offered to the peer
+              additionalProperties: false
+  /admin/peers/pairing/{attempt}/confirm:
+    servers:
+      - url: /api/v1
+    parameters:
+      - in: path
+        name: attempt
+        required: true
+        schema:
+          type: string
+        description: Pending pairing attempt identifier
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Confirm a pending pairing after comparing codes
+      security:
+        - cookieAuth: []
       responses:
         '200':
-          description: OK
+          description: Link activated
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenericObject'
-        '400':
-          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
-        '404':
-          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Optional local display name for the peer
+              additionalProperties: false
+  /admin/peers/pairing/{attempt}:
+    servers:
+      - url: /api/v1
+    parameters:
+      - in: path
+        name: attempt
+        required: true
+        schema:
+          type: string
+        description: Pending pairing attempt identifier
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Cancel a pending pairing
       security:
         - cookieAuth: []
-  /admin/cluster/nodes/{id}/metrics:
+      responses:
+        '200':
+          description: Pairing cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/peers/{id}/endpoint:
+    servers:
+      - url: /api/v1
     parameters:
       - in: path
         name: id
         required: true
         schema:
-          type: integer
-    get:
+          type: string
+        description: Peer link identifier
+    put:
       tags:
         - Cluster
         - Operator
-      summary: Get cluster nodes metrics
+      summary: Update a peer's WireGuard endpoint
+      security:
+        - cookieAuth: []
       responses:
         '200':
-          description: OK
+          description: Link after the endpoint change
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - peer
+                  - updated
+                properties:
+                  peer:
+                    $ref: '#/components/schemas/PeerLink'
+                  updated:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - endpoint
+              properties:
+                endpoint:
+                  type: string
+                  description: Host name or bare IP address reachable by the peer
+                wg_port:
+                  type: integer
+                  description: WireGuard UDP port
+                  minimum: 1
+                  maximum: 65535
+              additionalProperties: false
+  /admin/peers/{id}:
+    servers:
+      - url: /api/v1
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        description: Peer link identifier
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Revoke a peer link
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Link revoked
           content:
             application/json:
               schema:
@@ -890,8 +1169,10 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
-      security:
-        - cookieAuth: []
+        default:
+          $ref: '#/components/responses/PeerError'
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
   /admin/fileshare/download/{filename}:
     parameters:
       - in: path
@@ -6012,6 +6293,100 @@ paths:
             text/html:
               schema:
                 type: string
+  /peer-pairing/request:
+    servers:
+      - url: /api/v1
+    post:
+      tags:
+        - Cluster
+      summary: Request pairing using a single-use code
+      description: Server-to-server HTTPS bootstrap. Maximum request body 4 KiB. Limited to five requests per minute per trusted source IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - code
+                - name
+                - wg_pubkey
+                - endpoint
+                - wg_port
+                - tunnel_ip
+                - version
+                - timestamp
+              properties:
+                code:
+                  type: string
+                  description: Single-use pairing code
+                name:
+                  type: string
+                wg_pubkey:
+                  type: string
+                endpoint:
+                  type: string
+                  description: Host name or bare IP address reachable by the peer
+                wg_port:
+                  type: integer
+                  description: WireGuard UDP port
+                  minimum: 1
+                  maximum: 65535
+                tunnel_ip:
+                  type: string
+                version:
+                  type: string
+                peer_protocol:
+                  type: integer
+                  default: 1
+                timestamp:
+                  type: integer
+                  description: Sender clock as Unix seconds
+              additionalProperties: false
+      responses:
+        '200':
+          description: Pending pairing attempt
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - attempt_id
+                  - comparison_code
+                  - expires_at
+                  - server_name
+                  - version
+                  - peer_protocol
+                properties:
+                  attempt_id:
+                    type: string
+                  comparison_code:
+                    type: string
+                    pattern: ^[0-9]{6}$
+                  expires_at:
+                    type: integer
+                    description: Expiration as Unix seconds
+                  server_name:
+                    type: string
+                  version:
+                    type: string
+                  peer_protocol:
+                    type: integer
+        '429':
+          description: Pairing rate limit reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerErrorResponse'
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                description: Delay before retrying, in seconds
+        default:
+          $ref: '#/components/responses/PeerError'
+
 components:
   securitySchemes:
     cookieAuth:
@@ -6040,7 +6415,94 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    PeerError:
+      description: Typed peer lifecycle error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PeerErrorResponse'
   schemas:
+    PeerErrorResponse:
+      type: object
+      required:
+        - code
+        - server
+        - step
+        - message
+        - action
+      properties:
+        code:
+          type: string
+        server:
+          type: string
+        step:
+          type: string
+        message:
+          type: string
+        action:
+          type: string
+    PeerLink:
+      type: object
+      required:
+        - id
+        - name
+        - endpoint
+        - tunnel_ip
+        - wg_port
+        - state
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        endpoint:
+          type: string
+          description: Host name or bare IP address reachable by the peer
+        tunnel_ip:
+          type: string
+        wg_port:
+          type: integer
+          description: WireGuard UDP port
+          minimum: 1
+          maximum: 65535
+        state:
+          type: string
+          enum:
+            - pending
+            - active
+            - down
+            - revoked
+        peer_version:
+          type:
+            - string
+            - 'null'
+        peer_protocol:
+          type:
+            - integer
+            - 'null'
+        capabilities:
+          type: array
+          items:
+            type: string
+        compatibility:
+          type: string
+        rtt_ms:
+          type:
+            - number
+            - 'null'
+        high_latency:
+          type: boolean
+        pending_attempt_id:
+          type:
+            - string
+            - 'null'
+        pending_expires_at:
+          type:
+            - integer
+            - 'null'
+          description: Pending deadline as Unix seconds
+        grants:
+          $ref: '#/components/schemas/GenericObject'
     ErrorResponse:
       type: object
       required:

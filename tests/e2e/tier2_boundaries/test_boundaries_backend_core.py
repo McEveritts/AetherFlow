@@ -15,8 +15,7 @@ RUNNER_RS = "backend-rs/crates/af-runner/src/lib.rs"
 NETWORK_RS = "backend-rs/crates/af-runner/src/network.rs"
 QUOTA_RS = "backend-rs/crates/af-runner/src/quota.rs"
 DB_RS = "backend-rs/crates/af-db/src/lib.rs"
-CLUSTER_DAEMON_RS = "backend-rs/crates/af-services/src/cluster_daemon.rs"
-INTELLIGENCE_RS = "backend-rs/crates/af-api/src/intelligence.rs"
+PEERS_RS = "backend-rs/crates/af-api/src/peers/mod.rs"
 EMBED_RS = "backend-rs/crates/af-api/src/embed.rs"
 ACTIONS_TESTS_RS = "backend-rs/crates/af-api/src/mcbrowser/actions_tests.rs"
 ROUTES_RS = "backend-rs/crates/af-api/src/routes.rs"
@@ -158,50 +157,66 @@ class TestB09ConnectionPoolingCapped(TestCase):
         self.assert_true(bool(db_code and ".max_size(1)" in db_code), "B09: Pool max_size must be capped at 1 for pure WAL reliability")
 
 
-class TestB10ClusterDoubleInitSafe(TestCase):
+class TestB10PeerHealthSingleStart(TestCase):
     def __init__(self):
-        super().__init__("T2_B10_01", "F10", 2, "Calling cluster initialization multiple times is safe and idempotent")
+        super().__init__("T2_B10_01", "F10", 2, "Starting the peer runtime twice cannot spawn duplicate health loops")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        cluster_code = inspector.read_file(CLUSTER_DAEMON_RS)
-        self.assert_true(bool(cluster_code and "start_cluster_runtime" in cluster_code and "ensure_cluster_schema" in cluster_code), "B10: Cluster initialization must be idempotent")
+        peers = inspector.read_file(PEERS_RS) or ""
+        self.assert_true(
+            "health_shutdown.lock().await" in peers and "health_guard.is_none()" in peers,
+            "B10: guard peer health loop creation",
+        )
 
 
-class TestB10ClusterNilManagerHandlesCleanly(TestCase):
+class TestB10PeerListWithoutIdentity(TestCase):
     def __init__(self):
-        super().__init__("T2_B10_02", "F10", 2, "Cluster endpoints respond safely even with empty node tables")
+        super().__init__("T2_B10_02", "F10", 2, "Peer listing represents an unconfigured identity and empty links")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        handlers = inspector.read_file(INTELLIGENCE_RS)
-        self.assert_true(bool(handlers and "get_cluster_nodes" in handlers), "B10: intelligence.rs must implement safe cluster node queries")
+        links = inspector.read_file("backend-rs/crates/af-api/src/peers/links.rs") or ""
+        self.assert_true(
+            "identity.map" in links and "list_peer_links" in links and '"peers": peer_views' in links,
+            "B10: the list response must include optional identity and a peer list",
+        )
 
 
-class TestB10ClusterInvalidEnrollTokenRejected(TestCase):
+class TestB10PairingCodeDigest(TestCase):
     def __init__(self):
-        super().__init__("T2_B10_03", "F10", 2, "Joining cluster validates PSK enrollment tokens cryptographically")
+        super().__init__("T2_B10_03", "F10", 2, "Pairing validates a code against its stored digest")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        handlers = inspector.read_file(INTELLIGENCE_RS)
-        cluster_code = inspector.read_file(CLUSTER_DAEMON_RS)
-        self.assert_true(bool(handlers and "enroll_worker" in handlers and cluster_code and "verify_cluster_psk" in cluster_code), "B10: Cluster worker enrollment must verify PSK tokens")
+        pairing = inspector.read_file("backend-rs/crates/af-api/src/peers/pairing.rs") or ""
+        self.assert_true(
+            "code_hash" in pairing and "sha256_prefixed" in pairing and "constant_time_eq" in pairing,
+            "B10: the pairing code must be validated against a digest",
+        )
 
 
-class TestB10ClusterRemoveMasterNodePrevented(TestCase):
+class TestB10PeerRevocationInvalidatesLink(TestCase):
     def __init__(self):
-        super().__init__("T2_B10_04", "F10", 2, "Attempting to remove worker node handles lookup and errors safely")
+        super().__init__("T2_B10_04", "F10", 2, "Revocation disables link authorization and cleans up owned resources")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        handlers = inspector.read_file(INTELLIGENCE_RS)
-        self.assert_true(bool(handlers and "remove_worker" in handlers), "B10: Removing cluster worker node must be handled in intelligence.rs")
+        links = inspector.read_file("backend-rs/crates/af-api/src/peers/links.rs") or ""
+        self.assert_true(
+            "inbound_token_hash = NULL" in links and "remove_owned_wg_peer_locked" in links,
+            "B10: link revocation must invalidate the credential and clean up owned resources",
+        )
 
 
-class TestB10ClusterEmptyMetricsHandled(TestCase):
+class TestB10PeerRoutesExcludeLegacyAlias(TestCase):
     def __init__(self):
-        super().__init__("T2_B10_05", "F10", 2, "Querying metrics for newly enrolled node handles empty series cleanly")
+        super().__init__("T2_B10_05", "F10", 2, "Peer pairing and administration exclude the legacy API prefix")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        handlers = inspector.read_file(INTELLIGENCE_RS)
-        self.assert_true(bool(handlers and "get_worker_metrics" in handlers), "B10: Node metrics query must handle empty telemetry series")
+        routes = inspector.read_file(ROUTES_RS) or ""
+        self.assert_true(
+            'let v1 = build_v1_router_with_options(true)' in routes
+            and 'let legacy = build_v1_router_with_options(false)' in routes
+            and '.nest("/api/v1", v1)' in routes and '.nest("/api", legacy)' in routes,
+            "B10: enable peer routes only in the versioned API router",
+        )
 
 
 class TestB11RemovedRouteAccessReturns404(TestCase):
@@ -305,7 +320,7 @@ def get_tests():
         TestB07PayloadLimitExceededRejected(), TestB07CommandInjectionInPackageRejected(), TestB07CommandInjectionInHostsRejected(), TestB07InvalidActionOnRunnerRejected(), TestB07UnknownRunnerEndpointReturns404(),
         TestB08SocketUnavailableFallbackGraceful(), TestB08SocketTimeoutEnforced(), TestB08NetworkRustHandlesMissingWg(), TestB08QuotaManagerHandlesInvalidUser(), TestB08SystemdSandboxHandlesMissingPackage(),
         TestB09DuplicateAppNameRejected(), TestB09MigrationIdempotentOnReRun(), TestB09SchemaVersionRecorded(), TestB09WalJournalModePreserved(), TestB09ConnectionPoolingCapped(),
-        TestB10ClusterDoubleInitSafe(), TestB10ClusterNilManagerHandlesCleanly(), TestB10ClusterInvalidEnrollTokenRejected(), TestB10ClusterRemoveMasterNodePrevented(), TestB10ClusterEmptyMetricsHandled(),
+        TestB10PeerHealthSingleStart(), TestB10PeerListWithoutIdentity(), TestB10PairingCodeDigest(), TestB10PeerRevocationInvalidatesLink(), TestB10PeerRoutesExcludeLegacyAlias(),
         TestB11RemovedRouteAccessReturns404(), TestB11BuildFailsIfDynamicRouteReintroduced(), TestB11PathSelectorFailsGracefullyOnNetworkError(), TestB11NoFsPolyfillsInClientBundle(), TestB11IndexHtmlProducedInExport(),
         TestB12TestsCleanupTempFiles(), TestB12TestsRunSafelyInParallel(), TestB12MockRunnerHandlesMalformedPackets(), TestB12DatabaseRollbackOnTestFailure(), TestB12AllBackendPackagesCompile()
     ]

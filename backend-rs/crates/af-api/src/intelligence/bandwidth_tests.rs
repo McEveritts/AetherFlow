@@ -4,13 +4,9 @@ use super::bandwidth::{
     apply_transmission_bandwidth_to_url, load_transmission_rpc_credentials_from_paths,
     TRANSMISSION_SETTINGS_CANDIDATES,
 };
-use super::cluster::{dispatch_worker_command, enroll_worker, list_worker_commands, remove_worker};
 use super::mediaflow::probe_video_codec_and_size_with_timeout;
-use crate::auth::AuthUser;
-use axum::extract::Path;
 use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Json};
-use std::collections::HashMap;
+use axum::response::IntoResponse;
 
 #[tokio::test]
 async fn transmission_409_session_id_handshake_and_qbittorrent_webui_succeed() {
@@ -282,7 +278,7 @@ async fn bandwidth_apply_validates_deluge_transmission_jsonrpc_and_compensates_q
 }
 
 #[tokio::test]
-async fn p3_bandwidth_zero_unlimited_csrf_role_sanitization_and_cluster_admin_guards() {
+async fn p3_bandwidth_zero_unlimited_csrf_and_role_sanitization() {
     // 1. Chat history role sanitization: system, developer, tool -> user; assistant/model -> assistant
     let sanitized = sanitize_chat_history(vec![
         ChatMessage {
@@ -377,50 +373,6 @@ async fn p3_bandwidth_zero_unlimited_csrf_role_sanitization_and_cluster_admin_gu
         .unwrap_err();
     assert!(!qb_err.mutated);
     qb_s.abort();
-
-    // 4. Non-admin users are blocked with 403 Forbidden on enroll_worker, remove_worker, dispatch_worker_command, list_worker_commands
-    let viewer = AuthUser {
-        user_id: 77,
-        username: "viewer".to_string(),
-        role: "user".to_string(),
-        jti: "jti-viewer".to_string(),
-        plugin_id: None,
-        plugin_scopes: Vec::new(),
-    };
-    assert_eq!(
-        enroll_worker(axum::extract::Extension(viewer.clone()))
-            .await
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        remove_worker(
-            axum::extract::Extension(viewer.clone()),
-            Path("node-1".to_string())
-        )
-        .await
-        .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        dispatch_worker_command(
-            axum::extract::Extension(viewer.clone()),
-            Path("node-1".to_string()),
-            Json(serde_json::json!({"cmd_type": "restart_service", "target": "sonarr"})),
-        )
-        .await
-        .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        list_worker_commands(
-            axum::extract::Extension(viewer),
-            axum::extract::Query(HashMap::new()),
-        )
-        .await
-        .status(),
-        StatusCode::FORBIDDEN
-    );
 }
 
 #[tokio::test]

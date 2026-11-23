@@ -2139,11 +2139,11 @@ async fn standalone_startup_is_dormant_until_identity_is_configured() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. Router Integration: Versioned-Only Peer Routes, Admin/CSRF Guards,
-//    4 KiB Public Bootstrap Limit & Preserved Legacy Cluster Routes
+//    4 KiB Public Bootstrap Limit & Retired Legacy Cluster Routes
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_preserves_legacy_cluster(
+async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_retires_legacy_cluster(
 ) {
     if crate::plugins::tests::run_plugin_test_in_subprocess() {
         return;
@@ -2377,20 +2377,111 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_p
         serde_json::from_slice(&to_bytes(pub_closed.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(pub_closed_json["code"], "WINDOW_CLOSED");
 
-    // 8. Legacy /api/v1/admin/cluster/nodes stays preserved through P3.
-    let legacy_cluster = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/admin/cluster/nodes")
-                .header(header::HOST, "localhost")
-                .header(header::USER_AGENT, "peer-router-test")
-                .header(header::AUTHORIZATION, format!("Bearer {admin_jwt}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(legacy_cluster.status(), StatusCode::OK);
+    // 8. Legacy cluster routes are retired on both /api/v1 and /api legacy aliases.
+    for (method, path, payload) in [
+        (Method::GET, "/api/v1/admin/cluster/nodes", None),
+        (Method::GET, "/api/admin/cluster/nodes", None),
+        (Method::POST, "/api/v1/admin/cluster/enroll", Some("{}")),
+        (Method::POST, "/api/admin/cluster/enroll", Some("{}")),
+        (Method::GET, "/api/v1/admin/cluster/commands", None),
+        (Method::GET, "/api/admin/cluster/commands", None),
+        (Method::DELETE, "/api/v1/admin/cluster/nodes/node-1", None),
+        (Method::DELETE, "/api/admin/cluster/nodes/node-1", None),
+        (
+            Method::GET,
+            "/api/v1/admin/cluster/nodes/node-1/metrics",
+            None,
+        ),
+        (Method::GET, "/api/admin/cluster/nodes/node-1/metrics", None),
+        (
+            Method::POST,
+            "/api/v1/admin/cluster/nodes/node-1/commands",
+            Some(r#"{"cmd_type":"ping","target":""}"#),
+        ),
+        (
+            Method::POST,
+            "/api/admin/cluster/nodes/node-1/commands",
+            Some(r#"{"cmd_type":"ping","target":""}"#),
+        ),
+    ] {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(path)
+            .header(header::HOST, "localhost")
+            .header(header::USER_AGENT, "peer-router-test")
+            .header(header::AUTHORIZATION, format!("Bearer {admin_jwt}"));
+        let body = match payload {
+            Some(json_body) => {
+                builder = builder.header(header::CONTENT_TYPE, "application/json");
+                Body::from(json_body)
+            }
+            None => Body::empty(),
+        };
+        let resp = app
+            .clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "expected retired legacy cluster route {method} {path} to return 404"
+        );
+    }
+
+    // 9. Auth, media, backup, and settings routes remain intact on both /api/v1 and /api aliases.
+    for (path, expect_legacy_deprecation) in [
+        ("/api/v1/auth/session", false),
+        ("/api/auth/session", true),
+        ("/api/v1/admin/mediaflow/queue", false),
+        ("/api/admin/mediaflow/queue", true),
+        ("/api/v1/admin/backup/list", false),
+        ("/api/admin/backup/list", true),
+        ("/api/v1/admin/settings", false),
+        ("/api/admin/settings", true),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(header::HOST, "localhost")
+                    .header(header::USER_AGENT, "peer-router-test")
+                    .header(header::AUTHORIZATION, format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "expected unaffected route {path} to remain 200 OK"
+        );
+        if expect_legacy_deprecation {
+            assert_eq!(
+                resp.headers()
+                    .get("Deprecation")
+                    .and_then(|v| v.to_str().ok()),
+                Some("true"),
+                "expected legacy alias {path} to carry Deprecation header"
+            );
+        }
+    }
+
+    // 10. Peer runtime startup stays dormant on an unlinked fresh database without legacy cluster startup.
+    let global_rt = PeerRuntime::global();
+    super::start().await;
+    assert!(
+        global_rt.listener_state.lock().await.is_none(),
+        "dormant peer startup must not bind tunnel listener without configured peer identity"
+    );
+    run_health_tick(&global_rt).await;
+    assert!(
+        global_rt.listener_state.lock().await.is_none(),
+        "dormant peer health tick must leave tunnel listener unbound"
+    );
+    super::shutdown().await;
 
     let _ = std::fs::remove_dir_all(root);
 }

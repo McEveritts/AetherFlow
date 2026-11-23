@@ -1,3 +1,10 @@
+## Unreleased — Peer Clustering
+
+- The Cluster tab pairs servers over a dedicated WireGuard link and shows link health, protocol compatibility, and latency.
+- Breaking change. Migration 26 removes the legacy master/worker enrollment, node, and command tables. The `CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes are retired. Pair previously enrolled servers again from the Cluster tab.
+
+---
+
 ## Nightly Patch Notes — November 19, 2026 — Dashboard and operator workflows
 
 - Overview charts align live and historical samples on a UTC time axis, show gaps in collection, and support six telemetry windows. Daily transfer totals and capacity charts use server-side history aggregation.

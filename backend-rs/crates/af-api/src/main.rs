@@ -325,7 +325,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Background Subsystems: Metrics Recorder, Auto-Heal, Smart Backup, App Update Watcher,
-    // Cluster Master/Worker Runtime, Notification Rule Engine, and Jellyfin Streaming Poller
+    // Peer Clustering Runtime, Notification Rule Engine, and Jellyfin Streaming Poller
     if !disable_workers {
         af_services::lifecycle_cache::start_worker();
         af_services::workers::start_metrics_recorder();
@@ -335,7 +335,6 @@ async fn async_main() -> anyhow::Result<()> {
         af_services::workers::start_smart_backup_scheduler();
         af_services::workers::start_app_update_watcher();
         af_services::workers::start_mediaflow_poller();
-        af_services::cluster_daemon::start_cluster_runtime();
         peers::start().await;
         notifications_ext::start_notification_engine();
         streaming_ext::start_streaming_monitor();

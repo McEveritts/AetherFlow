@@ -196,7 +196,9 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
 
     def test_openapi_v1_route_parity_with_rust_router(self) -> None:
         routes_rs = (ROOT / "backend-rs/crates/af-api/src/routes.rs").read_text(encoding="utf-8")
-        v1_sec = routes_rs.split("fn build_v1_router() -> Router {", 1)[1].split("\n}\n", 1)[0]
+        v1_sec = routes_rs.split(
+            "fn build_v1_router_with_options(include_peer_routes: bool) -> Router {", 1
+        )[1].split("\n}\n", 1)[0]
 
         blocks = {}
         for name in (
@@ -233,11 +235,18 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
                 ):
                     mcb_auth.extend(_extract_router_routes(fn_m.group(1)))
 
+        peers_rs = (ROOT / "backend-rs/crates/af-api/src/peers/mod.rs").read_text(encoding="utf-8")
+
+        def peer_routes(factory: str) -> list[tuple[str, list[str]]]:
+            body = peers_rs.split(f"fn {factory}(", 1)[1].split("\n}\n", 1)[0]
+            return _extract_router_routes(body)
+
         expected: dict[str, set[str]] = {}
 
         def add(prefix: str, items: list[tuple[str, list[str]]]) -> None:
             for p, ms in items:
-                fp = re.sub(r":([A-Za-z0-9_]+)", r"{\1}", prefix + p)
+                mounted_path = prefix if prefix and p == "/" else prefix + p
+                fp = re.sub(r":([A-Za-z0-9_]+)", r"{\1}", mounted_path)
                 fp = re.sub(r"\*([A-Za-z0-9_]+)", r"{\1}", fp)
                 expected.setdefault(fp, set()).update(ms)
 
@@ -245,6 +254,12 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         add("/auth", blocks["auth_routes"] + blocks["ai_limited_auth"] + mcb_auth)
         add("/admin", blocks["admin_routes"] + blocks["quota_guarded_upload"])
         add("", blocks["compat_routes"] + blocks["ingress_compat_routes"])
+        peer_admin_routes = peer_routes("admin_routes_with_runtime")
+        peer_public_routes = peer_routes("public_routes_with_runtime")
+        self.assertIn('.nest("/peers", crate::peers::admin_routes())', v1_sec)
+        self.assertIn('router.merge(crate::peers::public_routes())', v1_sec)
+        add("/admin/peers", peer_admin_routes)
+        add("", peer_public_routes)
 
         spec = yaml.safe_load((ROOT / "config/openapi-v1.yaml").read_text(encoding="utf-8"))
         documented: dict[str, set[str]] = {}
@@ -255,6 +270,9 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             documented[path_key] = methods
 
         self.assertEqual(documented, expected)
+        for path in documented:
+            if path.startswith(("/admin/peers", "/peer-pairing/")):
+                self.assertEqual(spec["paths"][path]["servers"], [{"url": "/api/v1"}])
 
         backup_item = spec["paths"]["/admin/backup/download/{filename}"]
         for method in ("post", "get"):

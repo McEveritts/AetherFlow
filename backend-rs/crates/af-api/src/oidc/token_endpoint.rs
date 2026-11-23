@@ -138,7 +138,7 @@ pub(super) fn authenticate_oidc_client(
     let mut hasher = Sha256::new();
     hasher.update(client_secret.as_bytes());
     let computed = hex::encode(hasher.finalize());
-    if af_services::cluster_daemon::constant_time_eq(computed.as_bytes(), stored_hash.as_bytes()) {
+    if af_models::constant_time_eq(computed.as_bytes(), stored_hash.as_bytes()) {
         Ok(false)
     } else {
         Err(ClientAuthError::InvalidClient)
@@ -161,7 +161,7 @@ pub(super) fn verify_pkce(verifier: &str, challenge: &str, method: &str) -> bool
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let computed = URL_SAFE_NO_PAD.encode(hasher.finalize());
-    af_services::cluster_daemon::constant_time_eq(computed.as_bytes(), challenge.as_bytes())
+    af_models::constant_time_eq(computed.as_bytes(), challenge.as_bytes())
 }
 
 #[derive(Serialize, Deserialize)]

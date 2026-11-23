@@ -6,7 +6,7 @@ Tier 3: Cross-Feature Combinations (Pairwise Interoperability)
 3. DirectoryPicker + Rust FS Browser + MediaFlow Tab + Cookie Auth
 4. Quotas Panel + Privileged Runner Quota + Quota Manager Enforcement
 5. Network VPN Panel + Privileged Runner Network + WireGuard/Tailscale
-6. Cluster Manager Startup + Cluster Nodes Panel + Worker Enrollment
+6. Peer Runtime + Cluster Tab + Peer Administration
 7. External Rust WASM Pipeline + Embedded SPA + Obsidian CSS Tokens
 8. Systemd Privilege Units + Sudoers Purge + Caller Migration + Sandbox
 9. Debian 13 APT Sources + Core OS Detection + Package Modernization + Keyrings
@@ -93,17 +93,18 @@ class TestComboNetworkVpnRunner(TestCase):
         self.assert_true(net_ui and runner_net and caller_net, "Combo 05: Network panel, runner network socket, and network handler must be satisfied")
 
 
-class TestComboClusterTelemetryManagement(TestCase):
+class TestComboPeerClusterManagement(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_06", "F10+F27", 3, "Cluster manager startup cleanliness, ClusterTab UI, and worker telemetry")
+        super().__init__("T3_COMBO_06", "F10+F27", 3, "Peer runtime, Cluster tab, and peer administration")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        main_code = inspector.read_file(MAIN_RS)
-        routes_code = inspector.read_file(ROUTES_RS)
-        cluster_init = bool(main_code and "start_cluster_runtime" in main_code)
-        cluster_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/cluster.rs")
-        routes = bool(routes_code and "/cluster/nodes" in routes_code)
-        self.assert_true(cluster_init and cluster_ui and routes, "Combo 06: Cluster startup, UI tab, and node endpoints must be satisfied")
+        main_code = inspector.read_file(MAIN_RS) or ""
+        routes_code = inspector.read_file(ROUTES_RS) or ""
+        cluster_ui = inspector.file_exists("frontend-rs/crates/af-web-app/src/tabs/cluster/mod.rs")
+        self.assert_true(
+            "peers::start().await" in main_code and cluster_ui and 'nest("/peers", crate::peers::admin_routes())' in routes_code,
+            "Combo 06: the peer runtime, Cluster tab, and admin peer routes must be connected",
+        )
 
 
 class TestComboExternalWasmSpaAtmosphere(TestCase):
@@ -193,7 +194,7 @@ def get_tier3_tests():
         TestComboPathSelectorFsMediaflow(),
         TestComboQuotasRunner(),
         TestComboNetworkVpnRunner(),
-        TestComboClusterTelemetryManagement(),
+        TestComboPeerClusterManagement(),
         TestComboExternalWasmSpaAtmosphere(),
         TestComboPrivilegeBoundarySandbox(),
         TestComboDebian13AptPackaging(),

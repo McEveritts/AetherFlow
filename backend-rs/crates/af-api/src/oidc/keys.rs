@@ -371,10 +371,7 @@ pub(super) fn is_accepted_oidc_issuer(
     if let Ok(cfg_iss) = env::var("OIDC_ISSUER") {
         let cfg_trimmed = cfg_iss.trim().trim_end_matches('/');
         if !cfg_trimmed.is_empty() {
-            return af_services::cluster_daemon::constant_time_eq(
-                normalized.as_bytes(),
-                cfg_trimmed.as_bytes(),
-            );
+            return af_models::constant_time_eq(normalized.as_bytes(), cfg_trimmed.as_bytes());
         }
     }
     if normalized == get_oidc_issuer_for_peer(headers, peer_ip) {

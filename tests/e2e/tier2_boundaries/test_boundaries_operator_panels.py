@@ -4,7 +4,7 @@ Features:
 - B24: Network & VPN Panel Boundaries
 - B25: Notifications & Alerting Panel Boundaries
 - B26: Storage Quotas Panel Boundaries
-- B27: Cluster Nodes Panel Boundaries
+- B27: Cluster Peer Links Panel Boundaries
 """
 
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
@@ -14,7 +14,10 @@ WIREGUARD_RS = "frontend-rs/crates/af-web-app/src/tabs/network/wireguard.rs"
 TAILSCALE_RS = "frontend-rs/crates/af-web-app/src/tabs/network/tailscale.rs"
 NOTIFICATIONS_RS = "frontend-rs/crates/af-web-app/src/tabs/notifications.rs"
 QUOTAS_RS = "frontend-rs/crates/af-web-app/src/tabs/quotas.rs"
-CLUSTER_RS = "frontend-rs/crates/af-web-app/src/tabs/cluster.rs"
+CLUSTER_DIR = "frontend-rs/crates/af-web-app/src/tabs/cluster"
+CLUSTER_MOD = f"{CLUSTER_DIR}/mod.rs"
+CLUSTER_PEERS = f"{CLUSTER_DIR}/peers.rs"
+CLUSTER_PAIRING = f"{CLUSTER_DIR}/pairing.rs"
 
 
 # ============================================================================
@@ -186,51 +189,67 @@ class TestB26NonAdminQuotasForbidden(TestCase):
 
 
 # ============================================================================
-# B27: Cluster Nodes Panel Boundaries
+# B27: Cluster Peer Links Panel Boundaries
 # ============================================================================
-class TestB27MasterNodeRemovalPrevented(TestCase):
+class TestB27PeerRevocationConfirmation(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_01", "F27", 2, "UI disables delete button for master / coordinator cluster node")
+        super().__init__("T2_B27_01", "F27", 2, "Link revocation requires a confirmation dialog")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and 'value["role"] == "master"' in tab and 'selected.get()["role"] == "master"' in tab), "B27: cluster.rs must prevent master node deletion")
+        peers = inspector.read_file(CLUSTER_PEERS) or ""
+        self.assert_true(
+            "revoke" in peers.lower() and "dialog" in peers.lower(),
+            "B27: peer revocation must have a confirmation dialog",
+        )
 
 
-class TestB27ExpiredEnrollTokenHandling(TestCase):
+class TestB27PairingExpiryDisplayed(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_02", "F27", 2, "Enroll worker modal displays enrollment token and instructions")
+        super().__init__("T2_B27_02", "F27", 2, "Pairing countdown uses the server expiry")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "enrollment_token" in tab and "/api/v1/admin/cluster/enroll" in tab), "B27: Worker enrollment must display token details")
+        pairing = inspector.read_file(CLUSTER_PAIRING) or ""
+        self.assert_true(
+            "expires_at" in pairing and "format_countdown" in pairing,
+            "B27: display pairing time relative to the server deadline",
+        )
 
 
-class TestB27StaleHeartbeatWarningBadge(TestCase):
+class TestB27PeerCompatibilityDisplayed(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_03", "F27", 2, "ClusterTab tracks node heartbeat age and status")
+        super().__init__("T2_B27_03", "F27", 2, "ClusterTab handles peer compatibility and RTT")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "heartbeat_age" in tab and "last_heartbeat" in tab), "B27: cluster.rs must show node heartbeat status")
+        peers = inspector.read_file(CLUSTER_PEERS) or ""
+        self.assert_true(
+            "compatibility" in peers and "rtt_ms" in peers,
+            "B27: show compatibility and tolerate unavailable RTT",
+        )
 
 
-class TestB27ClusterUninitializedGuidance(TestCase):
+class TestB27ClusterUnlinkedGuidance(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_04", "F27", 2, "ClusterTab renders EmptyState cleanly when no worker nodes exist")
+        super().__init__("T2_B27_04", "F27", 2, "ClusterTab handles an empty peer list")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "EmptyState" in tab), "B27: cluster.rs must handle empty/uninitialized cluster state")
+        tab = inspector.read_file(CLUSTER_MOD) or ""
+        peers = inspector.read_file(CLUSTER_PEERS) or ""
+        self.assert_true(
+            "EmptyState" in tab + peers,
+            "B27: render an empty state when no peers are linked",
+        )
 
 
-class TestB27JoinCommandClipboardConfirmation(TestCase):
+class TestB27PairingStringClipboard(TestCase):
     def __init__(self):
-        super().__init__("T2_B27_05", "F27", 2, "Copying join command or token triggers 'Copied to clipboard' toast confirmation")
+        super().__init__("T2_B27_05", "F27", 2, "Pairing window supports copying its pairing string")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file(CLUSTER_RS)
-        self.assert_true(bool(tab and "clipboard()" in tab and "Copied to clipboard" in tab), "B27: Worker enroll modal must support clipboard copying")
+        pairing = inspector.read_file(CLUSTER_PAIRING) or ""
+        self.assert_true(
+            "pairing_string" in pairing and "clipboard" in pairing,
+            "B27: the one-time pairing string must be copyable",
+        )
 
 
 def get_tests():
@@ -238,5 +257,5 @@ def get_tests():
         TestB24InvalidWireGuardKeyRejected(), TestB24TailscaleCidrRouteValidation(), TestB24PeerDeletionPromptsConfirmation(), TestB24TailscaleDaemonOfflineState(), TestB24NonAdminNetworkAccessForbidden(),
         TestB25EmptyChannelUrlRejected(), TestB25TestAlertTimeoutHandling(), TestB25RuleDeletionConfirmation(), TestB25SecretTokensMaskedInUi(), TestB25DuplicateRuleNamesHandled(),
         TestB26NegativeQuotaValueRejected(), TestB26QuotaExceedingDiskCapacityWarned(), TestB26WebhookPayloadViewerExpandable(), TestB26QuotaRefreshThrottling(), TestB26NonAdminQuotasForbidden(),
-        TestB27MasterNodeRemovalPrevented(), TestB27ExpiredEnrollTokenHandling(), TestB27StaleHeartbeatWarningBadge(), TestB27ClusterUninitializedGuidance(), TestB27JoinCommandClipboardConfirmation()
+        TestB27PeerRevocationConfirmation(), TestB27PairingExpiryDisplayed(), TestB27PeerCompatibilityDisplayed(), TestB27ClusterUnlinkedGuidance(), TestB27PairingStringClipboard()
     ]

@@ -124,6 +124,12 @@ pub const FILESHARE_PENDING_PUBLISHES_SCHEMA: &str = "
         ON fileshare_pending_publishes(user_id);
 ";
 
+pub(crate) const LEGACY_CLUSTER_REMOVAL_MIGRATION_26_SQL: &[&str] = &[
+    "DROP TABLE IF EXISTS cluster_commands;",
+    "DROP TABLE IF EXISTS cluster_enrollment_tokens;",
+    "DROP TABLE IF EXISTS cluster_nodes;",
+];
+
 pub fn init_db() -> anyhow::Result<()> {
     let db_path = try_resolve_db_path()?;
     if db_path != ":memory:" && !db_path.starts_with("file:") {
@@ -193,17 +199,6 @@ pub fn init_db() -> anyhow::Result<()> {
             ip_address TEXT,
             user_agent TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS cluster_nodes (
-            id TEXT PRIMARY KEY,
-            hostname TEXT NOT NULL,
-            address TEXT NOT NULL,
-            psk_hash TEXT NOT NULL,
-            role TEXT DEFAULT 'worker',
-            status TEXT DEFAULT 'offline',
-            last_heartbeat DATETIME,
-            enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS oidc_clients (
@@ -443,7 +438,6 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_client ON oidc_refresh_tokens(client_id);",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_expires ON oidc_device_codes(expires_at);",
-            "CREATE INDEX IF NOT EXISTS idx_cluster_nodes_status ON cluster_nodes(status);",
             "CREATE INDEX IF NOT EXISTS idx_billing_provider_event ON billing_webhook_events(provider, event_id);",
             "CREATE INDEX IF NOT EXISTS idx_log_bookmarks_user ON log_bookmarks(user_id);",
         ],
@@ -782,6 +776,22 @@ pub fn init_db() -> anyhow::Result<()> {
     anyhow::ensure!(
         peer_clustering_migration == 1,
         "Peer clustering migration v25 failed"
+    );
+
+    migrate(
+        &conn,
+        26,
+        "Remove legacy master/worker clustering",
+        LEGACY_CLUSTER_REMOVAL_MIGRATION_26_SQL,
+    )?;
+    let legacy_cluster_removal_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 26",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        legacy_cluster_removal_migration == 1,
+        "Legacy master/worker clustering removal migration v26 failed"
     );
 
     ensure_security_schema_invariants(&conn)?;

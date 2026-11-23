@@ -105,7 +105,7 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 
 ---
 
-## Release Engine, Package Executor & Cluster Flags
+## Release Engine & Package Executor
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
@@ -114,8 +114,23 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 | `AETHERFLOW_FORCE_BASH_RELEASE` | Escape-hatch flag (`1` / `true`, or `AETHERFLOW_RELEASE_ENGINE=bash`) routing `/v1/self-update` through legacy `deploy/release-manager.sh` instead of the default native Rust `af-release` engine (`AETHERFLOW_ENABLE_RUST_RELEASE` / `AETHERFLOW_USE_RUST_RELEASE` remain accepted no-op compatibility flags). | `false` |
 | `AF_ENABLE_LEGACY_SEEDBOX_ALIASES` | Setup opt-in flag (`1`) enabling legacy MD5 Digest `/etc/htpasswd` and Apache `aliases-seedbox.conf` on fresh installations (existing upgraded hosts are preserved automatically). | `0` |
 | `AF_HEAL_AUTO_APPROVE` | When `1` or `true`, `af-heal` (10-second poll loop) restarts failed managed systemd units automatically via `aetherflow-runner` with exponential backoff (`10s * 2^attempt`, up to 3 retries) instead of queueing an Approval Inbox action. | `false` |
-| `CLUSTER_MODE` | Multi-node fleet topology (`standalone`, `master`, `worker`). | `standalone` |
-| `CLUSTER_PSK` | Pre-shared key validated via `X-Cluster-PSK` for cluster heartbeat and metrics endpoints. | `(Optional)` |
+
+---
+
+## Peer clustering and API logs
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `AF_PEER_TUNNEL_CIDR` | Subnet for peer tunnel addresses on `afpeer0`. Configure a subnet that avoids existing routes. | `10.231.0.0/16` |
+| `AF_PEER_WG_PORT` | UDP listen port for the dedicated WireGuard interface. | `51821` |
+| `AF_PEER_LISTEN_PORT` | TCP port for the API peer listener on the local tunnel address. | `9443` |
+| `AF_PEER_MAX_CONN` | Concurrent requests admitted per peer link. | `64` |
+| `AF_PEER_RTT_WARN_MS` | Link RTT threshold in milliseconds for the Cluster warning. | `25` |
+| `AF_LOG_FORMAT` | Set to `json` for structured API logs. The API continues to honor `RUST_LOG`. | Text |
+| `AF_PEER_MAX_WS` | Planned P6 limit on concurrent proxied WebSockets per peer link. | `16` |
+| `AF_TRANSCODE_REAL_FFMPEG` | Planned P8–P9 path to the real FFmpeg binary used by the Jellyfin shim and worker. | `/usr/lib/jellyfin-ffmpeg/ffmpeg` |
+
+The Cluster tab guides pairing and endpoint selection. [Peer clustering operator guide](peer-clustering.md)
 
 ---
 
