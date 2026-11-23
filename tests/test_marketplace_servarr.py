@@ -148,7 +148,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 
     def rebase(self, source):
         return replace_paths_once(source, [(prefix, str(self.root) + prefix) for prefix in
-            ('/opt', '/etc/', '/var/', '/tmp/', '/install', '/home/', '/usr/local/')])
+            ('/opt', '/etc/', '/var/', '/tmp/', '/run/', '/install', '/home/', '/usr/local/')])
 
     def file(self, relative, contents):
         target = self.root / relative

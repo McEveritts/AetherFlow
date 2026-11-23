@@ -11,7 +11,7 @@ id = "generic-api-key"
   condition = "AND"
   regexTarget = "secret"
   paths = [
-    '''^backend-rs/crates/af-api/src/middlewares\.rs$''',
+    '''^backend-rs/crates/af-api/src/middlewares(?:/tests)?\.rs$''',
   ]
   regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
 
@@ -43,7 +43,7 @@ id = "generic-api-key"
   description = "Synthetic lifecycle redaction canary in the API persistence regression"
   condition = "AND"
   regexTarget = "secret"
-  paths = ['''^backend-rs/crates/af-api/src/(?:routes\.rs|routes/tests\.rs)$''']
+  paths = ['''^backend-rs/crates/af-api/src/(?:routes\.rs|routes/tests(?:/marketplace_catalog)?\.rs)$''']
   regexes = ['''^secret_(?:gh_tok_789|api_key_000)$''']
 
   [[rules.allowlists]]
@@ -229,7 +229,7 @@ id = "curl-auth-header"
   description = "Synthetic bearer canary in the authenticated WebSocket redaction regression"
   condition = "AND"
   regexTarget = "secret"
-  paths = ['''^backend-rs/crates/af-api/src/ws\.rs$''']
+  paths = ['''^backend-rs/crates/af-api/src/ws(?:/telemetry_tests)?\.rs$''']
   regexes = ['''^my_super_secret_bearer_token$''']
 
   [[rules.allowlists]]
@@ -255,7 +255,8 @@ id = "curl-auth-user"
   regexTarget = "secret"
   paths = [
     '''^backend-rs/crates/af-api/src/(?:routes|ws)\.rs$''',
-    '''^backend-rs/crates/af-api/src/routes/tests\.rs$''',
+    '''^backend-rs/crates/af-api/src/ws/telemetry_tests\.rs$''',
+    '''^backend-rs/crates/af-api/src/routes/tests(?:/marketplace_catalog)?\.rs$''',
     '''^backend-rs/crates/af-release/src/lifecycle\.rs$''',
     '''^backend-rs/crates/af-runner/src/package_lifecycle\.rs$''',
     '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests\.rs$''',

@@ -929,7 +929,7 @@ install_binary_atomic() {
         print_error "Downloaded binary is empty: $source"
         return 1
     fi
-    install -d -m 0755 -- "$(dirname "$destination")"
+    af_mkdir_p_0755 "$(dirname "$destination")"
     staged="$(mktemp "${destination}.af-new.XXXXXX")"
     if ! install -m 0755 "$source" "$staged" || ! mv -fT "$staged" "$destination"; then
         rm -f "$staged"

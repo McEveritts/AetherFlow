@@ -27,7 +27,7 @@ def read_common_sh_source(root=ROOT):
     if marker in logging_src:
         logging_src = logging_src.replace(
             marker,
-            '\naf_ensure_lock_dir "$LOCK_DIR"\naf_prepare_logfile_path "$LOGFILE"\n' + marker,
+            '\nif [[ "${AF_SKIP_COMMON_INIT:-0}" != "1" ]]; then\n    af_ensure_lock_dir "$LOCK_DIR"\n    af_prepare_logfile_path "$LOGFILE"\nfi\n' + marker,
             1,
         )
     parts = [
@@ -70,7 +70,7 @@ printf 'ready\n'
 
 def common_functions(*names):
     names = tuple(dict.fromkeys((
-        'af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', 'af_github_curl', 'deb_compare_versions',
+        'af_prepare_logfile_path', 'af_mkdir_p_0755', 'af_logged', 'af_logged_stderr', 'af_github_curl', 'deb_compare_versions',
         'af_strip_version_prefix', 'af_normalize_exact_registry_version', 'af_read_npm_package_version',
         'af_validate_exact_apt_version', 'installed_apt_package_version', 'apt_package_raw_status',
         'apt_package_has_active_or_transitional_payload', 'apt_package_is_lockstep',

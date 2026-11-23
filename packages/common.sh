@@ -49,8 +49,10 @@ fi
 
 # shellcheck source=lib/logging_archives.sh
 source "${_AF_COMMON_LIB_DIR}/logging_archives.sh"
-af_ensure_lock_dir "$LOCK_DIR"
-af_prepare_logfile_path "$LOGFILE"
+if [[ "${AF_SKIP_COMMON_INIT:-0}" != "1" ]]; then
+    af_ensure_lock_dir "$LOCK_DIR"
+    af_prepare_logfile_path "$LOGFILE"
+fi
 
 for _af_lib_module in \
     versions_apt.sh \

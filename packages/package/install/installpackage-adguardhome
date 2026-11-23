@@ -170,13 +170,19 @@ af_logged setcap 'cap_net_bind_service=+ep' /opt/AdGuardHome/AdGuardHome || true
 
 AGH_DNS_PRE_SNAPSHOT=""
 AGH_DNS_HANDOFF_NEEDED=false
+if [[ -z "${AF_RESOLV_CONF_PATH:-}" ]]; then
+    AF_RESOLV_CONF_PATH="/etc/resolv.conf"
+fi
+if [[ -z "${AF_RESOLVED_RESOLV_CONF:-}" ]]; then
+    AF_RESOLVED_RESOLV_CONF="/run/systemd/resolve/resolv.conf"
+fi
 rollback_adguardhome_dns() {
     if [[ -n "${AGH_DNS_PRE_SNAPSHOT:-}" && -d "$AGH_DNS_PRE_SNAPSHOT" ]]; then
-        python3 - "$AGH_DNS_PRE_SNAPSHOT" <<'PYEOF'
+        python3 - "$AGH_DNS_PRE_SNAPSHOT" "$AF_RESOLV_CONF_PATH" <<'PYEOF'
 import json, os, pathlib, secrets, shutil, stat, sys
 
 snap = pathlib.Path(sys.argv[1])
-resolv_str = "/etc/resolv.conf"
+resolv_str = sys.argv[2]
 backup_dir = pathlib.Path("/etc/aetherflow/dns-backup")
 meta_path = snap / "meta.json"
 if not meta_path.is_file():
@@ -225,11 +231,11 @@ PYEOF
 if [[ "$DNS_PORT" == "53" ]]; then
 AGH_DNS_PRE_SNAPSHOT="${AF_ARCHIVE_BACKUP}/dns-pre-run"
 mkdir -p -m 0700 "$AGH_DNS_PRE_SNAPSHOT"
-python3 - "$AGH_DNS_PRE_SNAPSHOT" <<'PYEOF'
+python3 - "$AGH_DNS_PRE_SNAPSHOT" "$AF_RESOLV_CONF_PATH" <<'PYEOF'
 import json, os, pathlib, shutil, stat, sys
 
 snap = pathlib.Path(sys.argv[1])
-resolv_str = "/etc/resolv.conf"
+resolv_str = sys.argv[2]
 backup_dir = pathlib.Path("/etc/aetherflow/dns-backup")
 meta = {"resolv_kind": "absent"}
 try:
@@ -249,11 +255,11 @@ for name in ("adguardhome-resolv.conf.state", "adguardhome-resolv.conf.bak"):
         shutil.copy2(src, snap / name)
 PYEOF
 AF_ARCHIVE_ROLLBACK_HOOK="rollback_adguardhome_dns"
-af_backup_resolv_conf_state "adguardhome"
+af_backup_resolv_conf_state "adguardhome" "" "$AF_RESOLV_CONF_PATH"
 
-AGH_RESOLV_USES_STUB="$(python3 - <<'PYEOF'
-import os, stat
-resolv_str = "/etc/resolv.conf"
+AGH_RESOLV_USES_STUB="$(python3 - "$AF_RESOLV_CONF_PATH" <<'PYEOF'
+import os, stat, sys
+resolv_str = sys.argv[1]
 try:
     st = os.lstat(resolv_str)
 except FileNotFoundError:
@@ -289,8 +295,8 @@ if [[ "$AGH_RESOLVED_CHANGED" == changed ]]; then
     AF_ARCHIVE_ROLLBACK_RESTART_UNITS+=(systemd-resolved)
     if [[ "$AGH_RESOLV_USES_STUB" == "true" ]]; then
         AGH_DNS_HANDOFF_NEEDED=true
-        if [[ -e /run/systemd/resolve/resolv.conf ]]; then
-            ln -sfnT /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        if [[ -e "$AF_RESOLVED_RESOLV_CONF" ]]; then
+            ln -sfnT "$AF_RESOLVED_RESOLV_CONF" "$AF_RESOLV_CONF_PATH"
         fi
     fi
     af_logged systemctl restart systemd-resolved
@@ -332,7 +338,7 @@ finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
 if [[ "$DNS_PORT" == "53" ]]; then
     af_verify_local_dns_lookup "$DNS_PORT"
     if [[ "$AGH_DNS_HANDOFF_NEEDED" == "true" ]]; then
-        af_write_resolv_conf_nameserver "127.0.0.1" "/etc/resolv.conf"
+        af_write_resolv_conf_nameserver "127.0.0.1" "$AF_RESOLV_CONF_PATH"
     fi
 fi
 

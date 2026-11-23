@@ -46,7 +46,12 @@ def rebase_root(source: str, root: Path) -> str:
         "/srv/",
         "/mnt/",
     )
-    return replace_paths_once(source, [(prefix, root_str + prefix) for prefix in prefixes])
+    replacements = [(prefix, root_str + prefix) for prefix in prefixes]
+    replacements.extend([
+        (":-/install}", f":-{root_str}/install}}"),
+        ('"/install"', f'"{root_str}/install"'),
+    ])
+    return replace_paths_once(source, replacements)
 
 
 def reserve_loopback_port(port: int):

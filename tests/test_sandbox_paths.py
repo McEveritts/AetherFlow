@@ -88,6 +88,7 @@ exit 0
             fake_systemctl.chmod(0o755)
             script = f"""
 set -euo pipefail
+export LOCK_DIR="{tmp_path}/install"
 export LOGFILE=/dev/null
 export AETHERFLOW_DISABLE_HOST_ENV_FILE=1
 source "{common_sh}"
