@@ -867,6 +867,140 @@ pub async fn dispatch_network_action(req: &NetworkRunnerRequest) -> anyhow::Resu
     dispatch_network_control(req).await
 }
 
+#[cfg(unix)]
+const MAX_PEER_RUNNER_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(unix)]
+struct ZeroizingByteBuf(Vec<u8>);
+
+#[cfg(unix)]
+impl Drop for ZeroizingByteBuf {
+    fn drop(&mut self) {
+        peer_network::zeroize_bytes(&mut self.0);
+        self.0.clear();
+    }
+}
+
+#[cfg(unix)]
+async fn post_runner_peer_network_json(
+    req: &PeerNetworkRequest,
+    timeout: Duration,
+) -> Result<PeerNetworkResponse, PeerNetworkError> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper_util::rt::TokioIo;
+
+    const ENDPOINT: &str = "/v1/peer-network";
+    let sock_path = resolve_runner_socket_path();
+    let body_bytes = serde_json::to_vec(req).map_err(|_| {
+        PeerNetworkError::InvalidInput("Failed to serialize peer-network request".to_string())
+    })?;
+
+    let fut = async {
+        let stream = tokio::net::UnixStream::connect(&sock_path)
+            .await
+            .map_err(|err| {
+                PeerNetworkError::Runtime(format!(
+                    "Cannot connect to aetherflow-runner socket '{sock_path}': {err}"
+                ))
+            })?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(io)
+                .await
+                .map_err(|err| {
+                    PeerNetworkError::Runtime(format!(
+                        "Runner IPC handshake failed on '{sock_path}': {err}"
+                    ))
+                })?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let http_req = hyper::Request::builder()
+            .method(hyper::Method::POST)
+            .uri(ENDPOINT)
+            .header("Host", "unix")
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|err| {
+                PeerNetworkError::Runtime(format!("Failed to build peer-network request: {err}"))
+            })?;
+
+        let resp = sender.send_request(http_req).await.map_err(|err| {
+            PeerNetworkError::Runtime(format!("Runner peer-network request failed: {err}"))
+        })?;
+        let status = resp.status();
+        let error_code = resp
+            .headers()
+            .get(peer_network::PEER_ERROR_CODE_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        let mut body = resp.into_body();
+        let mut raw_body = ZeroizingByteBuf(Vec::new());
+        while let Some(frame_res) = body.frame().await {
+            let frame = frame_res.map_err(|err| {
+                PeerNetworkError::Runtime(format!("Failed reading peer-network response: {err}"))
+            })?;
+            if let Some(data) = frame.data_ref() {
+                if data.len() > MAX_PEER_RUNNER_RESPONSE_BYTES.saturating_sub(raw_body.0.len()) {
+                    return Err(PeerNetworkError::Runtime(
+                        "Runner peer-network response exceeded maximum size".to_string(),
+                    ));
+                }
+                raw_body.0.extend_from_slice(data);
+            }
+        }
+
+        let mut decoded: RunnerResponse = serde_json::from_slice(&raw_body.0).map_err(|_| {
+            PeerNetworkError::Runtime(format!(
+                "Invalid JSON response from runner ({ENDPOINT}, HTTP {})",
+                status.as_u16()
+            ))
+        })?;
+        drop(raw_body);
+
+        if status != StatusCode::OK || !decoded.success {
+            peer_network::zeroize_string(&mut decoded.output);
+            return Err(PeerNetworkError::from_http_response(
+                status,
+                error_code.as_deref(),
+                decoded.error,
+            ));
+        }
+
+        let typed = peer_network::decode_peer_network_response(req, &decoded.output);
+        peer_network::zeroize_string(&mut decoded.output);
+        typed
+    };
+
+    tokio::time::timeout(timeout, fut).await.map_err(|_| {
+        PeerNetworkError::Runtime(format!(
+            "Runner peer-network request timed out after {}s ({ENDPOINT})",
+            timeout.as_secs()
+        ))
+    })?
+}
+
+#[cfg(not(unix))]
+async fn post_runner_peer_network_json(
+    _req: &PeerNetworkRequest,
+    _timeout: Duration,
+) -> Result<PeerNetworkResponse, PeerNetworkError> {
+    Err(PeerNetworkError::Runtime(
+        "UNIX domain socket runner client is only supported on Unix hosts (/v1/peer-network)"
+            .to_string(),
+    ))
+}
+
+pub async fn dispatch_peer_network(
+    req: &PeerNetworkRequest,
+) -> Result<PeerNetworkResponse, PeerNetworkError> {
+    let timeout = peer_network::client_timeout_for_request(req);
+    post_runner_peer_network_json(req, timeout).await
+}
+
 pub async fn dispatch_quota_set(username: &str, size: &str) -> anyhow::Result<()> {
     let req = QuotaRunnerRequest {
         username: username.to_string(),

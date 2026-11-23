@@ -65,6 +65,15 @@ The file 7 scan confirmed more direct authenticated browser URLs in `af-web-app/
 - P6 must teach the McBrowser tus client to accept the selected peer's upload path in a rewritten `Location` response.
 - When P6 enables reactive switching, fence asynchronous telemetry, McBrowser subtitle loading and backup downloads by server selection. Check that remote update readiness polls the selected server's authenticated readiness endpoint.
 
+## P2 runner integration
+
+- File 22 includes the dispatcher in `runner_client.rs`. The socket handler lives in `peer_network.rs`, with an injectable manager for isolated fixtures. The shared dump parser in `network.rs` discards private and preshared keys and preserves the legacy status format.
+- The local WireGuard address uses the configured subnet prefix so live `wg syncconf` updates have a connected subnet route. Each peer still gets a single-host `AllowedIPs` entry. The runner checks the kernel subnet route and checks a newly synced peer's effective route before accepting the change. It restores the previous disk and live configurations if the route check fails.
+- The runner uses the existing Marketplace apt command path and whole-system lifecycle reservation for `wireguard-tools`, a Debian package under the catalog's `wireguard` entry. It bounds lock waits and command deadlines, waits for process-group cleanup, and creates no Marketplace app receipt.
+- Held link and grant credentials use their planned files. Pending issuer credentials live in `pending/<attempt>.token` with root-only permissions. Rollback and strip files live in the root-only `.staging` directory. The runner uses directory-anchored file operations and returns credential values in a redacting type over its Unix socket.
+- The runner client exposes distinct busy, already-present peer, missing peer and tunnel-IP conflict outcomes for P3 retries. Status also distinguishes persistent peers from peers present in the live dump so P7 can detect an explicitly removed peer. Status and mutations share exclusion, and credential operations have their own lock.
+- The local tests use isolated files, sockets and commands. Verify the actual Debian WireGuard service, routing and package behavior during approved two-server acceptance.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.

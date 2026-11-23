@@ -712,7 +712,35 @@ fn build_peer(
     Ok(Peer::parse(raw))
 }
 
-fn parse_dump(raw: &str, config: Option<&Config>) -> Result<Value> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WireGuardDumpPeer {
+    pub(crate) public_key: String,
+    pub(crate) endpoint: String,
+    pub(crate) allowed_ips: String,
+    pub(crate) latest_handshake: String,
+    pub(crate) latest_handshake_epoch: i64,
+    pub(crate) handshake_age_secs: Option<u64>,
+    pub(crate) transfer_rx: String,
+    pub(crate) transfer_tx: String,
+    pub(crate) persistent_keepalive: u16,
+    pub(crate) active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WireGuardDump {
+    pub(crate) public_key: String,
+    pub(crate) listen_port: String,
+    pub(crate) peers: Vec<WireGuardDumpPeer>,
+}
+
+/// Parses `wg show <interface> dump` output while discarding private keys and preshared keys.
+pub(crate) fn parse_wg_dump(raw: &str) -> Result<WireGuardDump> {
+    parse_wg_dump_at(raw, chrono::Utc::now().timestamp())
+}
+
+/// Deterministic `wg show <interface> dump` parser computing handshake age and active state from a
+/// single `now_epoch` timestamp so age and recent-handshake status can never disagree.
+pub(crate) fn parse_wg_dump_at(raw: &str, now_epoch: i64) -> Result<WireGuardDump> {
     let mut lines = raw.lines();
     let interface: Vec<_> = lines
         .next()
@@ -722,36 +750,73 @@ fn parse_dump(raw: &str, config: Option<&Config>) -> Result<Value> {
     if interface.len() != 4 {
         bail!("Invalid WireGuard interface response");
     }
-    let mut peers: Vec<Value> = config
-        .map(|c| c.peers.iter().map(Peer::json).collect())
-        .unwrap_or_default();
+    let mut peers = Vec::new();
     for line in lines {
         let row: Vec<_> = line.split('\t').collect();
         if row.len() != 8 {
             bail!("Invalid WireGuard peer response");
         }
         let handshake = row[4].parse::<i64>().unwrap_or(0);
-        let now = chrono::Utc::now().timestamp();
-        let active = handshake > 0 && handshake <= now && now - handshake <= 180;
+        let handshake_age_secs = if handshake > 0 && handshake <= now_epoch {
+            Some((now_epoch - handshake) as u64)
+        } else {
+            None
+        };
+        let active = handshake_age_secs.is_some_and(|age| age <= 180);
+        peers.push(WireGuardDumpPeer {
+            public_key: row[0].to_string(),
+            endpoint: if row[2] == "(none)" {
+                String::new()
+            } else {
+                row[2].to_string()
+            },
+            allowed_ips: row[3].to_string(),
+            latest_handshake: row[4].to_string(),
+            latest_handshake_epoch: handshake,
+            handshake_age_secs,
+            transfer_rx: row[5].to_string(),
+            transfer_tx: row[6].to_string(),
+            persistent_keepalive: row[7].parse::<u16>().unwrap_or(0),
+            active,
+        });
+    }
+    Ok(WireGuardDump {
+        public_key: interface[1].to_string(),
+        listen_port: interface[2].to_string(),
+        peers,
+    })
+}
+
+fn parse_dump(raw: &str, config: Option<&Config>) -> Result<Value> {
+    let dump = parse_wg_dump(raw)?;
+    let mut peers: Vec<Value> = config
+        .map(|c| c.peers.iter().map(Peer::json).collect())
+        .unwrap_or_default();
+    for dumped in dump.peers {
         let mut peer = peers
             .iter()
-            .find(|p| p["public_key"] == row[0])
+            .find(|p| p["public_key"] == dumped.public_key)
             .cloned()
-            .unwrap_or_else(|| json!({"name":"","public_key":row[0],"persistent":false}));
-        peer["endpoint"] = json!(if row[2] == "(none)" { "" } else { row[2] });
-        peer["allowed_ips"] = json!(row[3]);
-        peer["latest_handshake"] = json!(row[4]);
-        peer["transfer_rx"] = json!(row[5]);
-        peer["transfer_tx"] = json!(row[6]);
-        peer["persistent_keepalive"] = json!(row[7].parse::<u16>().unwrap_or(0));
-        peer["active"] = json!(active);
-        if let Some(index) = peers.iter().position(|p| p["public_key"] == row[0]) {
+            .unwrap_or_else(
+                || json!({"name":"","public_key":dumped.public_key,"persistent":false}),
+            );
+        peer["endpoint"] = json!(dumped.endpoint);
+        peer["allowed_ips"] = json!(dumped.allowed_ips);
+        peer["latest_handshake"] = json!(dumped.latest_handshake);
+        peer["transfer_rx"] = json!(dumped.transfer_rx);
+        peer["transfer_tx"] = json!(dumped.transfer_tx);
+        peer["persistent_keepalive"] = json!(dumped.persistent_keepalive);
+        peer["active"] = json!(dumped.active);
+        if let Some(index) = peers
+            .iter()
+            .position(|p| p["public_key"] == dumped.public_key)
+        {
             peers[index] = peer;
         } else {
             peers.push(peer);
         }
     }
-    Ok(json!({"public_key":interface[1],"listen_port":interface[2],"peers":peers}))
+    Ok(json!({"public_key":dump.public_key,"listen_port":dump.listen_port,"peers":peers}))
 }
 
 impl Manager {

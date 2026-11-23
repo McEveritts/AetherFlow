@@ -59,6 +59,14 @@ mod legacy_stream_output;
 #[cfg(all(test, unix))]
 mod lifecycle_tests;
 pub mod network;
+pub mod peer_network;
+pub use peer_network::{
+    execute_peer_network_local, PeerCredentialDeleteResponse, PeerCredentialReadResponse,
+    PeerCredentialSecret, PeerCredentialSlot, PeerCredentialWriteResponse,
+    PeerEnsurePackagesResponse, PeerIdentityResponse, PeerLinkCredentialsDeleteResponse,
+    PeerMutationResponse, PeerNetworkError, PeerNetworkManager, PeerNetworkRequest,
+    PeerNetworkResponse, PeerStatusPeer, PeerStatusResponse,
+};
 pub mod package_executor;
 pub use package_executor::check_domain_tls_ready;
 pub mod package_lifecycle;
@@ -359,6 +367,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/hosts", post(handle_hosts))
         .route("/v1/blueprint/apply", post(handle_blueprint_apply))
         .route("/v1/network", post(handle_network))
+        .route("/v1/peer-network", post(peer_network::handle_peer_network))
         .route("/v1/quota", post(handle_quota))
         .route("/v1/quota/usage", post(quota::handle))
         .route("/v1/app-meta", post(handle_app_meta))
@@ -665,13 +674,13 @@ pub use runner_client::{
     dispatch_package_action_with_target, dispatch_package_cancel,
     dispatch_package_lifecycle_snapshot_capture, dispatch_package_lifecycle_snapshot_discard,
     dispatch_package_lifecycle_snapshot_discard_for_job,
-    dispatch_package_lifecycle_snapshot_restore, dispatch_package_stream, dispatch_plugin_start,
-    dispatch_plugin_status, dispatch_plugin_stop, dispatch_plugin_token_rotate, dispatch_quota_set,
-    dispatch_sandbox, dispatch_sandbox_apply, dispatch_self_update, dispatch_self_update_request,
-    dispatch_self_update_status_request, dispatch_set_quota, dispatch_systemctl,
-    execute_package_local, is_lifecycle_busy, reconcile_hosts_file_via_runner,
-    remove_hosts_file_via_runner, runner_is_ready, start_self_update, update_hosts_file_via_runner,
-    LifecycleBusy,
+    dispatch_package_lifecycle_snapshot_restore, dispatch_package_stream, dispatch_peer_network,
+    dispatch_plugin_start, dispatch_plugin_status, dispatch_plugin_stop,
+    dispatch_plugin_token_rotate, dispatch_quota_set, dispatch_sandbox, dispatch_sandbox_apply,
+    dispatch_self_update, dispatch_self_update_request, dispatch_self_update_status_request,
+    dispatch_set_quota, dispatch_systemctl, execute_package_local, is_lifecycle_busy,
+    reconcile_hosts_file_via_runner, remove_hosts_file_via_runner, runner_is_ready,
+    start_self_update, update_hosts_file_via_runner, LifecycleBusy,
 };
 
 mod sandbox_ops;
