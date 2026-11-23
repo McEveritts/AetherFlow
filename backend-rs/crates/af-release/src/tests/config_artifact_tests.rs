@@ -779,3 +779,253 @@ fn verify_deployed_frontend_assets_validates_web_dist_and_allows_binary_only_fix
     fs::write(empty_wasm.join("web/dist/app.wasm"), b"").unwrap();
     assert!(verify_deployed_frontend_assets(&empty_wasm).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn test_unified_env_file_precedence_redaction_and_root_only_provenance_bypass() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = TempSandbox::new("unified-env-precedence");
+    let root = sb.path();
+    let etc_dir = root.join("etc/aetherflow");
+    fs::create_dir_all(&etc_dir).unwrap();
+    let env_file = etc_dir.join("aetherflow.env");
+    let secret_token = "ghp_synthetic_env_file_token_1234567890";
+    fs::write(
+        &env_file,
+        format!(
+            "HEALTH_ENDPOINT=http://127.0.0.1:9091/health/ready\n\
+             AF_GITHUB_TOKEN={secret_token}\n\
+             AETHERFLOW_SKIP_PROVENANCE_VERIFY=1\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&env_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+    // 1. Default-fallback release-manager.conf loses to aetherflow.env
+    let default_conf = root.join("default-fallback.conf");
+    fs::write(
+        &default_conf,
+        "HEALTH_ENDPOINT=\"${HEALTH_ENDPOINT:-http://127.0.0.1:8080/health/ready}\"\n",
+    )
+    .unwrap();
+    let empty_env = HashMap::new();
+    let cfg = ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &empty_env)
+        .unwrap();
+    assert_eq!(cfg.health_endpoint, "http://127.0.0.1:9091/health/ready");
+    assert_eq!(cfg.github_auth_token_str(), Some(secret_token));
+    assert!(
+        cfg.skip_provenance_verify,
+        "trusted 0600 isolated env file should enable skip_provenance_verify"
+    );
+
+    // 2. Redaction invariants: secret never appears in Debug, JSON Serialize, or serialized .conf
+    let debug_out = format!("{cfg:?}");
+    assert!(
+        !debug_out.contains(secret_token),
+        "Debug output must redact github_auth_token: {debug_out}"
+    );
+    assert!(debug_out.contains("[REDACTED]"));
+    let json_out = serde_json::to_string(&cfg).unwrap();
+    assert!(
+        !json_out.contains(secret_token),
+        "JSON serialization must skip github_auth_token"
+    );
+    let conf_out = cfg.to_serialized_conf_string();
+    assert!(
+        !conf_out.contains(secret_token) && !conf_out.contains("AETHERFLOW_SKIP_PROVENANCE_VERIFY"),
+        "serialized conf must never persist secrets or provenance bypass"
+    );
+
+    // 3. Explicit --config assignment beats aetherflow.env, and process env beats explicit --config
+    let explicit_conf = root.join("explicit.conf");
+    fs::write(
+        &explicit_conf,
+        "HEALTH_ENDPOINT=\"http://127.0.0.1:8082/health/ready\"\n",
+    )
+    .unwrap();
+    let cfg_explicit =
+        ReleaseConfig::load_for_root_with_env(Some(root), Some(&explicit_conf), &empty_env)
+            .unwrap();
+    assert_eq!(
+        cfg_explicit.health_endpoint,
+        "http://127.0.0.1:8082/health/ready"
+    );
+
+    let mut proc_env = HashMap::new();
+    proc_env.insert(
+        "HEALTH_ENDPOINT".to_string(),
+        "http://127.0.0.1:8083/health/ready".to_string(),
+    );
+    proc_env.insert(
+        "GITHUB_TOKEN".to_string(),
+        "ghp_proc_env_override_token".to_string(),
+    );
+    let cfg_proc =
+        ReleaseConfig::load_for_root_with_env(Some(root), Some(&explicit_conf), &proc_env).unwrap();
+    assert_eq!(cfg_proc.health_endpoint, "http://127.0.0.1:8083/health/ready");
+    assert_eq!(
+        cfg_proc.github_auth_token_str(),
+        Some("ghp_proc_env_override_token")
+    );
+
+    // 4. AETHERFLOW_SKIP_ENV_FILES=1 skips aetherflow.env and falls back to default-fallback conf
+    let mut skip_env = HashMap::new();
+    skip_env.insert("AETHERFLOW_SKIP_ENV_FILES".to_string(), "1".to_string());
+    let cfg_skip =
+        ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &skip_env).unwrap();
+    assert_eq!(cfg_skip.health_endpoint, "http://127.0.0.1:8080/health/ready");
+    assert_eq!(cfg_skip.github_auth_token_str(), None);
+    assert!(!cfg_skip.skip_provenance_verify);
+
+    // 5. Group-writable env file cannot enable AETHERFLOW_SKIP_PROVENANCE_VERIFY
+    fs::set_permissions(&env_file, fs::Permissions::from_mode(0o660)).unwrap();
+    let cfg_untrusted =
+        ReleaseConfig::load_for_root_with_env(Some(root), Some(&default_conf), &empty_env)
+            .unwrap();
+    assert!(
+        !cfg_untrusted.skip_provenance_verify,
+        "group-writable env file must not enable AETHERFLOW_SKIP_PROVENANCE_VERIFY"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_stage4_rollback_completes_when_log_retention_service_fails_and_logs_warn() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let sb = TempSandbox::new("stage4-log-retention-resilience");
+    let cfg = ReleaseConfig::for_root(sb.path());
+    fs::create_dir_all(&cfg.releases_dir).unwrap();
+    fs::create_dir_all(&cfg.data_dir).unwrap();
+    fs::create_dir_all(&cfg.env_dir).unwrap();
+    fs::create_dir_all(cfg.log_file.parent().unwrap()).unwrap();
+
+    // Seed an active prior release and a healthy database
+    let prev_dir = cfg.releases_dir.join("20261120000000");
+    fs::create_dir_all(&prev_dir).unwrap();
+    fs::write(prev_dir.join("aetherflow-api"), b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(prev_dir.join(".version"), b"v4.0.0\n").unwrap();
+    std::os::unix::fs::symlink(&prev_dir, &cfg.current_link).unwrap();
+    let db_path = cfg.data_dir.join(&cfg.sqlite_db);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE items (id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1);")
+        .unwrap();
+    drop(conn);
+
+    // Build a synthetic candidate release tarball that fails its health check to trigger Stage 4 rollback
+    let tar_path = sb.path().join("candidate.tar.gz");
+    let (_, manifest) = build_synthetic_release_tarball(
+        &tar_path,
+        &cfg.artifact_name,
+        &[
+            ("aetherflow-api", b"#!/bin/sh\nexit 0\n", EntryType::Regular),
+            (".version", b"v4.0.1\n", EntryType::Regular),
+            (
+                "web/dist/index.html",
+                b"<html>candidate</html>",
+                EntryType::Regular,
+            ),
+            (
+                "web/dist/app.wasm",
+                b"\0asm\x01\0\0\0",
+                EntryType::Regular,
+            ),
+        ],
+    );
+    let provider = super::MockArtifactProvider {
+        resolved_tag: Ok("v4.0.1".to_string()),
+        archive_source: tar_path,
+        manifest_content: manifest,
+    };
+
+    // Fake systemctl shim that fails specifically on aetherflow-log-retention.service
+    let fake_systemctl = sb.path().join("fake-systemctl");
+    fs::write(
+        &fake_systemctl,
+        "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"aetherflow-log-retention.service\" ]; then\n    echo 'simulated log-retention failure' >&2\n    exit 1\n  fi\ndone\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+    struct FailingLogRetentionLifecycle {
+        fake_systemctl: PathBuf,
+    }
+    impl LifecycleController for FailingLogRetentionLifecycle {
+        fn query_unit_environment(&self, _unit: &str) -> Option<String> {
+            None
+        }
+        fn restart_systemd_units(&self, config: &ReleaseConfig) -> ReleaseResult<()> {
+            run_post_restart_log_retention_with_bin(&self.fake_systemctl, config, true);
+            Ok(())
+        }
+        fn stop_database_services(&self, _db_path: &std::path::Path) -> ReleaseResult<()> {
+            Ok(())
+        }
+        fn terminate_legacy_pm2(&self) -> ReleaseResult<()> {
+            Ok(())
+        }
+    }
+
+    // Fail the candidate health probe (triggering Stage 4 rollback), then pass on rollback verification
+    struct FailFirstThenHealthyProber {
+        calls: AtomicUsize,
+    }
+    impl HealthProber for FailFirstThenHealthyProber {
+        fn check_once(&self, _endpoint: &str) -> ReleaseResult<HealthCheckAttempt> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(HealthCheckAttempt {
+                    http_status: 503,
+                    body: r#"{"status":"unhealthy"}"#.to_string(),
+                })
+            } else {
+                Ok(HealthCheckAttempt {
+                    http_status: 200,
+                    body: r#"{"status":"ready"}"#.to_string(),
+                })
+            }
+        }
+    }
+
+    let mut test_cfg = cfg.clone();
+    test_cfg.health_retries = 1;
+    test_cfg.health_interval = std::time::Duration::from_millis(1);
+
+    let engine = ReleaseEngine::new(
+        test_cfg.clone(),
+        provider,
+        FailingLogRetentionLifecycle { fake_systemctl },
+        FailFirstThenHealthyProber {
+            calls: AtomicUsize::new(0),
+        },
+    );
+
+    let err = engine
+        .execute(&ReleaseOptions {
+            command: ReleaseCommand::Deploy,
+            channel: ReleaseChannel::Stable,
+            dry_run: false,
+            offline: false,
+            from_source: false,
+        })
+        .expect_err("expected probe failure followed by clean Stage 4 rollback");
+    assert_eq!(
+        err.exit_code(),
+        ExitCode::HealthProbeFailedRollback,
+        "Stage 4 rollback must succeed even when aetherflow-log-retention.service fails; got: {err}"
+    );
+    assert_eq!(
+        fs::read_link(&test_cfg.current_link).unwrap(),
+        prev_dir,
+        "current symlink must be restored to prior release after Stage 4 rollback"
+    );
+    let log_text = fs::read_to_string(&test_cfg.log_file).unwrap();
+    assert!(
+        log_text.contains("\"level\":\"WARN\"")
+            && log_text.contains("aetherflow-log-retention.service")
+            && log_text.contains("simulated log-retention failure"),
+        "structured JSONL log must record WARN for best-effort log-retention failure: {log_text}"
+    );
+}

@@ -107,11 +107,6 @@ pub(super) fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
             description,
             ..
         }
-        | DeclarativeStep::RunCommand {
-            progress_pct,
-            description,
-            ..
-        }
         | DeclarativeStep::WaitForHttpReady {
             progress_pct,
             description,

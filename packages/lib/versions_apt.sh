@@ -1015,15 +1015,48 @@ PYEOF
     done
 }
 
+_af_apt_lock_timeout_value() {
+    local raw="${DPKG_LOCK_TIMEOUT:-120}"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$raw"
+    else
+        printf '120\n'
+    fi
+}
+
+_af_apt_args_have_lock_timeout() {
+    local arg expect_opt=false
+    for arg in "$@"; do
+        if [[ "$expect_opt" == true ]]; then
+            expect_opt=false
+            [[ "$arg" != DPkg::Lock::Timeout=* ]] || return 0
+            continue
+        fi
+        case "$arg" in
+            -o|--option)
+                expect_opt=true
+                ;;
+            -oDPkg::Lock::Timeout=*|-o=DPkg::Lock::Timeout=*|--option=DPkg::Lock::Timeout=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 apt-get() {
     local package argument arg_pkg="" selected=false primary_selected=false present=false skip_next=false
-    local -a rewritten=() additional=() extra_flags=()
+    local -a rewritten=() additional=() extra_flags=() lock_timeout_args=()
     [[ -v AF_APT_TRANSACTION_PACKAGES ]] || declare -ag AF_APT_TRANSACTION_PACKAGES=()
     [[ -v AF_APT_REINSTALL_PACKAGES ]] || declare -ag AF_APT_REINSTALL_PACKAGES=()
     [[ -v AF_APT_LOCKSTEP_PACKAGES ]] || declare -ag AF_APT_LOCKSTEP_PACKAGES=()
     local primary="${AF_APT_PRIMARY_PACKAGE:-}"
     local target="${AF_APT_TARGET_VERSION:-}"
     local local_deb="${AF_APT_LOCAL_DEB:-false}"
+
+    if ! _af_apt_args_have_lock_timeout "$@"; then
+        lock_timeout_args=(-o "DPkg::Lock::Timeout=$(_af_apt_lock_timeout_value)")
+    fi
 
     if [[ "${1:-}" == install ]]; then
         for argument in "${@:2}"; do
@@ -1107,7 +1140,7 @@ apt-get() {
                 done
                 [[ "$has_allow_downgrades" == true ]] || extra_flags+=(--allow-downgrades)
             fi
-            command apt-get install "${extra_flags[@]}" "${rewritten[@]}" "${additional[@]}" || return $?
+            command apt-get install "${lock_timeout_args[@]}" "${extra_flags[@]}" "${rewritten[@]}" "${additional[@]}" || return $?
             if [[ "$primary_selected" == true ]]; then
                 if [[ "${#AF_APT_LOCKSTEP_PACKAGES[@]}" -gt 0 ]]; then
                     for package in "${AF_APT_LOCKSTEP_PACKAGES[@]}"; do
@@ -1120,11 +1153,17 @@ apt-get() {
             return 0
         fi
     fi
-    command apt-get "$@"
+    if (( $# > 0 )) && [[ "$1" != -* ]]; then
+        command apt-get "$1" "${lock_timeout_args[@]}" "${@:2}"
+    else
+        command apt-get "${lock_timeout_args[@]}" "$@"
+    fi
 }
 
 rollback_apt_packages() {
     local state package previous installed marker reconciled failed=false idx
+    local lock_timeout
+    lock_timeout="$(_af_apt_lock_timeout_value)"
     local -a remove_pkgs=() downgrade_pkgs=() downgrade_prevs=() downgrade_specs=()
     AF_APT_ROLLBACK_MUTATED=false
     [[ -d "${AF_TX_DIR:-}/apt-packages" ]] || return 0
@@ -1150,12 +1189,12 @@ rollback_apt_packages() {
     done
 
     if (( ${#remove_pkgs[@]} > 1 )); then
-        DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "${remove_pkgs[@]}" || true
+        DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -o "DPkg::Lock::Timeout=${lock_timeout}" -y --no-auto-remove "${remove_pkgs[@]}" || true
     fi
     for package in "${remove_pkgs[@]}"; do
         reconciled=true
         if apt_package_has_active_or_transitional_payload "$package"; then
-            DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "$package" || reconciled=false
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -o "DPkg::Lock::Timeout=${lock_timeout}" -y --no-auto-remove "$package" || reconciled=false
         fi
         if [[ "$reconciled" != true ]] || apt_package_has_active_or_transitional_payload "$package"; then
             marker="$(apt_reinstall_marker_path "$package")" || return 1
@@ -1166,7 +1205,7 @@ rollback_apt_packages() {
     done
 
     if (( ${#downgrade_specs[@]} > 1 )); then
-        DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "${downgrade_specs[@]}" || true
+        DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -o "DPkg::Lock::Timeout=${lock_timeout}" -y --allow-downgrades --reinstall "${downgrade_specs[@]}" || true
     fi
     for idx in "${!downgrade_pkgs[@]}"; do
         package="${downgrade_pkgs[$idx]}"
@@ -1174,7 +1213,7 @@ rollback_apt_packages() {
         reconciled=true
         installed="$(installed_apt_package_version "$package")"
         if [[ "$installed" != "$previous" ]]; then
-            DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "${package}=${previous}" || reconciled=false
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -o "DPkg::Lock::Timeout=${lock_timeout}" -y --allow-downgrades --reinstall "${package}=${previous}" || reconciled=false
             installed="$(installed_apt_package_version "$package")"
         fi
         if [[ "$reconciled" != true || "$installed" != "$previous" ]]; then

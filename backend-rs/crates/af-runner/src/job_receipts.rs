@@ -518,7 +518,7 @@ impl ReceiptLock {
         let mut file = self.directory.open_file(
             &temporary,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            0o644,
+            0o600,
         )?;
         let result = (|| {
             file.write_all(&serde_json::to_vec_pretty(&status).map_err(io_error)?)?;
@@ -667,7 +667,7 @@ pub fn begin_launch(path: &Path) -> Result<LaunchOwner> {
     let file = lease_directory.open_file(
         OsStr::new(&owner),
         libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-        0o644,
+        0o600,
     )?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(Error::last_os_error());
@@ -679,7 +679,7 @@ pub fn begin_launch(path: &Path) -> Result<LaunchOwner> {
     let mut owner_file = guard.directory.open_file(
         owner_path.file_name().unwrap(),
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        0o644,
+        0o600,
     )?;
     owner_file.write_all(owner.as_bytes())?;
     owner_file.sync_all()?;

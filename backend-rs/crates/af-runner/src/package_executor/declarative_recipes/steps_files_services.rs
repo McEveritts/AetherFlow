@@ -724,7 +724,14 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 Ok(format!("purged systemd unit {}", norm))
             }
 
-            DeclarativeStep::UnmountPaths { paths, .. } => {
+            DeclarativeStep::UnmountPaths {
+                paths,
+                only_if_delete_data,
+                ..
+            } => {
+                if *only_if_delete_data && !self.env_cfg.delete_data {
+                    return Ok("skipped unmount (DELETE_DATA=false)".to_string());
+                }
                 for logical in paths {
                     cancel.check(&recipe.package_id)?;
                     validate_managed_path(logical)?;
@@ -814,43 +821,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
                 Ok(format!("removed paths: {}", paths.join(", ")))
-            }
-
-            DeclarativeStep::RunCommand {
-                program,
-                args,
-                only_if_delete_data,
-                ignore_errors,
-                ..
-            } => {
-                if *only_if_delete_data && !self.env_cfg.delete_data {
-                    return Ok("skipped command (DELETE_DATA=false)".to_string());
-                }
-                let mut cmd_envs: Vec<(String, String)> = Vec::new();
-                cmd_envs.push((
-                    "AF_JOB_SCRATCH_ROOT".to_string(),
-                    "/var/tmp/aetherflow-scratch".to_string(),
-                ));
-                if let Some(ref target) = self.env_cfg.expected_target_version {
-                    cmd_envs.push(("AF_TARGET_VERSION".to_string(), target.clone()));
-                }
-                let out = self
-                    .runner
-                    .run_command(program, args, &cmd_envs, cancel)
-                    .await?;
-                if !out.success() && !*ignore_errors {
-                    return Err(PackageExecutorError::StepFailed {
-                        step: format!("run_command {}", program),
-                        reason: format!(
-                            "{} {:?} exited with {}: {}",
-                            program,
-                            args,
-                            out.exit_code,
-                            out.combined_output()
-                        ),
-                    });
-                }
-                Ok(format!("executed command {}", program))
             }
 
             _ => unreachable!("step handled by primary dispatcher"),

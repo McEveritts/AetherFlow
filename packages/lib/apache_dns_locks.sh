@@ -1485,6 +1485,9 @@ write_lock() {
     INSTALL_COMMITTED=true
     if [[ -n "${AF_ARCHIVE_BACKUP:-}" ]]; then
         rm -f -- "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+        if [[ -n "${AF_ARCHIVE_DESTINATION:-}" ]] && declare -F prune_app_archive_backups >/dev/null 2>&1; then
+            prune_app_archive_backups "$AF_ARCHIVE_DESTINATION" "${AF_ARCHIVE_UNIT:-$package_name}" "$AF_ARCHIVE_BACKUP" 2
+        fi
     fi
     local certbot_sync="${AF_CERTBOT_SYNC_BIN:-/usr/local/bin/af-certbot-sync}"
     if [[ -x "$certbot_sync" ]]; then

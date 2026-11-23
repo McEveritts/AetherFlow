@@ -4,7 +4,7 @@
 
 The [package executor](../backend-rs/crates/af-runner/src/package_executor.rs) supports 9 [built-in Rust recipes](../backend-rs/crates/af-runner/src/package_executor/declarative_recipes.rs) for `fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `x2go`, `netdata`, `mergerfs`, and `rclone`. Set `AETHERFLOW_ENABLE_RUST_PACKAGES=1` in `/etc/aetherflow/aetherflow.env` (or an `aetherflow-runner.service` drop-in) and restart `aetherflow-runner.service` to opt in. Bash is the default for all 77 packages, and `AETHERFLOW_FORCE_BASH_PACKAGES=1` takes precedence over the opt-in.
 
-Most declarative operations execute typed, validated `DeclarativeStep` variants via direct `execve` rather than shell pipelines (exception: `DeclarativeStep::RunCommand`, currently used by `build_rclone_recipe` to execute `/bin/sh -c` during removal cleanup), paired with:
+All declarative operations execute typed, validated `DeclarativeStep` variants via direct `execve` without shell pipelines (including shell-free fail-closed `DeclarativeStep::UnmountPaths { paths, only_if_delete_data }` for `mergerfs` and `rclone`), paired with:
 
 - **Cross-Process & In-Process Serialization**: Coordinated via `crate::PACKAGE_MUTEX`, the shared maintenance lock, and persistent inode-stable `/install/.af-package-executor.flock` `flock(LOCK_EX | LOCK_NB)`.
 - **Cooperative Cancellation**: Process-group (`killpg`) cancellation and pre/post-boundary checks across every mutating step, queued lock wait, and streaming download chunk.

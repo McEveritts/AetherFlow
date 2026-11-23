@@ -920,7 +920,13 @@ fetch_and_run() {{ touch "{marker}"; return 0; }}
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             apt_installs = [c for c in env.commands() if c[:2] == ["apt-get", "install"]]
             self.assertEqual(len(apt_installs), 2)
-            self.assertFalse(any("=" in arg for cmd in apt_installs for arg in cmd))
+            self.assertFalse(
+                any(
+                    "=" in arg and not arg.startswith("DPkg::Lock::Timeout=")
+                    for cmd in apt_installs
+                    for arg in cmd
+                )
+            )
             self.assertEqual(
                 (env.root / "opt/emby-server/.af-version").read_text().strip(),
                 "4.8.10.0",
@@ -945,7 +951,7 @@ fetch_and_run() {{ touch "{marker}"; return 0; }}
                 res = env.run_install_script("quassel", extra_env={"AF_TARGET_VERSION": "1:0.14.0-1+deb12u1"})
                 self.assertNotEqual(res.returncode, 0, f"{label}: install must fail on {bad_status}")
                 self.assertIn(
-                    ["apt-get", "remove", "-y", "--no-auto-remove", "quassel-core"],
+                    ["apt-get", "remove", "-o", "DPkg::Lock::Timeout=120", "-y", "--no-auto-remove", "quassel-core"],
                     env.commands(),
                     f"{label}: rollback must run individual apt-get remove for fresh {bad_status} package",
                 )
@@ -991,7 +997,7 @@ fetch_and_run() {{ touch "{marker}"; return 0; }}
                 res = env.run_install_script("quassel", extra_env={"AF_TARGET_VERSION": "1:0.14.0-1+deb12u1"})
                 self.assertNotEqual(res.returncode, 0)
                 self.assertIn(
-                    ["apt-get", "remove", "-y", "--no-auto-remove", "quassel-core"],
+                    ["apt-get", "remove", "-o", "DPkg::Lock::Timeout=120", "-y", "--no-auto-remove", "quassel-core"],
                     env.commands(),
                     f"{label}: rollback must attempt individual apt-get remove",
                 )
@@ -1035,9 +1041,9 @@ fetch_and_run() {{ touch "{marker}"; return 0; }}
             res = env.run_install_script("deluge", extra_env={"AF_TARGET_VERSION": "2.1.1-1"})
             self.assertNotEqual(res.returncode, 0)
             remove_cmds = [c for c in env.commands() if c[:2] == ["apt-get", "remove"]]
-            self.assertTrue(any(len(c) > 5 for c in remove_cmds), f"expected batch remove in {remove_cmds}")
+            self.assertTrue(any(len(c) > 7 for c in remove_cmds), f"expected batch remove in {remove_cmds}")
             self.assertIn(
-                ["apt-get", "remove", "-y", "--no-auto-remove", "deluge-common"],
+                ["apt-get", "remove", "-o", "DPkg::Lock::Timeout=120", "-y", "--no-auto-remove", "deluge-common"],
                 remove_cmds,
                 f"expected individual fallback remove for unpacked deluge-common in {remove_cmds}",
             )
@@ -1214,6 +1220,76 @@ fetch_and_run() {{ touch "{marker}"; return 0; }}
                 (env.root / "var/lib/transmission-daemon/.af-version").read_text().strip(),
                 "4.1.0~beta2+dfsg-3+deb13u2",
             )
+
+    def test_apt_wrapper_and_rollback_inject_validated_dpkg_lock_timeout(self):
+        repo = {"demo-pkg": ["1.0.0-1", "2.0.0-1"]}
+        with SyntheticAptEnvironment(repo, installed={"demo-pkg": "1.0.0-1"}) as env:
+            script = env.root / "test-lock-timeout.sh"
+            script.write_text(
+                f"""#!/bin/bash
+set -euo pipefail
+export LOCK_DIR="{env.root}/install"
+export LOGFILE="{env.root}/var/log/aetherflow/test.log"
+source "{env.common_sh}"
+# 1. Default timeout (120) on passthrough apt-get update & install
+unset DPKG_LOCK_TIMEOUT
+apt-get update -qq
+apt-get install -y demo-pkg
+
+# 2. Custom numeric timeout (45)
+DPKG_LOCK_TIMEOUT=45 apt-get install -y demo-pkg
+
+# 3. Non-numeric timeout falls back to 120
+DPKG_LOCK_TIMEOUT="abc;rm -rf /" apt-get update
+
+# 4. Explicit caller DPkg::Lock::Timeout is preserved without duplication
+DPKG_LOCK_TIMEOUT=45 apt-get -o DPkg::Lock::Timeout=90 update
+
+# 5. rollback_apt_packages injects validated DPkg::Lock::Timeout on remove & downgrade
+export AF_TX_DIR="{env.root}/tmp/tx-root/rb-test"
+mkdir -p "$AF_TX_DIR/apt-packages"
+printf '%s\\n' '1.0.0-1' > "$AF_TX_DIR/apt-packages/demo-pkg"
+DPKG_LOCK_TIMEOUT=75 rollback_apt_packages
+""",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            run_env = os.environ.copy()
+            run_env.update(
+                {
+                    "AF_SYNTH_DPKG_STATE": str(env.state_path),
+                    "AF_SYNTH_APT_REPO": str(env.repo_path),
+                    "AF_SYNTH_APT_BEHAVIOR": str(env.behavior_path),
+                    "AF_SYNTH_LOG": str(env.log_path),
+                    "AETHERFLOW_SKIP_ENV_FILES": "1",
+                }
+            )
+            res = subprocess.run(
+                ["bash", str(script)],
+                env=run_env,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            cmds = [c for c in env.commands() if c and c[0] == "apt-get"]
+            self.assertGreaterEqual(len(cmds), 5, f"expected >=5 apt-get calls, got {cmds}")
+            # 1a. Default update
+            self.assertIn("DPkg::Lock::Timeout=120", cmds[0])
+            # 1b. Default install
+            self.assertIn("DPkg::Lock::Timeout=120", cmds[1])
+            # 2. Custom numeric 45
+            self.assertIn("DPkg::Lock::Timeout=45", cmds[2])
+            # 3. Non-numeric fallback -> 120
+            self.assertIn("DPkg::Lock::Timeout=120", cmds[3])
+            self.assertFalse(any("abc" in a for a in cmds[3]))
+            # 4. Explicit caller option preserved without duplicate
+            timeout_opts = [a for a in cmds[4] if "DPkg::Lock::Timeout=" in a]
+            self.assertEqual(timeout_opts, ["DPkg::Lock::Timeout=90"])
+            # 5. Rollback downgrade injected 75
+            rollback_cmds = [c for c in cmds[5:] if "--allow-downgrades" in c]
+            self.assertTrue(rollback_cmds, f"expected rollback downgrade command in {cmds[5:]}")
+            self.assertIn("DPkg::Lock::Timeout=75", rollback_cmds[0])
 
 
 if __name__ == "__main__":

@@ -11,11 +11,13 @@ else
 fi
 
 PACKAGE_NAME="appname"
+SERVICE_NAME="af-${PACKAGE_NAME}"
 APP_LABEL="AppName"
 APP_PORT="${AF_APP_PORT:-8080}"
 APP_DATA_DIR="/var/lib/${PACKAGE_NAME}"
 APP_INSTALL_DIR="/opt/${APP_LABEL}"
 APP_BINARY="${APP_INSTALL_DIR}/${APP_LABEL}"
+UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 GITHUB_REPOSITORY="owner/repo"
 
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
@@ -54,9 +56,9 @@ ASSET_SUFFIX="linux-${APP_ARCH}.tar.gz"
 report_progress 25 "Resolving the current ${APP_LABEL} release..."
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     _target_clean="${AF_TARGET_VERSION#[vV]}"
-    RELEASE_JSON="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${_target_clean}" 2>/dev/null || curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${_target_clean}")"
+    RELEASE_JSON="$(af_github_curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${_target_clean}" 2>/dev/null || af_github_curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${_target_clean}")"
 else
-    RELEASE_JSON="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")"
+    RELEASE_JSON="$(af_github_curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")"
 fi
 RELEASE_INFO="$(python3 - "$RELEASE_JSON" "$ASSET_SUFFIX" <<'PYEOF'
 import json, sys
@@ -78,18 +80,19 @@ DOWNLOAD_URL="${RELEASE_INFO#*$'\n'}"
 if ! id -u "$PACKAGE_NAME" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$APP_DATA_DIR" --shell /usr/sbin/nologin "$PACKAGE_NAME"
 fi
+validate_config_paths "$APP_DATA_DIR" "$APP_INSTALL_DIR" "$UNIT_PATH"
 mkdir -p "$APP_DATA_DIR" "$(dirname "$APP_INSTALL_DIR")" "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 TMP_TAR="$(mktemp "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/${PACKAGE_NAME}-XXXXXX.tar.gz")"
 trap 'rm -f -- "$TMP_TAR"' EXIT
 report_progress 40 "Downloading and staging ${APP_LABEL}..."
 af_logged download_file "$DOWNLOAD_URL" "$TMP_TAR"
-stage_app_archive "$TMP_TAR" "$APP_INSTALL_DIR" "$APP_LABEL" "$APP_DATA_DIR" "$PACKAGE_NAME" "$APP_LABEL"
+stage_app_archive "$TMP_TAR" "$APP_INSTALL_DIR" "$APP_LABEL" "$APP_DATA_DIR" "$SERVICE_NAME" "$APP_LABEL"
 chmod 0755 "$APP_BINARY"
 queue_app_version "$APP_INSTALL_DIR/.af-version" "${APP_VERSION#v}"
 chown -hRP "$PACKAGE_NAME:$PACKAGE_NAME" "$APP_INSTALL_DIR" "$APP_DATA_DIR"
 
-report_progress 70 "Configuring ${APP_LABEL} on port ${APP_PORT}..."
-cat > "/etc/systemd/system/${PACKAGE_NAME}.service" <<EOF
+report_progress 70 "Configuring ${APP_LABEL} on 127.0.0.1:${APP_PORT}..."
+write_config_file "$UNIT_PATH" 0644 <<EOF
 [Unit]
 Description=${APP_LABEL} (AetherFlow Managed)
 After=network-online.target
@@ -100,7 +103,7 @@ Type=simple
 User=${PACKAGE_NAME}
 Group=${PACKAGE_NAME}
 WorkingDirectory=${APP_INSTALL_DIR}
-ExecStart=${APP_BINARY} --port=${APP_PORT} --data-dir=${APP_DATA_DIR}
+ExecStart=${APP_BINARY} --host=127.0.0.1 --port=${APP_PORT} --data-dir=${APP_DATA_DIR}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -118,14 +121,13 @@ ReadWritePaths=${APP_DATA_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
-chmod 0644 "/etc/systemd/system/${PACKAGE_NAME}.service"
 af_logged systemctl daemon-reload
-af_logged systemctl enable "$PACKAGE_NAME"
-af_logged systemctl restart "$PACKAGE_NAME"
+af_logged systemctl enable "$SERVICE_NAME"
+af_logged systemctl restart "$SERVICE_NAME"
 report_progress 90 "Waiting for ${APP_LABEL} readiness..."
-finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/ping"
+finish_app_archive_update "$SERVICE_NAME" "$APP_PORT" "/ping"
 
 commit_app_versions
 write_lock "$PACKAGE_NAME"
-report_progress 100 "${APP_LABEL} installed on port ${APP_PORT}."
+report_progress 100 "${APP_LABEL} installed on 127.0.0.1:${APP_PORT}."
 log_info "${APP_LABEL} installation complete."

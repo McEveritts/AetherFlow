@@ -814,5 +814,136 @@ class CiAndReleaseBuildCleanupTests(unittest.TestCase):
                         self.assertNotIn("./web/dist/.keep", bundle.getnames())
 
 
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "Requires POSIX bash")
+class ArchiveBackupPruningAndPalateRemoverTests(BaseSandboxTest):
+    def test_post_activation_prunes_completed_app_backups_to_newest_two_and_skips_pending_foreign_symlinks(self):
+        opt_dir = self.root / "opt"
+        app_dir = opt_dir / "DemoApp"
+        app_dir.mkdir(parents=True, exist_ok=True)
+        (app_dir / "demo").write_text("live\n", encoding="utf-8")
+
+        def make_backup(suffix: str, mtime: float, owner: str | None = "demo", pending: bool = False) -> Path:
+            b = opt_dir / f"DemoApp.af-backup.{suffix}"
+            (b / "app").mkdir(parents=True, exist_ok=True)
+            (b / "app/file").write_text(suffix, encoding="utf-8")
+            if owner is not None:
+                (b / ".af-archive-owner").write_text(f"{owner}\n", encoding="utf-8")
+            if pending:
+                (b / ".af-archive-pending").write_text("", encoding="utf-8")
+            os.utime(b, (mtime, mtime))
+            return b
+
+        b1 = make_backup("000001", 1000.0, owner="demo")
+        b2 = make_backup("000002", 2000.0, owner="demo")
+        b3 = make_backup("000003", 3000.0, owner="demo")
+        b4 = make_backup("000004", 4000.0, owner="demo", pending=True)
+        b_pending_old = make_backup("pend01", 500.0, owner="demo", pending=True)
+        b_foreign = make_backup("forgn1", 400.0, owner="otherapp")
+        symlink_target = self.root / "outside-target"
+        symlink_target.mkdir(parents=True, exist_ok=True)
+        b_symlink = opt_dir / "DemoApp.af-backup.sym001"
+        b_symlink.symlink_to(symlink_target)
+
+        script = self.root / "run-prune.sh"
+        script.write_text(
+            f"""#!/bin/bash
+set -euo pipefail
+export LOCK_DIR="{self.root}/install"
+export LOGFILE="{self.root}/var/log/aetherflow/prune.log"
+source "{self.common_sh}"
+wait_for_service_ready() {{ return 0; }}
+AF_ARCHIVE_DESTINATION="{app_dir}"
+AF_ARCHIVE_UNIT="demo"
+AF_ARCHIVE_BACKUP="{b4}"
+finish_app_archive_update "demo" "8080" "/health"
+write_lock "demo"
+""",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        res = subprocess.run(
+            ["bash", str(script)],
+            env=self.base_env(),
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # Newest 2 completed owned backups (b4 current + b3 previous) remain; b1 & b2 pruned
+        self.assertTrue(b4.is_dir())
+        self.assertFalse((b4 / ".af-archive-pending").exists())
+        self.assertTrue(b3.is_dir())
+        self.assertFalse(b2.exists(), "older completed backup b2 should have been pruned")
+        self.assertFalse(b1.exists(), "oldest completed backup b1 should have been pruned")
+        # Pending, foreign-owned, and symlink entries must stay untouched
+        self.assertTrue(b_pending_old.is_dir())
+        self.assertTrue(b_foreign.is_dir())
+        self.assertTrue(b_symlink.is_symlink())
+        self.assertTrue(symlink_target.is_dir())
+
+        # Also verify replace_app_tree prunes unowned backups down to newest 2
+        tree_app = opt_dir / "TreeApp"
+        tree_app.mkdir(parents=True, exist_ok=True)
+        (tree_app / "bin").write_text("v0", encoding="utf-8")
+        t1 = opt_dir / "TreeApp.af-backup.aaa111"
+        t2 = opt_dir / "TreeApp.af-backup.aaa222"
+        t3 = opt_dir / "TreeApp.af-backup.aaa333"
+        for idx, d in enumerate((t1, t2, t3), start=1):
+            (d / "app").mkdir(parents=True, exist_ok=True)
+            os.utime(d, (1000.0 * idx, 1000.0 * idx))
+        staged = opt_dir / "TreeApp-staged"
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "bin").write_text("v1", encoding="utf-8")
+        script2 = self.root / "run-replace-tree.sh"
+        script2.write_text(
+            f"""#!/bin/bash
+set -euo pipefail
+export LOCK_DIR="{self.root}/install"
+export LOGFILE="{self.root}/var/log/aetherflow/tree.log"
+source "{self.common_sh}"
+replace_app_tree "{staged}" "{tree_app}"
+""",
+            encoding="utf-8",
+        )
+        script2.chmod(0o755)
+        res2 = subprocess.run(
+            ["bash", str(script2)],
+            env=self.base_env(),
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
+        remaining_tree_backups = sorted(opt_dir.glob("TreeApp.af-backup.*"))
+        self.assertEqual(len(remaining_tree_backups), 2, remaining_tree_backups)
+        self.assertFalse(t1.exists())
+        self.assertFalse(t2.exists())
+        self.assertTrue(t3.is_dir())
+
+    def test_removepackage_palate_output_depends_on_delete_data(self):
+        self.write_executable(self.bin_dir / "runuser", "#!/bin/sh\nexit 0\n")
+        self.write_executable(self.bin_dir / "flock", "#!/bin/sh\nexit 0\n")
+        (self.root / "run/lock").mkdir(parents=True, exist_ok=True)
+        (self.root / "opt/palate").mkdir(parents=True, exist_ok=True)
+        (self.root / "var/lib/palate").mkdir(parents=True, exist_ok=True)
+        (self.root / "etc/palate").mkdir(parents=True, exist_ok=True)
+        (self.root / "install/.palate.lock").write_text("", encoding="utf-8")
+
+        res_keep = self.run_remover("palate", delete_data="false")
+        self.assertEqual(res_keep.returncode, 0, res_keep.stdout + res_keep.stderr)
+        self.assertIn(
+            f"Existing backups remain in {self.root}/var/backups/aetherflow-palate.*",
+            res_keep.stdout + res_keep.stderr,
+        )
+        self.assertNotIn("application data purged", res_keep.stdout + res_keep.stderr)
+
+        (self.root / "opt/palate").mkdir(parents=True, exist_ok=True)
+        (self.root / "install/.palate.lock").write_text("", encoding="utf-8")
+        res_purge = self.run_remover("palate", delete_data="true")
+        self.assertEqual(res_purge.returncode, 0, res_purge.stdout + res_purge.stderr)
+        self.assertIn("Palate removed and application data purged.", res_purge.stdout + res_purge.stderr)
+        self.assertNotIn("Existing backups remain in", res_purge.stdout + res_purge.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -271,7 +271,7 @@ sudo af backup recover-interrupted --target-root /
 
 ## Self-Update & Release Operations (`af-release`)
 
-UI- and runner-triggered updates run inside per-launch transient `aetherflow-self-update-<command>-<channel>-<8hex>.service` units (`systemd-run --collect`) with durable JSON receipts under `/var/lib/aetherflow/.self-update-jobs/<unit>.json`, so restarting `aetherflow-runner` and `aetherflow-api` during the cutover never kills the updater. `runner.sock` IPC `/v1/self-update` defaults to the native Rust `af-release` engine (`NativeRustRelease`); operators can set `AETHERFLOW_FORCE_BASH_RELEASE=1` (or `AETHERFLOW_RELEASE_ENGINE=bash`) in `/etc/aetherflow/aetherflow.env` (or a `systemctl edit aetherflow-runner` drop-in) as an escape hatch to `deploy/release-manager.sh`.
+UI- and runner-triggered updates run inside per-launch transient `aetherflow-self-update-<command>-<channel>-<8hex>.service` units (`systemd-run --collect`) with private `0600` job configs and durable `0600` JSON receipts under `/var/lib/aetherflow/.self-update-jobs/<unit>.json`, so restarting `aetherflow-runner` and `aetherflow-api` during the cutover never kills the updater. `runner.sock` IPC `/v1/self-update` defaults to the native Rust `af-release` engine (`NativeRustRelease`); operators can set `AETHERFLOW_FORCE_BASH_RELEASE=1` (or `AETHERFLOW_RELEASE_ENGINE=bash`) in `/etc/aetherflow/aetherflow.env` (or a `systemctl edit aetherflow-runner` drop-in) as an escape hatch to `deploy/release-manager.sh`.
 
 Omitting `--local` dispatches through `aetherflow-runner.service`'s isolated transient systemd unit; passing `--local` executes `af-release` directly in the invoking root shell (recommended for standalone recovery when the runner or API is unhealthy):
 
@@ -283,14 +283,14 @@ sudo af release status
 sudo af release deploy --channel stable
 
 # Deploy or roll back directly in the invoking root shell (standalone recovery;
-# on custom-PORT hosts, use `sudo env HEALTH_ENDPOINT=...` or `--config <external-conf>`
-# because --local ignores aetherflow.env and Debian/Ubuntu sudo strips shell exports)
+# automatically reads HEALTH_ENDPOINT and GitHub tokens from /etc/aetherflow/aetherflow.env
+# when not overridden in process env or explicit --config)
 sudo af release deploy --local --channel stable
 sudo af release rollback --local
 ```
 
 > [!NOTE]
-> Both Stage 3 deploy and Stage 4 rollback synchronously execute `systemctl start aetherflow-log-retention.service` before restarting `aetherflow-runner` and `aetherflow-api`. If a deploy or rollback aborts in `Stage4Rollback` (`RollbackFailed`), check `sudo journalctl -u aetherflow-log-retention.service`, repair or remove any symlinked, hardlinked, non-`root`/`aetherflow`-owned, or group/world-writable managed log file under `/var/log/aetherflow` (`root:aetherflow`, `0640`), and re-run `sudo af release rollback --local`.
+> Both Stage 3 deploy and Stage 4 rollback restart `aetherflow-runner.service` and `aetherflow-api.service` **before** running `/var/log/aetherflow` ownership setup, `aetherflow-log-retention.timer` enablement, and `aetherflow-log-retention.service` start best-effort. Any log-retention failure emits a structured `WARN` in `/var/log/aetherflow/deploy.log` without blocking cutover or Stage 4 rollback. If a log-retention warning appears, inspect `sudo journalctl -u aetherflow-log-retention.service` and repair any non-compliant files under `/var/log/aetherflow` (`root:aetherflow`, `0640`, no symlinks or hardlinks).
 
 See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-release`)](./rust-release-engine.md).
 

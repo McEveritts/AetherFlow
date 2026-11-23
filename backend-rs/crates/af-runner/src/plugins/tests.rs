@@ -190,6 +190,14 @@ fn systemd_run_args_enforce_isolation_and_keep_credentials_out_of_argv() {
         .iter()
         .any(|a| a == "--property=CapabilityBoundingSet="));
     assert!(args.iter().any(|a| a == "--property=ProtectProc=invisible"));
+    assert!(args.iter().any(|a| a == "--property=SocketBindDeny=any"));
+    assert!(args
+        .iter()
+        .any(|a| a == "--property=SocketBindAllow=ipv4:tcp:21042"));
+    assert!(args.iter().any(|a| a == "--property=IPAddressDeny=any"));
+    assert!(args
+        .iter()
+        .any(|a| a == "--property=IPAddressAllow=localhost"));
     assert!(args
         .iter()
         .any(|a| a == "--property=StateDirectory=aetherflow-plugin-telemetry-fixture"));
@@ -254,6 +262,43 @@ fn systemd_run_args_enforce_isolation_and_keep_credentials_out_of_argv() {
         fs::read_to_string(runtime_token_dir.join("runtime.token")).unwrap(),
         token_secret
     );
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn cgroup_v2_and_systemd_version_preflight_enforces_minimum_249() {
+    let tmp = env::temp_dir().join(format!("af-runner-cgroup-preflight-{}", Uuid::new_v4()));
+    fs::create_dir_all(&tmp).unwrap();
+    let missing = tmp.join("cgroup.controllers");
+    let present = tmp.join("present.controllers");
+    fs::write(&present, "cpu io memory pids\n").unwrap();
+
+    // Missing cgroup.controllers fails closed with IsolationUnavailable
+    assert!(matches!(
+        validate_systemd_cgroup_v2_and_version(&missing, "systemd 255 (255.4-1ubuntu8)\n+PAM"),
+        Err(PluginRunnerError::IsolationUnavailable(_))
+    ));
+    // Old systemd (< 249) fails closed with IsolationUnavailable
+    assert!(matches!(
+        validate_systemd_cgroup_v2_and_version(&present, "systemd 248 (248.3-1)\n+PAM"),
+        Err(PluginRunnerError::IsolationUnavailable(_))
+    ));
+    // Malformed output fails closed with IsolationUnavailable
+    assert!(matches!(
+        validate_systemd_cgroup_v2_and_version(&present, "not-systemd\n"),
+        Err(PluginRunnerError::IsolationUnavailable(_))
+    ));
+    // Unified cgroup v2 + systemd >= 249 passes
+    assert!(
+        validate_systemd_cgroup_v2_and_version(&present, "systemd 249 (249.11-0ubuntu3)\n+PAM")
+            .is_ok()
+    );
+    assert!(validate_systemd_cgroup_v2_and_version(
+        &present,
+        "systemd 256 (256.5-2ubuntu3)\n+PAM +AUDIT"
+    )
+    .is_ok());
+
     let _ = fs::remove_dir_all(&tmp);
 }
 

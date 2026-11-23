@@ -214,22 +214,28 @@ pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<Pa
     resolve_package_script_in_roots(action, script_name, &package_script_roots())
 }
 
-fn package_script_roots() -> Vec<PathBuf> {
-    let mut roots = vec![
+fn package_script_roots_for_exe_dir(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(dir) = exe_dir {
+        roots.push(dir.join("packages/package"));
+        roots.push(dir.join("../packages/package"));
+    }
+    roots.extend([
         PathBuf::from("/opt/AetherFlow/current/packages/package"),
         PathBuf::from("/opt/AetherFlow/packages/package"),
         PathBuf::from("/usr/local/bin/AetherFlow/package"),
         PathBuf::from("packages/package"),
         PathBuf::from("../packages/package"),
         PathBuf::from("../../packages/package"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            roots.push(exe_dir.join("packages/package"));
-            roots.push(exe_dir.join("../packages/package"));
-        }
-    }
+    ]);
     roots
+}
+
+fn package_script_roots() -> Vec<PathBuf> {
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    package_script_roots_for_exe_dir(exe_dir.as_deref())
 }
 
 fn resolve_package_script_in_roots(
@@ -275,6 +281,21 @@ fn resolve_package_script_in_roots(
     None
 }
 
+pub(crate) fn release_manager_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("deploy/release-manager.sh"));
+        candidates.push(dir.join("../deploy/release-manager.sh"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.sh"),
+        PathBuf::from("/opt/AetherFlow/deploy/release-manager.sh"),
+        PathBuf::from("deploy/release-manager.sh"),
+        PathBuf::from("../deploy/release-manager.sh"),
+    ]);
+    candidates
+}
+
 pub fn resolve_release_manager_script() -> Option<PathBuf> {
     if let Ok(explicit) = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT") {
         let trimmed = explicit.trim();
@@ -285,19 +306,12 @@ pub fn resolve_release_manager_script() -> Option<PathBuf> {
             }
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.sh"),
-        PathBuf::from("/opt/AetherFlow/deploy/release-manager.sh"),
-        PathBuf::from("deploy/release-manager.sh"),
-        PathBuf::from("../deploy/release-manager.sh"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("deploy/release-manager.sh"));
-            candidates.push(exe_dir.join("../deploy/release-manager.sh"));
-        }
-    }
-    candidates.into_iter().find(|cand| cand.is_file())
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    release_manager_script_candidates(exe_dir.as_deref())
+        .into_iter()
+        .find(|cand| cand.is_file())
 }
 
 pub fn resolve_systemd_run_binary() -> Option<PathBuf> {
@@ -317,6 +331,20 @@ pub fn resolve_systemd_run_binary() -> Option<PathBuf> {
     candidates.into_iter().find(|cand| cand.is_file())
 }
 
+pub(crate) fn af_cli_binary_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("bin/af"));
+        candidates.push(dir.join("af"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/bin/af"),
+        PathBuf::from("/opt/AetherFlow/current/af"),
+        PathBuf::from("/usr/local/bin/af"),
+    ]);
+    candidates
+}
+
 pub fn resolve_af_cli_binary() -> Option<PathBuf> {
     if let Ok(explicit) = env::var("AETHERFLOW_CLI_BIN") {
         let trimmed = explicit.trim();
@@ -327,18 +355,12 @@ pub fn resolve_af_cli_binary() -> Option<PathBuf> {
             }
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/bin/af"),
-        PathBuf::from("/opt/AetherFlow/current/af"),
-        PathBuf::from("/usr/local/bin/af"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("bin/af"));
-            candidates.push(exe_dir.join("af"));
-        }
-    }
-    candidates.into_iter().find(|cand| cand.is_file())
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    af_cli_binary_candidates(exe_dir.as_deref())
+        .into_iter()
+        .find(|cand| cand.is_file())
 }
 
 /// Builds the Axum router for the Privileged Root Socket Daemon (`aetherflow-api runner`).
@@ -389,6 +411,27 @@ async fn handle_health() -> Json<RunnerResponse> {
     })
 }
 
+pub(crate) fn sandbox_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("deploy/security/af-systemd-sandbox"));
+        candidates.push(dir.join("../deploy/security/af-systemd-sandbox"));
+        candidates.push(dir.join("packages/system/af-systemd-sandbox"));
+        candidates.push(dir.join("../packages/system/af-systemd-sandbox"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
+        PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
+        PathBuf::from("/usr/local/bin/AetherFlow/system/af-systemd-sandbox"),
+        PathBuf::from("deploy/security/af-systemd-sandbox"),
+        PathBuf::from("../deploy/security/af-systemd-sandbox"),
+        PathBuf::from("packages/system/af-systemd-sandbox"),
+        PathBuf::from("../packages/system/af-systemd-sandbox"),
+        PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
+    ]);
+    candidates
+}
+
 pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     if let Ok(explicit) = env::var("AETHERFLOW_SANDBOX_SCRIPT") {
         let trimmed = explicit.trim();
@@ -400,25 +443,12 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
         }
     }
 
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
-        PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
-        PathBuf::from("/usr/local/bin/AetherFlow/system/af-systemd-sandbox"),
-        PathBuf::from("deploy/security/af-systemd-sandbox"),
-        PathBuf::from("../deploy/security/af-systemd-sandbox"),
-        PathBuf::from("packages/system/af-systemd-sandbox"),
-        PathBuf::from("../packages/system/af-systemd-sandbox"),
-        PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("deploy/security/af-systemd-sandbox"));
-            candidates.push(exe_dir.join("../deploy/security/af-systemd-sandbox"));
-            candidates.push(exe_dir.join("packages/system/af-systemd-sandbox"));
-            candidates.push(exe_dir.join("../packages/system/af-systemd-sandbox"));
-        }
-    }
-    candidates.into_iter().find(|c| c.is_file())
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    sandbox_script_candidates(exe_dir.as_deref())
+        .into_iter()
+        .find(|c| c.is_file())
 }
 
 pub fn open_and_read_regular_config(path: &Path) -> std::io::Result<String> {

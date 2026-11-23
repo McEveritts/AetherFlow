@@ -39,14 +39,15 @@ pub use artifact::{
     parse_stable_tag_from_redirect_url, prepare_release_permissions,
     resolve_stable_tag_from_latest_redirect, select_release_tag_from_json,
     simulate_offline_artifact, stage_running_release_manager, verify_artifact_checksum,
-    verify_release_provenance, ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
+    verify_release_provenance, verify_release_provenance_with_token, ArtifactProvider,
+    GitHubReleaseItem, GithubHttpArtifactProvider,
 };
 pub use config::{
     decode_quoted_or_raw_conf_value, default_release_asset_for_arch, escape_conf_value,
     parse_conf_file, parse_conf_str, read_env_file_value, read_env_str_value,
     read_systemd_environment_value, resolve_db_path, try_parse_conf_entries, try_resolve_db_path,
-    validate_no_parent_traversal, DbPathSource, ReleaseChannel, ReleaseCommand, ReleaseConfig,
-    ReleaseOptions, ResolvedDbPath,
+    validate_no_parent_traversal, DbPathSource, RedactedSecret, ReleaseChannel, ReleaseCommand,
+    ReleaseConfig, ReleaseOptions, ResolvedDbPath,
 };
 pub use engine::{
     append_jsonl_log, CleanupReport, DeployReport, MigrateSystemdReport, ReleaseEngine,
@@ -62,7 +63,8 @@ pub use fs_security::{
 };
 pub use health::{
     install_packaged_unit_if_missing, install_systemd_hardening_dropins, is_healthy_status,
-    parse_endpoint_socket_addr, parse_health_status, poll_readiness_probe, sync_cli_entrypoints,
+    parse_endpoint_socket_addr, parse_health_status, poll_readiness_probe,
+    run_post_restart_log_retention_with_bin, sync_cli_entrypoints,
     verify_deployed_frontend_assets, verify_isolated_systemd_lifecycle_authorized,
     wait_for_listener_stopped, HealthCheckAttempt, HealthProber, LifecycleController,
     NoopLifecycleController, ReqwestHealthProber, SystemdLifecycleController,

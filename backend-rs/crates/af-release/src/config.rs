@@ -220,6 +220,27 @@ pub fn default_release_asset_for_arch(arch: &str) -> &'static str {
     }
 }
 
+/// Redacted secret wrapper for GitHub tokens loaded from process env or `/etc/aetherflow/aetherflow.env`.
+/// Never reveals the plaintext secret in `Debug` output and is never serialized into `.conf` or JSON.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RedactedSecret(String);
+
+impl RedactedSecret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseConfig {
     pub releases_dir: PathBuf,
@@ -254,6 +275,10 @@ pub struct ReleaseConfig {
     pub isolated_root: Option<PathBuf>,
     #[serde(default = "default_cli_bin_dir")]
     pub cli_bin_dir: PathBuf,
+    #[serde(skip)]
+    pub github_auth_token: Option<RedactedSecret>,
+    #[serde(skip)]
+    pub skip_provenance_verify: bool,
 }
 
 impl Default for ReleaseConfig {
@@ -291,6 +316,8 @@ impl Default for ReleaseConfig {
             stage_conf_path: None,
             isolated_root: None,
             cli_bin_dir: default_cli_bin_dir(),
+            github_auth_token: None,
+            skip_provenance_verify: false,
         }
     }
 }
@@ -679,6 +706,94 @@ impl ReleaseConfig {
         cfg.host_env_file = cfg.env_file.clone();
         cfg.host_data_dir = cfg.data_dir.clone();
         cfg.isolated_root = effective_root.clone();
+
+        // Unified secret and runtime override loading from `cfg.env_file` (`/etc/aetherflow/aetherflow.env`)
+        // with exact precedence:
+        // process env > explicit --config assignment > cfg.env_file (unless AETHERFLOW_SKIP_ENV_FILES=1)
+        // > default-fallback --config line (is_default_fallback = true) > compiled default.
+        let env_file_content = load_env_file_if_enabled(&cfg.env_file, env_map);
+        let env_file_trusted_root =
+            is_trusted_root_env_file(&cfg.env_file, effective_root.as_deref());
+
+        let resolve_with_env_file = |key: &str, require_root_env_file: bool| -> Option<String> {
+            if let Some(env_val) = env_map
+                .get(key)
+                .map(|raw_val| raw_val.trim())
+                .filter(|trimmed| !trimmed.is_empty())
+            {
+                return Some(env_val.to_string());
+            }
+            if let Some(entry) = parsed_entries.get(key) {
+                let trimmed = entry.value.trim();
+                if !entry.is_default_fallback && !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+            if !require_root_env_file || env_file_trusted_root {
+                if let Some(ref content) = env_file_content {
+                    if let Some(val) = read_env_str_value(content, key) {
+                        let trimmed = val.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(entry) = parsed_entries.get(key) {
+                let trimmed = entry.value.trim();
+                if entry.is_default_fallback && !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+            None
+        };
+
+        if let Some(val) = resolve_with_env_file("HEALTH_ENDPOINT", false) {
+            cfg.health_endpoint = val;
+        }
+
+        let github_token_keys = ["AF_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
+        let resolved_token = github_token_keys
+            .iter()
+            .find_map(|key| {
+                env_map
+                    .get(*key)
+                    .map(|raw| raw.trim())
+                    .filter(|trimmed| !trimmed.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                github_token_keys.iter().find_map(|key| {
+                    parsed_entries
+                        .get(*key)
+                        .filter(|entry| !entry.is_default_fallback && !entry.value.trim().is_empty())
+                        .map(|entry| entry.value.trim().to_string())
+                })
+            })
+            .or_else(|| {
+                env_file_content.as_deref().and_then(|content| {
+                    github_token_keys.iter().find_map(|key| {
+                        read_env_str_value(content, key)
+                            .map(|val| val.trim().to_string())
+                            .filter(|trimmed| !trimmed.is_empty())
+                    })
+                })
+            })
+            .or_else(|| {
+                github_token_keys.iter().find_map(|key| {
+                    parsed_entries
+                        .get(*key)
+                        .filter(|entry| entry.is_default_fallback && !entry.value.trim().is_empty())
+                        .map(|entry| entry.value.trim().to_string())
+                })
+            });
+        cfg.github_auth_token = resolved_token.map(RedactedSecret::new);
+
+        cfg.skip_provenance_verify =
+            resolve_with_env_file("AETHERFLOW_SKIP_PROVENANCE_VERIFY", true)
+                .as_deref()
+                == Some("1");
+
         cfg.validate()?;
 
         if let Some(ref root) = effective_root {
@@ -688,6 +803,10 @@ impl ReleaseConfig {
         let _ = try_resolve_db_path(&cfg, None)?;
 
         Ok(cfg)
+    }
+
+    pub fn github_auth_token_str(&self) -> Option<&str> {
+        self.github_auth_token.as_ref().map(RedactedSecret::as_str)
     }
 
     pub fn load_from_process_env(conf_path: Option<&Path>) -> ReleaseResult<Self> {
@@ -1093,6 +1212,50 @@ pub fn parse_conf_str(content: &str, script_dir: Option<&Path>) -> HashMap<Strin
         }
     }
     map
+}
+
+fn load_env_file_if_enabled(path: &Path, env_map: &HashMap<String, String>) -> Option<String> {
+    if env_map
+        .get("AETHERFLOW_SKIP_ENV_FILES")
+        .map(|v| v.trim())
+        == Some("1")
+    {
+        return None;
+    }
+    let meta = fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
+pub(crate) fn is_trusted_root_env_file(path: &Path, isolated_root: Option<&Path>) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (meta.mode() & 0o022) != 0 {
+            return false;
+        }
+        let uid = meta.uid();
+        if uid == 0 {
+            return true;
+        }
+        if isolated_root.is_some() {
+            return uid == unsafe { libc::geteuid() };
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = isolated_root;
+        false
+    }
 }
 
 pub fn read_env_file_value(path: &Path, key: &str) -> Option<String> {

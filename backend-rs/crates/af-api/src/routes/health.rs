@@ -113,84 +113,6 @@ pub(super) async fn authenticated_ready() -> Response {
         .into_response()
 }
 
-pub(super) fn parse_forwarded_ip_token(raw: &str) -> Option<std::net::IpAddr> {
-    let trimmed = raw.trim().trim_matches('"');
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(sock) = trimmed.parse::<std::net::SocketAddr>() {
-        return Some(sock.ip().to_canonical());
-    }
-    let clean = trimmed
-        .strip_prefix('[')
-        .and_then(|s| s.split_once(']').map(|(h, _)| h))
-        .unwrap_or(trimmed);
-    clean
-        .parse::<std::net::IpAddr>()
-        .ok()
-        .map(|ip| ip.to_canonical())
-}
-
-pub(super) fn forwarded_headers_exclusively_loopback(headers: &axum::http::HeaderMap) -> bool {
-    let mut saw_any_client_ip = false;
-
-    for val in headers.get_all("x-forwarded-for") {
-        let Ok(raw) = val.to_str() else {
-            return false;
-        };
-        for hop in raw.split(',') {
-            let Some(ip) = parse_forwarded_ip_token(hop) else {
-                return false;
-            };
-            if !ip.is_loopback() {
-                return false;
-            }
-            saw_any_client_ip = true;
-        }
-    }
-
-    for val in headers.get_all("x-real-ip") {
-        let Ok(raw) = val.to_str() else {
-            return false;
-        };
-        let Some(ip) = parse_forwarded_ip_token(raw) else {
-            return false;
-        };
-        if !ip.is_loopback() {
-            return false;
-        }
-        saw_any_client_ip = true;
-    }
-
-    for val in headers.get_all("forwarded") {
-        let Ok(raw) = val.to_str() else {
-            return false;
-        };
-        let mut saw_for_in_header = false;
-        for element in raw.split(',') {
-            for pair in element.split(';') {
-                if let Some((k, v)) = pair.trim().split_once('=') {
-                    if k.trim().eq_ignore_ascii_case("for") {
-                        let Some(ip) = parse_forwarded_ip_token(v) else {
-                            return false;
-                        };
-                        if !ip.is_loopback() {
-                            return false;
-                        }
-                        saw_for_in_header = true;
-                        saw_any_client_ip = true;
-                    }
-                }
-            }
-        }
-        if !saw_for_in_header {
-            return false;
-        }
-    }
-
-    saw_any_client_ip
-}
-
 pub(super) async fn is_metrics_request_authorized(req: Request) -> bool {
     let (parts, _body) = req.into_parts();
     drop(_body);
@@ -206,21 +128,6 @@ pub(super) async fn is_metrics_request_authorized(req: Request) -> bool {
         .extensions
         .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
         .map(|axum::extract::connect_info::ConnectInfo(addr)| addr.ip().to_canonical());
-    let had_proxy_headers = parts
-        .extensions
-        .get::<crate::ws::InboundProxyForwarded>()
-        .map(|f| f.0)
-        .unwrap_or_else(|| {
-            parts.headers.contains_key("x-forwarded-for")
-                || parts.headers.contains_key("x-real-ip")
-                || parts.headers.contains_key("forwarded")
-        });
-
-    if peer_ip.is_none_or(|ip| ip.is_loopback())
-        && (!had_proxy_headers || forwarded_headers_exclusively_loopback(&parts.headers))
-    {
-        return true;
-    }
 
     let bearer = parts
         .headers

@@ -340,6 +340,8 @@ pub enum DeclarativeStep {
     /// to `umount` without `-l`), failing closed if any target path remains mounted afterward.
     UnmountPaths {
         paths: Vec<String>,
+        #[serde(default)]
+        only_if_delete_data: bool,
         progress_pct: u8,
         description: String,
     },
@@ -347,17 +349,6 @@ pub enum DeclarativeStep {
     RemovePaths {
         paths: Vec<String>,
         only_if_delete_data: bool,
-        progress_pct: u8,
-        description: String,
-    },
-    /// Executes a validated system command (e.g. FUSE mountpoint preflight/unmount before directory removal).
-    RunCommand {
-        program: String,
-        args: Vec<String>,
-        #[serde(default)]
-        only_if_delete_data: bool,
-        #[serde(default)]
-        ignore_errors: bool,
         progress_pct: u8,
         description: String,
     },

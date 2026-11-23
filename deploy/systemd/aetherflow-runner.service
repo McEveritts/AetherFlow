@@ -24,7 +24,6 @@ Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 # Optional operator overrides (configured in /etc/aetherflow/aetherflow.env):
 #   AF_POST_SANDBOX_READINESS_TIMEOUT_SECS=<10..300> (defaults: 120s dotnet/java/mono, 60s heavy python/node, 30s native/go)
 #   AETHERFLOW_FORCE_BASH_RELEASE=1 or AETHERFLOW_RELEASE_ENGINE=bash (escape hatch from default native Rust af-release)
-EnvironmentFile=-/opt/AetherFlow/current/backend/.env
 EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 ExecStart=/opt/AetherFlow/current/aetherflow-api runner

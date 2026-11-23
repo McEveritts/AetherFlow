@@ -92,6 +92,108 @@ fn test_rclone_both_cli_variants_render_app_port_and_metrics() {
 }
 
 #[tokio::test]
+async fn test_rclone_remove_uses_shell_free_unmount_gated_on_delete_data() {
+    let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+    let recipe = get_declarative_recipe("rclone").unwrap();
+
+    let unmount_step = recipe
+        .remove_steps
+        .iter()
+        .find(|s| {
+            matches!(
+                s,
+                DeclarativeStep::UnmountPaths {
+                    paths,
+                    only_if_delete_data: true,
+                    ..
+                } if paths == &vec!["/mnt/remote".to_string()]
+            )
+        })
+        .expect("rclone remove_steps must include UnmountPaths with only_if_delete_data: true");
+
+    // 1. With DELETE_DATA=false, UnmountPaths skips unmounting even if /mnt/remote is mounted.
+    {
+        let root = create_isolated_test_dir("rclone-unmount-skip-keep-data");
+        fs::create_dir_all(root.join("mnt/remote")).unwrap();
+        fs::create_dir_all(root.join("proc")).unwrap();
+        fs::write(
+            root.join("proc/mounts"),
+            "remote: /mnt/remote fuse.rclone rw,nosuid,nodev 0 0\n",
+        )
+        .unwrap();
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.delete_data = false;
+        let runner = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner.clone());
+        let out = executor
+            .run_single_step(
+                &recipe,
+                unmount_step,
+                &mut HashMap::new(),
+                &mut RollbackJournal::new(None),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("UnmountPaths with only_if_delete_data=true must skip when DELETE_DATA=false");
+        assert!(out.contains("skipped unmount"));
+        assert!(
+            runner.recorded_commands().is_empty(),
+            "no unmount command may run when DELETE_DATA=false"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 2. With DELETE_DATA=true and an active mountpoint that stays mounted, fail closed using
+    //    shell-free fusermount -u and umount (never /bin/sh or umount -l).
+    {
+        let root = create_isolated_test_dir("rclone-unmount-fail-closed-purge");
+        fs::create_dir_all(root.join("mnt/remote")).unwrap();
+        fs::create_dir_all(root.join("proc")).unwrap();
+        fs::write(
+            root.join("proc/mounts"),
+            "remote: /mnt/remote fuse.rclone rw,nosuid,nodev 0 0\n",
+        )
+        .unwrap();
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.delete_data = true;
+        let runner = MockCommandRunner {
+            fail_program: Some("fusermount".to_string()),
+            ..Default::default()
+        };
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner.clone());
+        let err = executor
+            .run_single_step(
+                &recipe,
+                unmount_step,
+                &mut HashMap::new(),
+                &mut RollbackJournal::new(None),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("rclone purge must fail closed when /mnt/remote remains mounted");
+        assert!(err.to_string().contains("/mnt/remote"));
+        let cmds = runner.recorded_commands();
+        assert!(
+            cmds.iter().any(|cmd| cmd.program == "fusermount"
+                && cmd.args == vec!["-u".to_string(), "/mnt/remote".to_string()]),
+            "expected fusermount -u /mnt/remote in {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|cmd| cmd.program == "umount" && cmd.args == vec!["/mnt/remote".to_string()]),
+            "expected non-lazy umount /mnt/remote in {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|cmd| cmd.program == "/bin/sh"
+                || cmd.program == "sh"
+                || cmd.args.iter().any(|a| a == "-l" || a == "-uz")),
+            "rclone unmount must never shell out or perform lazy unmount: {cmds:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[tokio::test]
 async fn test_rclone_authenticated_wait_for_http_ready_rcd_and_gui() {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
 

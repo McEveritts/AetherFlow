@@ -640,3 +640,138 @@ async fn auth_fs_browser_rejects_tmp_when_allowed_fs_roots_unset() {
         "/api/v1/auth/fs must reject /tmp when AF_ALLOWED_FS_ROOTS is unset"
     );
 }
+
+#[tokio::test]
+async fn metrics_loopback_requires_bearer_or_active_admin_session_unless_metrics_public() {
+    use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+    use axum::extract::connect_info::ConnectInfo;
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    ensure_shared_test_db();
+    env::remove_var("METRICS_PUBLIC");
+    env::remove_var("METRICS_BEARER_TOKEN");
+
+    let conn = af_db::get_conn().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO users (id, username, role) VALUES (903, 'metrics-admin', 'admin')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO users (id, username, role) VALUES (904, 'metrics-user', 'user')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(header::USER_AGENT, "metrics-test-ua".parse().unwrap());
+    let (admin_token, admin_claims) = crate::auth::create_standard_jwt(903, &headers).unwrap();
+    let (user_token, user_claims) = crate::auth::create_standard_jwt(904, &headers).unwrap();
+    let admin_jti = admin_claims.jti;
+    let user_jti = user_claims.jti;
+    {
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, last_active, expires_at) VALUES (?1, 903, '127.0.0.1', 'metrics-test-ua', datetime('now'), datetime('now', '+1 hour'))",
+            rusqlite::params![admin_jti],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, last_active, expires_at) VALUES (?1, 904, '127.0.0.1', 'metrics-test-ua', datetime('now'), datetime('now', '+1 hour'))",
+            rusqlite::params![user_jti],
+        )
+        .unwrap();
+    }
+
+    let app = super::super::build_router();
+    let loopback = ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 45678)));
+
+    // 1. Unauthenticated loopback is rejected 401
+    let mut req = axum::http::Request::builder()
+        .uri("/metrics")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::USER_AGENT, "metrics-test-ua")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(loopback);
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 2. Non-admin session is rejected 401
+    let mut req_user = axum::http::Request::builder()
+        .uri("/metrics")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::AUTHORIZATION, format!("Bearer {user_token}"))
+        .header(header::USER_AGENT, "metrics-test-ua")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req_user.extensions_mut().insert(loopback);
+    assert_eq!(
+        app.clone().oneshot(req_user).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 3. Active admin session succeeds 200
+    let mut req_admin = axum::http::Request::builder()
+        .uri("/metrics")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+        .header(header::USER_AGENT, "metrics-test-ua")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req_admin.extensions_mut().insert(loopback);
+    assert_eq!(
+        app.clone().oneshot(req_admin).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // 4. Revoking active_sessions immediately rejects the same admin JWT on /metrics
+    af_db::get_conn()
+        .unwrap()
+        .execute("DELETE FROM active_sessions WHERE jti = ?1", [&admin_jti])
+        .unwrap();
+    let mut req_revoked = axum::http::Request::builder()
+        .uri("/metrics")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+        .header(header::USER_AGENT, "metrics-test-ua")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req_revoked.extensions_mut().insert(loopback);
+    assert_eq!(
+        app.clone().oneshot(req_revoked).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 5. METRICS_BEARER_TOKEN succeeds on loopback
+    env::set_var("METRICS_BEARER_TOKEN", "loopback-metrics-token-secret");
+    let mut req_bearer = axum::http::Request::builder()
+        .uri("/metrics")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::AUTHORIZATION, "Bearer loopback-metrics-token-secret")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req_bearer.extensions_mut().insert(loopback);
+    let bearer_status = app.clone().oneshot(req_bearer).await.unwrap().status();
+    env::remove_var("METRICS_BEARER_TOKEN");
+    assert_eq!(bearer_status, StatusCode::OK);
+
+    // 6. Explicit METRICS_PUBLIC=1 opt-in allows unauthenticated loopback scrape
+    env::set_var("METRICS_PUBLIC", "1");
+    let mut req_public = axum::http::Request::builder()
+        .uri("/metrics")
+        .header(header::HOST, "127.0.0.1:8080")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req_public.extensions_mut().insert(loopback);
+    let public_status = app.oneshot(req_public).await.unwrap().status();
+    env::remove_var("METRICS_PUBLIC");
+    assert_eq!(public_status, StatusCode::OK);
+}

@@ -29,9 +29,9 @@ The `/v1/package` response includes the HTTP header `X-AetherFlow-Package-Engine
 
 Declarative recipes enforce strict validation before and during execution:
 
-- **Direct `execve` Dispatch & `RunCommand` Boundary**:
-  - Typed steps (`AptInstall`, `Systemctl`, `EnsureSystemUser`, `PurgeSystemUser`, etc.) invoke OS binaries directly via `tokio::process::Command::new(program).args(...)` with `stdin(Stdio::null())`, `process_group(0)` on Unix, and `kill_on_drop(true)`.
-  - `DeclarativeStep::RunCommand { program, args, ... }` exists for bounded custom operations and is currently used by `build_rclone_recipe` (`remove_steps`) to invoke `/bin/sh -c` for conditional cleanup; `validation.rs` currently checks only non-empty `program` and `args` without a binary allowlist.
+- **Direct `execve` Dispatch (Zero Shell Primitives)**:
+  - All 23 typed `DeclarativeStep` variants (`AptInstall`, `Systemctl`, `EnsureSystemUser`, `PurgeSystemUser`, `UnmountPaths`, etc.) invoke OS binaries directly via `tokio::process::Command::new(program).args(...)` with `stdin(Stdio::null())`, `process_group(0)` on Unix, and `kill_on_drop(true)`.
+  - `DeclarativeStep::RunCommand` has been removed completely; both `mergerfs` and `rclone` unmount active FUSE paths through the shell-free fail-closed `DeclarativeStep::UnmountPaths { paths, only_if_delete_data }` primitive (`is_active_mountpoint` → `fusermount -u` → non-lazy `umount` → re-check).
 - **Strict Identifier Allowlists**:
   - Package IDs: `SAFE_PKG_ID` (`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
   - Systemd units: `SAFE_SERVICE_NAME` (`^[a-zA-Z0-9][a-zA-Z0-9@._-]{0,63}$`), invoked with `--` before unit arguments (`systemctl <op> -- <unit>`)
@@ -104,7 +104,7 @@ The following public types and functions are exported from `af_runner` (and `af_
 | `PackageExecutionOutcome` | `struct` | Final execution summary (steps, lock path, resolved version, sandbox status, logs) |
 | `ArtifactVerificationPolicy` | `struct` | Size bounds, SHA-256 digest, gzip/ELF magic header requirements |
 | `ArchAssetMap` | `struct` | Per-architecture (`amd64`, `arm64`, `armhf`) asset filename mapping |
-| `DeclarativeStep` | `enum` | 24 typed lifecycle primitives (`AptUpdate`, `AptInstall`, `AptRemove` [serde alias `apt_purge`], `EnsureSystemUser`, `PurgeSystemUser`, `EnsureDirectories`, `ProbeSshPort`, `ResolveGitHubReleaseTag`, `DownloadAndExtractTarGz`, `DownloadBinary`, `WriteTemplateFile`, `WriteSystemdUnit`, `Systemctl`, `PurgeSystemdUnit`, `RemovePaths`, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, `EnsureThreadfinConfig`, `InstallRcloneBinary`, `RemoveRcloneFiles`, `MergeIniSettings`, `UnmountPaths`, `RunCommand`, `WaitForHttpReady`) |
+| `DeclarativeStep` | `enum` | 23 typed shell-free lifecycle primitives (`AptUpdate`, `AptInstall`, `AptRemove` [serde alias `apt_purge`], `EnsureSystemUser`, `PurgeSystemUser`, `EnsureDirectories`, `ProbeSshPort`, `ResolveGitHubReleaseTag`, `DownloadAndExtractTarGz`, `DownloadBinary`, `WriteTemplateFile`, `WriteSystemdUnit`, `Systemctl`, `PurgeSystemdUnit`, `RemovePaths`, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, `EnsureThreadfinConfig`, `InstallRcloneBinary`, `RemoveRcloneFiles`, `MergeIniSettings`, `UnmountPaths`, `WaitForHttpReady`) |
 | `SystemctlOp` | `enum` | `DaemonReload`, `EnableNow`, `Enable`, `Start`, `Restart`, `TryRestart`, `Stop`, `Disable`, `ResetFailed` |
 | `DeclarativePackageRecipe` | `struct` | Validated package lifecycle recipe (`validate()`, `steps_for_action()`) |
 | `PackageExecutorError` | `enum` | Typed error hierarchy (`Validation`, `SecurityViolation`, `LockConflict`, `Cancelled`, `ArtifactVerification`, `VerificationFailed`, `StepFailed`, `ExecutionError`, `Io`) |
@@ -137,7 +137,7 @@ Nine Marketplace applications are registered in `BUILTIN_DECLARATIVE_RECIPES` (`
 | `x2go` | APT + SSH Remote Desktop | Installs `x2goserver`, `x2goserver-xsession`, `xfce4`, `dbus-x11`, captures dpkg version, and manages `x2goserver.service` (`privileged`). |
 | `netdata` | APT + Local Telemetry Daemon | Installs `netdata`, configures `/etc/netdata/netdata.conf` via `MergeIniSettings` (`{{BIND_ADDRESS}}`, `{{APP_PORT}}`), captures dpkg version, manages `netdata.service` (`privileged`), and verifies `/api/v1/info` (`WaitForHttpReady`). |
 | `mergerfs` | APT Union Filesystem | Installs `mergerfs` and `fuse3`, records installed dpkg version in `/var/lib/mergerfs/.af-version`, manages `mergerfs.service` (`privileged`), and unmounts `/mnt/unionfs` & `/mnt/mergerfs` safely on removal/purge without deleting branch data. |
-| `rclone` | Upstream Binary + Rclone Web RCD / VFS | Installs `fuse3` and the upstream executable at `/opt/AetherFlow/apps/rclone/rclone`; manages `rclone.service` (`127.0.0.1:5572`) and `rclone-vfs.service` using `/etc/rclone/rclone.env` (migrating `/etc/aetherflow/rclone.env` if present); uses `DeclarativeStep::RunCommand` (`/bin/sh -c`) for conditional removal cleanup. |
+| `rclone` | Upstream Binary + Rclone Web RCD / VFS | Installs `fuse3` and the upstream executable at `/opt/AetherFlow/apps/rclone/rclone`; manages `rclone.service` (`127.0.0.1:5572`) and `rclone-vfs.service` using `/etc/rclone/rclone.env` (migrating `/etc/aetherflow/rclone.env` if present); unmounts `/mnt/remote` via shell-free fail-closed `DeclarativeStep::UnmountPaths { only_if_delete_data: true }` on data purge. |
 
 ### 5.2 Remaining Marketplace Packages (`PackageEngineMode::LegacyBashFallback`)
 

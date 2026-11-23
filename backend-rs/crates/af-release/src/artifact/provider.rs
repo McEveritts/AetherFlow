@@ -1,6 +1,6 @@
 use super::{
     is_v4_or_newer_release_tag, select_release_tag_from_json, verify_artifact_checksum,
-    verify_release_provenance,
+    verify_release_provenance_with_token,
 };
 use crate::config::{ReleaseChannel, ReleaseConfig};
 use crate::error::{ReleaseError, ReleaseResult};
@@ -52,12 +52,21 @@ pub fn resolve_stable_tag_from_latest_redirect(
     github_repo: &str,
     timeout: Duration,
 ) -> ReleaseResult<String> {
+    resolve_stable_tag_from_latest_redirect_with_token(download_base, github_repo, timeout, None)
+}
+
+fn resolve_stable_tag_from_latest_redirect_with_token(
+    download_base: &str,
+    github_repo: &str,
+    timeout: Duration,
+    github_token: Option<&str>,
+) -> ReleaseResult<String> {
     let latest_url = format!(
         "{}/{}/releases/latest",
         download_base.trim_end_matches('/'),
         github_repo.trim_matches('/')
     );
-    let effective = run_blocking_http_effective_url(&latest_url, timeout)?;
+    let effective = run_blocking_http_effective_url(&latest_url, timeout, github_token)?;
     parse_stable_tag_from_redirect_url(&effective, download_base, github_repo)
 }
 
@@ -105,7 +114,9 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
             config.github_repo
         );
 
-        let body = run_blocking_http_get_text(&url, Duration::from_secs(15)).unwrap_or_default();
+        let token = config.github_auth_token_str();
+        let body = run_blocking_http_get_text(&url, Duration::from_secs(15), token)
+            .unwrap_or_default();
         match select_release_tag_from_json(channel, &body) {
             Ok(tag) => Ok(tag),
             Err(api_err) if channel == ReleaseChannel::Stable => {
@@ -113,10 +124,11 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
                     .download_base_url
                     .as_deref()
                     .unwrap_or("https://github.com");
-                resolve_stable_tag_from_latest_redirect(
+                resolve_stable_tag_from_latest_redirect_with_token(
                     download_base,
                     &config.github_repo,
                     Duration::from_secs(15),
+                    token,
                 )
                 .map_err(|_| api_err)
             }
@@ -152,6 +164,7 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
         let artifact_url = format!("{}/{}", release_base, config.artifact_name);
         let checksum_url = format!("{}/{}", release_base, config.checksum_name);
 
+        let token = config.github_auth_token_str();
         let archive_dest = staging_dir.join(&config.artifact_name);
         run_blocking_http_download_to_file(
             &artifact_url,
@@ -159,15 +172,18 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
             0o600,
             Duration::from_secs(180),
             MAX_RELEASE_ARCHIVE_BYTES,
+            token,
         )?;
 
-        let manifest_content = run_blocking_http_get_text(&checksum_url, Duration::from_secs(30))
-            .map_err(|e| {
-            ReleaseError::ArtifactVerification(format!(
-                "Missing SHA256SUMS manifest for release {} ({}). Refusing unverified binary.",
-                tag, e
-            ))
-        })?;
+        let manifest_content =
+            run_blocking_http_get_text(&checksum_url, Duration::from_secs(30), token).map_err(
+                |e| {
+                    ReleaseError::ArtifactVerification(format!(
+                        "Missing SHA256SUMS manifest for release {} ({}). Refusing unverified binary.",
+                        tag, e
+                    ))
+                },
+            )?;
         let checksum_dest = staging_dir.join(&config.checksum_name);
         let _ = crate::fs_security::atomic_write_bytes_with_mode(
             &checksum_dest,
@@ -177,7 +193,9 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
 
         let verified_digest =
             verify_artifact_checksum(&archive_dest, &manifest_content, &config.artifact_name)?;
-        if std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() == Ok("1") {
+        if config.skip_provenance_verify
+            || std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() == Ok("1")
+        {
             tracing::warn!(
                 tag = %tag,
                 artifact = %config.artifact_name,
@@ -199,6 +217,7 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
                     0o600,
                     Duration::from_secs(30),
                     8 * 1024 * 1024,
+                    token,
                 )
                 .is_ok()
                 {
@@ -209,13 +228,14 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
                     }
                 }
             }
-            verify_release_provenance(
+            verify_release_provenance_with_token(
                 &config.github_repo,
                 &verified_digest,
                 &config.artifact_name,
                 Some(tag),
                 Some(channel),
                 bundle_override.as_deref(),
+                token,
             )?;
         }
 
@@ -251,10 +271,16 @@ pub(super) fn is_trusted_github_auth_url(url: &reqwest::Url) -> bool {
     false
 }
 
-fn resolve_github_auth_token_for_url(url: &str) -> Option<String> {
+fn resolve_github_auth_token_for_url(
+    url: &str,
+    configured_token: Option<&str>,
+) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     if !is_trusted_github_auth_url(&parsed) {
         return None;
+    }
+    if let Some(tok) = configured_token.map(str::trim).filter(|t| !t.is_empty()) {
+        return Some(tok.to_string());
     }
     for key in ["AF_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(val) = std::env::var(key) {
@@ -296,9 +322,13 @@ fn build_release_http_client(
         .map_err(|e| ReleaseError::ArtifactVerification(format!("http client init: {}", e)))
 }
 
-fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResult<String> {
+fn run_blocking_http_effective_url(
+    url: &str,
+    timeout: Duration,
+    configured_token: Option<&str>,
+) -> ReleaseResult<String> {
     let url_owned = url.to_string();
-    let token_opt = resolve_github_auth_token_for_url(&url_owned);
+    let token_opt = resolve_github_auth_token_for_url(&url_owned, configured_token);
     std::thread::spawn(move || -> ReleaseResult<String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -329,8 +359,17 @@ fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResul
     .map_err(|_| ReleaseError::ArtifactVerification("HTTP worker thread panicked".to_string()))?
 }
 
-fn run_blocking_http_get_text(url: &str, timeout: Duration) -> ReleaseResult<String> {
-    let bytes = run_blocking_http_get_bytes_capped(url, timeout, MAX_RELEASE_TEXT_BYTES)?;
+fn run_blocking_http_get_text(
+    url: &str,
+    timeout: Duration,
+    configured_token: Option<&str>,
+) -> ReleaseResult<String> {
+    let bytes = run_blocking_http_get_bytes_capped(
+        url,
+        timeout,
+        MAX_RELEASE_TEXT_BYTES,
+        configured_token,
+    )?;
     String::from_utf8(bytes).map_err(|e| {
         ReleaseError::ArtifactVerification(format!("invalid UTF-8 response from {}: {}", url, e))
     })
@@ -340,9 +379,10 @@ fn run_blocking_http_get_bytes_capped(
     url: &str,
     timeout: Duration,
     max_bytes: u64,
+    configured_token: Option<&str>,
 ) -> ReleaseResult<Vec<u8>> {
     let url_owned = url.to_string();
-    let token_opt = resolve_github_auth_token_for_url(&url_owned);
+    let token_opt = resolve_github_auth_token_for_url(&url_owned, configured_token);
     std::thread::spawn(move || -> ReleaseResult<Vec<u8>> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -402,10 +442,11 @@ fn run_blocking_http_download_to_file(
     mode: u32,
     timeout: Duration,
     max_bytes: u64,
+    configured_token: Option<&str>,
 ) -> ReleaseResult<()> {
     let url_owned = url.to_string();
     let dest_owned = dest_path.to_path_buf();
-    let token_opt = resolve_github_auth_token_for_url(&url_owned);
+    let token_opt = resolve_github_auth_token_for_url(&url_owned, configured_token);
     std::thread::spawn(move || -> ReleaseResult<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
