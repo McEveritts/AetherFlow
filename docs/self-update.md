@@ -1,53 +1,26 @@
-# Self-update lifecycle
+# Self-Update Lifecycle
 
-The privileged runner starts updates in the independent
-`aetherflow-self-update.service`. Native execution uses the running release's
-physical `af` binary with `release deploy --local`; it must not dispatch back
-through the runner socket. Bash compatibility updates use the same isolated
-systemd launcher. A process thread or task inside the runner cannot survive
-restarting that runner, regardless of `KillMode=process`.
+When triggered from the dashboard (`POST /api/v1/admin/system/update/run`) or via runner-mediated `af release deploy|rollback`, `aetherflow-runner.service` (`backend-rs/crates/af-runner/src/self_update.rs`) starts each update inside a unique per-launch transient systemd unit named `aetherflow-self-update-<command>-<channel>-<8hex>.service` via `systemd-run --collect`. A task running inside `aetherflow-runner` cannot survive restarting that runner, regardless of `KillMode=process`.
 
-Launch requests are validated, serialized, acknowledged only after systemd
-accepts execution, and assigned an operation ID. Active jobs reject duplicate
-requests. The root-only native recovery journal and the updater unit provide
-restart-surviving status through authenticated `/api/v1/auth/system/update/status` (and `/api/v1/admin/system/update/status`). A
-root-owned `0700` runtime directory and an atomic `0600` environment handoff
-keep forwarded credentials out of command arguments and public unit properties.
-The handoff is removed after systemd acknowledges execution. A retained success
-supersedes only the exact pre-swap journal recorded when that unit launched;
-later or post-swap interrupted journals still require recovery. A
-completed unit is retained until the next launch so early launch failures and
-terminal outcomes remain observable. The native journal preserves the operation
-ID after the transient unit is gone. Status errors are not successful updates.
+## Launch, Binary Resolution & Execution Mechanics
 
-The API captures its version from the physical running executable at startup,
-not the mutable `current` symlink. Readiness includes that version. The release
-engine verifies both systemd services' actual executable paths against the
-candidate before marking deployment complete; a healthy old API is insufficient.
-The settings UI independently checks fresh runtime, selected-release, operation,
-and upstream-version data before claiming the latest release is running.
+- **Default Native Engine (`NativeRustRelease`)**: `resolve_af_cli_binary()` (`backend-rs/crates/af-runner/src/lib.rs`) checks `AETHERFLOW_CLI_BIN`, `/opt/AetherFlow/current/bin/af`, `/opt/AetherFlow/current/af`, and `/usr/local/bin/af` before falling back to the directory of `env::current_exe()`. The transient unit runs `af [--root <root>] release <command> --channel <channel> --local --config <job_conf> --job-status-file <status_json> --job-unit <unit>` so it executes in-process without dispatching back through `/run/aetherflow/runner.sock`. Setting `AETHERFLOW_FORCE_BASH_RELEASE=1` or `AETHERFLOW_RELEASE_ENGINE=bash` runs `deploy/release-manager.sh` in the same isolated transient unit.
+- **Serialization & Mutual Exclusion**: Launch requests are validated, serialized against concurrent self-updates and in-flight Marketplace package lifecycle jobs (`PACKAGE_LIFECYCLE_MUTEX`, SQLite `package_lifecycle_jobs`, `LaunchOwner` lockfiles, and the shared maintenance lock), and acknowledged only after `systemd-run` accepts the unit. Active jobs reject duplicate requests.
+- **Configuration & Environment Passing**: Non-secret preserved environment variables are passed to the transient unit via `systemd-run --setenv=KEY=VALUE`. A `0600` job configuration file (`<data_dir>/.self-update-jobs/<unit>.conf`) is persisted on disk and passed via `--config` for the worker to read (unlinked only if `systemd-run` launch fails). `af-runner` intentionally does **not** forward GitHub tokens (`GH_TOKEN`, `GITHUB_TOKEN`, `AF_GITHUB_TOKEN`) into the transient unit; operators on high-frequency `nightly` hosts should be aware of GitHub's 60 requests/hour unauthenticated IP rate limit (and run `sudo af release deploy --local --channel nightly` with `AF_GITHUB_TOKEN` exported if rate-limited).
+- **Durable Status & Receipts**: Because `systemd-run --collect` unloads completed transient units immediately, restart-surviving observability relies on durable JSON receipt files written under `<data_dir>/.self-update-jobs/<unit>.json` (recording `af` CLI's `CliExitCode` mapping — `2` usage/config, `4` preflight/probe/lock, `7` rollback/execution failure — rather than raw `af_release::ExitCode`) and the release recovery journal (`${RELEASES_DIR}/.recovery_state.json`), queried via `POST /v1/self-update/status` on `af-runner` and exposed on `GET /api/v1/auth/system/update/status` (and `/api/v1/admin/system/update/status`).
+- **Operation Identifiers**: An unqualified poll to `/api/v1/auth/system/update/status` (without `?job_unit=<unit>` or `?unit=<unit>`) reports `operationId` as the active non-completed receipt's `job_unit`, returning `state: "idle"` and `operationId: null` once all on-disk receipts have completed (or `null` when reporting `recovery_required`). Pass `?job_unit=<unit>` (or `?unit=<unit>`) to query a specific completed receipt's `job_unit`. Separately, `af-release`'s `.recovery_state.json` tracks its own internal `RecoveryState::operation_id` UUID. Status errors are never treated as successful updates.
 
-## First fixed release and interrupted recovery
+## Running Binary Verification
 
-An older installed runner still contains the faulty in-process launcher. Install
-the first fixed release from a standalone root `af release deploy --local
---channel nightly` invocation or an independent root systemd service, not the old
-UI updater. This is a source/release change, not authorization to deploy it.
+`aetherflow-api` captures its version from its physical running executable on startup, not from the mutable `/opt/AetherFlow/current` symlink, and reports it on `/health/ready`. Before marking a deployment complete, `af-release` (`verify_running_release`) checks `/proc/<pid>/exe` for both `aetherflow-runner.service` and `aetherflow-api.service` against the candidate release directory so a healthy older process cannot satisfy the gate. The settings UI independently checks fresh runtime, selected-release, operation, and upstream-version data before reporting that the latest release is active.
 
-If a previous deployment stopped after switching `current`, take an online
-database backup and preserve its recovery journal. Run the existing native
-`af release rollback --local --channel nightly` before a fresh standalone
-deployment. The native guard intentionally blocks overwriting the previous
-known-good release. Do not forge or delete recovery state to bypass that guard.
+## Standalone Recovery & Interrupted Deployments
+
+- **Upgrading from Pre-Isolation Runners**: Older v3/early-v4 runners lacking transient systemd isolation must be upgraded once from a standalone root invocation (`sudo af release deploy --local --channel <stable|nightly>` or an independent root systemd service) rather than the old UI updater. On hosts with a custom `PORT`, explicitly export `HEALTH_ENDPOINT` or pass `--config <external-conf>` because `--local` ignores `HEALTH_ENDPOINT` in `/etc/aetherflow/aetherflow.env`.
+- **Interrupted Post-Swap Deployments**: If a previous deployment stopped after switching `/opt/AetherFlow/current`, take an online SQLite backup (`sudo af backup create`) and preserve `${RELEASES_DIR}/.recovery_state.json`. Run `sudo af release rollback --local [--channel <stable|nightly>]` (with `HEALTH_ENDPOINT` / `--config` if using a custom `PORT`) before starting a new deployment. The recovery guard intentionally blocks overwriting `.previous_release`; do not delete or edit `.recovery_state.json` to bypass it.
 
 ## Validation
 
-Run `backend-rs` and `frontend-rs` workspace tests, Clippy, WASM asset checks, and Playwright browser checks. The self-update tests cover command validation, launcher failure, duplicates, native/Bash isolation, runtime mismatch, and stale/failed UI status.
+Run the `backend-rs` and `frontend-rs` workspace tests, Clippy, WASM asset checks, and Playwright suites (see [Testing & Verification](./testing.md)).
 
-The explicit ignored Rust integration test
-`tests::updater_survives_caller_restart` in `af-runner` executes the actual launcher
-argument builder against disposable services. It requires a functioning systemd
-manager; set `AF_SYSTEMD_TEST_USER=1` for a user manager. CI runs it against the
-system manager on its disposable Linux runner. It verifies both native and Bash
-updaters survive their calling service being restarted. It never names or
-restarts the production AetherFlow services.
+The ignored Rust integration test `tests::updater_survives_caller_restart` in `af-runner` executes `python3 tests/self_update_systemd_smoke.py --test-binary <path>` against the Linux host's system `systemd` manager (`systemctl`, `systemd-run`, `runuser -u nobody`), driving `/v1/self-update` and `/v1/self-update/status` through `build_runner_router().oneshot(...)`. Release CI (`.github/workflows/release.yml`) compiles the test binary unprivileged in `working-directory: backend-rs` via `cargo test -p af-runner --lib --locked --no-run --message-format=json` and executes the extracted binary under `sudo` (`sudo "$test_binary" tests::updater_survives_caller_restart --ignored --exact --nocapture`) to verify that both native `af-release` and Bash updaters survive restarts of their calling service without touching production AetherFlow services.

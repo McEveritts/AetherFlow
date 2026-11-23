@@ -1,145 +1,38 @@
-# Marketplace lifecycle repair
+# Marketplace Lifecycle Hardening & Repair Reference
 
-This change repairs the Rust V4 Marketplace paths identified in the November 1,
-2026 diagnostic report. It keeps the native systemd deployment model.
+This document records the Marketplace lifecycle coordination, installer/removal safety contracts, and version-tracking behaviors enforced across the 77-package v4 catalog (established during the November 1, 2026 lifecycle repair and maintained in the current release).
 
-## Lifecycle coordination
+## Lifecycle Coordination
 
-- API jobs register atomically, then hold a lifecycle mutex through service
-  preparation, execution, and ingress synchronization. Health recovery uses that
-  mutex and resets its retry state while package work is queued or running.
-- The privileged runner's recovery operation shares the package execution mutex
-  and persistent advisory flock. A busy executor skips recovery without spending
-  a retry or posting a recovery notification. A leftover flock file is harmless.
-- Inactive or failed `Type=oneshot` jobs are excluded from automatic restarts;
-  their timer units can still be monitored.
-- Unit resolution uses catalog service names and companion units. Update
-  preparation queries and controls each concrete unit separately, stops timers
-  first, and aborts if an active service cannot be stopped.
-- Updates keep the native configured port, existing ingress port, or catalog port
-  in that order. They never probe the running application's port to allocate a new
-  one. Blueprint synchronization also reuses an installed application's port.
-- Direct execution uses the runner's stream supervisor and locking, including
-  `AF_PACKAGE_ACTION` and allocated port propagation.
+- API jobs register atomically and hold a lifecycle mutex through service preparation, script/recipe execution, and ingress synchronization.
+- **`af-heal` Coordination & Approval Gate**: `AF_HEAL_AUTO_APPROVE` defaults to `false` (`backend-rs/crates/af-services/src/workers.rs`), queueing restart proposals in `pending_actions` for administrator approval unless explicitly enabled. When package jobs are active, `collect_heal_poll_units()` skips early without mutating `HEAL_STATES`. The runner's recovery path shares the package execution mutex and persistent advisory flock; if the runner reports busy/skipped, `perform_heal_check()` restores `previous_state` rather than spending a retry, resetting retry counters to zero, or posting a recovery notification. A leftover flock inode on disk is harmless.
+- Inactive or failed `Type=oneshot` jobs are excluded from automatic restarts; their timer units remain monitorable.
+- Unit resolution uses catalog service names and companion units. Update preparation queries and controls each concrete unit separately, stops timers first, and aborts if an active service cannot be stopped.
+- **Port Preservation (Fail-Closed)**: Updates preserve the existing configured/ingress port and never probe a running port to allocate a new one, and **never** fall back to the catalog default port (`backend-rs/crates/af-api/src/routes/marketplace/lifecycle.rs`). For standard apps, `resolve_existing_update_port_with` checks persisted ingress configuration and fails closed if absent; for pre-stopped or `shared-vhost` apps, `resolve_package_lifecycle_port_with` checks native `configured_port`, then `ingress_port`, and fails closed if neither is valid. Blueprint synchronization also reuses an installed application's port.
+- Direct execution uses the runner's stream supervisor and locking, including `AF_PACKAGE_ACTION` and allocated port propagation.
 
-## Installer and removal behavior
+## Installer and Removal Behavior
 
-Gitea, Prometheus/Node Exporter, Rclone, Autobrr, File Browser, Unpackerr,
-Autoscan, and Recyclarr install binaries through a temporary file on the
-destination filesystem followed by `rename`. Gitea verifies the ELF header,
-preserves its INI settings, runs migrations, and records the installed version.
+- **Atomic Binary Swaps**: Gitea, Prometheus/Node Exporter, Rclone, Autobrr, File Browser, Unpackerr, Autoscan, and Recyclarr install binaries through a temporary file on the destination filesystem followed by `rename`. Gitea verifies the ELF header, preserves its INI settings, runs migrations, and records the installed version.
+- **State Preservation on Update**: Nextcloud preserves its database, configuration, application data, custom apps, and themes and runs `occ upgrade` for existing installations; missing configuration on an update fails before database provisioning, and an existing database without configuration is never reinitialized by a fresh install. Uptime Kuma stages its build and copies its `data` directory into the new tree. ruTorrent preserves `share`, `conf`, and plugins; Organizr preserves `api/config` and `api/db`; Kavita preserves its `config` directory; File Browser retains its database and initializes administrator accounts only for a new database.
+- **Staged Tree Backups & Manual Pruning**: Tree replacements retain the previous installation under `<application-directory>.af-backup.*/app` inside a private directory to support manual file recovery. Database migrations are not automatically reversed. Because there is no automated pruning timer for `.af-backup.*` trees, operators should retain normal database backups and manually remove verified old `.af-backup.*` copies to avoid unbounded disk growth across repeated upgrades.
+- **Port & Config Handling**: Legacy listen templates and readiness requests honor `AF_APP_PORT` (with `AETHERFLOW_APP_PORT` fallback). Native XML, JSON, INI, and YAML port settings update in place without replacing unrelated settings. Plex keeps port `32400`. Calibre-Web uses its built-in port or an existing port recorded in its settings database.
+- **Data Retention & Explicit Purge**: All removal scripts and declarative Rust recipes preserve persistent data, configuration, APT configs, Nextcloud databases, and service accounts by default. Administrators can request explicit purge via the Marketplace uninstall endpoint (`POST /api/v1/admin/packages/{id}/uninstall?purge=true`, passing `DELETE_DATA=true` to the remover), the UI purge confirmation checkbox, or `sudo af package remove <pkg> --purge`.
+- **Node.js & Staged npm Builds**: Node application installers use the shared `node_build` helper to include development, peer, and optional dependencies and enable lifecycle scripts during builds without mutating the caller's environment or runtime mode. Package-manager bootstraps disable their own lifecycle scripts. Maintainerr builds with its private Yarn release in a clean environment and prunes development dependencies only after its build succeeds. The Lounge, Flood, and n8n install into staged local npm trees under `/opt` and publish binaries in `/usr/local/bin`, avoiding npm global-mode build failures and staging previous trees in `<application-directory>.af-backup.*`.
+- **Shared Build Prerequisites**: `ensure_node` provisions Git, C/C++ build tools, Python, `setuptools`, and `pkg-config` even when a suitable Node runtime is already installed; installers using private runtimes declare those prerequisites separately.
+- **Readiness & Helper/Config Precedence**: Kavita readiness uses a bounded wait and concise errors; Seerr verifies an HTTP success response before parsing version JSON. Bash installers resolve `packages/common.sh` (`${SELF_DIR}/../../common.sh` -> `/opt/AetherFlow/current/packages/common.sh` -> `/opt/AetherFlow/packages/common.sh`), and `common.sh` loads `packages/lib/*.sh` from the adjacent `lib/` directory (or `AF_COMMON_LIB_DIR` / active release `packages/lib`). Separately, Rust catalog loading (`af-runner` and `af-services` for `packages.json` / `package_automation.json`) honors explicit overrides (`AETHERFLOW_PACKAGES_CONFIG`, `AETHERFLOW_PACKAGE_AUTOMATION_CONFIG`) first, then active/root `config/`, ahead of legacy v3 `/opt/AetherFlow/current/backend/config` and `/opt/AetherFlow/backend/config` fallbacks and embedded defaults.
 
-Nextcloud preserves its database, configuration, application data, custom apps,
-and themes and runs `occ upgrade` for an existing installation. Missing
-configuration on an update fails before database provisioning. An existing
-database without configuration is never reinitialized by a fresh install.
-Uptime Kuma stages its build and copies its `data` directory into the new tree.
-ruTorrent preserves `share`, `conf`, and plugins; Organizr preserves `api/config`
-and `api/db`. Kavita preserves its `config` directory. File Browser retains its
-database and initializes administrator accounts only for a new database.
+## Versions and Declarative Recipes
 
-Tree replacements retain the previous installation under
-`<application-directory>.af-backup.*/app`, inside a private directory. These
-copies support manual recovery of application files. Database migrations are
-not automatically reversed. Operators should retain normal database backups and
-remove old application copies after verifying an upgrade.
+- Installed version checks prefer `.af-version` markers across binary/source packages (including Gitea); Autobrr's fallback invokes `autobrr version`.
+- Every registered APT declarative recipe captures the installed Debian package version (`CaptureDpkgVersion`), using `unknown` until a version is resolved rather than a placeholder version.
+- Nine built-in declarative Rust recipes (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `x2go`, `netdata`, `mergerfs`, `rclone`) remain available behind the opt-in `AETHERFLOW_ENABLE_RUST_PACKAGES=1` gate. Scrutiny uses its Bash installer (which downloads its application binary and collector assets); ClamAV and Mosquitto are outside the 77-package Marketplace catalog.
 
-Legacy listen templates and readiness requests honor `AF_APP_PORT` (with
-`AETHERFLOW_APP_PORT` as fallback). Native XML, JSON, INI, and YAML port settings
-are updated without replacing unrelated settings. Plex keeps port 32400.
-Calibre-Web uses its built-in port or an existing port already recorded in its
-settings database; fresh installations do not receive an unsupported override.
+## Validation
 
-The 57 older removal scripts now preserve persistent directories by default.
-APT removals retain configuration, service accounts are retained with their
-data, and Nextcloud's database is kept. An administrator can explicitly purge
-through `DELETE_DATA=true` when invoking a removal script. The Marketplace's
-existing uninstall request uses the data-preserving default. Mixed application
-and data directories may remain after uninstall so reinstalling can reuse them.
-Native Rust removal follows the same configuration/account retention policy.
+- **`tests/test_marketplace_lifecycle.py`** (19 regression tests on the current 77-package catalog): Runs installers against temporary directory trees with mocked host commands, verifying in-place binary replacement without truncating active inodes, Gitea failure handling and port retention, data-preserving updates, failed Uptime Kuma builds, retained Nextcloud data on uninstall, explicit Gitea purging, and secret/port preservation.
+- **`tests/test_jellyseerr_installer.py`**: Verifies Seerr build failures, cutover, runtime verification, and rollback recovery.
+- **`tests/test_node_installers.py`**: Exercises real `npm` against local Git/tarball fixtures with the registry disabled, covering inherited global/production/disabled-script environments, scoped packages, missing executables, failed-build retention, upgrades, and build prerequisites.
+- **Rust & Hygiene Suites**: `cargo test --manifest-path backend-rs/Cargo.toml --workspace --locked -- --test-threads=1` (serial because API tests modify process-wide DB env state) and `python3 tests/check_shell_hygiene.py` verify runner coordination, oneshot exclusion, duplicate job rejection, companion unit resolution, catalog/recipe parity across all 77 packages, and shell syntax. *(Historical baseline: the original November 1, 2026 repair passed on the 74-package catalog with 11 lifecycle tests before subsequent catalog expansion to 77 packages and 19 lifecycle tests.)*
 
-Node application installers use the shared `node_build` environment to include
-development, peer, and optional dependencies and enable lifecycle scripts during
-builds. It overrides inherited production-only npm settings without changing
-the caller's environment or the application's runtime mode. Package-manager
-bootstraps explicitly disable their own lifecycle scripts. Maintainerr already
-builds with its private Yarn release in a clean environment and only prunes
-development dependencies after its build succeeds.
-
-The Lounge, Flood, and n8n install into staged local npm trees under `/opt`, then
-publish their command in `/usr/local/bin`. This prevents npm's global mode from
-leaking into Git dependency preparation, which previously skipped
-`irc-framework`'s build dependencies: adding global `npm-run-all` only exposed
-the next missing tool, Babel. Each dependency can now install its own declared
-toolchain. Builds and executable verification finish before replacing existing
-application code, and previous trees remain available in private
-`<application-directory>.af-backup.*` directories. Removal deletes managed code
-while retaining `/var/lib` state unless `DELETE_DATA=true`.
-
-`ensure_node` provisions Git, C/C++ build tools, Python, setuptools, and
-pkg-config even when a suitable Node runtime is already installed. Installers
-with private runtimes declare the same build prerequisites separately. This
-covers shared build tools; application-specific native libraries remain part
-of each installer's dependency list.
-
-Kavita readiness has a bounded wait and concise registration errors; Seerr
-checks a successful HTTP response before parsing its version JSON.
-
-Scripts prefer the helpers shipped alongside the selected release. Config
-loaders already prefer relative/current-release configuration ahead of the
-legacy `/opt/AetherFlow/backend/config` fallback. Explicit config overrides
-continue to take precedence.
-
-## Versions and declarative recipes
-
-Version checks prefer the existing `.af-version` markers for the eleven packages
-listed in the report, plus Gitea. Autobrr's fallback uses `autobrr version`.
-Every registered APT recipe captures the installed Debian package version, and
-unresolved versions use `unknown` rather than a fabricated `1.0.0`.
-
-The incomplete Scrutiny Rust recipe is no longer selected; Scrutiny uses its
-existing Bash installer, which downloads its application assets and collector.
-ClamAV and Mosquitto are not in the Marketplace catalog and no longer register
-as Marketplace recipes. Nine native recipes remain available behind the
-existing opt-in feature flag.
-
-## Validation and rollout
-
-`tests/test_marketplace_lifecycle.py` runs installers against temporary directory
-trees with mocked host commands. It verifies a real running executable can be
-replaced without truncating its inode, Gitea failure handling and port settings,
-data-preserving updates, a failed Uptime Kuma build, retained Nextcloud data on
-uninstall, explicit Gitea purging, and configuration changes that retain secrets
-and unrelated ports. The existing Seerr suite checks build failures, cutover,
-runtime verification, and recovery.
-
-Rust regressions cover recovery during package execution, scheduled oneshot
-exclusion, duplicate API jobs, companion unit resolution, catalog/recipe parity,
-actual installed versions, and default retention versus explicit purge.
-
-`tests/test_node_installers.py` uses real npm and local Git/tarball fixtures with
-the registry disabled. It checks Git preparation under inherited global,
-production-only, and disabled-script settings; scoped packages; missing
-executables; failed-build retention; successful upgrades and backup recovery;
-and build prerequisites on hosts where Node is already installed. Catalog
-checks reject new bare package-manager builds or global npm app installs. The
-Node installer CI job runs these checks with the npm version that reproduced
-the original failure.
-
-The original repair validation passed the following checks.
-
-- `cargo test --workspace --no-fail-fast -- --test-threads=1`.
-- Eleven isolated Marketplace installer/removal regressions and eight existing
-  Seerr installer regressions.
-- Syntax and shell hygiene checks for all 305 shell scripts, embedded Python
-  parsing, and catalog/automation/install/remove parity for 74 packages.
-
-The initial parallel Rust run failed an existing proxy test; that test passed
-alone and in the serial workspace run. The API test suites change process-wide
-database configuration, so the validated full-workspace command uses one test
-thread.
-
-Deploy the API, runner, configuration, package scripts, and shared helpers from
-the same forward V4 release. Once deployed, retry the Gitea update and verify its
-running version, existing repositories, configured port, and Marketplace update
-status. These source-level tests do not update production applications.
+Always deploy the API, runner, configuration, package scripts, and shared helpers together from the same v4 release archive.
