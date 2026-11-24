@@ -182,8 +182,10 @@ fn LiveSession(
     on_inspect: Callback<Value>,
 ) -> impl IntoView {
     let context = app();
-    let artwork_url =
-        Signal::derive(move || session.with(|s| servers.with(|list| session_artwork_url(s, list))));
+    let artwork_url = Signal::derive(move || {
+        context.active_server_id.track();
+        session.with(|s| servers.with(|list| session_artwork_url(s, list)))
+    });
     let artwork_failed = RwSignal::new(false);
     Effect::new(move |_| {
         artwork_url.track();
@@ -295,14 +297,37 @@ pub(super) fn StreamingDetails(
 ) -> impl IntoView {
     let context = app();
     let busy = RwSignal::new(false);
+    let command_ticket = RwSignal::new(0u64);
     let stop_confirm = RwSignal::new(false);
     let message = RwSignal::new(String::new());
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Services);
+        command_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        open.set(false);
+        stop_confirm.set(false);
+        busy.set(false);
+        message.set(String::new());
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Services) {
+            command_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            stop_confirm.set(false);
+        }
+    });
     let controllable = move || {
         context.is_admin()
+            && context.can_write_area(crate::state::PeerArea::Services)
             && session.with(|s| contracts::decode::<PlaybackSession>(s).controllable())
     };
     let command = Callback::new(move |command: String| {
-        if busy.get_untracked() || !controllable() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
+            || !session.with_untracked(|s| contracts::decode::<PlaybackSession>(s).controllable())
+        {
             return;
         }
         let row = session.get_untracked();
@@ -313,7 +338,19 @@ pub(super) fn StreamingDetails(
         }
         let id = text(&row, "sessionId");
         let body = json!({"command":command,"provider":row["provider"],"header":"AetherFlow Notice","message":message.get_untracked()});
+        command_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = command_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            command_ticket,
+            ticket,
+        );
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, command_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -326,9 +363,10 @@ pub(super) fn StreamingDetails(
                     Some(&body),
                 )
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
                 return;
             }
+            busy_guard.release();
             match result {
                 Ok(_) => {
                     context.toast(tt(context, "Playback command accepted."), false);
@@ -341,7 +379,6 @@ pub(super) fn StreamingDetails(
                 }
                 Err(e) => context.toast(tt(context, &e.message), true),
             }
-            busy.set(false);
             stop_confirm.set(false);
         });
     });
@@ -531,7 +568,27 @@ pub(super) fn ProviderCards(
                                                 view! {
                                                     <button
                                                         class="glass-button px-3 py-2 text-sm"
+                                                        disabled=move || {
+                                                            !context.can_write_area(
+                                                                crate::state::PeerArea::Settings,
+                                                            )
+                                                        }
+                                                        title=move || {
+                                                            context
+                                                                .area_block_reason(
+                                                                    crate::state::PeerArea::Settings,
+                                                                    true,
+                                                                )
+                                                                .unwrap_or_default()
+                                                        }
                                                         on:click=move |_| {
+                                                            if !context.is_admin_untracked()
+                                                                || !context.can_write_area_untracked(
+                                                                    crate::state::PeerArea::Settings,
+                                                                )
+                                                            {
+                                                                return;
+                                                            }
                                                             config.set(selected.clone());
                                                             config_open.set(true);
                                                         }
@@ -571,6 +628,7 @@ pub(super) fn DemoTelemetryBanner(
     let typed_confirmation = RwSignal::new(String::new());
     let stale_error = RwSignal::new(None::<&'static str>);
     let busy = RwSignal::new(false);
+    let demo_ticket = RwSignal::new(0u64);
 
     let block_reason = Signal::derive(move || {
         let action = pending_action.get();
@@ -585,6 +643,28 @@ pub(super) fn DemoTelemetryBanner(
         })
     });
 
+    let confirm_captured = crate::tabs::l10n::guard_modal_server_switch(confirm_open);
+
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Services);
+        demo_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        confirm_open.set(false);
+        pending_action.set(String::new());
+        typed_confirmation.set(String::new());
+        stale_error.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Services) {
+            demo_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            confirm_open.set(false);
+            typed_confirmation.set(String::new());
+            stale_error.set(None);
+        }
+    });
     Effect::new(move |_| {
         if !confirm_open.get() {
             typed_confirmation.set(String::new());
@@ -593,7 +673,8 @@ pub(super) fn DemoTelemetryBanner(
     });
 
     let open_confirm = move |action: &'static str| {
-        if !context.is_admin()
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
             || busy.get_untracked()
             || dashboard.data.with_untracked(Value::is_null)
             || dashboard.error.with_untracked(Option::is_some)
@@ -602,8 +683,15 @@ pub(super) fn DemoTelemetryBanner(
         }
         let demo = is_demo_mode.get_untracked();
         if servers.with_untracked(|list| {
-            demo_submission_block_reason(context.is_admin(), true, false, list, demo, action)
-                .is_some()
+            demo_submission_block_reason(
+                context.is_admin_untracked(),
+                true,
+                false,
+                list,
+                demo,
+                action,
+            )
+            .is_some()
         }) {
             return;
         }
@@ -614,8 +702,20 @@ pub(super) fn DemoTelemetryBanner(
     };
 
     let submit_demo = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
+        {
             return;
+        }
+        let server_epoch = context.server_epoch.get_untracked();
+        let current_server = context.active_server_id.get_untracked();
+        if let Some(captured) = confirm_captured.get_untracked() {
+            if captured.server_epoch != server_epoch || captured.server_id != current_server {
+                confirm_open.set(false);
+                context.toast(tt(context, "PeerSwitch.staleConfirmBlocked"), true);
+                return;
+            }
         }
         let action = pending_action.get_untracked();
         let typed = typed_confirmation.get_untracked();
@@ -626,7 +726,14 @@ pub(super) fn DemoTelemetryBanner(
         let has_error = dashboard.error.with_untracked(Option::is_some);
         let demo = is_demo_mode.get_untracked();
         let blocked = servers.with_untracked(|list| {
-            demo_submission_block_reason(context.is_admin(), loaded, has_error, list, demo, &action)
+            demo_submission_block_reason(
+                context.is_admin_untracked(),
+                loaded,
+                has_error,
+                list,
+                demo,
+                &action,
+            )
         });
         if let Some(reason) = blocked {
             stale_error.set(Some(reason));
@@ -634,19 +741,31 @@ pub(super) fn DemoTelemetryBanner(
             return;
         }
         stale_error.set(None);
+        demo_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = demo_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            demo_ticket,
+            ticket,
+        );
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, demo_ticket, ticket);
         spawn_local(async move {
             let body =
                 serde_json::to_value(StreamingDemoRequest { action: &action }).unwrap_or_default();
-            match ApiClient
+            let result = ApiClient
                 .post("/api/v1/admin/streaming/demo", Some(&body))
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(value) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     let _response = contracts::decode::<StreamingDemoResponse>(&value);
                     confirm_open.set(false);
                     typed_confirmation.set(String::new());
@@ -662,9 +781,6 @@ pub(super) fn DemoTelemetryBanner(
                 Err(error) => {
                     context.toast(tt(context, &error.message), true);
                 }
-            }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
             }
         });
     });
@@ -705,7 +821,19 @@ pub(super) fn DemoTelemetryBanner(
                                         type="button"
                                         class="glass-button px-4 py-2 text-sm"
                                         disabled=move || {
-                                            busy.get() || dashboard.error.with(Option::is_some)
+                                            busy.get()
+                                                || dashboard.error.with(Option::is_some)
+                                                || !context.can_write_area(
+                                                    crate::state::PeerArea::Services,
+                                                )
+                                        }
+                                        title=move || {
+                                            context
+                                                .area_block_reason(
+                                                    crate::state::PeerArea::Services,
+                                                    true,
+                                                )
+                                                .unwrap_or_default()
                                         }
                                         on:click=move |_| open_confirm("seed")
                                     >
@@ -718,7 +846,14 @@ pub(super) fn DemoTelemetryBanner(
                                 type="button"
                                 class="glass-button px-4 py-2 text-sm text-amber-300"
                                 disabled=move || {
-                                    busy.get() || dashboard.error.with(Option::is_some)
+                                    busy.get()
+                                        || dashboard.error.with(Option::is_some)
+                                        || !context.can_write_area(crate::state::PeerArea::Services)
+                                }
+                                title=move || {
+                                    context
+                                        .area_block_reason(crate::state::PeerArea::Services, true)
+                                        .unwrap_or_default()
                                 }
                                 on:click=move |_| open_confirm("clear")
                             >
@@ -732,11 +867,16 @@ pub(super) fn DemoTelemetryBanner(
         <Modal
             open=confirm_open
             title=Signal::derive(move || {
-                if pending_action.get() == "clear" {
-                    tt(context, "Clear streaming demo telemetry?")
+                let base = if pending_action.get() == "clear" {
+                    "Clear streaming demo telemetry?"
                 } else {
-                    tt(context, "Load streaming demo telemetry?")
-                }
+                    "Load streaming demo telemetry?"
+                };
+                let server = confirm_captured
+                    .get()
+                    .and_then(|c| c.server_name)
+                    .or_else(|| context.active_server_name());
+                crate::tabs::l10n::confirm_dialog_title(context, base, server.as_deref())
             })
         >
             <div class="space-y-4">
@@ -802,11 +942,18 @@ pub(super) fn DemoTelemetryBanner(
                         class="glass-button-primary px-4 py-2"
                         disabled=move || {
                             busy.get()
+                                || !context.is_admin()
+                                || !context.can_write_area(crate::state::PeerArea::Services)
                                 || block_reason.get().is_some()
                                 || !demo_action_confirmed(
                                     &pending_action.get(),
                                     &typed_confirmation.get(),
                                 )
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Services, true)
+                                .unwrap_or_default()
                         }
                         on:click=move |_| submit_demo.run(())
                     >

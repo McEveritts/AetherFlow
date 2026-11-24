@@ -1,7 +1,8 @@
 //! Provider connection credentials and server identity checks.
 use super::common::*;
 use super::types::*;
-use crate::state::app;
+use crate::state::{app, PeerArea};
+use crate::tabs::busy::BusyGuard;
 use crate::tabs::l10n::{tt, tt_with, Modal};
 use af_web_core::api::ApiClient;
 use af_web_core::draft::FormDraft;
@@ -39,18 +40,34 @@ pub(super) fn StreamingServerSettings(
     on_changed: Callback<()>,
 ) -> impl IntoView {
     let context = app();
-    let draft = RwSignal::new(FormDraft::new(
-        json!({"name":"","url":"","apiKey":"","enabled":true}),
-    ));
+    let draft = RwSignal::new(FormDraft::new(json!({})));
     let busy = RwSignal::new(false);
+    let generation = RwSignal::new(0u64);
     let result = RwSignal::new(None::<String>);
     Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        let editable = context.is_admin() && context.can_write_area(PeerArea::Settings);
+        let is_open = open.get();
         let server = server.get();
-        draft.set(FormDraft::new(json!({"name":server.name,"url":server.url,"apiKey":"","enabled":server.enabled.unwrap_or(true)})));
+        generation.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
         result.set(None);
+        if is_open && !editable {
+            open.set(false);
+        }
+        draft.set(FormDraft::new(if is_open && editable {
+            json!({"name":server.name,"url":server.url,"apiKey":"","enabled":server.enabled.unwrap_or(true)})
+        } else {
+            json!({})
+        }));
     });
     let save = Callback::new(move |test: bool| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !open.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Settings)
+        {
             return;
         }
         let provider = server.with_untracked(|s| s.provider.clone());
@@ -71,12 +88,31 @@ pub(super) fn StreamingServerSettings(
         if test {
             body["provider"] = json!(canonical_provider);
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let grant_epoch = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        generation.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = generation.get_untracked();
         busy.set(true);
+        let guard = BusyGuard::for_generation(busy, generation, ticket);
         spawn_local(async move {
+            let _guard = guard;
+            let is_current = || {
+                generation.try_get_untracked() == Some(ticket)
+                    && open.try_get_untracked() == Some(true)
+                    && context.session_epoch.try_get_untracked() == Some(session_epoch)
+                    && context.server_epoch.try_get_untracked() == Some(server_epoch)
+                    && context.area_revocation_epoch_untracked(PeerArea::Settings) == grant_epoch
+                    && context.is_admin_untracked()
+                    && context.can_write_area_untracked(PeerArea::Settings)
+            };
+            if !is_current() {
+                return;
+            }
             let response = ApiClient
                 .request(&path, if test { "POST" } else { "PUT" }, Some(&body))
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if !is_current() {
                 return;
             }
             match response {
@@ -107,7 +143,6 @@ pub(super) fn StreamingServerSettings(
                 }
                 Err(e) => result.set(Some(e.message)),
             }
-            busy.set(false);
         });
     });
     view! {
@@ -171,14 +206,28 @@ pub(super) fn StreamingServerSettings(
                 <div class="flex gap-3">
                     <button
                         class="glass-button px-4 py-2"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| save.run(true)
                     >
                         {move || tt(context, "Test and verify identity")}
                     </button>
                     <button
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| save.run(false)
                     >
                         {move || tt(context, "Save connection")}

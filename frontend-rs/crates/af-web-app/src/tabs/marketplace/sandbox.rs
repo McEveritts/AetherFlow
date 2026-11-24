@@ -30,6 +30,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
     let mounted = RwSignal::new(None::<Value>);
     let sandbox = RwSignal::new(false);
     let busy = RwSignal::new(String::new());
+    let toggle_ticket = RwSignal::new(0u64);
     let iframe = NodeRef::<leptos::html::Iframe>::new();
     let in_flight = Rc::new(Cell::new(0usize));
     let listener = StoredValue::new_local(None::<EventListener>);
@@ -88,6 +89,18 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
         }
     });
     Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Services);
+        if context.is_remote()
+            || !context.can_read_area(PeerArea::Services)
+            || sandbox.get_untracked()
+        {
+            sandbox.set(false);
+            mounted.set(None);
+        }
+    });
+    Effect::new(move |_| {
         let data = resource.data.get();
         if let Some(plugin) = mounted.get_untracked() {
             if data["plugins"].as_array().is_some_and(|plugins| {
@@ -99,10 +112,37 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
             }
         }
     });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Services);
+        toggle_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(String::new());
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Services) {
+            toggle_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(String::new());
+        }
+    });
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
     let toggle = move |plugin: Value| {
-        if !context.is_admin() || !busy.get_untracked().is_empty() {
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Services)
+            || !busy.get_untracked().is_empty()
+        {
             return;
         }
+        toggle_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = toggle_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Services,
+            true,
+            true,
+            toggle_ticket,
+            ticket,
+        );
         let id = field(&plugin, &["id"]);
         let action = if plugin["enabled"] == true {
             "stop"
@@ -110,6 +150,8 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
             "start"
         };
         busy.set(id.clone());
+        let mut busy_guard =
+            crate::tabs::busy::ValueBusyGuard::for_generation(busy, toggle_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -120,14 +162,18 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                     Some(&json!({"action":action})),
                 )
                 .await;
-            if busy.is_disposed() {
+            if busy.is_disposed() || !fence.is_valid() {
                 return;
             }
+            busy_guard.release();
             match result {
-                Ok(_) => resource.refresh(),
+                Ok(_) => {
+                    if context.can_read_area_untracked(PeerArea::Services) {
+                        resource.refresh();
+                    }
+                }
                 Err(e) => context.toast(tt(context, &e.message), true),
             }
-            busy.set(String::new());
         });
     };
     view! {
@@ -142,13 +188,34 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2 min-h-11"
-                    disabled=move || resource.loading.get()
-                    on:click=move |_| resource.refresh()
+                    disabled=move || resource.loading.get() || !can_read_services.get()
+                    title=move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }
+                    on:click=move |_| {
+                        if context.can_read_area_untracked(PeerArea::Services) {
+                            resource.refresh();
+                        }
+                    }
                     aria-label=move || tt(context, "Refresh Plugins")
                 >
                     {move || tt(context, "Common.refresh")}
                 </button>
             </div>
+            <Show when=move || !can_read_services.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <Show when=move || resource.error.get().is_some()>
                 <p role="alert" class="text-sm text-amber-300">
                     {move || resource.error.get().map(|e| tt(context, &e.message))}
@@ -242,6 +309,12 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                                             disabled=move || {
                                                 !busy.get().is_empty() || resource.loading.get()
                                                     || !context.is_admin()
+                                                    || !context.can_write_area(crate::state::PeerArea::Services)
+                                            }
+                                            title=move || {
+                                                context
+                                                    .area_block_reason(crate::state::PeerArea::Services, true)
+                                                    .unwrap_or_default()
                                             }
                                             on:click=move |_| toggle(control.clone())
                                         >
@@ -254,9 +327,20 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                                             type="button"
                                             data-testid=format!("open-plugin-ui-{id}")
                                             class="glass-button-primary px-4 py-2 min-h-11"
-                                            disabled=move || !enabled || !plugin_sandbox_is_local()
+                                            disabled=move || {
+                                                !enabled
+                                                    || context.is_remote()
+                                                    || !plugin_sandbox_is_local()
+                                            }
+                                            title=move || {
+                                                if context.is_remote() {
+                                                    tt(context, "PeerSwitch.localOnlyControl")
+                                                } else {
+                                                    String::new()
+                                                }
+                                            }
                                             on:click=move |_| {
-                                                if plugin_sandbox_is_local() {
+                                                if !context.is_remote_untracked() && plugin_sandbox_is_local() {
                                                     mounted.set(Some(open_plugin.clone()));
                                                     sandbox.set(true);
                                                 }
@@ -290,7 +374,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                     {move || tt(context, "Close Sandbox")}
                 </button>
                 {move || {
-                    if !plugin_sandbox_is_local() {
+                    if context.is_remote() || !plugin_sandbox_is_local() {
                         return None;
                     }
                     mounted

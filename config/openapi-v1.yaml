@@ -38,7 +38,7 @@ tags:
   - name: AI
     description: FlowAI assistant, metadata scanning, bandwidth optimization, and predictive scaling
   - name: Cluster
-    description: Peer pairing, WireGuard link health, and revocation
+    description: Peer pairing, WireGuard link health, grants, and remote management
   - name: Network
     description: WireGuard, Tailscale, and host network diagnostics
   - name: Operator
@@ -6512,6 +6512,115 @@ paths:
         default:
           $ref: '#/components/responses/PeerError'
 
+  /peers/{id}/{rest}:
+    servers:
+      - url: /api/v1
+    description: >-
+      Admin-only management of a linked server. The stored tunnel address identifies the
+      destination and the remote grant authorizes the selected route. The downstream
+      API defines the request and response schema. Root-relative redirects and supported
+      download ticket cookie paths are scoped to the selected peer.
+    parameters:
+      - name: id
+        in: path
+        description: Local peer link ID
+        required: true
+        schema:
+          type: string
+      - name: rest
+        in: path
+        description: Versioned API path without the /api/v1/ prefix
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Cluster
+      summary: Forward a peer GET request
+      security:
+        - cookieAuth: []
+      responses:
+        '101':
+          description: Authorized WebSocket upgrade
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          description: Local administrator or downstream grant denied access
+        default:
+          description: Streamed upstream response or a typed peer routing error
+    head:
+      tags:
+        - Cluster
+      summary: Forward a peer HEAD request
+      security:
+        - cookieAuth: []
+      responses:
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          description: Local administrator or downstream grant denied access
+        default:
+          description: Streamed upstream response or a typed peer routing error
+    post:
+      tags:
+        - Cluster
+      summary: Forward a peer POST request
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      security:
+        - cookieAuth: []
+      responses:
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          description: Local administrator or downstream grant denied access
+        default:
+          description: Streamed upstream response or a typed peer routing error
+    put:
+      tags:
+        - Cluster
+      summary: Forward a peer PUT request
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      security:
+        - cookieAuth: []
+      responses:
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          description: Local administrator or downstream grant denied access
+        default:
+          description: Streamed upstream response or a typed peer routing error
+    patch:
+      tags:
+        - Cluster
+      summary: Forward a peer PATCH request
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      security:
+        - cookieAuth: []
+      responses:
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          description: Local administrator or downstream grant denied access
+        default:
+          description: Streamed upstream response or a typed peer routing error
+    delete:
+      tags:
+        - Cluster
+      summary: Forward a peer DELETE request
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      security:
+        - cookieAuth: []
+      responses:
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          description: Local administrator or downstream grant denied access
+        default:
+          description: Streamed upstream response or a typed peer routing error
 components:
   securitySchemes:
     cookieAuth:

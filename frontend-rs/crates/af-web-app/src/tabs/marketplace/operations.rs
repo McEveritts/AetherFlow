@@ -138,6 +138,8 @@ pub(super) struct MarketplaceOps {
     pub(super) submitting: RwSignal<BTreeSet<String>>,
     pub(super) checking: RwSignal<BTreeSet<String>>,
     pub(super) ticket: RwSignal<u64>,
+    pub(super) write_epoch: RwSignal<u64>,
+    pub(super) poll_epoch: RwSignal<u64>,
     pub(super) polling: RwSignal<bool>,
     pub(super) deployment: RwSignal<Option<String>>,
     pub(super) drawer: RwSignal<bool>,
@@ -153,7 +155,8 @@ impl MarketplaceOps {
         let retained_purge_blocked = action == "uninstall"
             && !was_installed
             && !(purge && can_purge_retained_data(&package));
-        if !context.is_admin()
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Marketplace)
             || id.is_empty()
             || package["inventory_authenticated"] == false
             || package["inventory_known"] == false
@@ -166,11 +169,26 @@ impl MarketplaceOps {
         {
             return;
         }
-        self.ticket.update(|n| *n += 1);
+        let write_epoch = self.write_epoch.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Marketplace,
+            true,
+            true,
+            self.write_epoch,
+            write_epoch,
+        );
+        self.ticket.update(|n| *n = n.wrapping_add(1));
         let ticket = self.ticket.get_untracked();
         self.submitting.update(|set| {
             set.insert(id.clone());
         });
+        let mut submitting_guard = crate::tabs::busy::SetBusyGuard::for_generation(
+            self.submitting,
+            id.clone(),
+            self.write_epoch,
+            write_epoch,
+        );
         self.jobs.update(|jobs| {
             jobs.insert(id.clone(), PackageJob::new(action, ticket, &package));
         });
@@ -190,12 +208,10 @@ impl MarketplaceOps {
                     body.as_ref(),
                 )
                 .await;
-            if self.jobs.is_disposed() {
+            if self.jobs.is_disposed() || !fence.is_valid() {
                 return;
             }
-            self.submitting.update(|set| {
-                set.remove(&id);
-            });
+            submitting_guard.release();
             match result {
                 Ok(receipt) => {
                     self.jobs.update(|jobs| {
@@ -252,7 +268,9 @@ impl MarketplaceOps {
         });
     }
     pub(super) fn check_updates(self, package: Option<Value>) {
-        if !self.context.is_admin() {
+        if !self.context.is_admin_untracked()
+            || !self.context.can_write_area_untracked(PeerArea::Marketplace)
+        {
             return;
         }
         let id = package.as_ref().map(|p| field(p, &["id"]));
@@ -263,9 +281,24 @@ impl MarketplaceOps {
         if self.checking.with_untracked(|set| set.contains(&key)) {
             return;
         }
+        let write_epoch = self.write_epoch.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            self.context,
+            PeerArea::Marketplace,
+            true,
+            true,
+            self.write_epoch,
+            write_epoch,
+        );
         self.checking.update(|set| {
             set.insert(key.clone());
         });
+        let mut checking_guard = crate::tabs::busy::SetBusyGuard::for_generation(
+            self.checking,
+            key,
+            self.write_epoch,
+            write_epoch,
+        );
         spawn_local(async move {
             let path = match &id {
                 Some(id) => format!(
@@ -275,12 +308,10 @@ impl MarketplaceOps {
                 None => "/api/v1/admin/packages/updates/check".into(),
             };
             let result = ApiClient.post(&path, None).await;
-            if self.checking.is_disposed() {
+            if self.checking.is_disposed() || !fence.is_valid() {
                 return;
             }
-            self.checking.update(|set| {
-                set.remove(&key);
-            });
+            checking_guard.release();
             match result {
                 Ok(_) => self.context.toast(
                     match id {
@@ -300,7 +331,7 @@ impl MarketplaceOps {
     }
     pub(super) fn poll(self) {
         let context = self.context;
-        if self.polling.get_untracked() {
+        if self.polling.get_untracked() || !context.can_read_area_untracked(PeerArea::Marketplace) {
             return;
         }
         let jobs = self.jobs.with_untracked(|jobs| {
@@ -312,10 +343,29 @@ impl MarketplaceOps {
         if jobs.is_empty() {
             return;
         }
+        self.poll_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        let poll_ticket = self.poll_epoch.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Marketplace,
+            false,
+            false,
+            self.poll_epoch,
+            poll_ticket,
+        );
         self.polling.set(true);
+        let mut polling_guard = crate::tabs::busy::BusyGuard::for_generation(
+            self.polling,
+            self.poll_epoch,
+            poll_ticket,
+        );
         spawn_local(async move {
             let mut changed = false;
             for (id, ticket, job_id) in jobs {
+                if self.jobs.is_disposed() || !fence.is_valid() {
+                    return;
+                }
                 let mut url = format!(
                     "/api/v1/auth/packages/{}/progress",
                     js_sys::encode_uri_component(&id)
@@ -340,7 +390,7 @@ impl MarketplaceOps {
                     }
                     other => other,
                 };
-                if self.jobs.is_disposed() {
+                if self.jobs.is_disposed() || !fence.is_valid() {
                     return;
                 }
                 match result {
@@ -398,10 +448,10 @@ impl MarketplaceOps {
                     }),
                 }
             }
-            if self.polling.is_disposed() {
+            if self.polling.is_disposed() || !fence.is_valid() {
                 return;
             }
-            self.polling.set(false);
+            polling_guard.release();
             if changed {
                 self.catalog.refresh();
                 context.marketplace_revision.update(|r| *r += 1);

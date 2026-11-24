@@ -1,8 +1,8 @@
-use super::contracts::{grid_resource, use_api_typed, Records, UserQuota};
+use super::contracts::{grid_resource, use_api_typed_when, Records, UserQuota};
 use super::settings::{
-    bytes, draft_value, poll_resource, text, DraftButtons, DraftInput, ResourceFeedback,
+    bytes, draft_value, poll_resource_when, text, DraftButtons, DraftInput, ResourceFeedback,
 };
-use crate::state::{app, ApiResource};
+use crate::state::{app, ApiResource, PeerArea};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{EmptyState, ObsCard, SearchInput};
 use af_web_core::{api::ApiClient, draft::FormDraft};
@@ -47,20 +47,35 @@ fn quota_snapshot(data: Signal<Value>) -> (Memo<Vec<Value>>, Memo<BTreeMap<i64, 
     (rows, indexed)
 }
 
-fn reconciliation_current(
+#[derive(Clone, Copy)]
+struct ReconciliationFence {
     context: crate::state::AppContext,
     busy: RwSignal<bool>,
-    alive: bool,
+    sync_ticket: RwSignal<u64>,
+    ticket: u64,
     app_epoch: u64,
+    server_epoch: u64,
+    users_grant: u64,
     transport_epoch: u64,
-) -> bool {
-    alive
-        && busy.try_get_untracked().is_some()
-        && context.auth_loading.try_get_untracked() == Some(false)
-        && context.session_epoch.try_get_untracked() == Some(app_epoch)
-        && af_web_core::api::current_auth_epoch() == transport_epoch
-        && !af_web_core::api::auth_revalidation_pending()
-        && context.is_admin()
+}
+
+impl ReconciliationFence {
+    fn is_current(self, alive: bool) -> bool {
+        alive
+            && self.busy.try_get_untracked().is_some()
+            && self.sync_ticket.try_get_untracked() == Some(self.ticket)
+            && self.context.auth_loading.try_get_untracked() == Some(false)
+            && self.context.session_epoch.try_get_untracked() == Some(self.app_epoch)
+            && self.context.server_epoch.try_get_untracked() == Some(self.server_epoch)
+            && self
+                .context
+                .area_revocation_epoch_untracked(PeerArea::Users)
+                == self.users_grant
+            && af_web_core::api::current_auth_epoch() == self.transport_epoch
+            && !af_web_core::api::auth_revalidation_pending()
+            && self.context.is_admin_untracked()
+            && self.context.can_write_area_untracked(PeerArea::Users)
+    }
 }
 
 #[component]
@@ -83,17 +98,31 @@ pub fn QuotasTab() -> impl IntoView {
 #[component]
 fn QuotasAdminContent() -> impl IntoView {
     let context = app();
-    let quotas = grid_resource(use_api_typed::<Records<UserQuota>>(Signal::derive(|| {
-        "/api/v1/admin/quotas".to_string()
-    })));
-    poll_resource(quotas, 15_000);
+    let can_read_users = Signal::derive(move || context.can_read_area(PeerArea::Users));
+    let quotas = grid_resource(use_api_typed_when::<Records<UserQuota>>(
+        can_read_users,
+        Signal::derive(|| "/api/v1/admin/quotas".to_string()),
+    ));
+    poll_resource_when(quotas, 15_000, move || {
+        context.can_read_area_untracked(PeerArea::Users)
+    });
     let query = RwSignal::new(String::new());
     let page = RwSignal::new(0usize);
     let sync_busy = RwSignal::new(false);
+    let sync_ticket = RwSignal::new(0u64);
     let alive = Arc::new(AtomicBool::new(true));
     let cleanup_alive = alive.clone();
     on_cleanup(move || cleanup_alive.store(false, Ordering::SeqCst));
     let alive = StoredValue::new(alive);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Users);
+        if !context.can_write_area(PeerArea::Users) {
+            sync_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            sync_busy.set(false);
+        }
+    });
     let (rows, indexed) = quota_snapshot(quotas.data.into());
     let filtered = use_worker_rows(
         rows.into(),
@@ -145,25 +174,31 @@ fn QuotasAdminContent() -> impl IntoView {
             || context.auth_loading.get_untracked()
             || af_web_core::api::auth_revalidation_pending()
             || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Users)
         {
             return;
         }
         let users = rows.get_untracked();
-        let app_epoch = context.session_epoch.get_untracked();
-        let transport_epoch = af_web_core::api::current_auth_epoch();
         let alive = alive.get_value();
+        sync_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = sync_ticket.get_untracked();
+        let fence = ReconciliationFence {
+            context,
+            busy: sync_busy,
+            sync_ticket,
+            ticket,
+            app_epoch: context.session_epoch.get_untracked(),
+            server_epoch: context.server_epoch.get_untracked(),
+            users_grant: context.area_revocation_epoch_untracked(PeerArea::Users),
+            transport_epoch: af_web_core::api::current_auth_epoch(),
+        };
         sync_busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(sync_busy, sync_ticket, ticket);
         spawn_local(async move {
             let mut failures = Vec::new();
             for user in users {
-                if !reconciliation_current(
-                    context,
-                    sync_busy,
-                    alive.load(Ordering::SeqCst),
-                    app_epoch,
-                    transport_epoch,
-                ) {
-                    let _ = sync_busy.try_update(|busy| *busy = false);
+                if !fence.is_current(alive.load(Ordering::SeqCst)) {
                     return;
                 }
                 let Some(id) = user["user_id"].as_i64() else {
@@ -172,35 +207,25 @@ fn QuotasAdminContent() -> impl IntoView {
                 let result = ApiClient
                     .post(&format!("/api/v1/admin/quotas/{id}/refresh"), None)
                     .await;
-                if !reconciliation_current(
-                    context,
-                    sync_busy,
-                    alive.load(Ordering::SeqCst),
-                    app_epoch,
-                    transport_epoch,
-                ) || result
-                    .as_ref()
-                    .is_err_and(|error| error.code.as_deref() == Some("SESSION_CHANGED"))
+                if !fence.is_current(alive.load(Ordering::SeqCst))
+                    || result.as_ref().is_err_and(|error| {
+                        matches!(
+                            error.code.as_deref(),
+                            Some("SESSION_CHANGED" | "SERVER_CHANGED")
+                        )
+                    })
                 {
-                    let _ = sync_busy.try_update(|busy| *busy = false);
                     return;
                 }
                 if let Err(error) = result {
                     failures.push(format!("{}: {}", text(&user, "username"), error.message));
                 }
             }
-            if !reconciliation_current(
-                context,
-                sync_busy,
-                alive.load(Ordering::SeqCst),
-                app_epoch,
-                transport_epoch,
-            ) {
-                let _ = sync_busy.try_update(|busy| *busy = false);
+            if !fence.is_current(alive.load(Ordering::SeqCst)) {
                 return;
             }
             quotas.refresh();
-            sync_busy.set(false);
+            busy_guard.release();
             if failures.is_empty() {
                 context.toast(tt(context, "Quota reconciliation completed"), false);
             } else {
@@ -229,6 +254,15 @@ fn QuotasAdminContent() -> impl IntoView {
                     <h2 class="text-lg font-semibold mb-4">
                         {move || tt(context, "Tabs.quotasHeading")}
                     </h2>
+                    <Show when=move || !can_read_users.get()>
+                        <p role="status" class="text-xs text-amber-300 mb-4">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Users, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <p class="text-sm text-slate-400 mb-5">
                         {move || tt(
                             context,
@@ -278,7 +312,17 @@ fn QuotasAdminContent() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button px-4 py-2"
-                            on:click=move |_| quotas.refresh()
+                            disabled=move || !can_read_users.get()
+                            title=move || {
+                                context
+                                    .area_block_reason(PeerArea::Users, false)
+                                    .unwrap_or_default()
+                            }
+                            on:click=move |_| {
+                                if can_read_users.get_untracked() {
+                                    quotas.refresh();
+                                }
+                            }
                             aria-label=move || tt(context, "Refresh quotas")
                         >
                             {move || tt(context, "Common.refresh")}
@@ -286,7 +330,16 @@ fn QuotasAdminContent() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button-primary px-4 py-2"
-                            disabled=move || sync_busy.get() || quotas.loading.get()
+                            disabled=move || {
+                                sync_busy.get()
+                                    || quotas.loading.get()
+                                    || !context.can_write_area(crate::state::PeerArea::Users)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Users, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| reconcile()
                         >
                             {move || tt(context, if sync_busy.get() {
@@ -364,6 +417,16 @@ fn QuotaRow(
     let context = app();
     let draft = RwSignal::new(FormDraft::new(json!({"quota":""})));
     let busy = RwSignal::new(false);
+    let row_ticket = RwSignal::new(0u64);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Users);
+        if !context.can_write_area(PeerArea::Users) {
+            row_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+        }
+    });
     Effect::new(move |_| {
         let value = row.get();
         if !value.is_null() {
@@ -371,7 +434,11 @@ fn QuotaRow(
         }
     });
     let save = Callback::new(move |()| {
-        if busy.get_untracked() || sync_busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || sync_busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Users)
+        {
             return;
         }
         let Some(id) = row.get_untracked()["user_id"].as_i64() else {
@@ -382,17 +449,29 @@ fn QuotaRow(
             context.toast(tt(context, "Enter a positive storage allocation"), true);
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let users_grant = context.area_revocation_epoch_untracked(PeerArea::Users);
+        row_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = row_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, row_ticket, ticket);
         spawn_local(async move {
             let payload = json!({"quota":text(&sent,"quota").trim(),"source":"manual"});
-            match ApiClient
+            let result = ApiClient
                 .put(&format!("/api/v1/admin/quotas/{id}"), Some(&payload))
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || row_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Users) != users_grant
+                || !context.can_write_area_untracked(PeerArea::Users)
             {
+                return;
+            }
+            match result {
                 Ok(_) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     draft.update(|d| {
                         let _ = d.acknowledge_saved(&sent, sent.clone());
                     });
@@ -404,36 +483,47 @@ fn QuotaRow(
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     });
     let refresh = move || {
-        if busy.get_untracked() || sync_busy.get_untracked() {
+        if busy.get_untracked()
+            || sync_busy.get_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Users)
+        {
             return;
         }
         let Some(id) = row.get_untracked()["user_id"].as_i64() else {
             return;
         };
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let users_grant = context.area_revocation_epoch_untracked(PeerArea::Users);
+        row_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = row_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, row_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post(&format!("/api/v1/admin/quotas/{id}/refresh"), None)
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || row_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Users) != users_grant
+                || !context.can_write_area_untracked(PeerArea::Users)
             {
+                return;
+            }
+            match result {
                 Ok(_) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     quotas.refresh();
                     context.toast(tt(context, "Disk usage reconciled"), false);
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     };
     let percentage = Signal::derive(move || row.with(quota_percentage));
@@ -521,7 +611,16 @@ fn QuotaRow(
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || busy.get() || sync_busy.get()
+                    disabled=move || {
+                        busy.get()
+                            || sync_busy.get()
+                            || !context.can_write_area(crate::state::PeerArea::Users)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Users, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| refresh()
                 >
                     {move || tt(context, "Scan Disk")}
@@ -533,9 +632,24 @@ fn QuotaRow(
                     field="quota"
                     label="Allocated disk space"
                     placeholder="100GB, 2TB or exact bytes"
-                    disabled=Signal::derive(move || sync_busy.get())
+                    disabled=Signal::derive(move || {
+                        sync_busy.get() || !context.can_write_area(crate::state::PeerArea::Users)
+                    })
                 />
-                <DraftButtons draft busy on_save=save label="Apply Quota" />
+                <DraftButtons
+                    draft
+                    busy
+                    on_save=save
+                    label="Apply Quota"
+                    disabled=Signal::derive(move || {
+                        !context.can_write_area(crate::state::PeerArea::Users)
+                    })
+                    title=Signal::derive(move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Users, true)
+                            .unwrap_or_default()
+                    })
+                />
             </div>
         </div>
         </Show>

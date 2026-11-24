@@ -5,9 +5,10 @@ use super::{
     imports::HistoryEventImport, portability::HistoryPortability,
     reconciliation::HistoryReconciliation,
 };
-use crate::state::{app, use_api};
+use crate::state::{app, use_api_when, PeerArea};
 use crate::tabs::contracts;
 use crate::tabs::l10n::{tt, tt_with, Modal, ObsCard};
+use crate::tabs::GrantInvalidationBoundary;
 use af_web_core::api::ApiClient;
 use af_web_core::draft::FormDraft;
 use leptos::prelude::*;
@@ -19,19 +20,31 @@ pub(super) fn HistoryAdministration(
     on_changed: Callback<()>,
 ) -> impl IntoView {
     let context = app();
-    let status = use_api(Signal::derive(|| {
-        "/api/v1/admin/streaming/imports/status".to_string()
-    }));
-    let policies = use_api(Signal::derive(|| {
-        "/api/v1/admin/streaming/policies".to_string()
-    }));
-    let links = use_api(Signal::derive(|| {
-        "/api/v1/admin/streaming/user-links".to_string()
-    }));
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let can_read_users = Signal::derive(move || context.can_read_area(PeerArea::Users));
+    let status = use_api_when(
+        can_read_services,
+        Signal::derive(|| "/api/v1/admin/streaming/imports/status".to_string()),
+    );
+    let policies = use_api_when(
+        can_read_settings,
+        Signal::derive(|| "/api/v1/admin/streaming/policies".to_string()),
+    );
+    let links = use_api_when(
+        can_read_users,
+        Signal::derive(|| "/api/v1/admin/streaming/user-links".to_string()),
+    );
     let changed = Callback::new(move |(): ()| {
-        status.refresh();
-        policies.refresh();
-        links.refresh();
+        if context.can_read_area_untracked(PeerArea::Services) {
+            status.refresh();
+        }
+        if context.can_read_area_untracked(PeerArea::Settings) {
+            policies.refresh();
+        }
+        if context.can_read_area_untracked(PeerArea::Users) {
+            links.refresh();
+        }
         on_changed.run(());
     });
     let decoded_policy =
@@ -63,16 +76,36 @@ pub(super) fn HistoryAdministration(
                     <summary class="cursor-pointer py-2 font-semibold">
                         {move || tt(context, "Jellystat / Tautulli / JSON event import")}
                     </summary>
-                    <HistoryEventImport
-                        servers
-                        status=Signal::derive(move || status.data.get())
-                        on_changed=changed
-                    />
+                    <Show when=move || !can_read_services.get()>
+                        <p role="status" class="text-xs text-amber-300 mt-2">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Services, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
+                    <GrantInvalidationBoundary areas=&[PeerArea::Services]>
+                        <HistoryEventImport
+                            servers
+                            status=Signal::derive(move || status.data.get())
+                            on_changed=changed
+                        />
+                    </GrantInvalidationBoundary>
                 </details>
                 <details>
                     <summary class="cursor-pointer py-2 font-semibold">
                         {move || tt(context, "Tracking policy and exclusions")}
                     </summary>
+                    <Show when=move || !can_read_settings.get()>
+                        <p role="status" class="text-xs text-amber-300 mt-2">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Settings, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     {move || {
                         policies
                             .error
@@ -85,7 +118,9 @@ pub(super) fn HistoryAdministration(
                                 }
                             })
                     }}
-                    <StructuredPolicyEditor policy=decoded_policy on_changed=changed />
+                    <GrantInvalidationBoundary areas=&[PeerArea::Settings]>
+                        <StructuredPolicyEditor policy=decoded_policy on_changed=changed />
+                    </GrantInvalidationBoundary>
                     <p class="text-xs text-slate-400">
                         {move || tt(
                             context,
@@ -97,6 +132,15 @@ pub(super) fn HistoryAdministration(
                     <summary class="cursor-pointer py-2 font-semibold">
                         {move || tt(context, "Explicit provider user bindings")}
                     </summary>
+                    <Show when=move || !can_read_users.get()>
+                        <p role="status" class="text-xs text-amber-300 mt-2">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Users, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     {move || {
                         links
                             .error
@@ -115,19 +159,25 @@ pub(super) fn HistoryAdministration(
                             "Bindings require afUserId, provider, serverId and providerUserId. Display names are never used for identity matching.",
                         )}
                     </p>
-                    <StructuredUserBindingsEditor links=decoded_links servers on_changed=changed />
+                    <GrantInvalidationBoundary areas=&[PeerArea::Users]>
+                        <StructuredUserBindingsEditor links=decoded_links servers on_changed=changed />
+                    </GrantInvalidationBoundary>
                 </details>
                 <details>
                     <summary class="cursor-pointer py-2 font-semibold">
                         {move || tt(context, "Legacy history reconciliation")}
                     </summary>
-                    <HistoryReconciliation on_changed=changed />
+                    <GrantInvalidationBoundary areas=&[PeerArea::Services]>
+                        <HistoryReconciliation on_changed=changed />
+                    </GrantInvalidationBoundary>
                 </details>
                 <details>
                     <summary class="cursor-pointer py-2 font-semibold">
                         {move || tt(context, "Portable archive export / restore")}
                     </summary>
-                    <HistoryPortability on_changed=changed />
+                    <GrantInvalidationBoundary areas=&[PeerArea::Settings]>
+                        <HistoryPortability on_changed=changed />
+                    </GrantInvalidationBoundary>
                 </details>
             </div>
         </ObsCard>
@@ -197,8 +247,27 @@ fn StructuredPolicyEditor(
     })));
     let prepared = RwSignal::new(Value::Null);
     let confirm = RwSignal::new(false);
+    let confirm_captured = crate::tabs::l10n::guard_modal_server_switch(confirm);
     let busy = RwSignal::new(false);
+    let exec_ticket = RwSignal::new(0u64);
     let error_msg = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        confirm.set(false);
+        prepared.set(Value::Null);
+        error_msg.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            confirm.set(false);
+        }
+    });
     Effect::new(move |_| {
         let current = policy.get();
         draft.update(|d| {
@@ -211,7 +280,7 @@ fn StructuredPolicyEditor(
         });
     });
     let review = move |_| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area(crate::state::PeerArea::Settings) {
             return;
         }
         let val = draft.with_untracked(|d| d.value()).unwrap_or_default();
@@ -230,17 +299,41 @@ fn StructuredPolicyEditor(
         }
     };
     let execute = move |_| {
-        if busy.get_untracked() || !context.is_admin() || !prepared.with_untracked(Value::is_object)
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area(crate::state::PeerArea::Settings)
+            || !prepared.with_untracked(Value::is_object)
         {
             return;
         }
+        let server_epoch = context.server_epoch.get_untracked();
+        let current_server = context.active_server_id.get_untracked();
+        if let Some(captured) = confirm_captured.get_untracked() {
+            if captured.server_epoch != server_epoch || captured.server_id != current_server {
+                confirm.set(false);
+                context.toast(tt(context, "PeerSwitch.staleConfirmBlocked"), true);
+                return;
+            }
+        }
         let body = prepared.get_untracked();
+        let session_epoch = context.session_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = exec_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, exec_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .request("/api/v1/admin/streaming/policies", "PUT", Some(&body))
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || exec_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
+            {
                 return;
             }
             match response {
@@ -262,7 +355,7 @@ fn StructuredPolicyEditor(
                     context.toast(tt(context, &e.message), true);
                 }
             }
-            busy.set(false);
+            busy_guard.release();
             confirm.set(false);
         });
     };
@@ -334,12 +427,32 @@ fn StructuredPolicyEditor(
             <button
                 type="button"
                 class="glass-button px-4 py-2"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Settings, true)
+                        .unwrap_or_default()
+                }
                 on:click=review
             >
                 {move || tt(context, "Save Tracking Policy")}
             </button>
-            <Modal open=confirm title="Review exact administrative request">
+            <Modal
+                open=confirm
+                title=Signal::derive(move || {
+                    let server = confirm_captured
+                        .get()
+                        .and_then(|c| c.server_name)
+                        .or_else(|| context.active_server_name());
+                    crate::tabs::l10n::confirm_dialog_title(
+                        context,
+                        "Review exact administrative request",
+                        server.as_deref(),
+                    )
+                })
+            >
                 <div class="space-y-3">
                     <p class="text-sm">{"PUT /api/v1/admin/streaming/policies"}</p>
                     <pre class="text-xs whitespace-pre-wrap break-all max-h-64 overflow-auto">
@@ -402,10 +515,29 @@ fn StructuredUserBindingsEditor(
     let provider_user_id = RwSignal::new(String::new());
     let pending_request = RwSignal::new(None::<(&'static str, Value)>);
     let confirm = RwSignal::new(false);
+    let confirm_captured = crate::tabs::l10n::guard_modal_server_switch(confirm);
     let busy = RwSignal::new(false);
+    let exec_ticket = RwSignal::new(0u64);
     let error_msg = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Users);
+        exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        confirm.set(false);
+        pending_request.set(None);
+        error_msg.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Users) {
+            exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            confirm.set(false);
+        }
+    });
     let review_upsert = move |_| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area(crate::state::PeerArea::Users) {
             return;
         }
         match validate_user_binding_input(
@@ -426,15 +558,39 @@ fn StructuredUserBindingsEditor(
         let Some((method, body)) = pending_request.get_untracked() else {
             return;
         };
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area(crate::state::PeerArea::Users)
+        {
             return;
         }
+        let server_epoch = context.server_epoch.get_untracked();
+        let current_server = context.active_server_id.get_untracked();
+        if let Some(captured) = confirm_captured.get_untracked() {
+            if captured.server_epoch != server_epoch || captured.server_id != current_server {
+                confirm.set(false);
+                context.toast(tt(context, "PeerSwitch.staleConfirmBlocked"), true);
+                return;
+            }
+        }
+        let session_epoch = context.session_epoch.get_untracked();
+        let users_grant = context.area_revocation_epoch_untracked(PeerArea::Users);
+        exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = exec_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, exec_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .request("/api/v1/admin/streaming/user-links", method, Some(&body))
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || exec_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Users) != users_grant
+                || !context.can_write_area_untracked(PeerArea::Users)
+            {
                 return;
             }
             match response {
@@ -461,7 +617,7 @@ fn StructuredUserBindingsEditor(
                     context.toast(tt(context, &e.message), true);
                 }
             }
-            busy.set(false);
+            busy_guard.release();
             confirm.set(false);
             pending_request.set(None);
         });
@@ -533,7 +689,14 @@ fn StructuredUserBindingsEditor(
             <button
                 type="button"
                 class="glass-button px-4 py-2"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Users)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Users, true)
+                        .unwrap_or_default()
+                }
                 on:click=review_upsert
             >
                 {move || tt(context, "Save Link")}
@@ -592,7 +755,20 @@ fn StructuredUserBindingsEditor(
                                                         type="button"
                                                         class="glass-button px-2.5 py-1 text-xs text-rose-300"
                                                         aria-label=remove_label
-                                                        disabled=move || busy.get()
+                                                        disabled=move || {
+                                                            busy.get()
+                                                                || !context.can_write_area(
+                                                                    crate::state::PeerArea::Users,
+                                                                )
+                                                        }
+                                                        title=move || {
+                                                            context
+                                                                .area_block_reason(
+                                                                    crate::state::PeerArea::Users,
+                                                                    true,
+                                                                )
+                                                                .unwrap_or_default()
+                                                        }
                                                         on:click=move |_| {
                                                             pending_request.set(Some(("DELETE", payload.clone())));
                                                             confirm.set(true);
@@ -611,7 +787,20 @@ fn StructuredUserBindingsEditor(
                     </tbody>
                 </table>
             </div>
-            <Modal open=confirm title="Review exact administrative request">
+            <Modal
+                open=confirm
+                title=Signal::derive(move || {
+                    let server = confirm_captured
+                        .get()
+                        .and_then(|c| c.server_name)
+                        .or_else(|| context.active_server_name());
+                    crate::tabs::l10n::confirm_dialog_title(
+                        context,
+                        "Review exact administrative request",
+                        server.as_deref(),
+                    )
+                })
+            >
                 <div class="space-y-3">
                     <p class="text-sm">
                         {move || {

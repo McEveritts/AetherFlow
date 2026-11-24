@@ -90,7 +90,7 @@ fn safe_avatar_url(value: &str) -> bool {
 }
 
 fn profile_avatar_src(value: &str) -> Option<String> {
-    safe_avatar_url(value).then(|| af_web_core::api::api_url(value))
+    safe_avatar_url(value).then(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -132,7 +132,7 @@ mod avatar_tests {
     }
 
     #[test]
-    fn profile_avatar_routes_validated_api_urls() {
+    fn profile_avatar_stays_on_local_server_and_enforces_allowlist() {
         use af_web_core::api::set_active_server;
 
         let path = "/api/v1/auth/profile/avatar";
@@ -144,10 +144,7 @@ mod avatar_tests {
         set_active_server(None);
 
         assert_eq!(local.as_deref(), Some(path));
-        assert_eq!(
-            remote.as_deref(),
-            Some("/api/v1/peers/media-2/auth/profile/avatar")
-        );
+        assert_eq!(remote.as_deref(), Some(path));
         assert_eq!(external.as_deref(), Some("https://example.com/avatar.png"));
         assert_eq!(rejected, None);
     }
@@ -309,6 +306,45 @@ mod quota_tests {
 #[component]
 pub(super) fn ProfileSecurity() -> impl IntoView {
     let context = app();
+    view! {
+        <Show
+            when=move || !context.is_remote()
+            fallback=move || {
+                view! {
+                    <ObsCard title=Signal::derive(move || {
+                        tt(context, "PeerSwitch.localSecurityOnlyTitle")
+                    })>
+                        <div class="space-y-4" data-testid="remote-security-local-only">
+                            <p class="text-sm text-slate-300">
+                                {move || {
+                                    let server = context.active_server_name().unwrap_or_default();
+                                    tt_with(
+                                        context,
+                                        "PeerSwitch.localSecurityOnlyDesc",
+                                        &[("server", &server)],
+                                    )
+                                }}
+                            </p>
+                            <button
+                                type="button"
+                                class="glass-button px-4 py-2"
+                                on:click=move |_| context.exit_to_local_server()
+                            >
+                                {move || tt(context, "PeerSwitch.exitToThisServer")}
+                            </button>
+                        </div>
+                    </ObsCard>
+                }
+            }
+        >
+            <LocalProfileSecurity />
+        </Show>
+    }
+}
+
+#[component]
+fn LocalProfileSecurity() -> impl IntoView {
+    let context = app();
     let draft = RwSignal::new(FormDraft::new(
         json!({"email":"","current_password":"","new_password":"","confirm_password":"","code":"","password":""}),
     ));
@@ -394,10 +430,11 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
             guard.release();
         });
     };
-    let sessions = use_api("/api/v1/auth/sessions".to_string());
-    poll_resource(sessions, 30_000);
-    let quota = use_api("/api/v1/auth/user/quota".to_string());
-    poll_resource(quota, 30_000);
+    let is_local = Signal::derive(move || !context.is_remote());
+    let sessions = use_api_when(is_local, "/api/v1/auth/sessions".to_string());
+    poll_resource_when(sessions, 30_000, move || !context.is_remote_untracked());
+    let quota = use_api_when(is_local, "/api/v1/auth/user/quota".to_string());
+    poll_resource_when(quota, 30_000, move || !context.is_remote_untracked());
     let enrollment = RwSignal::new(Value::Null);
     let enroll_open = RwSignal::new(false);
     let recovery = RwSignal::new(Vec::<Value>::new());

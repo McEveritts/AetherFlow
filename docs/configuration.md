@@ -124,10 +124,10 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 | `AF_PEER_TUNNEL_CIDR` | Subnet for peer tunnel addresses on `afpeer0`. Configure a subnet that avoids existing routes. | `10.231.0.0/16` |
 | `AF_PEER_WG_PORT` | UDP listen port for the dedicated WireGuard interface. | `51821` |
 | `AF_PEER_LISTEN_PORT` | TCP port for the API peer listener on the local tunnel address. | `9443` |
-| `AF_PEER_MAX_CONN` | Concurrent requests admitted per peer link. | `64` |
+| `AF_PEER_MAX_CONN` | Concurrent requests admitted per peer link at the listener and outbound management proxy. | `64` |
 | `AF_PEER_RTT_WARN_MS` | Link RTT threshold in milliseconds for the Cluster warning. | `25` |
 | `AF_LOG_FORMAT` | Set to `json` for structured API logs. The API continues to honor `RUST_LOG`. | Text |
-| `AF_PEER_MAX_WS` | Planned P6 limit on concurrent proxied WebSockets per peer link. | `16` |
+| `AF_PEER_MAX_WS` | Concurrent proxied WebSockets per peer link. | `16` |
 | `AF_TRANSCODE_REAL_FFMPEG` | Planned P8–P9 path to the real FFmpeg binary used by the Jellyfin shim and worker. | `/usr/lib/jellyfin-ffmpeg/ffmpeg` |
 
 The Cluster tab guides pairing and endpoint selection. [Peer clustering operator guide](peer-clustering.md)

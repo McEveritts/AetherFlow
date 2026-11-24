@@ -17,38 +17,63 @@ pub(crate) use paths::parent_path;
 pub(super) use paths::{encode, relative_path, text};
 use policy_audit::{ShareAuditView, SharePolicyView};
 use shares::PublicShareLinks;
-pub(super) use shares::{share_url, ShareCreateModal, ShareLinkDetails};
+pub(super) use shares::{
+    share_origin_available, share_origin_available_untracked, share_origin_block_reason,
+    share_url_for_context_untracked, ShareCreateModal, ShareLinkDetails,
+};
 pub(crate) use upload::upload_id;
 const SHARES: &str = "/api/v1/auth/mcbrowser/shares";
 const SHARES_CHANGED: &str = "af:mcbrowser-shares-changed";
 
-// Bearer URLs belong to this mounted component and authorization lifetime.
+// Bearer URLs belong to this mounted component, auth epoch, active server, and grant epoch.
 #[derive(Clone, Copy)]
-struct CreatedShareUrls(RwSignal<(u64, BTreeMap<String, String>)>);
+struct CreatedShareUrls(RwSignal<(u64, u64, u64, BTreeMap<String, String>)>);
+
+const SHARE_GRANT_AREAS: [crate::state::PeerArea; 2] = [
+    crate::state::PeerArea::Files,
+    crate::state::PeerArea::Settings,
+];
 
 fn cached_url(
     context: crate::state::AppContext,
     cache: Option<CreatedShareUrls>,
     id: &str,
 ) -> Option<String> {
+    if !context.can_read_area(crate::state::PeerArea::Files) || !share_origin_available(context) {
+        return None;
+    }
     let auth = context.session_epoch.get();
+    let server = context.server_epoch.get();
+    let grant = context.areas_revocation_epoch(&SHARE_GRANT_AREAS);
     cache?.0.with(|cache| {
-        (cache.0 == auth)
-            .then(|| cache.1.get(id).cloned())
+        (cache.0 == auth && cache.1 == server && cache.2 == grant)
+            .then(|| cache.3.get(id).cloned())
             .flatten()
     })
 }
 
-fn remember_url(cache: Option<CreatedShareUrls>, auth: u64, row: &Value) {
-    let Some(url) = share_url(row) else {
+fn remember_url(
+    context: crate::state::AppContext,
+    cache: Option<CreatedShareUrls>,
+    auth: u64,
+    server: u64,
+    grant: u64,
+    row: &Value,
+) {
+    if !context.can_read_area_untracked(crate::state::PeerArea::Files)
+        || !share_origin_available_untracked(context)
+    {
+        return;
+    }
+    let Some(url) = share_url_for_context_untracked(context, row) else {
         return;
     };
     if let Some(cache) = cache {
         cache.0.update(|cache| {
-            if cache.0 != auth {
-                *cache = (auth, BTreeMap::new());
+            if cache.0 != auth || cache.1 != server || cache.2 != grant {
+                *cache = (auth, server, grant, BTreeMap::new());
             }
-            cache.1.insert(text(row, "id"), url);
+            cache.3.insert(text(row, "id"), url);
         });
     }
     if let (Some(window), Ok(event)) = (web_sys::window(), web_sys::Event::new(SHARES_CHANGED)) {
@@ -61,14 +86,20 @@ pub fn FileshareTab() -> impl IntoView {
     let context = app();
     let urls = CreatedShareUrls(RwSignal::new((
         context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+        context.areas_revocation_epoch_untracked(&SHARE_GRANT_AREAS),
         BTreeMap::new(),
     )));
     provide_context(urls);
     Effect::new(move |_| {
         let auth = context.session_epoch.get();
+        let server = context.server_epoch.get();
+        let grant = context.areas_revocation_epoch(&SHARE_GRANT_AREAS);
+        let origin_ok = share_origin_available(context);
+        let files_ok = context.can_read_area(crate::state::PeerArea::Files);
         urls.0.update(|cache| {
-            if cache.0 != auth {
-                *cache = (auth, BTreeMap::new());
+            if cache.0 != auth || cache.1 != server || cache.2 != grant || !origin_ok || !files_ok {
+                *cache = (auth, server, grant, BTreeMap::new());
             }
         });
     });
@@ -125,8 +156,12 @@ mod tests {
         owner.with(|| {
             let context = crate::state::AppContext::new();
             let auth = context.session_epoch.get_untracked();
+            let server = context.server_epoch.get_untracked();
+            let grant = context.areas_revocation_epoch_untracked(&SHARE_GRANT_AREAS);
             let urls = CreatedShareUrls(RwSignal::new((
                 auth,
+                server,
+                grant,
                 BTreeMap::from([("share".into(), "secret".into())]),
             )));
             provide_context(urls);
@@ -134,10 +169,14 @@ mod tests {
                 cached_url(context, use_context::<CreatedShareUrls>(), "share"),
                 Some("secret".into())
             );
+            context.server_epoch.update(|generation| *generation += 1);
+            assert_eq!(cached_url(context, Some(urls), "share"), None);
             context.session_epoch.update(|generation| *generation += 1);
             assert_eq!(cached_url(context, Some(urls), "share"), None);
             let remounted = CreatedShareUrls(RwSignal::new((
                 context.session_epoch.get_untracked(),
+                context.server_epoch.get_untracked(),
+                context.areas_revocation_epoch_untracked(&SHARE_GRANT_AREAS),
                 BTreeMap::new(),
             )));
             assert_eq!(cached_url(context, Some(remounted), "share"), None);

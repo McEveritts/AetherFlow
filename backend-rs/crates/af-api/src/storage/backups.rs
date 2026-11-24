@@ -450,8 +450,67 @@ pub(super) fn verify_backup_password(
     valid
 }
 
-const BACKUP_DOWNLOAD_COOKIE: &str = "af_backup_download";
+pub(crate) const BACKUP_DOWNLOAD_COOKIE: &str = "af_backup_download";
+pub(crate) const BACKUP_DOWNLOAD_COOKIE_PATH: &str = "/api/v1/admin/backup/download/";
 const BACKUP_DOWNLOAD_TTL: StdDuration = StdDuration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackupTicketCookieError {
+    Ambiguous,
+    Malformed,
+}
+
+/// Returns `true` strictly for canonical `/api/v1/admin/backup/download/<filename>` paths.
+pub(crate) fn is_canonical_backup_download_path(canonical_path: &str) -> bool {
+    let Some(filename) = canonical_path.strip_prefix(BACKUP_DOWNLOAD_COOKIE_PATH) else {
+        return false;
+    };
+    !filename.is_empty() && !filename.contains('/')
+}
+
+/// Extracts an isolated, single, well-formed 64-hex backup download ticket cookie.
+///
+/// Returns `Ok(None)` when no `af_backup_download` cookie is present, `Ok(Some(token))` when a
+/// single well-formed ticket cookie is present, and `Err(_)` when duplicate or malformed
+/// `af_backup_download` cookies are supplied so callers fail closed without falling back.
+pub(crate) fn extract_isolated_backup_ticket_cookie(
+    headers: &HeaderMap,
+) -> Result<Option<String>, BackupTicketCookieError> {
+    let mut found: Option<String> = None;
+    for val in headers.get_all(header::COOKIE) {
+        let Ok(raw) = val.to_str() else {
+            if val
+                .as_bytes()
+                .windows(BACKUP_DOWNLOAD_COOKIE.len())
+                .any(|w| w == BACKUP_DOWNLOAD_COOKIE.as_bytes())
+            {
+                return Err(BackupTicketCookieError::Malformed);
+            }
+            continue;
+        };
+        for part in raw.split(';') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == BACKUP_DOWNLOAD_COOKIE {
+                    if found.is_some() {
+                        return Err(BackupTicketCookieError::Ambiguous);
+                    }
+                    let token = v.trim();
+                    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(BackupTicketCookieError::Malformed);
+                    }
+                    found = Some(token.to_string());
+                }
+            } else if trimmed == BACKUP_DOWNLOAD_COOKIE {
+                return Err(BackupTicketCookieError::Malformed);
+            }
+        }
+    }
+    Ok(found)
+}
 pub(super) struct BackupDownloadTicket {
     user_id: i64,
     session: String,
@@ -894,7 +953,15 @@ pub async fn download_backup(
         .get::<crate::auth::PeerPrincipal>()
         .cloned();
     let (authorized, ticket_authorized) = if let Some(peer) = peer {
-        (peer_backup_download_authorized(&peer, &user), false)
+        let peer_ok = peer_backup_download_authorized(&peer, &user);
+        match extract_isolated_backup_ticket_cookie(req.headers()) {
+            Ok(Some(token)) => {
+                let redeemed = peer_ok && redeem_backup_download_ticket(&token, &user, &filename);
+                (redeemed, redeemed)
+            }
+            Ok(None) => (peer_ok, false),
+            Err(_) => (false, false),
+        }
     } else {
         let ticket = extract_cookie(req.headers(), BACKUP_DOWNLOAD_COOKIE);
         let ticket_authorized = ticket

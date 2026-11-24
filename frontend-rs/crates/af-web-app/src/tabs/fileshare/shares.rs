@@ -1,8 +1,10 @@
 //! Active shares, creation, revocation, QR codes, and one-time URL display.
 use super::paths::{encode, relative_path, text};
 use super::types::*;
-use super::{cached_url, remember_url, CreatedShareUrls, SHARES, SHARES_CHANGED};
-use crate::state::{app, use_api};
+use super::{
+    cached_url, remember_url, CreatedShareUrls, SHARES, SHARES_CHANGED, SHARE_GRANT_AREAS,
+};
+use crate::state::{app, is_valid_public_remote_host, use_api_when, PeerArea};
 use crate::tabs::contracts;
 use crate::tabs::l10n::{
     tt, tt_with, Badge, ConfirmDialog, EmptyState, Modal, ObsCard, SearchInput,
@@ -14,19 +16,170 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-pub(crate) fn share_url(row: &Value) -> Option<String> {
-    let share: ShareRow = serde_json::from_value(row.clone()).ok()?;
-    let raw = share.url.as_deref()?;
-    let origin = web_sys::window()?.location().origin().ok()?;
-    let url = web_sys::Url::new_with_base(raw, &origin).ok()?;
-    let token = url.search_params().get("token")?;
-    (url.origin() == origin
-        && url.pathname() == "/share"
-        && token.len() == 43
+
+fn normalize_remote_origin(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if !is_valid_public_remote_host(host) {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+pub(crate) fn remote_public_origin(settings: &Value, local_origin: Option<&str>) -> Option<String> {
+    let local_norm = local_origin
+        .and_then(|origin| url::Url::parse(origin.trim()).ok())
+        .map(|parsed| parsed.origin().ascii_serialization());
+    let candidate = ["publicOrigin", "public_origin", "publicUrl", "public_url"]
+        .iter()
+        .find_map(|key| settings[key].as_str().and_then(normalize_remote_origin))
+        .or_else(|| {
+            ["baseDomain", "base_domain"]
+                .iter()
+                .find_map(|key| settings[key].as_str())
+                .map(|raw| raw.trim().trim_start_matches("*.").to_ascii_lowercase())
+                .filter(|domain| is_valid_public_remote_host(domain))
+                .and_then(|domain| normalize_remote_origin(&format!("https://{domain}")))
+        })?;
+    if local_norm
+        .as_deref()
+        .is_some_and(|local| local.eq_ignore_ascii_case(&candidate))
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn valid_share_token(token: &str) -> bool {
+    token.len() == 43
         && token
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
-    .then(|| url.href())
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+pub(crate) fn share_url_for_server(
+    row: &Value,
+    is_remote: bool,
+    settings: &Value,
+    local_origin: Option<&str>,
+) -> Option<String> {
+    let share: ShareRow = serde_json::from_value(row.clone()).ok()?;
+    let raw = share.url.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let target_origin = if is_remote {
+        remote_public_origin(settings, local_origin)?
+    } else {
+        let local = local_origin?.trim();
+        url::Url::parse(local).ok()?.origin().ascii_serialization()
+    };
+    let base = url::Url::parse(&target_origin).ok()?;
+    let resolved = base.join(raw).ok()?;
+    if resolved.origin() != base.origin()
+        || resolved.path() != "/share"
+        || resolved.fragment().is_some()
+        || !resolved.username().is_empty()
+        || resolved.password().is_some()
+    {
+        return None;
+    }
+    if is_remote {
+        if resolved.scheme() != "https" {
+            return None;
+        }
+        if let Some(local) = local_origin.and_then(|origin| url::Url::parse(origin.trim()).ok()) {
+            if resolved.origin() == local.origin() {
+                return None;
+            }
+        }
+    }
+    let token = resolved
+        .query_pairs()
+        .find_map(|(key, value)| (key == "token").then(|| value.into_owned()))?;
+    valid_share_token(&token).then(|| resolved.to_string())
+}
+
+fn browser_origin() -> Option<String> {
+    web_sys::window()?.location().origin().ok()
+}
+
+pub(crate) fn share_origin_available(context: crate::state::AppContext) -> bool {
+    if !context.is_remote() {
+        return true;
+    }
+    if !context.can_read_area(PeerArea::Settings) {
+        return false;
+    }
+    let settings = context.settings.get();
+    remote_public_origin(&settings, browser_origin().as_deref()).is_some()
+}
+
+pub(crate) fn share_origin_available_untracked(context: crate::state::AppContext) -> bool {
+    if !context.is_remote_untracked() {
+        return true;
+    }
+    if !context.can_read_area_untracked(PeerArea::Settings) {
+        return false;
+    }
+    let settings = context.settings.get_untracked();
+    remote_public_origin(&settings, browser_origin().as_deref()).is_some()
+}
+
+pub(crate) fn share_origin_block_reason(context: crate::state::AppContext) -> Option<String> {
+    if share_origin_available(context) {
+        return None;
+    }
+    let server = context
+        .active_server_name()
+        .unwrap_or_else(|| tt(context, "PeerSwitch.identityBarLabel"));
+    Some(tt_with(
+        context,
+        "PeerSwitch.remoteShareOriginUnavailable",
+        &[("server", &server)],
+    ))
+}
+
+pub(crate) fn share_url_for_context(
+    context: crate::state::AppContext,
+    row: &Value,
+) -> Option<String> {
+    let is_remote = context.is_remote();
+    if is_remote && !context.can_read_area(PeerArea::Settings) {
+        return None;
+    }
+    let settings = context.settings.get();
+    share_url_for_server(row, is_remote, &settings, browser_origin().as_deref())
+}
+
+pub(crate) fn share_url_for_context_untracked(
+    context: crate::state::AppContext,
+    row: &Value,
+) -> Option<String> {
+    let is_remote = context.is_remote_untracked();
+    if is_remote && !context.can_read_area_untracked(PeerArea::Settings) {
+        return None;
+    }
+    let settings = context.settings.get_untracked();
+    share_url_for_server(row, is_remote, &settings, browser_origin().as_deref())
+}
+
+#[allow(dead_code)]
+pub(crate) fn share_url(row: &Value) -> Option<String> {
+    share_url_for_context_untracked(app(), row)
 }
 
 pub(crate) fn copy_url(url: String) {
@@ -51,36 +204,38 @@ pub(crate) fn copy_url(url: String) {
 pub(crate) fn ShareLinkDetails(#[prop(into)] url: Signal<String>) -> impl IntoView {
     let context = app();
     view! {
-        <div class="space-y-4 min-w-0">
-            <p class="text-sm text-amber-200">
-                {move || tt(
-                    context,
-                    "Save this URL now. It is only returned when the share is created.",
-                )}
-            </p>
-            <label class="block text-sm space-y-1">
-                <span>{move || tt(context, "Share URL")}</span>
-                <input class="glass-input w-full px-3 py-2" readonly prop:value=move || url.get() />
-            </label>
-            <div class="flex flex-wrap gap-2">
-                <button
-                    type="button"
-                    class="glass-button-primary px-4 py-2"
-                    on:click=move |_| copy_url(url.get_untracked())
-                >
-                    {move || tt(context, "Copy share URL")}
-                </button>
-                <a
-                    class="glass-button px-4 py-2"
-                    href=move || url.get()
-                    target="_blank"
-                    rel="noopener noreferrer"
-                >
-                    {move || tt(context, "Open share preview")}
-                </a>
+        <Show when=move || !url.with(String::is_empty)>
+            <div class="space-y-4 min-w-0">
+                <p class="text-sm text-amber-200">
+                    {move || tt(
+                        context,
+                        "Save this URL now. It is only returned when the share is created.",
+                    )}
+                </p>
+                <label class="block text-sm space-y-1">
+                    <span>{move || tt(context, "Share URL")}</span>
+                    <input class="glass-input w-full px-3 py-2" readonly prop:value=move || url.get() />
+                </label>
+                <div class="flex flex-wrap gap-2">
+                    <button
+                        type="button"
+                        class="glass-button-primary px-4 py-2"
+                        on:click=move |_| copy_url(url.get_untracked())
+                    >
+                        {move || tt(context, "Copy share URL")}
+                    </button>
+                    <a
+                        class="glass-button px-4 py-2"
+                        href=move || url.get()
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        {move || tt(context, "Open share preview")}
+                    </a>
+                </div>
+                <QrCodeSvg payload=url label="Public share QR code" />
             </div>
-            <QrCodeSvg payload=url label="Public share QR code" />
-        </div>
+        </Show>
     }
 }
 
@@ -125,9 +280,44 @@ pub(crate) fn ShareCreateModal(
             busy.set(false);
         }
     });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        open.set(false);
+        busy.set(false);
+        created_url.set(String::new());
+        error.set(String::new());
+    });
+    Effect::new(move |_| {
+        context.areas_revocation_epoch(&SHARE_GRANT_AREAS);
+        let origin_ok = share_origin_available(context);
+        let files_ok = context.can_read_area(PeerArea::Files);
+        if !files_ok {
+            generation.update(|value| *value += 1);
+            open.set(false);
+            busy.set(false);
+            created_url.set(String::new());
+            error.set(String::new());
+        } else if !origin_ok {
+            generation.update(|value| *value += 1);
+            busy.set(false);
+            created_url.set(String::new());
+        }
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Files) {
+            generation.update(|value| *value += 1);
+            busy.set(false);
+        }
+    });
+    let origin_block_reason = Signal::derive(move || share_origin_block_reason(context));
     let submit = move |event: web_sys::SubmitEvent| {
         event.prevent_default();
-        if busy.get_untracked() || !created_url.get_untracked().is_empty() {
+        if busy.get_untracked()
+            || !created_url.get_untracked().is_empty()
+            || !context.can_write_area_untracked(PeerArea::Files)
+            || !share_origin_available_untracked(context)
+        {
             return;
         }
         let target = match relative_path(&path.get_untracked(), false) {
@@ -162,22 +352,26 @@ pub(crate) fn ShareCreateModal(
         error.set(String::new());
         let ticket = generation.get_untracked();
         let auth = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let grant_epoch = context.areas_revocation_epoch_untracked(&SHARE_GRANT_AREAS);
         let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, generation, ticket);
         spawn_local(async move {
             let result = ApiClient.post(SHARES, Some(&body)).await;
-            if context.session_epoch.try_get_untracked() != Some(auth)
-                || generation.try_get_untracked().is_none()
+            if generation.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.areas_revocation_epoch_untracked(&SHARE_GRANT_AREAS) != grant_epoch
+                || !context.can_read_area_untracked(PeerArea::Files)
+                || !context.can_write_area_untracked(PeerArea::Files)
+                || !share_origin_available_untracked(context)
             {
                 return;
             }
             if let Ok(data) = &result {
                 let created: CreatedShare = contracts::decode(data);
                 let share = serde_json::to_value(&created.share).unwrap_or_default();
-                remember_url(urls, auth, &share);
+                remember_url(context, urls, auth, server_epoch, grant_epoch, &share);
                 on_created.run(share.clone());
-            }
-            if generation.try_get_untracked() != Some(ticket) {
-                return;
             }
             busy_guard.release();
             password.set(String::new());
@@ -185,7 +379,8 @@ pub(crate) fn ShareCreateModal(
                 Ok(data) => {
                     let created: CreatedShare = contracts::decode(&data);
                     let share = serde_json::to_value(&created.share).unwrap_or_default();
-                    created_url.set(share_url(&share).unwrap_or_default());
+                    created_url
+                        .set(share_url_for_context_untracked(context, &share).unwrap_or_default());
                     context.toast(tt(context, "Share created"), false);
                     if created_url.get_untracked().is_empty() {
                         error.set(
@@ -204,6 +399,19 @@ pub(crate) fn ShareCreateModal(
                 fallback=move || view! { <ShareLinkDetails url=created_url /> }
             >
                 <form class="space-y-4" on:submit=submit>
+                    {move || {
+                        origin_block_reason.get().map(|reason| {
+                            view! {
+                                <p
+                                    role="status"
+                                    data-testid="remote-share-origin-unavailable"
+                                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                                >
+                                    {reason}
+                                </p>
+                            }
+                        })
+                    }}
                     <label class="block text-sm space-y-1">
                         <span>{move || tt(context, "File or folder path")}</span>
                         <input
@@ -252,7 +460,17 @@ pub(crate) fn ShareCreateModal(
                     <button
                         type="submit"
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get()
+                                || !context.can_write_area(crate::state::PeerArea::Files)
+                                || origin_block_reason.with(Option::is_some)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Files, true)
+                                .or_else(|| origin_block_reason.get())
+                                .unwrap_or_default()
+                        }
                     >
                         {move || tt(
                             context,
@@ -279,12 +497,16 @@ fn expires(row: &ShareRow) -> Option<f64> {
 pub(super) fn PublicShareLinks() -> impl IntoView {
     let context = app();
     let urls = use_context::<CreatedShareUrls>();
-    let resource = use_api(SHARES.to_owned());
+    let can_read_files = Signal::derive(move || context.can_read_area(PeerArea::Files));
+    let resource = use_api_when(can_read_files, SHARES.to_owned());
     let known = RwSignal::new(Vec::<ShareRow>::new());
-    let changes =
-        StoredValue::new_local(web_sys::window().map(|window| {
-            EventListener::new(&window, SHARES_CHANGED, move |_| resource.refresh())
-        }));
+    let changes = StoredValue::new_local(web_sys::window().map(|window| {
+        EventListener::new(&window, SHARES_CHANGED, move |_| {
+            if context.can_read_area_untracked(PeerArea::Files) {
+                resource.refresh();
+            }
+        })
+    }));
     on_cleanup(move || changes.set_value(None));
     let query = RwSignal::new(String::new());
     let filter = RwSignal::new("all".to_owned());
@@ -295,6 +517,10 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
     )));
     on_cleanup(move || clock.set_value(None));
     Effect::new(move |_| {
+        if !can_read_files.get() {
+            known.set(vec![]);
+            return;
+        }
         let data = resource.data.get();
         let Some(_server) = data["shares"].as_array() else {
             return;
@@ -347,30 +573,69 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
     let revoke_open = RwSignal::new(false);
     let revoke_target = RwSignal::new(ShareRow::default());
     let busy = RwSignal::new(false);
+    let revoke_ticket = RwSignal::new(0u64);
     let revoke_error = RwSignal::new(String::new());
     let created = Callback::new(move |row: Value| {
+        if !context.can_read_area_untracked(PeerArea::Files) {
+            return;
+        }
         if let Ok(row) = serde_json::from_value::<ShareRow>(row) {
             known.update(|rows| rows.insert(0, row));
         }
         resource.refresh();
     });
+    Effect::new(move |_| {
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Files);
+        revoke_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        known.set(vec![]);
+        create_open.set(false);
+        qr_open.set(false);
+        qr_url.set(String::new());
+        revoke_open.set(false);
+        revoke_error.set(String::new());
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Files) {
+            revoke_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            revoke_open.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        context.area_revocation_epoch(PeerArea::Settings);
+        if !share_origin_available(context) {
+            qr_open.set(false);
+            qr_url.set(String::new());
+        }
+    });
     let revoke = Callback::new(move |()| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area_untracked(PeerArea::Files) {
             return;
         }
         let id = revoke_target.get_untracked().id;
         if id.is_empty() {
             return;
         }
+        revoke_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = revoke_ticket.get_untracked();
         busy.set(true);
         revoke_error.set(String::new());
         let auth = context.session_epoch.get_untracked();
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, revoke_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .delete(&format!("{SHARES}/{}", encode(&id)), None)
                 .await;
-            if context.session_epoch.try_get_untracked() != Some(auth)
+            if revoke_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                || !context.can_write_area_untracked(PeerArea::Files)
                 || busy.try_get_untracked().is_none()
             {
                 return;
@@ -380,7 +645,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                 Ok(_) => {
                     if let Some(cache) = urls {
                         cache.0.update(|cache| {
-                            cache.1.remove(&id);
+                            cache.3.remove(&id);
                         });
                     }
                     known.update(|rows| rows.retain(|row| row.id != id));
@@ -410,7 +675,17 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button px-4 py-2"
-                        on:click=move |_| resource.refresh()
+                        disabled=move || !can_read_files.get()
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Files, false)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if can_read_files.get_untracked() {
+                                resource.refresh();
+                            }
+                        }
                         aria-label=move || tt(context, "Refresh")
                     >
                         {move || tt(context, "Common.refresh")}
@@ -418,12 +693,53 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button-primary px-4 py-2"
-                        on:click=move |_| create_open.set(true)
+                        disabled=move || {
+                            !context.can_write_area(PeerArea::Files)
+                                || !share_origin_available(context)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Files, true)
+                                .or_else(|| share_origin_block_reason(context))
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if context.can_write_area(PeerArea::Files)
+                                && share_origin_available_untracked(context)
+                            {
+                                create_open.set(true);
+                            }
+                        }
                     >
                         {move || tt(context, "Create share")}
                     </button>
                 </div>
             </div>
+            <Show when=move || !can_read_files.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Files, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
+            {move || {
+                share_origin_block_reason(context).map(|reason| {
+                    view! {
+                        <p
+                            role="status"
+                            data-testid="fileshare-remote-origin-notice"
+                            class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                        >
+                            {reason}
+                        </p>
+                    }
+                })
+            }}
             <div class="grid grid-cols-2 xl:grid-cols-4 gap-4">
                 <ObsCard title=Signal::derive(move || tt(context, "Fileshare.activeShares"))>
                     <p class="text-3xl font-semibold text-cyan-300">
@@ -536,7 +852,11 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                                     };
                                     let url = move || {
                                         row.with_value(|row| {
-                                            share_url(&serde_json::to_value(row).unwrap_or_default()).or_else(|| cached_url(context, urls, &row.id))
+                                            share_url_for_context(
+                                                context,
+                                                &serde_json::to_value(row).unwrap_or_default(),
+                                            )
+                                            .or_else(|| cached_url(context, urls, &row.id))
                                         })
                                     };
                                     view! {
@@ -600,7 +920,20 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                                                     <button
                                                         type="button"
                                                         class="glass-button px-3 py-2 text-rose-300"
-                                                        disabled=move || busy.get()
+                                                        disabled=move || {
+                                                            busy.get()
+                                                                || !context.can_write_area(
+                                                                    crate::state::PeerArea::Files,
+                                                                )
+                                                        }
+                                                        title=move || {
+                                                            context
+                                                                .area_block_reason(
+                                                                    crate::state::PeerArea::Files,
+                                                                    true,
+                                                                )
+                                                                .unwrap_or_default()
+                                                        }
                                                         on:click=move |_| {
                                                             revoke_target.set(row.get_value());
                                                             revoke_error.set(String::new());
@@ -648,5 +981,133 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                     })
             }}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_TOKEN: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm0123";
+
+    #[test]
+    fn remote_public_origin_validates_authoritative_https_domain_and_blocks_local_fallbacks() {
+        assert_eq!(
+            remote_public_origin(
+                &json!({"baseDomain": "beta.example.com"}),
+                Some("https://alpha.example.com")
+            )
+            .as_deref(),
+            Some("https://beta.example.com")
+        );
+        assert_eq!(
+            remote_public_origin(
+                &json!({"baseDomain": "*.Beta.Example.COM"}),
+                Some("http://127.0.0.1:8080")
+            )
+            .as_deref(),
+            Some("https://beta.example.com")
+        );
+        assert_eq!(
+            remote_public_origin(
+                &json!({"publicOrigin": "https://share.peer-b.example.com:8443/"}),
+                Some("https://alpha.example.com")
+            )
+            .as_deref(),
+            Some("https://share.peer-b.example.com:8443")
+        );
+        for invalid in [
+            json!({}),
+            json!({"baseDomain": ""}),
+            json!({"baseDomain": "localhost"}),
+            json!({"baseDomain": "peer.localhost"}),
+            json!({"baseDomain": "peer.aether.local"}),
+            json!({"baseDomain": "peer.local"}),
+            json!({"baseDomain": "192.168.1.50"}),
+            json!({"baseDomain": "https://beta.example.com"}),
+            json!({"baseDomain": "alpha.example.com"}),
+            json!({"publicOrigin": "http://beta.example.com"}),
+            json!({"publicOrigin": "https://user:pass@beta.example.com"}),
+            json!({"publicOrigin": "https://beta.example.com/subpath"}),
+            json!({"publicOrigin": "https://alpha.example.com"}),
+        ] {
+            assert_eq!(
+                remote_public_origin(&invalid, Some("https://alpha.example.com")),
+                None,
+                "invalid remote origin settings must be rejected: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn share_url_for_server_keeps_local_origin_and_never_sends_remote_tokens_locally() {
+        let relative = json!({
+            "id": "s-1",
+            "url": format!("/share?token={SAMPLE_TOKEN}")
+        });
+        // Local server resolves relative share URLs against browser origin.
+        assert_eq!(
+            share_url_for_server(&relative, false, &json!({}), Some("http://127.0.0.1:8080"))
+                .as_deref(),
+            Some(format!("http://127.0.0.1:8080/share?token={SAMPLE_TOKEN}").as_str())
+        );
+
+        // Remote server with validated baseDomain uses the peer's public HTTPS origin.
+        assert_eq!(
+            share_url_for_server(
+                &relative,
+                true,
+                &json!({"baseDomain": "peer-b.example.com"}),
+                Some("http://127.0.0.1:8080")
+            )
+            .as_deref(),
+            Some(format!("https://peer-b.example.com/share?token={SAMPLE_TOKEN}").as_str())
+        );
+
+        // Remote server without a safe remote origin refuses to generate a local link.
+        assert_eq!(
+            share_url_for_server(&relative, true, &json!({}), Some("http://127.0.0.1:8080")),
+            None
+        );
+        assert_eq!(
+            share_url_for_server(
+                &relative,
+                true,
+                &json!({"baseDomain": "peer-b.aether.local"}),
+                Some("http://127.0.0.1:8080")
+            ),
+            None
+        );
+
+        // Remote server rejects absolute URL pointing to local or foreign origin.
+        let local_spoof = json!({
+            "id": "s-2",
+            "url": format!("https://alpha.example.com/share?token={SAMPLE_TOKEN}")
+        });
+        assert_eq!(
+            share_url_for_server(
+                &local_spoof,
+                true,
+                &json!({"baseDomain": "peer-b.example.com"}),
+                Some("https://alpha.example.com")
+            ),
+            None
+        );
+
+        // Short or malformed tokens are rejected on both local and remote.
+        let bad_token = json!({"id": "s-3", "url": "/share?token=short"});
+        assert_eq!(
+            share_url_for_server(&bad_token, false, &json!({}), Some("http://127.0.0.1:8080")),
+            None
+        );
+        assert_eq!(
+            share_url_for_server(
+                &bad_token,
+                true,
+                &json!({"baseDomain": "peer-b.example.com"}),
+                Some("http://127.0.0.1:8080")
+            ),
+            None
+        );
     }
 }

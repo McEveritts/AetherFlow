@@ -40,13 +40,23 @@ impl Editor {
         self.content.get_untracked() != self.baseline.get_untracked()
     }
     pub(super) fn load(self, target: String) {
-        if self.saving.get_untracked() || self.loading.get_untracked() {
+        let context = app();
+        if self.saving.get_untracked()
+            || self.loading.get_untracked()
+            || !context.can_read_area_untracked(PeerArea::Files)
+        {
             return;
         }
-        self.load_seq.update(|g| *g += 1);
+        self.load_seq.update(|g| *g = g.wrapping_add(1));
         let ticket = self.load_seq.get_untracked();
-        let context = app();
-        let auth = context.session_epoch.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Files,
+            false,
+            false,
+            self.load_seq,
+            ticket,
+        );
         self.open.set(true);
         self.loading.set(true);
         self.failure.set(String::new());
@@ -61,6 +71,9 @@ impl Editor {
                         None,
                     )
                     .await?;
+                if !fence.is_valid() {
+                    return Err(error("Session ended"));
+                }
                 let (data, etag) = response_value(context, response).await?;
                 let content = data["content"]
                     .as_str()
@@ -80,9 +93,7 @@ impl Editor {
                 Ok::<_, ApiError>((content, etag))
             }
             .await;
-            if self.load_seq.try_get_untracked() != Some(ticket)
-                || context.session_epoch.try_get_untracked() != Some(auth)
-            {
+            if self.loading.try_get_untracked().is_none() || !fence.is_valid() {
                 return;
             }
             busy_guard.release();
@@ -99,13 +110,25 @@ impl Editor {
         });
     }
     pub(super) fn save(self, overwrite: bool) {
-        if self.saving.get_untracked() || self.loading.get_untracked() || !self.dirty_untracked() {
+        let context = app();
+        if self.saving.get_untracked()
+            || self.loading.get_untracked()
+            || !self.dirty_untracked()
+            || !context.can_write_area_untracked(PeerArea::Files)
+        {
             return;
         }
-        let context = app();
-        let auth = context.session_epoch.get_untracked();
-        self.save_seq.update(|generation| *generation += 1);
+        self.save_seq
+            .update(|generation| *generation = generation.wrapping_add(1));
         let ticket = self.save_seq.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Files,
+            true,
+            false,
+            self.save_seq,
+            ticket,
+        );
         let target = self.path.get_untracked();
         let content = self.content.get_untracked();
         if content.len() > MAX_TEXT_EDITOR_BYTES {
@@ -123,17 +146,23 @@ impl Editor {
                 // Overwrite is still guarded against a second concurrent write:
                 // obtain current truth and CAS against that ETag, never '*'.
                 let etag = if overwrite {
-                    let (data, header) = response_value(
-                        context,
-                        ApiClient
-                            .fetch(
-                                &format!("{BASE}/content?path={}", encode(&target)),
-                                "GET",
-                                None,
-                            )
-                            .await?,
-                    )
-                    .await?;
+                    if !fence.is_valid() {
+                        return Err(error("Session ended"));
+                    }
+                    let response = ApiClient
+                        .fetch(
+                            &format!("{BASE}/content?path={}", encode(&target)),
+                            "GET",
+                            None,
+                        )
+                        .await?;
+                    if !fence.is_valid() {
+                        return Err(error("Session ended"));
+                    }
+                    let (data, header) = response_value(context, response).await?;
+                    if !fence.is_valid() {
+                        return Err(error("Session ended"));
+                    }
                     header
                         .or_else(|| data["etag"].as_str().map(str::to_owned))
                         .unwrap_or_default()
@@ -143,7 +172,7 @@ impl Editor {
                 if etag.is_empty() {
                     return Err(error("Reload the file to obtain an ETag before saving."));
                 }
-                if context.session_epoch.try_get_untracked() != Some(auth) {
+                if !fence.is_valid() {
                     return Err(error("Session ended"));
                 }
                 let payload =
@@ -157,6 +186,9 @@ impl Editor {
                         &[("If-Match", &etag)],
                     )
                     .await?;
+                if !fence.is_valid() {
+                    return Err(error("Session ended"));
+                }
                 let (data, header) = response_value(context, response).await?;
                 let etag = header
                     .or_else(|| data["etag"].as_str().map(str::to_owned))
@@ -167,9 +199,7 @@ impl Editor {
                 Ok::<_, ApiError>((etag, data["accounting_pending"] == true))
             }
             .await;
-            if self.save_seq.try_get_untracked() != Some(ticket)
-                || context.session_epoch.try_get_untracked() != Some(auth)
-            {
+            if self.saving.try_get_untracked().is_none() || !fence.is_valid() {
                 return;
             }
             busy_guard.release();
@@ -215,6 +245,32 @@ pub(super) fn EditorPanel(
     let markdown_preview = RwSignal::new(false);
     let overwrite = RwSignal::new(false);
     let reload = RwSignal::new(false);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Files);
+        editor.load_seq.update(|g| *g = g.wrapping_add(1));
+        editor.save_seq.update(|g| *g = g.wrapping_add(1));
+        editor.baseline.set(String::new());
+        editor.content.set(String::new());
+        editor.path.set(String::new());
+        editor.etag.set(String::new());
+        editor.failure.set(String::new());
+        editor.conflict.set(false);
+        editor.loading.set(false);
+        editor.saving.set(false);
+        editor.open.set(false);
+        discard.set(false);
+        overwrite.set(false);
+        reload.set(false);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Files) {
+            editor.save_seq.update(|g| *g = g.wrapping_add(1));
+            editor.saving.set(false);
+            overwrite.set(false);
+        }
+    });
     Effect::new(move |_| {
         if !editor.open.get() && editor.dirty_untracked() {
             editor.open.set(true);
@@ -426,13 +482,13 @@ fn next_zoom(current: u16, zoom_in: bool) -> u16 {
     }
 }
 
-fn parse_subtitle_tracks(data: &Value) -> Vec<(String, String, String)> {
+fn parse_subtitle_tracks(data: &Value, server: Option<&str>) -> Vec<(String, String, String)> {
     data["subtitles"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|track| {
-            let url = safe_subtitle_url(track["url"].as_str()?)?;
+            let url = safe_subtitle_url_for_server(track["url"].as_str()?, server)?;
             let label = track["label"]
                 .as_str()
                 .or_else(|| track["name"].as_str())
@@ -576,8 +632,19 @@ pub(super) fn MediaPreview(
     };
 
     Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Files);
+        open.set(false);
+        path.set(String::new());
+        aux_seq.update(|seq| *seq += 1);
+    });
+
+    Effect::new(move |_| {
         let is_open = open.get();
         let target = path.get();
+        let server_epoch = context.server_epoch.get();
+        let server_id = context.active_server_id.get_untracked();
         aux_seq.update(|seq| *seq += 1);
         let ticket = aux_seq.get_untracked();
         failed.set(false);
@@ -594,11 +661,12 @@ pub(super) fn MediaPreview(
         aux_error.set(String::new());
         aux_loading.set(false);
 
-        if !is_open || target.is_empty() {
+        if !is_open || target.is_empty() || !context.can_read_area_untracked(PeerArea::Files) {
             return;
         }
         let kind = media_kind(&target);
         let auth = context.session_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
         match kind {
             "image" | "video" | "audio" => {
                 let is_video = kind == "video";
@@ -609,11 +677,15 @@ pub(super) fn MediaPreview(
                         if disposed.try_get_value() != Some(false)
                             || aux_seq.try_get_untracked() != Some(ticket)
                             || context.session_epoch.try_get_untracked() != Some(auth)
+                            || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                            || context.area_revocation_epoch_untracked(PeerArea::Files)
+                                != files_grant
+                            || !context.can_read_area_untracked(PeerArea::Files)
                         {
                             return;
                         }
                         if is_video {
-                            let tracks = parse_subtitle_tracks(&info);
+                            let tracks = parse_subtitle_tracks(&info, server_id.as_deref());
                             if !tracks.is_empty() {
                                 have_subs = true;
                                 subtitles.set(tracks);
@@ -629,10 +701,14 @@ pub(super) fn MediaPreview(
                             if disposed.try_get_value() != Some(false)
                                 || aux_seq.try_get_untracked() != Some(ticket)
                                 || context.session_epoch.try_get_untracked() != Some(auth)
+                                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                                || context.area_revocation_epoch_untracked(PeerArea::Files)
+                                    != files_grant
+                                || !context.can_read_area_untracked(PeerArea::Files)
                             {
                                 return;
                             }
-                            let tracks = parse_subtitle_tracks(&subs);
+                            let tracks = parse_subtitle_tracks(&subs, server_id.as_deref());
                             if !tracks.is_empty() {
                                 subtitles.set(tracks);
                             }
@@ -659,6 +735,9 @@ pub(super) fn MediaPreview(
                     if disposed.try_get_value() != Some(false)
                         || aux_seq.try_get_untracked() != Some(ticket)
                         || context.session_epoch.try_get_untracked() != Some(auth)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                        || !context.can_read_area_untracked(PeerArea::Files)
                     {
                         return;
                     }
@@ -677,6 +756,9 @@ pub(super) fn MediaPreview(
                     if disposed.try_get_value() != Some(false)
                         || aux_seq.try_get_untracked() != Some(ticket)
                         || context.session_epoch.try_get_untracked() != Some(auth)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                        || !context.can_read_area_untracked(PeerArea::Files)
                     {
                         return;
                     }
@@ -781,7 +863,12 @@ pub(super) fn MediaPreview(
             </div>
             <div node_ref=media_host>
                 {move || {
+                    context.active_server_id.track();
+                    context.server_epoch.track();
                     let current_path = path.get();
+                    if current_path.is_empty() {
+                        return ().into_any();
+                    }
                     let encoded_path = encode(&current_path);
                     let src = mcbrowser_media_url_encoded(&encoded_path);
                     let big_src = mcbrowser_preview_big_url_encoded(&encoded_path);
@@ -1314,10 +1401,15 @@ pub(super) fn MediaPreview(
                     )}
                 </p>
             </Show>
-            <Show when=move || can_download.get()>
+            <Show when=move || can_download.get() && !path.with(String::is_empty)>
                 <a
                     class="glass-button inline-block px-4 py-2 mt-3"
-                    href=move || mcbrowser_download_url_encoded(&encode(&path.get()))
+                    href=move || {
+                        context.server_epoch.track();
+                        let server = context.active_server_id.get();
+                        mcbrowser_preview_download_href(server.as_deref(), &encode(&path.get()))
+                            .unwrap_or_default()
+                    }
                     download=move || leaf(&path.get()).to_owned()
                 >
                     {move || tt(context, "Download original")}
@@ -1381,7 +1473,7 @@ mod busy_tests {
                 }
             ]
         });
-        let parsed_subs = parse_subtitle_tracks(&subs);
+        let parsed_subs = parse_subtitle_tracks(&subs, None);
         assert_eq!(parsed_subs.len(), 1);
         assert_eq!(parsed_subs[0].1, "English");
 
@@ -1450,7 +1542,7 @@ mod busy_tests {
                 }
             ]
         });
-        let parsed_subs = parse_subtitle_tracks(&subs);
+        let parsed_subs = parse_subtitle_tracks(&subs, Some("media-2"));
         assert_eq!(parsed_subs.len(), 1);
         assert_eq!(
             parsed_subs[0].0,
@@ -1471,5 +1563,14 @@ mod busy_tests {
             mcbrowser_download_url_encoded("docs%2Fguide.pdf"),
             "/api/v1/peers/media-2/auth/mcbrowser/download?path=docs%2Fguide.pdf"
         );
+        assert_eq!(
+            mcbrowser_preview_download_href(Some("media-2"), "docs%2Fguide.pdf").as_deref(),
+            Some("/api/v1/peers/media-2/auth/mcbrowser/download?path=docs%2Fguide.pdf")
+        );
+        assert_eq!(
+            mcbrowser_preview_download_href(None, "docs%2Fguide.pdf").as_deref(),
+            Some("/api/v1/auth/mcbrowser/download?path=docs%2Fguide.pdf")
+        );
+        assert_eq!(mcbrowser_preview_download_href(Some("media-2"), ""), None);
     }
 }

@@ -272,6 +272,23 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     await json(route, []);
   });
 
+  await page.route(/\/api\/v1\/admin\/peers(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, {
+      identity: null,
+      peer_protocol: 1,
+      capabilities: ['links'],
+      rtt_warn_ms: 120,
+      peers: [],
+      pairing_windows: [],
+      pairing_attempts: [],
+      detected_endpoints: [],
+    });
+  });
+
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/(check|status)/, async (route: Route) => {
     if (new URL(route.request().url()).pathname.endsWith('/status')) {
       await json(route, { state: 'idle', phase: '', operationId: '', error: '' });

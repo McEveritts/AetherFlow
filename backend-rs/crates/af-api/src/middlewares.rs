@@ -15,11 +15,16 @@ pub use host_validation::host_validation_middleware;
 pub(crate) use host_validation::is_trusted_request_host;
 #[allow(unused_imports)]
 pub(crate) use proxy_helpers::upstream_uses_tls;
+pub(crate) use proxy_helpers::{
+    connection_header_tokens, is_hop_by_hop_header, is_websocket_upgrade_request, GuardedBody,
+    StreamProxyErrorKind, StreamProxyOptions, StreamProxySocketBind, StreamProxyUpgradePolicy,
+};
 pub use rate_limit::{
     ai_rate_limit_middleware, auth_rate_limit_middleware, oidc_rate_limit_middleware,
     quota_upload_guard_middleware,
 };
 pub use subdomain_proxy::app_subdomain_proxy_middleware;
+pub(crate) use subdomain_proxy::stream_proxy;
 
 #[cfg(test)]
 use host_resolution::PROXY_RESOLVE_LIMIT;

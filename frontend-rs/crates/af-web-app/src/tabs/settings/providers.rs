@@ -106,21 +106,53 @@ pub(super) fn ProviderSettings(
 ) -> impl IntoView {
     let context = app();
     let testing = RwSignal::new(false);
+    let test_ticket = RwSignal::new(0u64);
     let test_provider = RwSignal::new("gemini".to_string());
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Settings);
+        test_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        testing.set(false);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Settings) {
+            test_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            testing.set(false);
+        }
+    });
     let test = move || {
-        if testing.get_untracked() {
+        if testing.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let value = draft_value(draft);
         let provider = test_provider.get_untracked();
         let payload = build_test_ai_payload(&provider, &value);
+        test_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = test_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Settings,
+            true,
+            true,
+            test_ticket,
+            ticket,
+        );
         testing.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(testing);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(testing, test_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post("/api/v1/admin/settings/test-ai", Some(&payload))
-                .await
-            {
+                .await;
+            if testing.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(data) => context.toast(
                     tt(
                         context,
@@ -129,9 +161,6 @@ pub(super) fn ProviderSettings(
                     false,
                 ),
                 Err(error) => context.toast(tt(context, &error.message), true),
-            }
-            if testing.try_get_untracked().is_some() {
-                busy_guard.release();
             }
         });
     };
@@ -342,7 +371,14 @@ pub(super) fn ProviderSettings(
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || testing.get()
+                    disabled=move || {
+                        testing.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Settings, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| test()
                 >
                     {move || {
@@ -360,6 +396,14 @@ pub(super) fn ProviderSettings(
                 on_save
                 label=move || tt(context, "Settings.saveConfig")
                 saving_label=move || tt(context, "Settings.saving")
+                disabled=Signal::derive(move || {
+                    !context.can_write_area(crate::state::PeerArea::Settings)
+                })
+                title=Signal::derive(move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Settings, true)
+                        .unwrap_or_default()
+                })
             />
         </ObsCard>
     }

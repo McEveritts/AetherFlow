@@ -20,21 +20,26 @@ use super::pairing::sha256_prefixed;
 use super::scopes::{self, RouteDecision};
 use super::{
     capabilities, grants, is_live_link_state, is_revoked_or_revoking_state, links, pairing,
-    ListenerHandle, PeerRuntime, HEADER_GRANT_TOKEN, HEADER_LINK_TOKEN, HEADER_ORIGIN_OPERATOR,
-    PEER_PROTOCOL_VERSION,
+    ListenerHandle, PeerListenerRuntime, PeerRuntime, PeerWsPermit, HEADER_GRANT_TOKEN,
+    HEADER_LINK_TOKEN, HEADER_ORIGIN_OPERATOR, PEER_PROTOCOL_VERSION,
 };
-use crate::auth::{AuthUser, PeerPrincipal, SessionAuthTime};
+use crate::auth::{api_error, AuthUser, PeerPrincipal, SessionAuthTime};
+use crate::middlewares::{is_websocket_upgrade_request, GuardedBody};
+use crate::storage::{
+    extract_isolated_backup_ticket_cookie, is_canonical_backup_download_path,
+    BACKUP_DOWNLOAD_COOKIE,
+};
 use af_db::peers::{self as db_peers, PeerLink};
 use af_models::constant_time_eq;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{OriginalUri, Request, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::{watch, OwnedSemaphorePermit};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
@@ -60,6 +65,16 @@ pub(crate) async fn authenticate_active_link(
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: &HeaderMap,
     route_label: &str,
+) -> Result<(AuthenticatedPeerLink, tokio::sync::OwnedSemaphorePermit), PeerError> {
+    authenticate_active_link_for_kind(runtime, connect_info, headers, route_label, false).await
+}
+
+async fn authenticate_active_link_for_kind(
+    runtime: &PeerRuntime,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
+    route_label: &str,
+    is_ws: bool,
 ) -> Result<(AuthenticatedPeerLink, tokio::sync::OwnedSemaphorePermit), PeerError> {
     let local_server = runtime.local_server_name();
     let step = "tunnel_link_auth";
@@ -144,12 +159,21 @@ pub(crate) async fn authenticate_active_link(
         ));
     }
 
-    let Some(permit) = runtime.acquire_link_permit(&link.id) else {
+    let permit = if is_ws {
+        runtime.acquire_link_ws_permit(&link.id)
+    } else {
+        runtime.acquire_link_permit(&link.id)
+    };
+    let Some(permit) = permit else {
         audit_listener_denial(runtime, route_label, &source_ip_str, "PEER_BUSY").await;
         return Err(PeerError::busy(
             &local_server,
             step,
-            "Per-link concurrency limit exceeded on tunnel listener",
+            if is_ws {
+                "Per-link WebSocket concurrency limit exceeded on tunnel listener"
+            } else {
+                "Per-link concurrency limit exceeded on tunnel listener"
+            },
         ));
     };
 
@@ -275,11 +299,23 @@ async fn tunnel_management_or_deny_fallback(
     let route_label = "unclassified tunnel request";
     let local_server = runtime.local_server_name();
 
-    let (auth, _permit) =
-        match authenticate_active_link(runtime, connect_info, req.headers(), route_label).await {
-            Ok(ok) => ok,
-            Err(err) => return err.into_response(),
-        };
+    let canonical = scopes::canonicalize(req.uri().path());
+    let is_ws = canonical
+        .as_ref()
+        .is_ok_and(scopes::CanonicalPath::is_websocket_path)
+        && is_websocket_upgrade_request(req.headers(), req.method());
+    let (auth, permit) = match authenticate_active_link_for_kind(
+        runtime,
+        connect_info,
+        req.headers(),
+        route_label,
+        is_ws,
+    )
+    .await
+    {
+        Ok(ok) => ok,
+        Err(err) => return err.into_response(),
+    };
 
     let source_ip_str = auth.source_ip.to_string();
     let remote_addr = connect_info
@@ -288,7 +324,7 @@ async fn tunnel_management_or_deny_fallback(
 
     // 1. Canonicalize path once; fail closed on any smuggling, control, dot-segment, or encoding
     //    ambiguity without logging untrusted raw path text.
-    let canonical = match scopes::canonicalize(req.uri().path()) {
+    let canonical = match canonical {
         Ok(c) => c,
         Err(_) => {
             let err = PeerError::peer_route_unclassified(
@@ -570,16 +606,65 @@ async fn tunnel_management_or_deny_fallback(
     };
     *req.uri_mut() = reconciled_uri;
 
-    // 7. Strip browser/peer auth, forwarding, reauth, and audit headers and untrusted extensions,
-    //    then inject trusted `PeerPrincipal`, constrained run-as `AuthUser`, `ConnectInfo`, and
-    //    `X-Request-ID`.
+    // 7. Isolate any one-use backup download ticket cookie strictly on canonical backup download
+    //    GET requests (failing closed on malformed or ambiguous cookies without falling back),
+    //    then strip all browser/peer auth, forwarding, reauth, and audit headers and untrusted
+    //    extensions before injecting trusted `PeerPrincipal`, constrained run-as `AuthUser`,
+    //    `PeerListenerRuntime`, `ConnectInfo`, and `X-Request-ID`.
+    let isolated_backup_ticket = if method == Method::GET
+        && is_canonical_backup_download_path(canonical.as_str())
+    {
+        match extract_isolated_backup_ticket_cookie(req.headers()) {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                runtime
+                        .db
+                        .record_audit(
+                            run_as_subject.user_id,
+                            run_as_subject.username.clone(),
+                            "peer_management_denied".to_string(),
+                            "peer_grant".to_string(),
+                            grant.id.clone(),
+                            format!(
+                                "Denied {} {} via {} (operator={}, request_id={}, reason=invalid_backup_ticket_cookie)",
+                                method,
+                                canonical.as_str(),
+                                auth.link.name,
+                                operator_display,
+                                request_id
+                            ),
+                            source_ip_str,
+                            String::new(),
+                        )
+                        .await;
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "INVALID_CURRENT_PASSWORD",
+                    "Invalid backup download ticket",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     strip_untrusted_peer_headers(req.headers_mut());
+    if let Some(ticket) = isolated_backup_ticket {
+        if let Ok(mut cookie_hv) =
+            HeaderValue::from_str(&format!("{BACKUP_DOWNLOAD_COOKIE}={ticket}"))
+        {
+            cookie_hv.set_sensitive(true);
+            req.headers_mut().insert(header::COOKIE, cookie_hv);
+        }
+    }
     if let Ok(hv) = HeaderValue::from_str(&request_id) {
         req.headers_mut().insert("x-request-id", hv);
     }
 
     let exts = req.extensions_mut();
     exts.remove::<PeerPrincipal>();
+    exts.remove::<PeerListenerRuntime>();
+    exts.remove::<PeerWsPermit>();
     exts.remove::<AuthUser>();
     exts.remove::<SessionAuthTime>();
     exts.remove::<crate::plugins::PluginTokenClaims>();
@@ -608,6 +693,14 @@ async fn tunnel_management_or_deny_fallback(
     };
 
     exts.insert(ConnectInfo(remote_addr));
+    exts.insert(PeerListenerRuntime(Arc::clone(runtime)));
+    let (http_permit, ws_permit) = if is_ws {
+        let ws_permit = PeerWsPermit::new(permit);
+        exts.insert(ws_permit.clone());
+        (None, Some(ws_permit))
+    } else {
+        (Some(permit), None)
+    };
     exts.insert(principal);
     exts.insert(run_as_auth_user);
 
@@ -656,6 +749,25 @@ async fn tunnel_management_or_deny_fallback(
             String::new(),
         )
         .await;
+    guard_management_response(response, http_permit, ws_permit)
+}
+
+fn guard_management_response(
+    response: Response,
+    http_permit: Option<OwnedSemaphorePermit>,
+    ws_permit: Option<PeerWsPermit>,
+) -> Response {
+    let body_permit = http_permit.or_else(|| {
+        if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+            None
+        } else {
+            ws_permit.and_then(|permit| permit.take())
+        }
+    });
+    if let Some(permit) = body_permit {
+        let (parts, body) = response.into_parts();
+        return Response::from_parts(parts, GuardedBody::wrap(body, Some(permit)));
+    }
     response
 }
 
@@ -787,4 +899,35 @@ pub(crate) async fn spawn_tunnel_listener(
         shutdown_tx,
         task,
     })
+}
+
+#[cfg(test)]
+mod response_permit_tests {
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn management_permits_remain_held_until_the_response_body_is_dropped() {
+        for (status, uses_ws_pool) in [(StatusCode::OK, false), (StatusCode::FORBIDDEN, true)] {
+            let pool = Arc::new(Semaphore::new(1));
+            let acquired = pool.clone().try_acquire_owned().unwrap();
+            let (http_permit, ws_permit) = if uses_ws_pool {
+                (None, Some(PeerWsPermit::new(acquired)))
+            } else {
+                (Some(acquired), None)
+            };
+            let response = Response::builder()
+                .status(status)
+                .body(Body::from_stream(futures::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap();
+            let response = guard_management_response(response, http_permit, ws_permit);
+            assert_eq!(response.status(), status);
+            assert_eq!(pool.available_permits(), 0);
+            drop(response);
+            assert_eq!(pool.available_permits(), 1);
+        }
+    }
 }

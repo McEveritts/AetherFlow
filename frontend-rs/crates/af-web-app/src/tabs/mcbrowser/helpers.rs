@@ -1,5 +1,5 @@
 use super::*;
-use af_web_core::api::{api_url, RawResponse};
+use af_web_core::api::{api_url, api_url_for_server, RawResponse};
 
 pub(super) const BASE: &str = "/api/v1/auth/mcbrowser";
 pub(super) const DIRECT_BYTES: u64 = 64 * 1024 * 1024;
@@ -205,25 +205,36 @@ pub(super) async fn fingerprint(
         hash(data).await?
     ))
 }
-pub(super) fn upload_location(raw: &str) -> Result<String, ApiError> {
-    let origin = web_sys::window()
-        .ok_or_else(|| error("Browser unavailable"))?
-        .location()
-        .origin()
-        .map_err(js_error)?;
-    let url = web_sys::Url::new_with_base(raw, &origin).map_err(js_error)?;
-    let prefix = format!("{BASE}/uploads/");
-    let path = url.pathname();
-    let id = path.strip_prefix(&prefix).unwrap_or_default();
-    if url.origin() != origin
-        || !url.search().is_empty()
-        || !url.hash().is_empty()
+pub(super) fn upload_location_for_server(
+    raw: &str,
+    origin: &str,
+    server: Option<&str>,
+) -> Result<String, ApiError> {
+    let base = url::Url::parse(origin).map_err(|_| error("Browser origin unavailable"))?;
+    let url = base
+        .join(raw.trim())
+        .map_err(|_| error("Server returned an invalid upload session URL"))?;
+    let expected_prefix = api_url_for_server(server, &format!("{BASE}/uploads/"));
+    let path = url.path();
+    let id = path.strip_prefix(&expected_prefix).unwrap_or_default();
+    if url.origin() != base.origin()
+        || url.query().is_some()
+        || url.fragment().is_some()
         || id.len() != 32
         || !id.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(error("Server returned an invalid upload session URL"));
     }
-    Ok(path)
+    Ok(path.to_owned())
+}
+
+pub(super) fn upload_location(raw: &str, server: Option<&str>) -> Result<String, ApiError> {
+    let origin = web_sys::window()
+        .ok_or_else(|| error("Browser unavailable"))?
+        .location()
+        .origin()
+        .map_err(js_error)?;
+    upload_location_for_server(raw, &origin, server)
 }
 
 pub(super) const EDITOR_THEME_OPTIONS: [&str; 8] = [
@@ -499,7 +510,15 @@ pub(super) fn mcbrowser_download_url_encoded(encoded_path: &str) -> String {
     api_url(&format!("{BASE}/download?path={encoded_path}"))
 }
 
-pub(super) fn safe_subtitle_url(raw: &str) -> Option<String> {
+pub(super) fn mcbrowser_preview_download_href(
+    server: Option<&str>,
+    encoded_path: &str,
+) -> Option<String> {
+    (!encoded_path.is_empty())
+        .then(|| api_url_for_server(server, &format!("{BASE}/download?path={encoded_path}")))
+}
+
+pub(super) fn safe_subtitle_url_for_server(raw: &str, server: Option<&str>) -> Option<String> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("/api/v1/auth/mcbrowser/subtitle?") {
         return None;
@@ -507,7 +526,12 @@ pub(super) fn safe_subtitle_url(raw: &str) -> Option<String> {
     if trimmed.contains('\r') || trimmed.contains('\n') || trimmed.contains("..") {
         return None;
     }
-    Some(api_url(trimmed))
+    Some(api_url_for_server(server, trimmed))
+}
+
+#[cfg(test)]
+pub(super) fn safe_subtitle_url(raw: &str) -> Option<String> {
+    safe_subtitle_url_for_server(raw, af_web_core::api::active_server().as_deref())
 }
 
 fn decode_windows_1252(bytes: &[u8]) -> String {
@@ -1003,6 +1027,52 @@ mod helper_tests {
             mcbrowser_download_url_encoded("docs%2Freport%201.pdf"),
             "/api/v1/peers/media-2/auth/mcbrowser/download?path=docs%2Freport%201.pdf"
         );
+    }
+
+    #[test]
+    fn tus_upload_location_validates_exact_active_server_prefix_and_rejects_mismatches() {
+        let origin = "https://panel.example.test";
+        let hex = "0123456789abcdef0123456789abcdef";
+
+        // Local server accepts local prefix only.
+        assert_eq!(
+            upload_location_for_server(
+                &format!("/api/v1/auth/mcbrowser/uploads/{hex}"),
+                origin,
+                None
+            )
+            .unwrap(),
+            format!("/api/v1/auth/mcbrowser/uploads/{hex}")
+        );
+        assert!(upload_location_for_server(
+            &format!("/api/v1/peers/media-2/auth/mcbrowser/uploads/{hex}"),
+            origin,
+            None
+        )
+        .is_err());
+
+        // Remote peer accepts only its exact prefixed path, never unprefixed local or another peer.
+        assert_eq!(
+            upload_location_for_server(
+                &format!("/api/v1/peers/media-2/auth/mcbrowser/uploads/{hex}"),
+                origin,
+                Some("media-2")
+            )
+            .unwrap(),
+            format!("/api/v1/peers/media-2/auth/mcbrowser/uploads/{hex}")
+        );
+        for bad in [
+            format!("/api/v1/auth/mcbrowser/uploads/{hex}"),
+            format!("/api/v1/peers/other-peer/auth/mcbrowser/uploads/{hex}"),
+            format!("https://evil.example/api/v1/peers/media-2/auth/mcbrowser/uploads/{hex}"),
+            format!("/api/v1/peers/media-2/auth/mcbrowser/uploads/{hex}?extra=1"),
+            "/api/v1/peers/media-2/auth/mcbrowser/uploads/not-hex-32".to_string(),
+        ] {
+            assert!(
+                upload_location_for_server(&bad, origin, Some("media-2")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

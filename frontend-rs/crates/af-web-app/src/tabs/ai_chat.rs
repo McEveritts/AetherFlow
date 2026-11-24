@@ -1,5 +1,5 @@
 //! FlowAI operations console. Proposals are reviewed exclusively in the inbox.
-use crate::state::{app, use_api, TabId};
+use crate::state::{app, use_api_when, PeerArea, TabId};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{Badge, EmptyState, ObsCard};
 use af_web_core::api::ApiClient;
@@ -266,7 +266,10 @@ fn service_health(value: &Value) -> Value {
 #[component]
 pub fn AiChatTab() -> impl IntoView {
     let context = app();
-    let settings = use_api(Signal::derive(|| "/api/v1/auth/settings".to_string()));
+    let settings = use_api_when(
+        Signal::derive(move || context.can_read_area(PeerArea::Settings)),
+        Signal::derive(|| "/api/v1/auth/settings".to_string()),
+    );
     let user_id = context.user.with_untracked(|u| {
         u.as_ref()
             .and_then(|u| u.get("id"))
@@ -278,27 +281,35 @@ pub fn AiChatTab() -> impl IntoView {
             })
             .unwrap_or_default()
     });
-    let storage_key = StoredValue::new(format!("aetherflow-ai-sessions:{user_id}"));
-    let owner_epoch = af_web_core::api::current_auth_epoch();
-    let cached = web_sys::window()
-        .and_then(|window| window.session_storage().ok().flatten())
-        .and_then(|storage| storage.get_item(&storage_key.get_value()).ok().flatten())
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| t["id"].is_string() && t["messages"].is_array())
-        .take(40)
-        .collect::<Vec<_>>();
-    let initial = if cached.is_empty() {
-        vec![new_thread(&crate::tabs::l10n::locale(context))]
-    } else {
-        cached
+    let server_storage_key = move |server_id: Option<&str>| match server_id {
+        Some(id) if !id.is_empty() => format!("aetherflow-ai-sessions:{user_id}:{id}"),
+        _ => format!("aetherflow-ai-sessions:{user_id}"),
     };
+    let load_threads_for_key = move |key: &str| {
+        let cached = web_sys::window()
+            .and_then(|window| window.session_storage().ok().flatten())
+            .and_then(|storage| storage.get_item(key).ok().flatten())
+            .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t["id"].is_string() && t["messages"].is_array())
+            .take(40)
+            .collect::<Vec<_>>();
+        if cached.is_empty() {
+            vec![new_thread(&crate::tabs::l10n::locale(context))]
+        } else {
+            cached
+        }
+    };
+    let initial_key = server_storage_key(context.active_server_id.get_untracked().as_deref());
+    let storage_key = RwSignal::new(initial_key.clone());
+    let owner_epoch = af_web_core::api::current_auth_epoch();
+    let initial = load_threads_for_key(&initial_key);
     let active = RwSignal::new(text(&initial[0], "id"));
     let threads = RwSignal::new(initial);
-    let pending_turn = StoredValue::new(None::<PendingTurn>);
+    let pending_turn = StoredValue::new(None::<(u64, PendingTurn)>);
     on_cleanup(move || {
-        if let Some(pending) = pending_turn.get_value() {
+        if let Some((_, pending)) = pending_turn.get_value() {
             // Persist the rollback here: the normal persistence effect will be
             // disposed with the view and must not leave a failed optimistic turn.
             if let Some(value) = threads.try_update(|threads| {
@@ -309,7 +320,9 @@ pub fn AiChatTab() -> impl IntoView {
                     if let Some(storage) =
                         web_sys::window().and_then(|window| window.session_storage().ok().flatten())
                     {
-                        let _ = storage.set_item(&storage_key.get_value(), &value);
+                        if let Some(key) = storage_key.try_get_untracked() {
+                            let _ = storage.set_item(&key, &value);
+                        }
                     }
                 }
             }
@@ -317,10 +330,50 @@ pub fn AiChatTab() -> impl IntoView {
     });
     let input = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
+    let send_ticket = RwSignal::new(0u64);
     let failure = RwSignal::new(None::<String>);
     let provider = RwSignal::new("gemini".to_string());
     let model = RwSignal::new(String::new());
     let initialized = RwSignal::new(false);
+    let rollback_pending = move || {
+        if let Some((_, pending)) = pending_turn.get_value() {
+            pending_turn.set_value(None);
+            threads.update(|threads| pending.rollback(threads));
+        }
+    };
+    let last_server_epoch = RwSignal::new(context.server_epoch.get_untracked());
+    Effect::new(move |_| {
+        let next_epoch = context.server_epoch.get();
+        if next_epoch == last_server_epoch.get_untracked() {
+            return;
+        }
+        last_server_epoch.set(next_epoch);
+        send_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        rollback_pending();
+        let next_key = server_storage_key(context.active_server_id.get_untracked().as_deref());
+        let next_threads = load_threads_for_key(&next_key);
+        storage_key.set(next_key);
+        active.set(text(&next_threads[0], "id"));
+        threads.set(next_threads);
+        initialized.set(false);
+        busy.set(false);
+        failure.set(None);
+    });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        send_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        rollback_pending();
+        busy.set(false);
+        initialized.set(false);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            send_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            rollback_pending();
+            busy.set(false);
+        }
+    });
     let attach = RwSignal::new(context.is_admin());
     Effect::new(move |_| {
         if !context.is_admin() {
@@ -349,19 +402,20 @@ pub fn AiChatTab() -> impl IntoView {
     });
     Effect::new(move |_| {
         let value = threads.get();
+        let key = storage_key.get();
         if let Some(storage) =
             web_sys::window().and_then(|window| window.session_storage().ok().flatten())
         {
-            let _ = storage.set_item(
-                &storage_key.get_value(),
-                &serde_json::to_string(&value).unwrap_or_default(),
-            );
+            let _ = storage.set_item(&key, &serde_json::to_string(&value).unwrap_or_default());
         }
     });
     let send = Callback::new(move |(): ()| {
         let message = input.get_untracked().trim().to_string();
         let selected_model = model.get_untracked().trim().to_string();
-        if busy.get_untracked() || message.is_empty() {
+        if busy.get_untracked()
+            || message.is_empty()
+            || !context.can_write_area_untracked(PeerArea::Settings)
+        {
             return;
         }
         if !valid_model(&selected_model) {
@@ -370,11 +424,23 @@ pub fn AiChatTab() -> impl IntoView {
             ));
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        send_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = send_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Settings,
+            true,
+            false,
+            send_ticket,
+            ticket,
+        );
         let thread_id = active.get_untracked();
         let history = messages.get_untracked();
         let mut body = json!({"message":message,"history":history,"model":selected_model,"provider":provider.get_untracked()});
         let (endpoint, attach_telemetry) =
-            resolve_ai_chat_endpoint(attach.get_untracked(), context.is_admin());
+            resolve_ai_chat_endpoint(attach.get_untracked(), context.is_admin_untracked());
         if attach_telemetry {
             let mode = context_mode.get_untracked();
             body["context_mode"] = json!(mode);
@@ -399,16 +465,24 @@ pub fn AiChatTab() -> impl IntoView {
         let Some(pending) = pending else {
             return;
         };
-        pending_turn.set_value(Some(pending.clone()));
+        pending_turn.set_value(Some((ticket, pending.clone())));
         input.set(String::new());
         busy.set(true);
         failure.set(None);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, send_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient.post(endpoint, Some(&body)).await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
                 return;
             }
-            pending_turn.set_value(None);
+            if pending_turn
+                .try_with_value(|slot| slot.as_ref().is_some_and(|(id, _)| *id == ticket))
+                .unwrap_or(false)
+            {
+                pending_turn.set_value(None);
+            }
+            busy_guard.release();
             match result {
                 Ok(data) => {
                     let reply = data["reply"]
@@ -438,13 +512,26 @@ pub fn AiChatTab() -> impl IntoView {
                             .map(Vec::len)
                             .or_else(|| pending.as_u64().map(|n| n as usize))
                             .unwrap_or(1);
-                        context.pending.update(|n| *n = (*n).max(count));
-                        if context.is_admin() {
+                        if context.is_admin_untracked()
+                            && context.can_read_area_untracked(PeerArea::Services)
+                        {
+                            let services_grant =
+                                context.area_revocation_epoch_untracked(PeerArea::Services);
+                            context.pending.update(|n| *n = (*n).max(count));
                             if let Ok(data) = ApiClient
                                 .get("/api/v1/admin/actions/pending?status=pending&limit=1")
                                 .await
                             {
-                                if context.pending.try_get_untracked().is_some() {
+                                if context.pending.try_get_untracked().is_some()
+                                    && context.session_epoch.try_get_untracked()
+                                        == Some(session_epoch)
+                                    && context.server_epoch.try_get_untracked()
+                                        == Some(server_epoch)
+                                    && context.area_revocation_epoch_untracked(PeerArea::Services)
+                                        == services_grant
+                                    && context.is_admin_untracked()
+                                    && context.can_read_area_untracked(PeerArea::Services)
+                                {
                                     if let Some(total) = data["total"].as_u64() {
                                         context.pending.set(total as usize);
                                     }
@@ -464,9 +551,6 @@ pub fn AiChatTab() -> impl IntoView {
                         input.set(message);
                     }
                 }
-            }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
             }
         });
     });
@@ -656,7 +740,20 @@ pub fn AiChatTab() -> impl IntoView {
                                 view! {
                                     <button
                                         class="glass-button px-3 py-2 text-xs"
-                                        disabled=move || busy.get()
+                                        disabled=move || {
+                                            busy.get()
+                                                || !context.can_write_area(
+                                                    crate::state::PeerArea::Settings,
+                                                )
+                                        }
+                                        title=move || {
+                                            context
+                                                .area_block_reason(
+                                                    crate::state::PeerArea::Settings,
+                                                    true,
+                                                )
+                                                .unwrap_or_default()
+                                        }
                                         on:click=move |_| { input.set(tt(context, prompt)); send.run(()); }
                                     >
                                         {move || tt(context, label)}
@@ -812,8 +909,15 @@ pub fn AiChatTab() -> impl IntoView {
                             type="submit"
                             class="glass-button-primary px-5 py-3"
                             disabled=move || {
-                                busy.get() || input.get().trim().is_empty()
+                                busy.get()
+                                    || input.get().trim().is_empty()
                                     || !valid_model(&model.get())
+                                    || !context.can_write_area(crate::state::PeerArea::Settings)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Settings, true)
+                                    .unwrap_or_default()
                             }
                         >
                             {move || tt(context, "Send")}

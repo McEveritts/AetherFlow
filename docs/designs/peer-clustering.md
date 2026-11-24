@@ -232,7 +232,7 @@ Existing handlers that need a real user then work unchanged: WebSocket tickets a
 *   **Targets.** The target is always the stored tunnel IP. The proxy never accepts a host from the request.
 *   **Limits.**
     *   Per-link caps: `AF_PEER_MAX_CONN=64` concurrent requests and `AF_PEER_MAX_WS=16` WebSockets.
-    *   Timeouts: 30 s connect and headers, none on streaming bodies.
+    *   Allow 30 s to connect and 30 s for response headers. The header timer begins after any request body completes. An upload that stops making progress has a 30 s idle deadline. Active streams have no total duration limit.
 *   **Frontend.** `ApiClient` gets an **active server** setting.
     *   When a peer is selected, every `/api/v1/<rest>` request becomes `/api/v1/peers/{id}/<rest>`. That covers the request builders (`frontend-rs/crates/af-web-core/src/api.rs:806-860`), the CSRF prefix list (`api.rs:165-202`) and the WebSocket ticket fetch and URL builder (`frontend-rs/crates/af-web-core/src/ws.rs:280,307-311`).
     *   A new `api_url(path)` helper replaces the six places that build URLs directly. The full list is in the Detailed Implementation Plan.

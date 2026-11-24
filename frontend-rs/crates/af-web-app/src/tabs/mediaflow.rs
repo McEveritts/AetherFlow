@@ -1,8 +1,9 @@
 //! Installed media pipeline, configuration evidence and human-gated transcodes.
 use super::contracts::MediaFlowLiveProgress;
-use crate::state::{app, json_rows, use_api, TabId};
+use crate::state::{app, json_rows, use_api_when, PeerArea, TabId};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{Badge, ConfirmDialog, EmptyState, ObsCard};
+use crate::tabs::GrantInvalidationBoundary;
 use af_web_core::api::{api_url, ApiClient};
 use af_web_ui::SkeletonBox;
 use gloo_events::EventListener;
@@ -14,30 +15,68 @@ use wasm_bindgen_futures::spawn_local;
 mod helpers;
 use helpers::*;
 
+const MEDIAFLOW_STREAM_REQS: [(PeerArea, bool); 2] = [
+    (PeerArea::Transcoding, false),
+    (PeerArea::Marketplace, false),
+];
+
 #[component]
 pub fn MediaflowTab() -> impl IntoView {
     let context = app();
-    let resource = use_api(Signal::derive(|| "/api/v1/auth/services".to_string()));
-    let blueprints = context
-        .is_admin()
-        .then(|| use_api(Signal::derive(|| "/api/v1/auth/blueprints".to_string())));
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
+    let can_read_marketplace = Signal::derive(move || context.can_read_area(PeerArea::Marketplace));
+    let can_read_transcoding = Signal::derive(move || context.can_read_area(PeerArea::Transcoding));
+    let resource = use_api_when(
+        can_read_services,
+        Signal::derive(|| "/api/v1/auth/services".to_string()),
+    );
+    let can_read_blueprints =
+        Signal::derive(move || context.is_admin() && can_read_marketplace.get());
+    let blueprints = use_api_when(
+        can_read_blueprints,
+        Signal::derive(|| "/api/v1/auth/blueprints".to_string()),
+    );
     let refresh_blueprints = move || {
-        if let Some(blueprints) = blueprints {
+        if context.is_admin_untracked() && context.can_read_area_untracked(PeerArea::Marketplace) {
             blueprints.refresh();
         }
     };
     let rows = Memo::new(move |_| services(&resource.data.get()));
     let busy = RwSignal::new(false);
     let syncing = RwSignal::new(None::<String>);
+    let sync_ticket = RwSignal::new(0u64);
     let stream_requested = RwSignal::new(false);
     let queue_summary = RwSignal::new(None::<super::contracts::MediaFlowQueueSummary>);
     let sync_results = RwSignal::new(std::collections::BTreeMap::<String, Value>::new());
+    let blueprint_sync_reqs = [(PeerArea::Marketplace, true), (PeerArea::Network, true)];
     let sync = Callback::new(move |id: String| {
-        if syncing.with_untracked(Option::is_some) || !context.is_admin() {
+        if syncing.with_untracked(Option::is_some)
+            || !context.is_admin()
+            || !context.can_all_areas(&blueprint_sync_reqs)
+        {
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let sync_grant =
+            context.areas_revocation_epoch_untracked(&[PeerArea::Marketplace, PeerArea::Network]);
+        sync_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = sync_ticket.get_untracked();
         syncing.set(Some(id.clone()));
         spawn_local(async move {
+            let is_current = || {
+                sync_ticket.try_get_untracked() == Some(ticket)
+                    && context.session_epoch.try_get_untracked() == Some(session_epoch)
+                    && context.server_epoch.try_get_untracked() == Some(server_epoch)
+                    && context.areas_revocation_epoch_untracked(&[
+                        PeerArea::Marketplace,
+                        PeerArea::Network,
+                    ]) == sync_grant
+                    && context.can_all_areas_untracked(&blueprint_sync_reqs)
+            };
+            if !is_current() {
+                return;
+            }
             let response = ApiClient
                 .fetch(
                     &format!(
@@ -50,17 +89,18 @@ pub fn MediaflowTab() -> impl IntoView {
                     None,
                 )
                 .await;
-            if syncing.try_get_untracked().is_none() {
+            if !is_current() {
                 return;
             }
             match response {
                 Ok(raw) => {
                     let ok = raw.ok();
-                    match raw.text().await {
+                    let body = raw.text().await;
+                    if !is_current() {
+                        return;
+                    }
+                    match body {
                         Ok(body) => {
-                            if syncing.try_get_untracked().is_none() {
-                                return;
-                            }
                             let data: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                             if data["result"].is_object() {
                                 sync_results.update(|results| {
@@ -68,7 +108,9 @@ pub fn MediaflowTab() -> impl IntoView {
                                 });
                             }
                             if ok {
-                                stream_requested.set(true);
+                                if context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS) {
+                                    stream_requested.set(true);
+                                }
                                 let has_warnings = data["result"]["warnings"]
                                     .as_array()
                                     .is_some_and(|warnings| !warnings.is_empty());
@@ -80,11 +122,15 @@ pub fn MediaflowTab() -> impl IntoView {
                                     "Application configuration synchronized."
                                 };
                                 context.toast(tt(context, message), false);
-                                resource.refresh();
+                                if context.can_read_area_untracked(PeerArea::Services) {
+                                    resource.refresh();
+                                }
                                 refresh_blueprints();
                             } else {
                                 if data["partial_commit"].as_bool() == Some(true) {
-                                    resource.refresh();
+                                    if context.can_read_area_untracked(PeerArea::Services) {
+                                        resource.refresh();
+                                    }
                                     refresh_blueprints();
                                 }
                                 let message = data["message"]
@@ -94,23 +140,46 @@ pub fn MediaflowTab() -> impl IntoView {
                                 context.toast(tt(context, message), true);
                             }
                         }
-                        Err(e) => {
-                            if syncing.try_get_untracked().is_none() {
-                                return;
-                            }
-                            context.toast(tt(context, &e.message), true);
-                        }
+                        Err(e) => context.toast(tt(context, &e.message), true),
                     }
                 }
                 Err(e) => context.toast(tt(context, &e.message), true),
             }
-            syncing.set(None);
+            if sync_ticket.try_get_untracked() == Some(ticket) {
+                let _ = syncing.try_set(None);
+            }
         });
+    });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        sync_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        syncing.set(None);
+        sync_results.set(std::collections::BTreeMap::new());
+        queue_summary.set(None);
+        stream_requested.set(false);
+    });
+    Effect::new(move |_| {
+        context.area_revocation_epoch(PeerArea::Transcoding);
+        if !can_read_transcoding.get() {
+            queue_summary.set(None);
+            stream_requested.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        context.areas_revocation_epoch(&[PeerArea::Marketplace, PeerArea::Network]);
+        if !context.can_all_areas(&blueprint_sync_reqs) {
+            sync_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            syncing.set(None);
+            sync_results.set(std::collections::BTreeMap::new());
+        }
     });
     let refresh = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         10_000,
         move || {
-            if !resource.loading.get_untracked() {
+            if context.can_read_area_untracked(PeerArea::Services)
+                && !resource.loading.get_untracked()
+            {
                 resource.refresh();
             }
         },
@@ -132,9 +201,23 @@ pub fn MediaflowTab() -> impl IntoView {
                 </div>
                 <button
                     class="glass-button px-4 py-2"
-                    disabled=move || resource.loading.get()
+                    disabled=move || {
+                        resource.loading.get()
+                            || (!can_read_services.get() && !can_read_blueprints.get())
+                    }
+                    title=move || {
+                        if !can_read_services.get() && !can_read_blueprints.get() {
+                            context
+                                .area_block_reason(PeerArea::Services, false)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
                     on:click=move |_| {
-                        resource.refresh();
+                        if context.can_read_area_untracked(PeerArea::Services) {
+                            resource.refresh();
+                        }
                         refresh_blueprints();
                     }
                     aria-label=move || tt(context, "Refresh pipeline")
@@ -142,6 +225,30 @@ pub fn MediaflowTab() -> impl IntoView {
                     {move || tt(context, "Common.refresh")}
                 </button>
             </div>
+            <Show when=move || !can_read_services.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
+            <Show when=move || context.is_admin() && !can_read_marketplace.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Marketplace, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             {move || {
                 resource
                     .error
@@ -156,7 +263,8 @@ pub fn MediaflowTab() -> impl IntoView {
             }}
             {move || {
                 blueprints
-                    .and_then(|blueprints| blueprints.error.get())
+                    .error
+                    .get()
                     .map(|e| {
                         view! {
                             <p role="alert" class="text-rose-300">
@@ -212,7 +320,8 @@ pub fn MediaflowTab() -> impl IntoView {
                                                 let sync_id = id.clone();
                                                 let lookup_id = id.clone();
                                                 let blueprint = blueprints
-                                                    .and_then(|blueprints| blueprints.data.with(|v| {
+                                                    .data
+                                                    .with(|v| {
                                                         v["blueprints"]
                                                             .as_array()
                                                             .and_then(|all| {
@@ -224,12 +333,20 @@ pub fn MediaflowTab() -> impl IntoView {
                                                                     })
                                                             })
                                                             .cloned()
-                                                    }))
+                                                    })
                                                     .unwrap_or(Value::Null);
                                                 let contract = super::contracts::decode::<super::contracts::MediaFlowServiceContract>(&service);
                                                 let wired = contract.wired.or(contract.auto_configured).or_else(|| blueprint["config_applied"].as_bool());
                                                 let has_key = contract.api_key.as_deref().is_some_and(|key| !key.is_empty());
                                                 let running = matches!(contract.status.as_str(), "running" | "active");
+                                                let is_remote = context.is_remote();
+                                                let launch_settings = if !is_remote
+                                                    || context.can_read_area(PeerArea::Settings)
+                                                {
+                                                    context.settings.get()
+                                                } else {
+                                                    Value::Null
+                                                };
                                                 view! {
                                                     <article class="space-y-2 border-t border-white/10 pt-3 min-w-0">
                                                         <h3 class="font-semibold break-words">
@@ -253,7 +370,11 @@ pub fn MediaflowTab() -> impl IntoView {
                                                                 },
                                                             )}
                                                         </p>
-                                                        {safe_launch_url(&service)
+                                                        {safe_launch_url_for_server(
+                                                            &service,
+                                                            &launch_settings,
+                                                            is_remote,
+                                                        )
                                                             .map(|url| {
                                                                 view! {
                                                                     <a
@@ -277,7 +398,15 @@ pub fn MediaflowTab() -> impl IntoView {
                                                                 view! {
                                                                     <button
                                                                         class="glass-button px-3 py-2 text-sm"
-                                                                        disabled=move || syncing.with(Option::is_some)
+                                                                        disabled=move || {
+                                                                            syncing.with(Option::is_some)
+                                                                                || !context.can_all_areas(&blueprint_sync_reqs)
+                                                                        }
+                                                                        title=move || {
+                                                                            context
+                                                                                .areas_block_reason(&blueprint_sync_reqs)
+                                                                                .unwrap_or_default()
+                                                                        }
                                                                         on:click=move |_| sync.run(sync_id.clone())
                                                                     >
                                                                         {move || tt(context, "Sync Zero-Touch configuration")}
@@ -350,6 +479,10 @@ pub fn MediaflowTab() -> impl IntoView {
                             {move || {
                                 if !context.is_admin() {
                                     tt(context, "Common.adminRequired")
+                                } else if !can_read_transcoding.get() {
+                                    context
+                                        .area_block_reason(PeerArea::Transcoding, false)
+                                        .unwrap_or_default()
                                 } else if let Some(summary) = queue_summary.get() {
                                     tt_with(
                                         context,
@@ -377,7 +510,9 @@ pub fn MediaflowTab() -> impl IntoView {
                     }
                 }
             >
-                <MediaflowQueue busy stream_requested queue_summary />
+                <GrantInvalidationBoundary areas=&[PeerArea::Transcoding]>
+                    <MediaflowQueue busy stream_requested queue_summary />
+                </GrantInvalidationBoundary>
             </Show>
         </section>
     }
@@ -394,9 +529,12 @@ fn MediaflowQueue(
     queue_summary: RwSignal<Option<super::contracts::MediaFlowQueueSummary>>,
 ) -> impl IntoView {
     let context = app();
-    let queue = use_api(Signal::derive(|| {
-        "/api/v1/admin/mediaflow/queue".to_string()
-    }));
+    let can_read_transcoding = Signal::derive(move || context.can_read_area(PeerArea::Transcoding));
+    let can_open_stream = Signal::derive(move || context.can_all_areas(&MEDIAFLOW_STREAM_REQS));
+    let queue = use_api_when(
+        can_read_transcoding,
+        Signal::derive(|| "/api/v1/admin/mediaflow/queue".to_string()),
+    );
     let directory = RwSignal::new(DEFAULT_SCAN_DIRECTORY.to_string());
     let progress = RwSignal::new(Value::Null);
     let connected = RwSignal::new(false);
@@ -415,7 +553,16 @@ fn MediaflowQueue(
                 events.close();
             }
         });
+        if !context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS) {
+            connected.set(false);
+            stream_requested.set(false);
+            return;
+        }
         stream_error.set(None);
+        let origin_session_epoch = context.session_epoch.get_untracked();
+        let origin_server_epoch = context.server_epoch.get_untracked();
+        let origin_grant_epoch = context
+            .areas_revocation_epoch_untracked(&[PeerArea::Transcoding, PeerArea::Marketplace]);
         let stream_url = deploy_stream_url();
         let Ok(events) = web_sys::EventSource::new(&stream_url) else {
             stream_error.set(Some("Live transcode stream could not be opened.".into()));
@@ -424,6 +571,17 @@ fn MediaflowQueue(
         };
         let completed_events = events.clone();
         let message = EventListener::new(&events, "message", move |event| {
+            if context.session_epoch.try_get_untracked() != Some(origin_session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(origin_server_epoch)
+                || context.areas_revocation_epoch_untracked(&[
+                    PeerArea::Transcoding,
+                    PeerArea::Marketplace,
+                ]) != origin_grant_epoch
+                || !context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS)
+            {
+                completed_events.close();
+                return;
+            }
             if let Some(data) = event
                 .dyn_ref::<web_sys::MessageEvent>()
                 .and_then(|e| e.data().as_string())
@@ -437,17 +595,41 @@ fn MediaflowQueue(
                 if terminal {
                     completed_events.close();
                     stream_requested.set(false);
-                    queue.refresh();
+                    if context.can_read_area_untracked(PeerArea::Transcoding) {
+                        queue.refresh();
+                    }
                 }
             }
         });
+        let opened_events = events.clone();
         let opened = EventListener::new(&events, "open", move |_| {
+            if context.session_epoch.try_get_untracked() != Some(origin_session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(origin_server_epoch)
+                || context.areas_revocation_epoch_untracked(&[
+                    PeerArea::Transcoding,
+                    PeerArea::Marketplace,
+                ]) != origin_grant_epoch
+                || !context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS)
+            {
+                opened_events.close();
+                return;
+            }
             connected.set(true);
             stream_error.set(None);
         });
         let failed_events = events.clone();
         let error = EventListener::new(&events, "error", move |_| {
             failed_events.close();
+            if context.session_epoch.try_get_untracked() != Some(origin_session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(origin_server_epoch)
+                || context.areas_revocation_epoch_untracked(&[
+                    PeerArea::Transcoding,
+                    PeerArea::Marketplace,
+                ]) != origin_grant_epoch
+                || !context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS)
+            {
+                return;
+            }
             connected.set(false);
             stream_requested.set(false);
             stream_error.set(Some(
@@ -457,7 +639,24 @@ fn MediaflowQueue(
         source.set_value(Some((events, message, opened, error)));
     });
     Effect::new(move |_| {
-        if stream_requested.get() {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.areas_revocation_epoch(&[PeerArea::Transcoding, PeerArea::Marketplace]);
+        let allowed = can_open_stream.get();
+        if !allowed {
+            stream_requested.set(false);
+        }
+        source.update_value(|source| {
+            if let Some((events, _, _, _)) = source.take() {
+                events.close();
+            }
+        });
+        progress.set(Value::Null);
+        connected.set(false);
+        stream_error.set(None);
+    });
+    Effect::new(move |_| {
+        if stream_requested.get() && can_open_stream.get() {
             connect.run(());
         }
     });
@@ -471,7 +670,9 @@ fn MediaflowQueue(
     let refresh = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         10_000,
         move || {
-            if !queue.loading.get_untracked() {
+            if context.can_read_area_untracked(PeerArea::Transcoding)
+                && !queue.loading.get_untracked()
+            {
                 queue.refresh();
             }
         },
@@ -481,7 +682,9 @@ fn MediaflowQueue(
         super::contracts::grid_rows::<super::contracts::MediaFlowQueueRecord>(&queue.data.get())
     });
     Effect::new(move |_| {
-        if queue.data.with(|d| !d.is_null()) {
+        if !can_read_transcoding.get() || queue.data.with(Value::is_null) {
+            queue_summary.set(None);
+        } else {
             queue_summary.set(Some(super::contracts::MediaFlowQueueSummary::from_jobs(
                 &rows.get(),
             )));
@@ -489,23 +692,51 @@ fn MediaflowQueue(
     });
     let candidate = RwSignal::new(None::<(i64, String, Value)>);
     let confirm = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Transcoding);
+        if !context.can_write_area(PeerArea::Transcoding) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            confirm.set(false);
+        }
+    });
     let decide = Callback::new(move |(): ()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area(PeerArea::Transcoding)
+        {
             return;
         }
         let Some((id, verb, row)) = candidate.get_untracked() else {
             return;
         };
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let transcode_grant = context.area_revocation_epoch_untracked(PeerArea::Transcoding);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         let (endpoint, payload) = decision_endpoint_and_payload(id, &verb, &row);
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient.post(&endpoint, payload.as_ref()).await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Transcoding) != transcode_grant
+                || !context.can_write_area_untracked(PeerArea::Transcoding)
+            {
                 return;
             }
             match result {
                 Ok(data) => {
-                    if verb == "approve" {
+                    if verb == "approve" && context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS)
+                    {
                         stream_requested.set(true);
                     }
                     let fallback = if verb == "approve" {
@@ -520,19 +751,23 @@ fn MediaflowQueue(
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or(fallback);
                     context.toast(tt(context, msg), false);
-                    queue.refresh();
+                    if context.can_read_area_untracked(PeerArea::Transcoding) {
+                        queue.refresh();
+                    }
                 }
                 Err(e) => {
                     context.toast(tt(context, &e.message), true);
-                    queue.refresh();
+                    if context.can_read_area_untracked(PeerArea::Transcoding) {
+                        queue.refresh();
+                    }
                 }
             }
-            busy.set(false);
+            busy_guard.release();
             confirm.set(false);
         });
     });
     let scan = Callback::new(move |(): ()| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area(PeerArea::Transcoding) {
             return;
         }
         let path = directory.get_untracked().trim().to_string();
@@ -540,7 +775,14 @@ fn MediaflowQueue(
             context.toast(tt(context, "Choose an absolute scan directory."), true);
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let transcode_grant = context.area_revocation_epoch_untracked(PeerArea::Transcoding);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -548,23 +790,45 @@ fn MediaflowQueue(
                     Some(&json!({"directory":path})),
                 )
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Transcoding) != transcode_grant
+                || !context.can_write_area_untracked(PeerArea::Transcoding)
+            {
                 return;
             }
             match result {
                 Ok(_) => {
-                    stream_requested.set(true);
+                    if context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS) {
+                        stream_requested.set(true);
+                    }
                     context.toast(tt(context, "MediaFlow background scan requested."), false);
-                    queue.refresh();
+                    if context.can_read_area_untracked(PeerArea::Transcoding) {
+                        queue.refresh();
+                    }
                 }
                 Err(e) => context.toast(tt(context, &e.message), true),
             }
-            busy.set(false);
+            busy_guard.release();
         });
     });
     view! {
         <ObsCard title="Human-gated transcode queue">
             <div class="space-y-4">
+                <Show when=move || !can_read_transcoding.get()>
+                    <p
+                        role="status"
+                        class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                    >
+                        {move || {
+                            context
+                                .area_block_reason(PeerArea::Transcoding, false)
+                                .unwrap_or_default()
+                        }}
+                    </p>
+                </Show>
                 <form
                     class="flex flex-wrap gap-3"
                     on:submit=move |e| {
@@ -583,7 +847,14 @@ fn MediaflowQueue(
                     <button
                         type="submit"
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get() || !context.can_write_area(PeerArea::Transcoding)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Transcoding, true)
+                                .unwrap_or_default()
+                        }
                     >
                         {move || tt(context, "Scan for candidates")}
                     </button>
@@ -607,8 +878,19 @@ fn MediaflowQueue(
                     <button
                         type="button"
                         class="glass-button px-4 py-2"
-                        disabled=move || connected.get() || stream_requested.get()
-                        on:click=move |_| stream_requested.set(true)
+                        disabled=move || {
+                            connected.get() || stream_requested.get() || !can_open_stream.get()
+                        }
+                        title=move || {
+                            context
+                                .areas_block_reason(&MEDIAFLOW_STREAM_REQS)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if context.can_all_areas_untracked(&MEDIAFLOW_STREAM_REQS) {
+                                stream_requested.set(true);
+                            }
+                        }
                     >
                         {move || tt(context, "Connect Live Stream")}
                     </button>
@@ -705,7 +987,16 @@ fn MediaflowQueue(
                                                     <div class="flex gap-3">
                                                         <button
                                                             class="glass-button-primary px-4 py-2"
-                                                            disabled=move || busy.get() || id.is_none()
+                                                            disabled=move || {
+                                                                busy.get()
+                                                                    || id.is_none()
+                                                                    || !context.can_write_area(PeerArea::Transcoding)
+                                                            }
+                                                            title=move || {
+                                                                context
+                                                                    .area_block_reason(PeerArea::Transcoding, true)
+                                                                    .unwrap_or_default()
+                                                            }
                                                             on:click=move |_| {
                                                                 candidate
                                                                     .set(id.map(|id| (id, "approve".into(), approval.clone())));
@@ -716,7 +1007,16 @@ fn MediaflowQueue(
                                                         </button>
                                                         <button
                                                             class="glass-button px-4 py-2"
-                                                            disabled=move || busy.get() || id.is_none()
+                                                            disabled=move || {
+                                                                busy.get()
+                                                                    || id.is_none()
+                                                                    || !context.can_write_area(PeerArea::Transcoding)
+                                                            }
+                                                            title=move || {
+                                                                context
+                                                                    .area_block_reason(PeerArea::Transcoding, true)
+                                                                    .unwrap_or_default()
+                                                            }
                                                             on:click=move |_| {
                                                                 candidate
                                                                     .set(
@@ -736,7 +1036,16 @@ fn MediaflowQueue(
                                                     <div class="flex gap-3">
                                                         <button
                                                             class="glass-button px-4 py-2"
-                                                            disabled=move || busy.get() || id.is_none()
+                                                            disabled=move || {
+                                                                busy.get()
+                                                                    || id.is_none()
+                                                                    || !context.can_write_area(PeerArea::Transcoding)
+                                                            }
+                                                            title=move || {
+                                                                context
+                                                                    .area_block_reason(PeerArea::Transcoding, true)
+                                                                    .unwrap_or_default()
+                                                            }
                                                             on:click=move |_| {
                                                                 candidate.set(id.map(|id| {
                                                                     (id, "cancel".into(), cancellation.clone())

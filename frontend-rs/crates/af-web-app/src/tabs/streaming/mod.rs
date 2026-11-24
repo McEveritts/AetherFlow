@@ -1,7 +1,7 @@
 //! Live streaming, canonical history, and administrative subtab orchestration.
 use self::common::*;
 use self::types::*;
-use crate::state::{app, use_api};
+use crate::state::{app, use_api_when, PeerArea};
 use crate::tabs::contracts;
 use crate::tabs::l10n::{tt, tt_with, TabPanel, TabsBar};
 use af_web_ui::SkeletonBox;
@@ -25,18 +25,22 @@ use live::{ActiveSessions, DemoTelemetryBanner, ProviderCards, StreamingDetails}
 #[component]
 pub fn StreamingTab() -> impl IntoView {
     let context = app();
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
     let active = RwSignal::new("live".to_owned());
     let window = RwSignal::new("30".to_string());
     let play_method = RwSignal::new("all".to_string());
     let media_type = RwSignal::new("all".to_string());
-    let dashboard = use_api(Signal::derive(move || {
-        format!(
-            "/api/v1/auth/streaming/dashboard?window={}&playMethod={}&mediaType={}",
-            window.get(),
-            play_method.get(),
-            media_type.get()
-        )
-    }));
+    let dashboard = use_api_when(
+        can_read_services,
+        Signal::derive(move || {
+            format!(
+                "/api/v1/auth/streaming/dashboard?window={}&playMethod={}&mediaType={}",
+                window.get(),
+                play_method.get(),
+                media_type.get()
+            )
+        }),
+    );
     let poll = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         5000,
         move || {
@@ -44,6 +48,7 @@ pub fn StreamingTab() -> impl IntoView {
                 .and_then(|w| w.document())
                 .is_none_or(|d| !d.hidden());
             if visible
+                && context.can_read_area_untracked(PeerArea::Services)
                 && active.with_untracked(|tab| tab == "live")
                 && !dashboard.loading.get_untracked()
             {
@@ -56,6 +61,14 @@ pub fn StreamingTab() -> impl IntoView {
     let detail_open = RwSignal::new(false);
     let config = RwSignal::new(ProviderStatus::default());
     let config_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Services);
+        detail_open.set(false);
+        config_open.set(false);
+        detail.set(Value::Null);
+    });
     let inspect = Callback::new(move |row: Value| {
         let mut full = row.clone();
         if let Some(extra) = dashboard.data.with_untracked(|d| {
@@ -76,7 +89,9 @@ pub fn StreamingTab() -> impl IntoView {
         detail_open.set(true);
     });
     let changed = Callback::new(move |(): ()| {
-        dashboard.refresh();
+        if context.can_read_area_untracked(PeerArea::Services) {
+            dashboard.refresh();
+        }
         context.history_revision.update(|n| *n += 1);
     });
     let servers = Signal::derive(move || {
@@ -97,13 +112,34 @@ pub fn StreamingTab() -> impl IntoView {
                 </div>
                 <button
                     class="glass-button px-4 py-2"
-                    disabled=move || dashboard.loading.get()
-                    on:click=move |_| dashboard.refresh()
+                    disabled=move || dashboard.loading.get() || !can_read_services.get()
+                    title=move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }
+                    on:click=move |_| {
+                        if context.can_read_area_untracked(PeerArea::Services) {
+                            dashboard.refresh();
+                        }
+                    }
                     aria-label=move || tt(context, "Refresh live sessions")
                 >
                     {move || tt(context, "Common.refresh")}
                 </button>
             </div>
+            <Show when=move || !can_read_services.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             {move || {
                 dashboard
                     .error

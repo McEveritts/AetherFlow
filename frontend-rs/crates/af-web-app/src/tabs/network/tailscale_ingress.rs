@@ -1,4 +1,49 @@
 use super::*;
+use crate::state::AppContext;
+use crate::tabs::busy::BusyGuard;
+
+#[derive(Clone, Copy)]
+struct IngressWrite {
+    busy: RwSignal<bool>,
+    generation: RwSignal<u64>,
+}
+
+impl IngressWrite {
+    fn new(context: AppContext) -> Self {
+        let write = Self {
+            busy: RwSignal::new(false),
+            generation: RwSignal::new(0),
+        };
+        Effect::new(move |_| {
+            if !context.can_write_area(PeerArea::Network) {
+                write
+                    .generation
+                    .update(|ticket| *ticket = ticket.wrapping_add(1));
+                write.busy.set(false);
+            }
+        });
+        write
+    }
+
+    fn begin(self, context: AppContext) -> (BusyGuard, impl Fn() -> bool + Copy) {
+        let session = context.session_epoch.get_untracked();
+        let server = context.server_epoch.get_untracked();
+        let grant = context.area_revocation_epoch_untracked(PeerArea::Network);
+        self.generation
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = self.generation.get_untracked();
+        self.busy.set(true);
+        let guard = BusyGuard::for_generation(self.busy, self.generation, ticket);
+        let is_current = move || {
+            self.generation.try_get_untracked() == Some(ticket)
+                && context.session_epoch.try_get_untracked() == Some(session)
+                && context.server_epoch.try_get_untracked() == Some(server)
+                && context.area_revocation_epoch_untracked(PeerArea::Network) == grant
+                && context.can_write_area_untracked(PeerArea::Network)
+        };
+        (guard, is_current)
+    }
+}
 
 pub(super) fn normalize_ingress_target(target: String) -> Option<String> {
     let trimmed = target.trim();
@@ -30,13 +75,25 @@ pub(super) fn ingress_form(value: &Value) -> Value {
 #[component]
 pub(super) fn ExternalAccessSettings() -> impl IntoView {
     let context = app();
-    let settings = use_api("/api/v1/auth/settings".to_string());
-    let configs = use_api("/api/v1/admin/ingress/configs".to_string());
-    let services = use_api("/api/v1/admin/services".to_string());
-    poll_resource(configs, 15_000);
-    poll_resource(services, 15_000);
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let can_read_network = Signal::derive(move || context.can_read_area(PeerArea::Network));
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
+    let settings = use_api_when(can_read_settings, "/api/v1/auth/settings".to_string());
+    let configs = use_api_when(
+        can_read_network,
+        "/api/v1/admin/ingress/configs".to_string(),
+    );
+    let services = use_api_when(can_read_services, "/api/v1/admin/services".to_string());
+    poll_resource_when(configs, 15_000, move || {
+        context.can_read_area_untracked(PeerArea::Network)
+    });
+    poll_resource_when(services, 15_000, move || {
+        context.can_read_area_untracked(PeerArea::Services)
+    });
     let draft = RwSignal::new(FormDraft::new(json!({"baseDomain":""})));
     let busy = RwSignal::new(false);
+    let save_ticket = RwSignal::new(0u64);
+    let sync = IngressWrite::new(context);
     let focused_app = RwSignal::new(
         context
             .take_pending_subtab(crate::state::TabId::Network)
@@ -49,6 +106,24 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
         }
     });
     Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        can_read_settings.track();
+        save_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        draft.set(FormDraft::new(json!({"baseDomain":""})));
+        busy.set(false);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            save_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        if !can_read_settings.get() {
+            return;
+        }
         let value = settings.data.get();
         if value.is_object() {
             draft.update(|d| {
@@ -57,7 +132,10 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
         }
     });
     let save = Callback::new(move |()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || sync.busy.get_untracked()
+            || !context.can_write_area_untracked(PeerArea::Settings)
+        {
             return;
         }
         let sent = draft_value(draft);
@@ -75,11 +153,29 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
             );
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        save_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = save_ticket.get_untracked();
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, save_ticket, ticket);
         spawn_local(async move {
             let result = async {
                 let mut payload = ApiClient.get("/api/v1/auth/settings").await?;
+                if save_ticket.try_get_untracked() != Some(ticket)
+                    || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                    || !context.can_write_area_untracked(PeerArea::Settings)
+                {
+                    return Err(af_web_core::api::ApiError {
+                        status: 0,
+                        code: Some("SERVER_CHANGED".into()),
+                        message: "Server changed; request cancelled".into(),
+                    });
+                }
                 payload["baseDomain"] = json!(domain);
                 ApiClient
                     .put("/api/v1/admin/settings", Some(&payload))
@@ -87,7 +183,14 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                 ApiClient.get("/api/v1/auth/settings").await
             }
             .await;
-            if busy.try_get_untracked().is_none() {
+            if save_ticket.try_get_untracked() != Some(ticket)
+                || busy.try_get_untracked().is_none()
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_read_area_untracked(PeerArea::Settings)
+                || !context.can_write_area_untracked(PeerArea::Settings)
+            {
                 return;
             }
             match result {
@@ -96,9 +199,11 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                         let _ =
                             d.acknowledge_saved(&sent, json!({"baseDomain":value["baseDomain"]}));
                     });
-                    context.settings.set(value);
-                    settings.refresh();
-                    configs.refresh();
+                    context.publish_settings_save(value.clone());
+                    settings.commit(value);
+                    if context.can_read_area_untracked(PeerArea::Network) {
+                        configs.refresh();
+                    }
                     context.toast(
                         tt(
                             context,
@@ -133,13 +238,38 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                         field="baseDomain"
                         label="Server base domain"
                         placeholder="example.com"
+                        disabled=Signal::derive(move || {
+                            !context.can_write_area(PeerArea::Settings)
+                        })
                     />
+                    <Show when=move || !can_read_settings.get()>
+                        <p role="status" class="text-xs text-amber-300 mt-2">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Settings, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <p class="text-sm text-slate-400 mt-3">
                         {move || {
                             tt_with(context, "Public routing: <app>.{domain} · LAN routing: <app>.aether.local", &[("domain", &(text(&draft_value(draft), "baseDomain")).to_string())])
                         }}
                     </p>
-                    <DraftButtons draft busy on_save=save label="Save base domain" />
+                    <DraftButtons
+                        draft
+                        busy
+                        on_save=save
+                        label="Save base domain"
+                        disabled=Signal::derive(move || {
+                            sync.busy.get() || !context.can_write_area(PeerArea::Settings)
+                        })
+                        title=Signal::derive(move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        })
+                    />
                 </div>
                 <div class="text-sm space-y-3">
                     <p>
@@ -147,6 +277,15 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                             tt_with(context, "Apache2 gateway: {gateway} · af-certbot-sync: {certbot}", &[("gateway", &(tt(context, &(service_state("apache2")).to_string())).to_string()), ("certbot", &(tt(context, &(service_state("af-certbot-sync")).to_string())).to_string())])
                         }}
                     </p>
+                    <Show when=move || !can_read_services.get()>
+                        <p role="status" class="text-xs text-amber-300">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Services, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <p class="text-slate-400">
                         {move || tt(
                             context,
@@ -156,19 +295,32 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button px-4 py-2"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get() || sync.busy.get() || !context.can_write_area(PeerArea::Network)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Network, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
-                            if busy.get_untracked() {
+                            if busy.get_untracked()
+                                || sync.busy.get_untracked()
+                                || !context.can_write_area_untracked(PeerArea::Network)
+                            {
                                 return;
                             }
-                            busy.set(true);
-                            let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+                            let (guard, is_current) = sync.begin(context);
                             spawn_local(async move {
+                                let _guard = guard;
                                 let result = async {
                                     let latest = ApiClient
                                         .get("/api/v1/admin/ingress/configs")
                                         .await
                                         .map_err(|e| e.message)?;
+                                    if !is_current() {
+                                        return Err("Server changed; request cancelled".to_string());
+                                    }
                                     let name = latest["configs"]
                                         .as_array()
                                         .and_then(|rows| {
@@ -189,12 +341,14 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                                     Ok::<(), String>(())
                                 }
                                     .await;
+                                if !is_current() {
+                                    return;
+                                }
                                 match result {
                                     Ok(()) => {
-                                        if busy.try_get_untracked().is_none() {
-                                            return;
+                                        if context.can_read_area_untracked(PeerArea::Services) {
+                                            services.refresh();
                                         }
-                                        services.refresh();
                                         configs.refresh();
                                         context
                                             .toast(
@@ -203,9 +357,6 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                                             );
                                     }
                                     Err(error) => context.toast(tt(context, &error), true),
-                                }
-                                if busy.try_get_untracked().is_some() {
-                                    busy_guard.release();
                                 }
                             });
                         }
@@ -312,10 +463,11 @@ pub(super) fn IngressRow(
     let context = app();
     let name = StoredValue::new(name);
     let draft: JsonDraft = RwSignal::new(FormDraft::new(ingress_form(&value.get_untracked())));
-    let busy = RwSignal::new(false);
+    let write = IngressWrite::new(context);
+    let busy = write.busy;
     Effect::new(move |_| draft.update(|d| d.apply_server_refresh(ingress_form(&value.get()))));
     let save = Callback::new(move |()| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area_untracked(PeerArea::Network) {
             return;
         }
         let sent = draft_value(draft);
@@ -329,21 +481,24 @@ pub(super) fn IngressRow(
         }
         let mut payload = sent.clone();
         payload["publicDomain"] = json!(domain);
-        busy.set(true);
         let app = name.get_value();
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let (guard, is_current) = write.begin(context);
         spawn_local(async move {
-            match ApiClient
+            let _guard = guard;
+            if !is_current() {
+                return;
+            }
+            let result = ApiClient
                 .put(
                     &format!("/api/v1/admin/ingress/apps/{}", encode(&app)),
                     Some(&payload),
                 )
-                .await
-            {
+                .await;
+            if !is_current() {
+                return;
+            }
+            match result {
                 Ok(value) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     let saved = if value["config"].is_object() {
                         ingress_form(&value["config"])
                     } else {
@@ -356,9 +511,6 @@ pub(super) fn IngressRow(
                     context.toast(tt(context, "External access saved"), false);
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
-            }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
             }
         });
     });
@@ -382,7 +534,20 @@ pub(super) fn IngressRow(
             <div role="cell">
                 <DraftCheck draft field="externalAccessEnabled" label="Enable external access" />
                 <DraftCheck draft field="tlsEnabled" label="Enable automatic TLS" />
-                <DraftButtons draft busy on_save=save label="Save external access" />
+                <DraftButtons
+                    draft
+                    busy
+                    on_save=save
+                    label="Save external access"
+                    disabled=Signal::derive(move || {
+                        !context.can_write_area(crate::state::PeerArea::Network)
+                    })
+                    title=Signal::derive(move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    })
+                />
             </div>
         </div>
     }

@@ -2,7 +2,7 @@
 use super::analytics::HistoryAnalytics;
 use super::common::*;
 use super::types::*;
-use crate::state::{app, run_resource_read, worker_pool, ApiResource, ResourceReads};
+use crate::state::{app, run_resource_read, worker_pool, ApiResource, PeerArea, ResourceReads};
 use crate::tabs::contracts;
 use crate::tabs::l10n::{tt, tt_with, DataGrid, ObsCard};
 use af_web_core::api::ApiClient;
@@ -88,17 +88,25 @@ struct CommittedHistory {
     query: HistoryQuery,
     revision: u64,
     epoch: u64,
+    server_epoch: u64,
     page: HistoryPage,
 }
 
 impl CommittedHistory {
-    fn matches(&self, query: &HistoryQuery, revision: u64, epoch: u64) -> bool {
-        &self.query == query && self.revision == revision && self.epoch == epoch
+    fn matches(&self, query: &HistoryQuery, revision: u64, epoch: u64, server_epoch: u64) -> bool {
+        &self.query == query
+            && self.revision == revision
+            && self.epoch == epoch
+            && self.server_epoch == server_epoch
     }
 
     fn same_export_scope(&self, origin: &Self) -> bool {
-        self.matches(&origin.query, origin.revision, origin.epoch)
-            && self.page.scope.snapshot_token == origin.page.scope.snapshot_token
+        self.matches(
+            &origin.query,
+            origin.revision,
+            origin.epoch,
+            origin.server_epoch,
+        ) && self.page.scope.snapshot_token == origin.page.scope.snapshot_token
     }
 }
 
@@ -120,7 +128,7 @@ fn use_history(query: RwSignal<HistoryQuery>) -> ApiResource<Option<CommittedHis
     let context = app();
     let resource = ApiResource {
         data: RwSignal::new(None::<CommittedHistory>),
-        loading: RwSignal::new(true),
+        loading: RwSignal::new(false),
         error: RwSignal::new(None),
         revision: RwSignal::new(0),
     };
@@ -128,21 +136,33 @@ fn use_history(query: RwSignal<HistoryQuery>) -> ApiResource<Option<CommittedHis
     let reads = StoredValue::new_local(ResourceReads::default());
     on_cleanup(move || reads.update_value(|reads| reads.cancel()));
     let last_epoch = StoredValue::new(context.session_epoch.get_untracked());
+    let last_server_epoch = StoredValue::new(context.server_epoch.get_untracked());
     Effect::new(move |_| {
         let epoch = context.session_epoch.get();
-        if last_epoch.get_value() != epoch {
+        let server_epoch = context.server_epoch.get();
+        let can_read = context.can_read_area(PeerArea::Services);
+        let grant_epoch = context.area_revocation_epoch(PeerArea::Services);
+        if last_epoch.get_value() != epoch || last_server_epoch.get_value() != server_epoch {
             resource.data.set(None);
             resource.error.set(None);
             last_epoch.set_value(epoch);
+            last_server_epoch.set_value(server_epoch);
         }
         let requested_query = query.get();
         let revision = resource.revision.get();
+        generation.update(|g| *g += 1);
+        let ticket = generation.get_untracked();
+        if !can_read {
+            reads.update_value(|reads| reads.cancel());
+            resource.data.set(None);
+            resource.error.set(None);
+            resource.loading.set(false);
+            return;
+        }
         let path = format!(
             "/api/v1/auth/streaming/history?{}",
             requested_query.params(None, true)
         );
-        generation.update(|g| *g += 1);
-        let ticket = generation.get_untracked();
         resource.loading.set(true);
         let Some(job) = reads.try_update_value(ResourceReads::next) else {
             return;
@@ -153,6 +173,9 @@ fn use_history(query: RwSignal<HistoryQuery>) -> ApiResource<Option<CommittedHis
                     || query.try_get_untracked().as_ref() != Some(&requested_query)
                     || resource.revision.try_get_untracked() != Some(revision)
                     || context.session_epoch.try_get_untracked() != Some(epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Services) != grant_epoch
+                    || !context.can_read_area_untracked(PeerArea::Services)
                 {
                     return None;
                 }
@@ -165,6 +188,9 @@ fn use_history(query: RwSignal<HistoryQuery>) -> ApiResource<Option<CommittedHis
                 || query.try_get_untracked().as_ref() != Some(&requested_query)
                 || resource.revision.try_get_untracked() != Some(revision)
                 || context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Services) != grant_epoch
+                || !context.can_read_area_untracked(PeerArea::Services)
             {
                 return;
             }
@@ -174,9 +200,18 @@ fn use_history(query: RwSignal<HistoryQuery>) -> ApiResource<Option<CommittedHis
                         query: requested_query,
                         revision,
                         epoch,
+                        server_epoch,
                         page: contracts::decode::<HistoryPage>(&data),
                     }));
                     resource.error.set(None);
+                }
+                Err(error)
+                    if matches!(
+                        error.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) =>
+                {
+                    return;
                 }
                 Err(error) => resource.error.set(Some(error)),
             }
@@ -250,16 +285,37 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
         });
     });
     let snapshot_invalid = RwSignal::new(false);
+    let last_view_epochs = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+    ));
+    Effect::new(move |_| {
+        let next_epochs = (context.session_epoch.get(), context.server_epoch.get());
+        if last_view_epochs.get_value() == next_epochs {
+            return;
+        }
+        last_view_epochs.set_value(next_epochs);
+        export_abort.update_value(|controller| {
+            if let Some(old) = controller.take() {
+                old.abort();
+            }
+            *controller = web_sys::AbortController::new().ok();
+        });
+        export_busy.set(false);
+        snapshot_invalid.set(false);
+        query.set(HistoryQuery::new());
+    });
     let committed = Signal::derive(move || {
         let current_query = query.get();
         let revision = history.revision.get();
         let epoch = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
         if snapshot_invalid.get() || history.loading.get() || history.error.with(Option::is_some) {
             None
         } else {
             history.data.with(|data| {
                 data.as_ref()
-                    .filter(|data| data.matches(&current_query, revision, epoch))
+                    .filter(|data| data.matches(&current_query, revision, epoch, server_epoch))
                     .cloned()
             })
         }
@@ -319,11 +375,12 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
         }
         export_busy.set(true);
         spawn_local(async move {
-            // A pending export may outlive this history view or the account
-            // that initiated it. Never download into a different session.
+            // A pending export may outlive this history view, account session,
+            // or selected server. Never download or toast across server/session boundaries.
             let is_alive = || {
                 export_busy.try_get_untracked().is_some()
                     && context.session_epoch.try_get_untracked() == Some(origin.epoch)
+                    && context.server_epoch.try_get_untracked() == Some(origin.server_epoch)
             };
             let result: Result<(), HistoryExportError> = async {
                 if format == "canonical-csv" {
@@ -402,14 +459,13 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                 }
             }
             .await;
-            if export_busy.try_get_untracked().is_none() {
+            if !is_alive() {
                 return;
             }
             // A failure is relevant only to the still-committed request. In
             // particular, an old 409 must not invalidate a newer snapshot.
             if let Err(error) = result {
-                if is_alive()
-                    && context.history_revision.try_get_untracked() == Some(history_revision)
+                if context.history_revision.try_get_untracked() == Some(history_revision)
                     && revision.try_get_untracked() == Some(history_revision)
                     && committed
                         .try_get_untracked()
@@ -722,6 +778,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                     (!snapshot.is_empty()).then(|| {
                         let conflict_query = data.query.clone();
                         let conflict_snapshot = snapshot.clone();
+                        let conflict_server_epoch = data.server_epoch;
                         view! {
                             <HistoryAnalytics
                                 query
@@ -729,10 +786,11 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                                 snapshot
                                 on_conflict=Callback::new(move |()| {
                                     // A late conflict belongs only to the pair
-                                    // that issued it, not a newer selection.
+                                    // that issued it, not a newer selection or server.
                                     if committed.try_get_untracked().flatten().is_some_and(|current| {
                                         current.query == conflict_query
                                             && current.page.scope.snapshot_token == conflict_snapshot
+                                            && current.server_epoch == conflict_server_epoch
                                     }) {
                                         snapshot_invalid.set(true);
                                     }
@@ -782,23 +840,25 @@ mod tests {
             query: original.clone(),
             revision: 4,
             epoch: 2,
+            server_epoch: 7,
             page: HistoryPage::default(),
         };
-        assert!(committed.matches(&original, 4, 2));
-        assert!(!committed.matches(&original, 5, 2));
-        assert!(!committed.matches(&original, 4, 3));
+        assert!(committed.matches(&original, 4, 2, 7));
+        assert!(!committed.matches(&original, 5, 2, 7));
+        assert!(!committed.matches(&original, 4, 3, 7));
+        assert!(!committed.matches(&original, 4, 2, 8));
 
         let mut edited = original.clone();
         edited.edit("pageSize", "25".into());
-        assert!(!committed.matches(&edited, 4, 2));
+        assert!(!committed.matches(&edited, 4, 2, 7));
         edited.edit("sort", "startedAsc".into());
-        assert!(!committed.matches(&edited, 4, 2));
+        assert!(!committed.matches(&edited, 4, 2, 7));
 
         let mut next_page = original;
         next_page.cursor = "next".into();
         next_page.snapshot = "snapshot".into();
         next_page.previous.push(String::new());
-        assert!(!committed.matches(&next_page, 4, 2));
+        assert!(!committed.matches(&next_page, 4, 2, 7));
     }
 
     #[test]
@@ -807,6 +867,7 @@ mod tests {
             query: HistoryQuery::new(),
             revision: 4,
             epoch: 2,
+            server_epoch: 7,
             page: HistoryPage::default(),
         };
         origin.page.scope.snapshot_token = "snapshot-a".into();
@@ -828,6 +889,10 @@ mod tests {
 
         current = origin.clone();
         current.epoch += 1;
+        assert!(!current.same_export_scope(&origin));
+
+        current = origin.clone();
+        current.server_epoch += 1;
         assert!(!current.same_export_scope(&origin));
     }
 

@@ -7,6 +7,7 @@ use futures::{
 use leptos::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use wasm_bindgen_futures::spawn_local;
 
 /// Drop each old request future before its replacement can start transport.
@@ -108,6 +109,13 @@ pub fn use_api(path: impl Into<Signal<String>>) -> ApiResource {
     use_api_typed::<Value>(path.into())
 }
 
+pub fn use_api_when(
+    enabled: impl Into<Signal<bool>>,
+    path: impl Into<Signal<String>>,
+) -> ApiResource {
+    use_api_typed_when::<Value>(enabled.into(), path.into())
+}
+
 /// Typed requests share the same loading, revalidation and stale-write guards
 /// as JSON resources. Invalid responses keep the last good value and surface an
 /// error, rather than passing a malformed domain object to a tab.
@@ -122,36 +130,79 @@ pub fn use_typed_api<T: DeserializeOwned + Default + Clone + Send + Sync + 'stat
 pub fn use_api_typed<T: DeserializeOwned + Default + Clone + Send + Sync + 'static>(
     path: Signal<String>,
 ) -> ApiResource<T> {
+    use_api_typed_when(Signal::stored(true), path)
+}
+
+pub fn use_api_typed_when<T: DeserializeOwned + Default + Clone + Send + Sync + 'static>(
+    enabled: Signal<bool>,
+    path: Signal<String>,
+) -> ApiResource<T> {
     let context = app();
     let resource = ApiResource {
         data: RwSignal::new(T::default()),
-        loading: RwSignal::new(true),
+        loading: RwSignal::new(enabled.get_untracked()),
         error: RwSignal::new(None),
         revision: RwSignal::new(0),
     };
     let generation = RwSignal::new(0u64);
     let reads = owned_resource_reads();
     let last_epoch = StoredValue::new(context.session_epoch.get_untracked());
+    let last_server_epoch = StoredValue::new(context.server_epoch.get_untracked());
+    let server_cache = StoredValue::new_local(BTreeMap::<(Option<String>, String), T>::new());
     Effect::new(move |_| {
         let epoch = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
+        let active_server = context.active_server_id.get_untracked();
+        let allowed = enabled.get();
+        let path = path.get();
         if last_epoch.get_value() != epoch {
+            let _ = server_cache.try_update_value(BTreeMap::clear);
             resource.data.set(T::default());
             resource.error.set(None);
             last_epoch.set_value(epoch);
+            last_server_epoch.set_value(server_epoch);
+        } else if last_server_epoch.get_value() != server_epoch {
+            // Remote peers always revalidate fresh server data instead of
+            // flashing potentially stale or revoked cached payloads on revisit.
+            let cached = if allowed && active_server.is_none() {
+                server_cache
+                    .try_with_value(|cache| {
+                        cache.get(&(active_server.clone(), path.clone())).cloned()
+                    })
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                T::default()
+            };
+            resource.data.set(cached);
+            resource.error.set(None);
+            last_server_epoch.set_value(server_epoch);
         }
-        let path = path.get();
         let requested_revision = resource.revision.get();
         generation.update(|g| *g += 1);
         let ticket = generation.get_untracked();
+        if !allowed || path.trim().is_empty() {
+            reads.with_value(ResourceReads::cancel);
+            let _ = server_cache.try_update_value(|cache| {
+                cache.remove(&(active_server.clone(), path.clone()));
+            });
+            resource.data.set(T::default());
+            resource.error.set(None);
+            resource.loading.set(false);
+            return;
+        }
         resource.loading.set(true);
         let Some(job) = reads.try_update_value(ResourceReads::next) else {
             return;
         };
+        let cache_key = (active_server, path.clone());
         spawn_local(async move {
             let work = async move {
                 if generation.try_get_untracked() != Some(ticket)
                     || resource.revision.try_get_untracked() != Some(requested_revision)
                     || context.session_epoch.try_get_untracked() != Some(epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || enabled.try_get_untracked() != Some(true)
                 {
                     return None;
                 }
@@ -162,19 +213,29 @@ pub fn use_api_typed<T: DeserializeOwned + Default + Clone + Send + Sync + 'stat
             };
             if generation.try_get_untracked() != Some(ticket)
                 || resource.revision.try_get_untracked() != Some(requested_revision)
+                || enabled.try_get_untracked() != Some(true)
             {
                 return;
             }
-            if context.session_epoch.try_get_untracked() == Some(epoch) {
+            if context.session_epoch.try_get_untracked() == Some(epoch)
+                && context.server_epoch.try_get_untracked() == Some(server_epoch)
+            {
                 match result {
                     Ok(data) => {
+                        let _ = server_cache.try_update_value(|cache| {
+                            cache.insert(cache_key, data.clone());
+                        });
                         resource.data.set(data);
                         resource.error.set(None);
                     }
-                    Err(error) => resource.error.set(Some(error)),
+                    Err(error) => {
+                        if !matches!(error.code.as_deref(), Some("SERVER_CHANGED" | "ABORTED")) {
+                            resource.error.set(Some(error));
+                        }
+                    }
                 }
+                resource.loading.set(false);
             }
-            resource.loading.set(false);
         });
     });
     resource

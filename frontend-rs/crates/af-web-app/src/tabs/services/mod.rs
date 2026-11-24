@@ -4,12 +4,17 @@ mod launch;
 mod logs;
 mod restart;
 
+#[cfg(test)]
+pub(crate) use self::helpers::launch_url_with_host;
 use self::helpers::*;
-pub(crate) use self::helpers::{external_access_target, launch_url_with_host, safe_release_url};
+pub(crate) use self::helpers::{
+    external_access_target, launch_url_for_server, mediaflow_launch_url_for_server,
+    safe_release_url,
+};
 pub(crate) use self::launch::launch_app;
 pub(crate) use self::logs::ServiceLogsModal;
 use self::restart::{CoreRestartPhase, CoreRestartTracker};
-use crate::state::{app, run_resource_read, ApiResource, ResourceReads, TabId};
+use crate::state::{app, run_resource_read, ApiResource, PeerArea, ResourceReads, TabId};
 use crate::tabs::l10n::{tt, tt_with, Badge, ConfirmDialog, EmptyState, ObsCard, SearchInput};
 use af_web_core::api::ApiClient;
 use af_web_ui::use_worker_rows;
@@ -21,7 +26,7 @@ fn use_services_inventory() -> ApiResource {
     let context = app();
     let resource = ApiResource {
         data: RwSignal::new(Value::Null),
-        loading: RwSignal::new(true),
+        loading: RwSignal::new(false),
         error: RwSignal::new(None),
         revision: RwSignal::new(0),
     };
@@ -30,11 +35,22 @@ fn use_services_inventory() -> ApiResource {
     on_cleanup(move || reads.update_value(|reads| reads.cancel()));
     Effect::new(move |_| {
         let epoch = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
+        let can_read = context.can_read_area(PeerArea::Services);
+        let grant_epoch = context.area_revocation_epoch(PeerArea::Services);
         let revision = resource.revision.get();
         generation.update(|generation| *generation = generation.wrapping_add(1));
         let ticket = generation.get_untracked();
+        if !can_read {
+            reads.update_value(|reads| reads.cancel());
+            resource.data.set(Value::Null);
+            resource.error.set(None);
+            resource.loading.set(false);
+            return;
+        }
         let request = context.begin_services_request();
         resource.loading.set(true);
+        resource.error.set(None);
         let Some(job) = reads.try_update_value(ResourceReads::next) else {
             return;
         };
@@ -43,6 +59,9 @@ fn use_services_inventory() -> ApiResource {
                 if generation.try_get_untracked() != Some(ticket)
                     || resource.revision.try_get_untracked() != Some(revision)
                     || context.session_epoch.try_get_untracked() != Some(epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Services) != grant_epoch
+                    || !context.can_read_area_untracked(PeerArea::Services)
                 {
                     return None;
                 }
@@ -54,6 +73,9 @@ fn use_services_inventory() -> ApiResource {
             if generation.try_get_untracked() != Some(ticket)
                 || resource.revision.try_get_untracked() != Some(revision)
                 || context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Services) != grant_epoch
+                || !context.can_read_area_untracked(PeerArea::Services)
             {
                 return;
             }
@@ -64,7 +86,11 @@ fn use_services_inventory() -> ApiResource {
                     }
                     resource.error.set(None);
                 }
-                Err(error) => resource.error.set(Some(error)),
+                Err(error) => {
+                    if !matches!(error.code.as_deref(), Some("SERVER_CHANGED" | "ABORTED")) {
+                        resource.error.set(Some(error));
+                    }
+                }
             }
             resource.loading.set(false);
         });
@@ -90,6 +116,13 @@ pub fn ServicesTab() -> impl IntoView {
     });
     let selected = RwSignal::new(None::<Value>);
     let logs_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        context.area_revocation_epoch(PeerArea::Services);
+        if !context.is_admin() || !context.can_read_area(PeerArea::Services) {
+            logs_open.set(false);
+            selected.set(None);
+        }
+    });
     let rows = Signal::derive(move || context.services.with(service_rows));
     let searched = use_worker_rows(
         rows,
@@ -120,23 +153,62 @@ pub fn ServicesTab() -> impl IntoView {
         rows.with(|list| list.iter().filter(|v| has_available_update(v)).count())
     });
     let checking_updates = RwSignal::new(false);
-    let checking_unit = RwSignal::new(None::<String>);
-    let updating_unit = RwSignal::new(None::<String>);
+    let check_all_ticket = RwSignal::new(0u64);
+    let checking_units = RwSignal::new(std::collections::BTreeSet::<String>::new());
+    let updating_units = RwSignal::new(std::collections::BTreeSet::<String>::new());
+    let marketplace_write_epoch = RwSignal::new(0u64);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Marketplace);
+        check_all_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        marketplace_write_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+        checking_updates.set(false);
+        checking_units.set(std::collections::BTreeSet::new());
+        updating_units.set(std::collections::BTreeSet::new());
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Marketplace) {
+            check_all_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            marketplace_write_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+            checking_updates.set(false);
+            checking_units.set(std::collections::BTreeSet::new());
+            updating_units.set(std::collections::BTreeSet::new());
+        }
+    });
     let refresh = Callback::new(move |()| inventory.refresh());
     let restarts = CoreRestartTracker::start_polling(context, refresh);
     let check_all_updates = move |_| {
-        if !context.is_admin() || checking_updates.get_untracked() {
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Marketplace)
+            || checking_updates.get_untracked()
+        {
             return;
         }
+        check_all_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = check_all_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Marketplace,
+            true,
+            true,
+            check_all_ticket,
+            ticket,
+        );
         checking_updates.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(
+            checking_updates,
+            check_all_ticket,
+            ticket,
+        );
         spawn_local(async move {
             let result = ApiClient
                 .post("/api/v1/admin/packages/updates/check", None)
                 .await;
-            if checking_updates.is_disposed() {
+            if checking_updates.is_disposed() || !fence.is_valid() {
                 return;
             }
-            checking_updates.set(false);
+            busy_guard.release();
             match result {
                 Ok(payload) => {
                     let count = payload["updates_available"].as_u64().unwrap_or_else(|| {
@@ -165,7 +237,9 @@ pub fn ServicesTab() -> impl IntoView {
                             false,
                         );
                     }
-                    inventory.refresh();
+                    if context.can_read_area_untracked(PeerArea::Services) {
+                        inventory.refresh();
+                    }
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
@@ -187,7 +261,15 @@ pub fn ServicesTab() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button px-4 py-2 min-h-11"
-                            disabled=move || checking_updates.get()
+                            disabled=move || {
+                                checking_updates.get()
+                                    || !context.can_write_area(PeerArea::Marketplace)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(PeerArea::Marketplace, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=check_all_updates
                         >
                             {move || {
@@ -202,14 +284,37 @@ pub fn ServicesTab() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button px-4 py-2 min-h-11"
-                        disabled=move || inventory.loading.get()
-                        on:click=move |_| inventory.refresh()
+                        disabled=move || {
+                            inventory.loading.get() || !context.can_read_area(PeerArea::Services)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Services, false)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if context.can_read_area_untracked(PeerArea::Services) {
+                                inventory.refresh();
+                            }
+                        }
                         aria-label=move || tt(context, "Refresh services")
                     >
                         {move || tt(context, "Common.refresh")}
                     </button>
                 </div>
             </header>
+            <Show when=move || !context.can_read_area(PeerArea::Services)>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <SearchInput value=query placeholder="Search services" />
             <div
                 role="group"
@@ -354,8 +459,9 @@ pub fn ServicesTab() -> impl IntoView {
                                                 selected
                                                 logs_open
                                                 restarts
-                                                checking_unit
-                                                updating_unit
+                                                checking_units
+                                                updating_units
+                                                marketplace_write_epoch
                                             />
                                         }
                                     }
@@ -382,7 +488,10 @@ pub fn ServicesTab() -> impl IntoView {
                 />
             </Show>
             <Show when=move || {
-                logs_open.get() && selected.with(Option::is_some) && context.is_admin()
+                logs_open.get()
+                    && selected.with(Option::is_some)
+                    && context.is_admin()
+                    && context.can_read_area(PeerArea::Services)
             }>
                 <ServiceLogsModal open=logs_open service=selected />
             </Show>
@@ -398,8 +507,9 @@ fn ServiceCard(
     selected: RwSignal<Option<Value>>,
     logs_open: RwSignal<bool>,
     restarts: CoreRestartTracker,
-    checking_unit: RwSignal<Option<String>>,
-    updating_unit: RwSignal<Option<String>>,
+    checking_units: RwSignal<std::collections::BTreeSet<String>>,
+    updating_units: RwSignal<std::collections::BTreeSet<String>>,
+    marketplace_write_epoch: RwSignal<u64>,
 ) -> impl IntoView {
     let context = app();
     let id = StoredValue::new(id);
@@ -413,9 +523,27 @@ fn ServiceCard(
         })
     });
     let busy = RwSignal::new(String::new());
+    let action_ticket = RwSignal::new(0u64);
     let img_failed = RwSignal::new(false);
     let confirm_action = RwSignal::new(None::<&'static str>);
     let confirm_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Services);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(String::new());
+        confirm_open.set(false);
+        confirm_action.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Services) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(String::new());
+            confirm_open.set(false);
+            confirm_action.set(None);
+        }
+    });
     Effect::new(move |_| {
         if !confirm_open.get() {
             confirm_action.set(None);
@@ -426,7 +554,10 @@ fn ServiceCard(
         img_failed.set(false);
     });
     let action = move |action: &'static str| {
-        if !context.is_admin() || !busy.get_untracked().is_empty() || is_restarting.get_untracked()
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Services)
+            || !busy.get_untracked().is_empty()
+            || is_restarting.get_untracked()
         {
             return;
         }
@@ -434,6 +565,16 @@ fn ServiceCard(
         if shared_vhost(&row) || row["managed_by"] == "embedded" {
             return;
         }
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Services,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         let target = field(&row, &["id", "process", "slug"]);
         let label = field(&row, &["name", "slug", "id"]);
         let process = field(&row, &["id", "process", "slug"]);
@@ -444,6 +585,8 @@ fn ServiceCard(
             manager
         };
         busy.set(action.into());
+        let mut busy_guard =
+            crate::tabs::busy::ValueBusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -454,9 +597,10 @@ fn ServiceCard(
                     Some(&json!({"action":action,"managed_by":manager,"process":process})),
                 )
                 .await;
-            if busy.is_disposed() {
+            if busy.is_disposed() || !fence.is_valid() {
                 return;
             }
+            busy_guard.release();
             match result {
                 Ok(receipt) => {
                     if receipt["status"] == "accepted" {
@@ -488,11 +632,20 @@ fn ServiceCard(
                     refresh.run(());
                 }
             }
-            busy.set(String::new());
         });
     };
     let launch = Signal::derive(move || {
-        info.with(|v| context.settings.with(|settings| launch_url(v, settings)))
+        let is_remote = context.is_remote();
+        let can_read_settings = !is_remote || context.can_read_area(PeerArea::Settings);
+        info.with(|v| {
+            if can_read_settings {
+                context
+                    .settings
+                    .with(|settings| launch_url_for_server(v, settings, is_remote))
+            } else {
+                launch_url_for_server(v, &Value::Null, is_remote)
+            }
+        })
     });
     let status_label = Signal::derive(move || {
         if is_restarting.get() {
@@ -522,14 +675,32 @@ fn ServiceCard(
     });
     let trigger_check_update = move |_| {
         let pkg_id = info.with_untracked(|v| field(v, &["id"]));
-        if !context.is_admin()
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Marketplace)
             || pkg_id.is_empty()
             || info.with_untracked(core_service)
-            || checking_unit.with_untracked(|c| c.as_deref() == Some(pkg_id.as_str()))
+            || checking_units.with_untracked(|set| set.contains(&pkg_id))
         {
             return;
         }
-        checking_unit.set(Some(pkg_id.clone()));
+        let write_epoch = marketplace_write_epoch.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Marketplace,
+            true,
+            true,
+            marketplace_write_epoch,
+            write_epoch,
+        );
+        checking_units.update(|set| {
+            set.insert(pkg_id.clone());
+        });
+        let mut busy_guard = crate::tabs::busy::SetBusyGuard::for_generation(
+            checking_units,
+            pkg_id.clone(),
+            marketplace_write_epoch,
+            write_epoch,
+        );
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -540,10 +711,10 @@ fn ServiceCard(
                     None,
                 )
                 .await;
-            if checking_unit.is_disposed() {
+            if checking_units.is_disposed() || !fence.is_valid() {
                 return;
             }
-            checking_unit.set(None);
+            busy_guard.release();
             match result {
                 Ok(data) => {
                     if !field(&data, &["error", "last_error"]).is_empty() {
@@ -570,7 +741,9 @@ fn ServiceCard(
                             false,
                         );
                     }
-                    refresh.run(());
+                    if context.can_read_area_untracked(PeerArea::Services) {
+                        refresh.run(());
+                    }
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
@@ -578,15 +751,33 @@ fn ServiceCard(
     };
     let trigger_update = move |_| {
         let pkg_id = info.with_untracked(|v| field(v, &["id"]));
-        if !context.is_admin()
+        if !context.is_admin_untracked()
+            || !context.can_write_area_untracked(PeerArea::Marketplace)
             || pkg_id.is_empty()
             || info.with_untracked(core_service)
-            || updating_unit.with_untracked(|u| u.as_deref() == Some(pkg_id.as_str()))
+            || updating_units.with_untracked(|set| set.contains(&pkg_id))
         {
             return;
         }
+        let write_epoch = marketplace_write_epoch.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Marketplace,
+            true,
+            true,
+            marketplace_write_epoch,
+            write_epoch,
+        );
         let target_version = info.with_untracked(|v| field(v, &["latest_version"]));
-        updating_unit.set(Some(pkg_id.clone()));
+        updating_units.update(|set| {
+            set.insert(pkg_id.clone());
+        });
+        let mut busy_guard = crate::tabs::busy::SetBusyGuard::for_generation(
+            updating_units,
+            pkg_id.clone(),
+            marketplace_write_epoch,
+            write_epoch,
+        );
         spawn_local(async move {
             let body = if target_version.is_empty() {
                 Value::Null
@@ -602,17 +793,19 @@ fn ServiceCard(
                     (!body.is_null()).then_some(&body),
                 )
                 .await;
-            if updating_unit.is_disposed() {
+            if updating_units.is_disposed() || !fence.is_valid() {
                 return;
             }
-            updating_unit.set(None);
+            busy_guard.release();
             match result {
                 Ok(_) => {
                     context.toast(
                         tt_with(context, "Update started for {id}", &[("id", &pkg_id)]),
                         false,
                     );
-                    refresh.run(());
+                    if context.can_read_area_untracked(PeerArea::Services) {
+                        refresh.run(());
+                    }
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
@@ -695,13 +888,21 @@ fn ServiceCard(
                         <Show when=move || context.is_admin() && info.with(|v| !core_service(v) && !field(v, &["id"]).is_empty())>
                             <button
                                 type="button"
-                                class="text-indigo-300 hover:text-indigo-200 underline text-xs"
-                                disabled=move || checking_unit.with(|c| c.as_deref() == Some(info.with(|v| field(v, &["id"])).as_str()))
+                                class="text-indigo-300 hover:text-indigo-200 underline text-xs disabled:opacity-50"
+                                disabled=move || {
+                                    !context.can_write_area(PeerArea::Marketplace)
+                                        || checking_units.with(|set| set.contains(&info.with(|v| field(v, &["id"]))))
+                                }
+                                title=move || {
+                                    context
+                                        .area_block_reason(PeerArea::Marketplace, true)
+                                        .unwrap_or_default()
+                                }
                                 on:click=trigger_check_update
                             >
                                 {move || {
                                     let pid = info.with(|v| field(v, &["id"]));
-                                    if checking_unit.with(|c| c.as_deref() == Some(pid.as_str())) {
+                                    if checking_units.with(|set| set.contains(&pid)) {
                                         tt(context, "Checking…")
                                     } else {
                                         tt(context, "Check update")
@@ -874,8 +1075,16 @@ fn ServiceCard(
                                                 <button
                                                     type="button"
                                                     class="glass-button px-2.5 py-1 text-xs shrink-0"
-                                                    title=unit_title.clone()
+                                                    disabled=move || !context.can_read_area(PeerArea::Services)
+                                                    title=move || {
+                                                        context
+                                                            .area_block_reason(PeerArea::Services, false)
+                                                            .unwrap_or_else(|| unit_title.clone())
+                                                    }
                                                     on:click=move |_| {
+                                                        if !context.can_read_area(PeerArea::Services) {
+                                                            return;
+                                                        }
                                                         let mut row = info.get_untracked();
                                                         row["initial_unit"] = json!(unit_for_logs.clone());
                                                         selected.set(Some(row));
@@ -920,11 +1129,19 @@ fn ServiceCard(
                     <button
                         type="button"
                         class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs"
+                        disabled=move || !context.can_read_area(PeerArea::Network)
                         title=move || {
-                            let name = info.with(|v| field(v, &["name", "slug", "id"]));
-                            tt_with(context, "Configure external access for {name}", &[("name", &name)])
+                            context
+                                .area_block_reason(PeerArea::Network, false)
+                                .unwrap_or_else(|| {
+                                    let name = info.with(|v| field(v, &["name", "slug", "id"]));
+                                    tt_with(context, "Configure external access for {name}", &[("name", &name)])
+                                })
                         }
                         on:click=move |_| {
+                            if !context.can_read_area(PeerArea::Network) {
+                                return;
+                            }
                             if let Some(target) = info.with_untracked(external_access_target) {
                                 context.navigate_to_subtab(TabId::Network, target);
                             }
@@ -940,16 +1157,22 @@ fn ServiceCard(
                         type="button"
                         class="glass-button-primary w-full px-3 py-2 text-xs min-h-11"
                         disabled=move || {
-                            !busy.get().is_empty()
+                            !context.can_write_area(PeerArea::Marketplace)
+                                || !busy.get().is_empty()
                                 || is_restarting.get()
-                                || updating_unit.with(|u| u.as_deref() == Some(info.with(|v| field(v, &["id"])).as_str()))
+                                || updating_units.with(|set| set.contains(&info.with(|v| field(v, &["id"]))))
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Marketplace, true)
+                                .unwrap_or_default()
                         }
                         on:click=trigger_update
                     >
                         {move || {
                             let pid = info.with(|v| field(v, &["id"]));
                             let name = info.with(|v| field(v, &["name", "slug", "id"]));
-                            if updating_unit.with(|u| u.as_deref() == Some(pid.as_str())) {
+                            if updating_units.with(|set| set.contains(&pid)) {
                                 tt(context, "Updating…")
                             } else {
                                 tt_with(context, "Update {name}", &[("name", &name)])
@@ -966,21 +1189,31 @@ fn ServiceCard(
                                     type="button"
                                     class="glass-button px-3 py-2 text-xs min-h-11"
                                     disabled=move || {
-                                        !busy.get().is_empty()
+                                        !context.can_write_area(PeerArea::Services)
+                                            || !busy.get().is_empty()
                                             || is_restarting.get()
                                             || info
                                                 .with(|v| shared_vhost(v) || v["managed_by"] == "embedded")
                                     }
-                                    title=move || tt(context,
-                                        if info.with(shared_vhost) {
-                                            "Shared gateway: use the Apache service controls"
-                                        } else if info.with(|v| v["managed_by"] == "embedded") {
-                                            "Runs inside the API process"
+                                    title=move || {
+                                        if let Some(reason) = context.area_block_reason(PeerArea::Services, true) {
+                                            reason
                                         } else {
-                                            "Control service"
+                                            tt(context,
+                                                if info.with(shared_vhost) {
+                                                    "Shared gateway: use the Apache service controls"
+                                                } else if info.with(|v| v["managed_by"] == "embedded") {
+                                                    "Runs inside the API process"
+                                                } else {
+                                                    "Control service"
+                                                }
+                                            )
                                         }
-                                    )
+                                    }
                                     on:click=move |_| {
+                                        if !context.can_write_area(PeerArea::Services) {
+                                            return;
+                                        }
                                         if key == "stop" || info.with_untracked(is_failed_install) {
                                             confirm_action.set(Some(key));
                                             confirm_open.set(true);
@@ -997,8 +1230,14 @@ fn ServiceCard(
                     <button
                         type="button"
                         class="glass-button px-3 py-2 text-xs min-h-11"
+                        disabled=move || !context.can_read_area(PeerArea::Services)
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Services, false)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
-                            if context.is_admin() {
+                            if context.is_admin() && context.can_read_area(PeerArea::Services) {
                                 selected.set(Some(info.get_untracked()));
                                 logs_open.set(true);
                             }

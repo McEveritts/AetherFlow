@@ -1,5 +1,5 @@
-use super::contracts::{grid_resource, use_api_typed, Records, SharedRecord};
-use crate::state::{app, json_rows, use_api, ApiResource, AppContext};
+use super::contracts::{grid_resource, use_api_typed_when, Records, SharedRecord};
+use crate::state::{app, json_rows, use_api_when, ApiResource, AppContext, PeerArea};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{Badge, Drawer, EmptyState, Modal, SearchInput, TabPanel, TabsBar};
 use af_web_core::{
@@ -28,16 +28,22 @@ use sandbox::*;
 #[component]
 pub fn MarketplaceTab() -> impl IntoView {
     let context = app();
-    let catalog = grid_resource(use_api_typed::<Records<SharedRecord<MarketplaceApp>>>(
+    let can_read_marketplace = Signal::derive(move || context.can_read_area(PeerArea::Marketplace));
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
+    let catalog = grid_resource(use_api_typed_when::<Records<SharedRecord<MarketplaceApp>>>(
+        can_read_marketplace,
         Signal::derive(move || {
             context.marketplace_revision.track();
             "/api/v1/public/marketplace".to_string()
         }),
     ));
-    let plugins = use_api(Signal::derive(move || {
-        context.marketplace_revision.track();
-        "/api/v1/auth/plugins".to_string()
-    }));
+    let plugins = use_api_when(
+        can_read_services,
+        Signal::derive(move || {
+            context.marketplace_revision.track();
+            "/api/v1/auth/plugins".to_string()
+        }),
+    );
     let ops = MarketplaceOps {
         context,
         catalog,
@@ -45,6 +51,8 @@ pub fn MarketplaceTab() -> impl IntoView {
         submitting: RwSignal::new(BTreeSet::new()),
         checking: RwSignal::new(BTreeSet::new()),
         ticket: RwSignal::new(0),
+        write_epoch: RwSignal::new(0),
+        poll_epoch: RwSignal::new(0),
         polling: RwSignal::new(false),
         deployment: RwSignal::new(None),
         drawer: RwSignal::new(false),
@@ -169,6 +177,9 @@ pub fn MarketplaceTab() -> impl IntoView {
     let interval = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         2000,
         move || {
+            if !context.can_read_area_untracked(PeerArea::Marketplace) {
+                return;
+            }
             ops.poll();
             if ops
                 .jobs
@@ -180,6 +191,43 @@ pub fn MarketplaceTab() -> impl IntoView {
         },
     )));
     on_cleanup(move || interval.set_value(None));
+    let confirm_captured = crate::tabs::l10n::guard_modal_server_switch(confirm);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Marketplace);
+        ops.write_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        ops.poll_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        ops.polling.set(false);
+        ops.ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        ops.jobs.set(BTreeMap::new());
+        ops.submitting.set(BTreeSet::new());
+        ops.checking.set(BTreeSet::new());
+        ops.deployment.set(None);
+        ops.drawer.set(false);
+        pending.set(None);
+        confirm.set(false);
+        purge_data.set(false);
+        purge_confirmation.set(String::new());
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Marketplace) {
+            ops.write_epoch
+                .update(|epoch| *epoch = epoch.wrapping_add(1));
+            ops.ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            ops.submitting.set(BTreeSet::new());
+            ops.checking.set(BTreeSet::new());
+            ops.jobs.update(|jobs| {
+                jobs.retain(|_, job| job.accepted);
+            });
+            pending.set(None);
+            confirm.set(false);
+            purge_data.set(false);
+            purge_confirmation.set(String::new());
+        }
+    });
     view! {
         <section class="py-5 space-y-6 min-w-0 max-w-full">
             <header class="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-white/10">
@@ -198,10 +246,26 @@ pub fn MarketplaceTab() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button px-4 py-2 min-h-11"
-                        disabled=move || catalog.loading.get()
+                        disabled=move || {
+                            catalog.loading.get()
+                                || (!can_read_marketplace.get() && !can_read_services.get())
+                        }
+                        title=move || {
+                            if !can_read_marketplace.get() && !can_read_services.get() {
+                                context
+                                    .area_block_reason(PeerArea::Marketplace, false)
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            }
+                        }
                         on:click=move |_| {
-                            catalog.refresh();
-                            plugins.refresh();
+                            if context.can_read_area_untracked(PeerArea::Marketplace) {
+                                catalog.refresh();
+                            }
+                            if context.can_read_area_untracked(PeerArea::Services) {
+                                plugins.refresh();
+                            }
                         }
                         aria-label=move || tt(context, "Refresh catalog")
                     >
@@ -211,7 +275,15 @@ pub fn MarketplaceTab() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button px-4 py-2 min-h-11"
-                            disabled=move || ops.checking.with(|set| set.contains(""))
+                            disabled=move || {
+                                ops.checking.with(|set| set.contains(""))
+                                    || !context.can_write_area(crate::state::PeerArea::Marketplace)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Marketplace, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| ops.check_updates(None)
                         >
                             {move || {
@@ -225,6 +297,18 @@ pub fn MarketplaceTab() -> impl IntoView {
                     </Show>
                 </div>
             </header>
+            <Show when=move || !can_read_marketplace.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Marketplace, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <Show when=move || {
                 !context.is_admin()
                     || rows.with(|rows| rows.iter().any(|p| p["inventory_authenticated"] == false))
@@ -363,8 +447,39 @@ pub fn MarketplaceTab() -> impl IntoView {
                                         .unwrap_or_else(|| package_snapshot.get_value())
                                 })
                             };
+                            let modal_title = Signal::derive(move || {
+                                let server_name = confirm_captured
+                                    .get()
+                                    .and_then(|c| c.server_name)
+                                    .or_else(|| context.active_server_name());
+                                crate::tabs::l10n::confirm_dialog_title(
+                                    context,
+                                    &title,
+                                    server_name.as_deref(),
+                                )
+                            });
                             view! {
-                                <Modal open=confirm title>
+                                <Modal open=confirm title=modal_title>
+                                    {move || {
+                                        confirm_captured
+                                            .get()
+                                            .and_then(|c| c.server_name)
+                                            .or_else(|| context.active_server_name())
+                                            .map(|server_name| {
+                                                view! {
+                                                    <p
+                                                        data-testid="confirm-target-server"
+                                                        class="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-200"
+                                                    >
+                                                        {tt_with(
+                                                            context,
+                                                            "PeerSwitch.confirmTargetServer",
+                                                            &[("server", &server_name)],
+                                                        )}
+                                                    </p>
+                                                }
+                                            })
+                                    }}
                                     <p class="text-slate-300 mb-5">
                                         {move || {
                                             if action == "uninstall" && purge_data.get() {
@@ -429,6 +544,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                                                 let busy_now = ops.submitting.with(|set| set.contains(&id))
                                                     || ops.jobs.with(|jobs| jobs.get(&id).is_some_and(|job| job.active));
                                                 !context.is_admin()
+                                                    || !context.can_write_area(crate::state::PeerArea::Marketplace)
                                                     || busy_now
                                                     || (action == "purge" && !can_purge_retained_data(&live_package()))
                                                     || !purge_confirmed(
@@ -438,6 +554,14 @@ pub fn MarketplaceTab() -> impl IntoView {
                                                     )
                                             }
                                             on:click=move |_| {
+                                                let valid = confirm_captured
+                                                    .get_untracked()
+                                                    .is_some_and(|saved| saved.still_matches(context));
+                                                if !valid {
+                                                    confirm.set(false);
+                                                    context.toast("PeerSwitch.staleConfirmBlocked", true);
+                                                    return;
+                                                }
                                                 let id = package_id.get_value();
                                                 let purge = requires_purge_confirmation(
                                                     action,

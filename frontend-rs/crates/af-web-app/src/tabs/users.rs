@@ -1,8 +1,8 @@
-use super::contracts::{grid_resource, use_api_typed, Records, UserRecord};
+use super::contracts::{grid_resource, use_api_typed_when, Records, UserRecord};
 use super::settings::{
-    draft_value, poll_resource, text, DraftButtons, DraftSelect, ResourceFeedback,
+    draft_value, poll_resource_when, text, DraftButtons, DraftSelect, ResourceFeedback,
 };
-use crate::state::{app, json_rows};
+use crate::state::{app, json_rows, PeerArea};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{Badge, ConfirmDialog, DataGrid, Drawer, EmptyState, ObsCard};
 use af_web_core::{api::ApiClient, draft::FormDraft, models::User};
@@ -39,6 +39,21 @@ fn last_administrator(selected: &Value, users: &[Value]) -> bool {
             <= 1
 }
 
+fn is_self_selected_user(is_remote: bool, local_user: Option<&Value>, selected: &Value) -> bool {
+    if is_remote {
+        return false;
+    }
+    let Some(local_user) = local_user else {
+        return false;
+    };
+    let same_id = !local_user["id"].is_null() && local_user["id"] == selected["id"];
+    let same_username = local_user["username"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| selected["username"].as_str() == Some(name));
+    same_id || same_username
+}
+
 #[component]
 pub fn UsersTab() -> impl IntoView {
     let context = app();
@@ -59,14 +74,20 @@ pub fn UsersTab() -> impl IntoView {
 #[component]
 fn UsersAdminContent() -> impl IntoView {
     let context = app();
-    let user_records =
-        use_api_typed::<Records<UserRecord>>(Signal::derive(|| "/api/v1/admin/users".to_string()));
+    let can_read_users = Signal::derive(move || context.can_read_area(PeerArea::Users));
+    let user_records = use_api_typed_when::<Records<UserRecord>>(
+        can_read_users,
+        Signal::derive(|| "/api/v1/admin/users".to_string()),
+    );
     let users = grid_resource(user_records);
-    poll_resource(users, 30_000);
+    poll_resource_when(users, 30_000, move || {
+        context.can_read_area_untracked(PeerArea::Users)
+    });
     let selected = RwSignal::new(Value::Null);
     let inspector = RwSignal::new(false);
     let remove = RwSignal::new(false);
     let busy = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
     let draft = RwSignal::new(FormDraft::new(json!({"role":"user"})));
     let rows = Signal::derive(move || {
         json_rows(&users.data.get())
@@ -83,14 +104,31 @@ fn UsersAdminContent() -> impl IntoView {
             .collect::<Vec<_>>()
     });
     let self_selected = Signal::derive(move || {
-        context.user.with(|user| {
-            user.as_ref().is_some_and(|user| {
-                user["id"] == selected.get()["id"] || user["username"] == selected.get()["username"]
-            })
-        })
+        let is_remote = context.is_remote();
+        let current = selected.get();
+        context
+            .user
+            .with(|user| is_self_selected_user(is_remote, user.as_ref(), &current))
     });
     let last_admin = Signal::derive(move || {
         selected.with(|user| last_administrator(user, &json_rows(&users.data.get())))
+    });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Users);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        inspector.set(false);
+        remove.set(false);
+        busy.set(false);
+        selected.set(Value::Null);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Users) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            remove.set(false);
+        }
     });
     Effect::new(move |_| {
         let id = selected.with(|value| value["id"].clone());
@@ -104,7 +142,11 @@ fn UsersAdminContent() -> impl IntoView {
         }
     });
     let save_role = Callback::new(move |()| {
-        if busy.get_untracked() || self_selected.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || self_selected.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Users)
+        {
             return;
         }
         let id = selected.with_untracked(|row| row["id"].as_i64());
@@ -120,16 +162,29 @@ fn UsersAdminContent() -> impl IntoView {
             context.toast(tt(context, "Keep at least one administrator"), true);
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let users_grant = context.area_revocation_epoch_untracked(PeerArea::Users);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .put(&format!("/api/v1/admin/users/{id}/role"), Some(&sent))
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Users) != users_grant
+                || !context.can_write_area_untracked(PeerArea::Users)
             {
+                return;
+            }
+            match result {
                 Ok(_) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     draft.update(|d| {
                         let _ = d.acknowledge_saved(&sent, sent.clone());
                     });
@@ -154,9 +209,7 @@ fn UsersAdminContent() -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     });
     let delete = Callback::new(move |()| {
@@ -164,22 +217,36 @@ fn UsersAdminContent() -> impl IntoView {
             || self_selected.get_untracked()
             || last_admin.get_untracked()
             || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Users)
         {
             return;
         }
         let Some(id) = selected.with_untracked(|row| row["id"].as_i64()) else {
             return;
         };
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let users_grant = context.area_revocation_epoch_untracked(PeerArea::Users);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .delete(&format!("/api/v1/admin/users/{id}"), None)
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Users) != users_grant
+                || !context.can_write_area_untracked(PeerArea::Users)
             {
+                return;
+            }
+            match result {
                 Ok(response) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     users.refresh();
                     remove.set(false);
                     inspector.set(false);
@@ -193,9 +260,7 @@ fn UsersAdminContent() -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     });
     view! {
@@ -212,6 +277,15 @@ fn UsersAdminContent() -> impl IntoView {
                     <h2 class="text-lg font-semibold mb-4">
                         {move || tt(context, "Tabs.usersHeading")}
                     </h2>
+                    <Show when=move || !can_read_users.get()>
+                        <p role="status" class="text-xs text-amber-300 mb-4">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Users, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <div class="flex flex-wrap justify-between gap-4 mb-5">
                         <div class="flex flex-wrap gap-3 items-center">
                             <Badge label="RBAC enforced" tone="indigo" />
@@ -229,7 +303,17 @@ fn UsersAdminContent() -> impl IntoView {
                             <button
                                 type="button"
                                 class="glass-button px-4 py-2"
-                                on:click=move |_| users.refresh()
+                                disabled=move || !can_read_users.get()
+                                title=move || {
+                                    context
+                                        .area_block_reason(PeerArea::Users, false)
+                                        .unwrap_or_default()
+                                }
+                                on:click=move |_| {
+                                    if can_read_users.get_untracked() {
+                                        users.refresh();
+                                    }
+                                }
                                 aria-label=move || tt(context, "Refresh users")
                             >
                                 {move || tt(context, "Common.refresh")}
@@ -292,12 +376,37 @@ fn UsersAdminContent() -> impl IntoView {
                         field="role"
                         label="Role"
                         options=vec![("admin", "Administrator"), ("user", "User")]
+                        disabled=Signal::derive(move || {
+                            !context.can_write_area(crate::state::PeerArea::Users)
+                        })
                     />
-                    <DraftButtons draft busy on_save=save_role label="Update role" />
+                    <DraftButtons
+                        draft
+                        busy
+                        on_save=save_role
+                        label="Update role"
+                        disabled=Signal::derive(move || {
+                            !context.can_write_area(crate::state::PeerArea::Users)
+                        })
+                        title=Signal::derive(move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Users, true)
+                                .unwrap_or_default()
+                        })
+                    />
                     <button
                         type="button"
                         class="glass-button px-4 py-2 mt-5 text-rose-300"
-                        disabled=move || busy.get() || last_admin.get()
+                        disabled=move || {
+                            busy.get()
+                                || last_admin.get()
+                                || !context.can_write_area(crate::state::PeerArea::Users)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Users, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| remove.set(true)
                     >
                         {move || tt(context, "Delete User")}
@@ -373,6 +482,52 @@ mod tests {
         assert!(!last_administrator(
             &admin,
             &[admin.clone(), json!({"id":3,"role":"admin"})]
+        ));
+    }
+
+    #[test]
+    fn self_edit_protection_compares_local_operator_only_against_local_users() {
+        let local_admin = json!({"id": 1, "username": "admin", "role": "admin"});
+        let same_id_row = json!({"id": 1, "username": "other", "role": "admin"});
+        let same_name_row = json!({"id": 9, "username": "admin", "role": "admin"});
+        let other_row = json!({"id": 2, "username": "bob", "role": "user"});
+
+        assert!(is_self_selected_user(
+            false,
+            Some(&local_admin),
+            &same_id_row
+        ));
+        assert!(is_self_selected_user(
+            false,
+            Some(&local_admin),
+            &same_name_row
+        ));
+        assert!(!is_self_selected_user(
+            false,
+            Some(&local_admin),
+            &other_row
+        ));
+        assert!(!is_self_selected_user(
+            false,
+            Some(&local_admin),
+            &Value::Null
+        ));
+
+        // Remote user rows belong to the peer's database; never match Server A's local operator.
+        assert!(!is_self_selected_user(
+            true,
+            Some(&local_admin),
+            &same_id_row
+        ));
+        assert!(!is_self_selected_user(
+            true,
+            Some(&local_admin),
+            &same_name_row
+        ));
+        assert!(!is_self_selected_user(
+            true,
+            Some(&local_admin),
+            &local_admin
         ));
     }
 }

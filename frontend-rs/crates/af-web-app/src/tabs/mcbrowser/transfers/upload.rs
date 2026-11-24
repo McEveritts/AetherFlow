@@ -14,13 +14,22 @@ impl TransferQueue {
         if !self.job_current(job) {
             return Err(error("Session ended"));
         }
-        let response = checked(
-            self.context,
-            ApiClient
-                .fetch_raw_body(&session, "HEAD", None, None, &[("Tus-Resumable", "1.0.0")])
-                .await?,
-        )
-        .await?;
+        let signal = self.request_signal(job)?;
+        let raw_response = ApiClient
+            .fetch_raw_body_with_signal(
+                &session,
+                "HEAD",
+                None,
+                None,
+                &[("Tus-Resumable", "1.0.0")],
+                Some(&signal),
+            )
+            .await;
+        job.borrow_mut().abort.take();
+        if !self.job_current(job) {
+            return Err(error("Session ended"));
+        }
+        let response = checked(self.context, raw_response?).await?;
         if !self.job_current(job) {
             return Err(error("Session ended"));
         }
@@ -67,19 +76,25 @@ impl TransferQueue {
             if self.head(job).await?.1 {
                 return Ok(Some(TransferEnd::Completed));
             }
-            checked(
-                self.context,
-                ApiClient
-                    .fetch_raw_body(
-                        &session,
-                        "DELETE",
-                        None,
-                        None,
-                        &[("Tus-Resumable", "1.0.0")],
-                    )
-                    .await?,
-            )
-            .await?;
+            let signal = self.request_signal(job)?;
+            let raw_response = ApiClient
+                .fetch_raw_body_with_signal(
+                    &session,
+                    "DELETE",
+                    None,
+                    None,
+                    &[("Tus-Resumable", "1.0.0")],
+                    Some(&signal),
+                )
+                .await;
+            job.borrow_mut().abort.take();
+            if !self.job_current(job) {
+                return Err(error("Session ended"));
+            }
+            checked(self.context, raw_response?).await?;
+            if !self.job_current(job) {
+                return Err(error("Session ended"));
+            }
             return Ok(Some(TransferEnd::Cancelled));
         }
         Ok(pause.then_some(TransferEnd::Paused))
@@ -116,11 +131,14 @@ impl TransferQueue {
                     Some(&signal),
                 )
                 .await;
+            job.borrow_mut().abort.take();
+            if !self.job_current(&job) {
+                return Err(error("Session ended"));
+            }
             let result = match result {
                 Ok(response) => response_value(self.context, response).await,
                 Err(failure) => Err(failure),
             };
-            job.borrow_mut().abort.take();
             if !self.job_current(&job) {
                 return Err(error("Session ended"));
             }
@@ -142,20 +160,42 @@ impl TransferQueue {
         }
         if job.borrow().fingerprint.is_empty() {
             let fp = fingerprint(&file, size, &conflict).await?;
+            if !self.job_current(&job) {
+                return Err(error("Session ended"));
+            }
             job.borrow_mut().fingerprint = fp;
         }
         if let Some(end) = self.stop(&job).await? {
             return Ok(end);
         }
         if job.borrow().session.is_empty() {
-            let fp = job.borrow().fingerprint.clone();
-            let sessions = ApiClient
-                .get(&format!(
-                    "{BASE}/uploads?path={}&length={size}&fingerprint={}",
-                    encode(&path),
-                    encode(&fp)
-                ))
-                .await?;
+            let (fp, server_id) = {
+                let j = job.borrow();
+                (j.fingerprint.clone(), j.server_id.clone())
+            };
+            let signal = self.request_signal(&job)?;
+            let discovery = ApiClient
+                .fetch_raw_body_with_signal(
+                    &format!(
+                        "{BASE}/uploads?path={}&length={size}&fingerprint={}",
+                        encode(&path),
+                        encode(&fp)
+                    ),
+                    "GET",
+                    None,
+                    None,
+                    &[],
+                    Some(&signal),
+                )
+                .await;
+            job.borrow_mut().abort.take();
+            if !self.job_current(&job) {
+                return Err(error("Session ended"));
+            }
+            let (sessions, _) = response_value(self.context, discovery?).await?;
+            if !self.job_current(&job) {
+                return Err(error("Session ended"));
+            }
             let uploads = crate::tabs::contracts::rows::<crate::tabs::contracts::TusUploadLookup>(
                 &sessions["uploads"],
             );
@@ -170,12 +210,14 @@ impl TransferQueue {
                         "uploading" | "completed" | "publishing"
                     )
             }) {
-                let session = upload_location(&format!("{BASE}/uploads/{}", existing.upload_id))?;
+                let candidate = af_web_core::api::api_url_for_server(
+                    server_id.as_deref(),
+                    &format!("{BASE}/uploads/{}", existing.upload_id),
+                );
+                let session = upload_location(&candidate, server_id.as_deref())?;
                 job.borrow_mut().session = session;
             } else {
-                if !self.job_current(&job) {
-                    return Err(error("Session ended"));
-                }
+                let signal = self.request_signal(&job)?;
                 let metadata = format!(
                     "path {},fingerprint {},conflict {}",
                     base64(path.as_bytes()),
@@ -183,27 +225,32 @@ impl TransferQueue {
                     base64(conflict.as_bytes())
                 );
                 let length = size.to_string();
-                let response = checked(
-                    self.context,
-                    ApiClient
-                        .fetch_raw_body(
-                            &format!("{BASE}/uploads"),
-                            "POST",
-                            None,
-                            None,
-                            &[
-                                ("Tus-Resumable", "1.0.0"),
-                                ("Upload-Length", &length),
-                                ("Upload-Metadata", &metadata),
-                                ("X-Upload-Conflict", &conflict),
-                            ],
-                        )
-                        .await?,
-                )
-                .await?;
+                let creation = ApiClient
+                    .fetch_raw_body_with_signal(
+                        &format!("{BASE}/uploads"),
+                        "POST",
+                        None,
+                        None,
+                        &[
+                            ("Tus-Resumable", "1.0.0"),
+                            ("Upload-Length", &length),
+                            ("Upload-Metadata", &metadata),
+                            ("X-Upload-Conflict", &conflict),
+                        ],
+                        Some(&signal),
+                    )
+                    .await;
+                job.borrow_mut().abort.take();
+                if !self.job_current(&job) {
+                    return Err(error("Session ended"));
+                }
+                let response = checked(self.context, creation?).await?;
+                if !self.job_current(&job) {
+                    return Err(error("Session ended"));
+                }
                 let location = response.headers().get("Location").map_err(js_error)?
                     .ok_or_else(|| error("Upload creation returned no session URL; reselect to discover its state"))?;
-                job.borrow_mut().session = upload_location(&location)?;
+                job.borrow_mut().session = upload_location(&location, server_id.as_deref())?;
             }
         }
         let (mut offset, completed) = self.head(&job).await?;
@@ -251,6 +298,10 @@ impl TransferQueue {
                     Some(&signal),
                 )
                 .await;
+            job.borrow_mut().abort.take();
+            if !self.job_current(&job) {
+                return Err(error("Session ended"));
+            }
             let result = match result {
                 Ok(response) if response.ok() => {
                     // PATCH success is metadata-only; release its unread body
@@ -263,7 +314,6 @@ impl TransferQueue {
                     .unwrap_or_else(|| error("Upload failed"))),
                 Err(failure) => Err(failure),
             };
-            job.borrow_mut().abort.take();
             if !self.job_current(&job) {
                 return Err(error("Session ended"));
             }
@@ -307,6 +357,9 @@ impl TransferQueue {
                     }
                     if offset == previous {
                         gloo_timers::future::TimeoutFuture::new(200 * (1 << (retries - 1))).await;
+                        if !self.job_current(&job) {
+                            return Err(error("Session ended"));
+                        }
                     }
                 }
             }

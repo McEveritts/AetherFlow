@@ -1,7 +1,17 @@
 mod preferences;
 mod resources;
+pub mod server;
 mod session;
 mod tabs;
+
+use crate::tabs::cluster::peers::{AccessLevel, PeerLinkView, PeersSnapshot};
+pub use server::{
+    evaluate_active_peer_health, is_valid_public_remote_host, normalize_server_selection,
+    peer_compatibility_supports_management, peer_has_capability, peer_switch_eligibility,
+    server_accent, ActivePeerHealth, PeerArea, ServerAccent,
+};
+use server::{peer_area_read_mask, peer_snapshot_allows_area_read, ServerStateSnapshot};
+use std::collections::BTreeMap;
 
 pub(crate) use preferences::hydrate_preferences_with;
 #[allow(unused_imports)]
@@ -19,7 +29,8 @@ use preferences::{
 #[allow(unused_imports)]
 pub(crate) use resources::ResourceReadJob;
 pub use resources::{
-    json_rows, use_api, use_api_typed, use_typed_api, ApiResource, TypedApiResource,
+    json_rows, use_api, use_api_typed, use_api_typed_when, use_api_when, use_typed_api,
+    ApiResource, TypedApiResource,
 };
 pub(crate) use resources::{owned_resource_reads, run_resource_read, ResourceReads};
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -53,13 +64,29 @@ pub struct Toast {
 #[derive(Clone, Copy)]
 pub(crate) struct ServicesRequest {
     epoch: u64,
+    server_epoch: u64,
+    grant_epoch: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SettingsRequest {
+    epoch: u64,
+    server_epoch: u64,
+    grant_epoch: u64,
     generation: u64,
 }
 
 #[derive(Clone, Copy, Default)]
-struct ServicesOrder {
+struct RequestOrder {
     issued: u64,
     accepted: u64,
+}
+
+fn user_role_changed(prev: Option<&Value>, next: &Value) -> bool {
+    let prev_role = prev.and_then(deserialize_user).map(|user| user.role);
+    let next_role = deserialize_user(next).map(|user| user.role);
+    prev_role.is_some() && prev_role != next_role
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +105,16 @@ pub struct AppContext {
     pub auth_loading: RwSignal<bool>,
     auth_generation: RwSignal<u64>,
     pub session_epoch: RwSignal<u64>,
+    pub server_epoch: RwSignal<u64>,
+    pub active_server_id: RwSignal<Option<String>>,
+    pub peers_snapshot: RwSignal<Option<PeersSnapshot>>,
+    active_peer_last: RwSignal<Option<PeerLinkView>>,
+    server_cache: RwSignal<BTreeMap<Option<String>, ServerStateSnapshot>>,
+    active_read_mask: RwSignal<u8>,
+    area_access: [RwSignal<AccessLevel>; 8],
+    area_read: [RwSignal<bool>; 8],
+    area_write: [RwSignal<bool>; 8],
+    area_revocation_epochs: [RwSignal<u64>; 8],
     pub authenticated_at: RwSignal<f64>,
     pub tab: RwSignal<TabId>,
     pub pending_subtab: RwSignal<Option<(TabId, String)>>,
@@ -99,9 +136,10 @@ pub struct AppContext {
     pub grain_display: RwSignal<bool>,
     pub card_lift: RwSignal<i8>,
     pub settings: RwSignal<Value>,
+    settings_order: RwSignal<RequestOrder>,
     pub metrics: RwSignal<Value>,
     pub services: RwSignal<Value>,
-    services_order: RwSignal<ServicesOrder>,
+    services_order: RwSignal<RequestOrder>,
     pub(crate) live_samples: RwSignal<Vec<crate::tabs::overview::Sample>>,
     pub connection: RwSignal<ConnectionState>,
     pub pending: RwSignal<usize>,
@@ -141,6 +179,16 @@ impl AppContext {
             auth_loading: RwSignal::new(true),
             auth_generation: RwSignal::new(0),
             session_epoch: RwSignal::new(0),
+            server_epoch: RwSignal::new(0),
+            active_server_id: RwSignal::new(None),
+            peers_snapshot: RwSignal::new(None),
+            active_peer_last: RwSignal::new(None),
+            server_cache: RwSignal::new(BTreeMap::new()),
+            active_read_mask: RwSignal::new(u8::MAX),
+            area_access: std::array::from_fn(|_| RwSignal::new(AccessLevel::Write)),
+            area_read: std::array::from_fn(|_| RwSignal::new(true)),
+            area_write: std::array::from_fn(|_| RwSignal::new(true)),
+            area_revocation_epochs: std::array::from_fn(|_| RwSignal::new(0u64)),
             authenticated_at: RwSignal::new(0.0),
             tab: RwSignal::new(tab),
             pending_subtab: RwSignal::new(None),
@@ -162,9 +210,10 @@ impl AppContext {
             grain_display: RwSignal::new(hydrated.grain_display),
             card_lift: RwSignal::new(hydrated.card_lift),
             settings: RwSignal::new(Value::Null),
+            settings_order: RwSignal::new(RequestOrder::default()),
             metrics: RwSignal::new(Value::Null),
             services: RwSignal::new(Value::Null),
-            services_order: RwSignal::new(ServicesOrder::default()),
+            services_order: RwSignal::new(RequestOrder::default()),
             live_samples: RwSignal::new(vec![]),
             connection: RwSignal::new(ConnectionState::Connecting),
             pending: RwSignal::new(0),
@@ -187,6 +236,513 @@ impl AppContext {
     }
     pub fn is_admin(self) -> bool {
         self.typed_user().is_some_and(|user| user.role == "admin")
+    }
+    pub fn is_admin_untracked(self) -> bool {
+        self.user.with_untracked(|user| {
+            user.as_ref()
+                .and_then(deserialize_user)
+                .is_some_and(|u| u.role == "admin")
+        })
+    }
+    pub fn is_remote(self) -> bool {
+        self.active_server_id.with(Option::is_some)
+    }
+    pub fn is_remote_untracked(self) -> bool {
+        self.active_server_id.with_untracked(Option::is_some)
+    }
+    pub fn api_url(self, path: &str) -> String {
+        self.active_server_id.track();
+        self.server_epoch.track();
+        af_web_core::api::api_url(path)
+    }
+    fn current_read_mask_untracked(self) -> u8 {
+        let is_admin = self.is_admin_untracked();
+        let active_id = self.active_server_id.get_untracked();
+        self.peers_snapshot.with_untracked(|snap| {
+            self.active_peer_last.with_untracked(|cached| {
+                peer_area_read_mask(
+                    is_admin,
+                    active_id.as_deref(),
+                    snap.as_ref(),
+                    cached.as_ref(),
+                )
+            })
+        })
+    }
+    pub fn area_revocation_epoch(self, area: PeerArea) -> u64 {
+        self.area_revocation_epochs[area.index()].get()
+    }
+    pub fn area_revocation_epoch_untracked(self, area: PeerArea) -> u64 {
+        self.area_revocation_epochs[area.index()]
+            .try_get_untracked()
+            .unwrap_or(0)
+    }
+    pub fn areas_revocation_epoch(self, areas: &[PeerArea]) -> u64 {
+        areas.iter().fold(0u64, |acc, &area| {
+            acc.wrapping_add(self.area_revocation_epoch(area))
+        })
+    }
+    pub fn areas_revocation_epoch_untracked(self, areas: &[PeerArea]) -> u64 {
+        areas.iter().fold(0u64, |acc, &area| {
+            acc.wrapping_add(self.area_revocation_epoch_untracked(area))
+        })
+    }
+    fn compute_peer_access_untracked(self, area: PeerArea) -> AccessLevel {
+        let Some(id) = self.active_server_id.get_untracked() else {
+            return AccessLevel::Write;
+        };
+        if !self.is_admin_untracked() {
+            return AccessLevel::None;
+        }
+        let health = self.peers_snapshot.with_untracked(|snap| {
+            self.active_peer_last.with_untracked(|cached| {
+                evaluate_active_peer_health(&id, snap.as_ref(), cached.as_ref())
+            })
+        });
+        if !health.allows_management() {
+            return AccessLevel::None;
+        }
+        self.active_peer_untracked()
+            .and_then(|peer| peer.grants.outbound)
+            .map(|grant| area.level(&grant.access))
+            .unwrap_or(AccessLevel::None)
+    }
+    /// Keep per-area reactive signals strictly synchronized without notifying
+    /// subscribers on unchanged peer polls or unrelated grant transitions.
+    fn sync_active_area_signals(self) {
+        for area in PeerArea::ALL {
+            let idx = area.index();
+            let next_level = self.compute_peer_access_untracked(area);
+            if self.area_access[idx].get_untracked() != next_level {
+                self.area_access[idx].set(next_level);
+            }
+            let next_read = next_level.allows_read();
+            if self.area_read[idx].get_untracked() != next_read {
+                self.area_read[idx].set(next_read);
+            }
+            let next_write = next_level.allows_write();
+            if self.area_write[idx].get_untracked() != next_write {
+                self.area_write[idx].set(next_write);
+            }
+        }
+    }
+    fn sync_active_read_mask(self) {
+        let prev_mask = self.active_read_mask.get_untracked();
+        let next_mask = self.current_read_mask_untracked();
+        self.active_read_mask.set(next_mask);
+        let lost_mask = prev_mask & !next_mask;
+        for area in PeerArea::ALL {
+            if (lost_mask & (1 << area.index())) != 0 {
+                self.area_revocation_epochs[area.index()]
+                    .update(|epoch| *epoch = epoch.wrapping_add(1));
+            }
+        }
+        let lost_settings = (lost_mask & (1 << PeerArea::Settings.index())) != 0;
+        let unauthorized_settings =
+            self.is_remote_untracked() && !self.can_read_area_untracked(PeerArea::Settings);
+        if lost_settings || (unauthorized_settings && !self.settings.with_untracked(Value::is_null))
+        {
+            self.settings_order.update(|order| {
+                order.issued += 1;
+                order.accepted = order.issued;
+            });
+            self.settings.set(Value::Null);
+        }
+        let lost_services = (lost_mask & (1 << PeerArea::Services.index())) != 0;
+        let unauthorized_services =
+            self.is_remote_untracked() && !self.can_read_area_untracked(PeerArea::Services);
+        if lost_services
+            || (unauthorized_services
+                && (!self.services.with_untracked(Value::is_null)
+                    || self.pending.get_untracked() != 0))
+        {
+            self.services_order.update(|order| {
+                order.issued += 1;
+                order.accepted = order.issued;
+            });
+            self.services.set(Value::Null);
+            self.pending.set(0);
+        }
+        self.sync_active_area_signals();
+    }
+    pub fn apply_peers_snapshot(self, snapshot: PeersSnapshot) {
+        if let Some(active_id) = self.active_server_id.get_untracked() {
+            if let Some(found) = snapshot.peers.iter().find(|p| p.id == active_id).cloned() {
+                self.active_peer_last.set(Some(found));
+            }
+        }
+        self.server_cache.update(|cache| {
+            for (server_key, entry) in cache.iter_mut() {
+                let Some(peer_id) = server_key.as_deref() else {
+                    continue;
+                };
+                if !peer_snapshot_allows_area_read(peer_id, &snapshot, PeerArea::Settings) {
+                    entry.settings = Value::Null;
+                }
+                if !peer_snapshot_allows_area_read(peer_id, &snapshot, PeerArea::Services) {
+                    entry.services = Value::Null;
+                    entry.pending = 0;
+                }
+            }
+        });
+        self.peers_snapshot.set(Some(snapshot));
+        self.sync_active_read_mask();
+    }
+    pub fn refresh_peers_snapshot(self) {
+        if !self.is_admin() {
+            return;
+        }
+        let epoch = self.session_epoch.get_untracked();
+        spawn_local(async move {
+            if let Ok(snapshot) = ApiClient
+                .get_typed::<PeersSnapshot>("/api/v1/admin/peers")
+                .await
+            {
+                if self.session_epoch.try_get_untracked() == Some(epoch) {
+                    self.apply_peers_snapshot(snapshot);
+                }
+            }
+        });
+    }
+    pub fn active_peer(self) -> Option<PeerLinkView> {
+        let id = self.active_server_id.get()?;
+        self.peers_snapshot
+            .with(|snap| {
+                snap.as_ref()
+                    .and_then(|s| s.peers.iter().find(|p| p.id == id).cloned())
+            })
+            .or_else(|| {
+                self.active_peer_last
+                    .with(|cached| cached.as_ref().filter(|p| p.id == id).cloned())
+            })
+    }
+    pub fn active_peer_untracked(self) -> Option<PeerLinkView> {
+        let id = self.active_server_id.get_untracked()?;
+        self.peers_snapshot
+            .with_untracked(|snap| {
+                snap.as_ref()
+                    .and_then(|s| s.peers.iter().find(|p| p.id == id).cloned())
+            })
+            .or_else(|| {
+                self.active_peer_last
+                    .with_untracked(|cached| cached.as_ref().filter(|p| p.id == id).cloned())
+            })
+    }
+    pub fn active_server_name(self) -> Option<String> {
+        let id = self.active_server_id.get()?;
+        let name = self.active_peer().map(|peer| peer.name).unwrap_or(id);
+        Some(name)
+    }
+    pub fn active_server_name_untracked(self) -> Option<String> {
+        let id = self.active_server_id.get_untracked()?;
+        let name = self
+            .active_peer_untracked()
+            .map(|peer| peer.name)
+            .unwrap_or(id);
+        Some(name)
+    }
+    pub fn active_server_accent(self) -> Option<ServerAccent> {
+        self.active_server_id
+            .with(|id| id.as_deref().map(server_accent))
+    }
+    pub fn active_peer_health(self) -> Option<ActivePeerHealth> {
+        let id = self.active_server_id.get()?;
+        Some(self.peers_snapshot.with(|snap| {
+            self.active_peer_last
+                .with(|cached| evaluate_active_peer_health(&id, snap.as_ref(), cached.as_ref()))
+        }))
+    }
+    pub fn eligible_peers(self) -> Vec<PeerLinkView> {
+        if !self.is_admin() {
+            return Vec::new();
+        }
+        self.peers_snapshot.with(|snap| {
+            snap.as_ref()
+                .map(|s| {
+                    s.peers
+                        .iter()
+                        .filter(|peer| peer_switch_eligibility(peer).is_ok())
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+    pub fn peer_access(self, area: PeerArea) -> AccessLevel {
+        self.area_access[area.index()].get()
+    }
+    pub fn can_read_area(self, area: PeerArea) -> bool {
+        self.area_read[area.index()].get()
+    }
+    pub fn can_read_area_untracked(self, area: PeerArea) -> bool {
+        self.compute_peer_access_untracked(area).allows_read()
+    }
+    pub fn can_write_area(self, area: PeerArea) -> bool {
+        self.area_write[area.index()].get()
+    }
+    pub fn can_write_area_untracked(self, area: PeerArea) -> bool {
+        self.compute_peer_access_untracked(area).allows_write()
+    }
+    pub fn can_all_areas(self, reqs: &[(PeerArea, bool)]) -> bool {
+        if !self.is_remote() {
+            return true;
+        }
+        reqs.iter().all(|&(area, write)| {
+            if write {
+                self.can_write_area(area)
+            } else {
+                self.can_read_area(area)
+            }
+        })
+    }
+    pub fn can_all_areas_untracked(self, reqs: &[(PeerArea, bool)]) -> bool {
+        if !self.is_remote_untracked() {
+            return true;
+        }
+        reqs.iter().all(|&(area, write)| {
+            if write {
+                self.can_write_area_untracked(area)
+            } else {
+                self.can_read_area_untracked(area)
+            }
+        })
+    }
+    pub fn active_peer_allows_management(self) -> bool {
+        if !self.is_remote() {
+            return true;
+        }
+        self.active_peer_health()
+            .is_some_and(ActivePeerHealth::allows_management)
+    }
+    pub fn active_peer_allows_management_untracked(self) -> bool {
+        let Some(id) = self.active_server_id.get_untracked() else {
+            return true;
+        };
+        if !self.is_admin_untracked() {
+            return false;
+        }
+        self.peers_snapshot.with_untracked(|snap| {
+            self.active_peer_last.with_untracked(|cached| {
+                evaluate_active_peer_health(&id, snap.as_ref(), cached.as_ref()).allows_management()
+            })
+        })
+    }
+    pub fn has_peer_capability(self, capability: &str) -> bool {
+        let Some(peer) = self.active_peer() else {
+            return !self.is_remote();
+        };
+        peer_has_capability(&peer, capability)
+    }
+    pub fn area_block_reason(self, area: PeerArea, write: bool) -> Option<String> {
+        let server_name = self.active_server_name()?;
+        match self.active_peer_health()? {
+            ActivePeerHealth::Unreachable => Some(self.t_with(
+                "PeerSwitch.peerUnreachableReason",
+                &[("server", &server_name)],
+            )),
+            ActivePeerHealth::Revoked => {
+                Some(self.t_with("PeerSwitch.peerRevokedReason", &[("server", &server_name)]))
+            }
+            ActivePeerHealth::Incompatible => Some(self.t_with(
+                "PeerSwitch.peerIncompatibleReason",
+                &[("server", &server_name)],
+            )),
+            ActivePeerHealth::NoGrant => {
+                Some(self.t_with("PeerSwitch.noGrantReason", &[("server", &server_name)]))
+            }
+            ActivePeerHealth::Healthy | ActivePeerHealth::Limited => {
+                let level = self.peer_access(area);
+                let allowed = if write {
+                    level.allows_write()
+                } else {
+                    level.allows_read()
+                };
+                if allowed {
+                    return None;
+                }
+                let area_label = self.t(area.label_key());
+                if write && level.allows_read() {
+                    Some(self.t_with(
+                        "PeerSwitch.readOnlyAreaReason",
+                        &[("area", &area_label), ("server", &server_name)],
+                    ))
+                } else {
+                    Some(self.t_with(
+                        "PeerSwitch.noAreaAccessReason",
+                        &[("area", &area_label), ("server", &server_name)],
+                    ))
+                }
+            }
+        }
+    }
+    pub fn areas_block_reason(self, reqs: &[(PeerArea, bool)]) -> Option<String> {
+        let server_name = self.active_server_name()?;
+        match self.active_peer_health()? {
+            ActivePeerHealth::Unreachable => {
+                return Some(self.t_with(
+                    "PeerSwitch.peerUnreachableReason",
+                    &[("server", &server_name)],
+                ))
+            }
+            ActivePeerHealth::Revoked => {
+                return Some(
+                    self.t_with("PeerSwitch.peerRevokedReason", &[("server", &server_name)]),
+                )
+            }
+            ActivePeerHealth::Incompatible => {
+                return Some(self.t_with(
+                    "PeerSwitch.peerIncompatibleReason",
+                    &[("server", &server_name)],
+                ))
+            }
+            ActivePeerHealth::NoGrant => {
+                return Some(self.t_with("PeerSwitch.noGrantReason", &[("server", &server_name)]))
+            }
+            ActivePeerHealth::Healthy | ActivePeerHealth::Limited => {}
+        }
+        let missing: Vec<String> = reqs
+            .iter()
+            .filter_map(|&(area, write)| {
+                let level = self.peer_access(area);
+                let ok = if write {
+                    level.allows_write()
+                } else {
+                    level.allows_read()
+                };
+                if ok {
+                    return None;
+                }
+                let area_label = self.t(area.label_key());
+                Some(self.t_with(
+                    if write {
+                        "PeerSwitch.areaWriteRequired"
+                    } else {
+                        "PeerSwitch.areaReadRequired"
+                    },
+                    &[("area", &area_label)],
+                ))
+            })
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        if missing.len() == 1 && reqs.len() == 1 {
+            return self.area_block_reason(reqs[0].0, reqs[0].1);
+        }
+        let joined = missing.join(", ");
+        Some(self.t_with(
+            "PeerSwitch.missingMultiAreaReason",
+            &[("requirements", &joined), ("server", &server_name)],
+        ))
+    }
+    pub fn capability_block_reason(self, capability: &str) -> Option<String> {
+        if self.has_peer_capability(capability) {
+            return None;
+        }
+        let server_name = self.active_server_name()?;
+        Some(self.t_with(
+            "PeerSwitch.capabilityUpdateHint",
+            &[("server", &server_name)],
+        ))
+    }
+    pub fn select_server(self, target: Option<String>) -> bool {
+        let is_admin = self.user.with_untracked(|user| {
+            user.as_ref()
+                .and_then(deserialize_user)
+                .is_some_and(|u| u.role == "admin")
+        });
+        let normalized = if is_admin {
+            normalize_server_selection(target)
+        } else {
+            None
+        };
+        let current = self.active_server_id.get_untracked();
+        if current == normalized {
+            return true;
+        }
+        let next_peer = if let Some(ref peer_id) = normalized {
+            let found = self.peers_snapshot.with_untracked(|snap| {
+                snap.as_ref()
+                    .and_then(|s| s.peers.iter().find(|p| &p.id == peer_id).cloned())
+            });
+            let Some(peer) = found else {
+                self.toast("PeerSwitch.peerUnavailable", true);
+                return false;
+            };
+            if let Err(reason_key) = peer_switch_eligibility(&peer) {
+                self.toast(reason_key, true);
+                return false;
+            }
+            Some(peer)
+        } else {
+            None
+        };
+        let save_settings =
+            if current.is_some() && !self.can_read_area_untracked(PeerArea::Settings) {
+                Value::Null
+            } else {
+                self.settings.get_untracked()
+            };
+        let (save_services, save_pending) =
+            if current.is_some() && !self.can_read_area_untracked(PeerArea::Services) {
+                (Value::Null, 0)
+            } else {
+                (self.services.get_untracked(), self.pending.get_untracked())
+            };
+        let snapshot = ServerStateSnapshot {
+            settings: save_settings,
+            metrics: self.metrics.get_untracked(),
+            services: save_services,
+            live_samples: self.live_samples.get_untracked(),
+            pending: save_pending,
+            notifications: self.notifications.get_untracked(),
+            banners: self.banners.get_untracked(),
+        };
+        self.server_cache.update(|cache| {
+            cache.insert(current, snapshot);
+        });
+        let mut restored = self
+            .server_cache
+            .with_untracked(|cache| cache.get(&normalized).cloned())
+            .unwrap_or_default();
+        if normalized.is_some() {
+            // Remote peers must always revalidate Settings, Services, and pending actions
+            // after fresh authorized reads so stale origins or revoked access never flash.
+            restored.settings = Value::Null;
+            restored.services = Value::Null;
+            restored.pending = 0;
+        }
+        af_web_core::api::set_active_server(normalized.clone());
+        self.active_peer_last.set(next_peer);
+        self.active_server_id.set(normalized);
+        self.active_read_mask
+            .set(self.current_read_mask_untracked());
+        self.sync_active_area_signals();
+        self.server_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        self.settings_order.update(|order| {
+            order.issued += 1;
+            order.accepted = order.issued;
+        });
+        self.services_order.update(|order| {
+            order.issued += 1;
+            order.accepted = order.issued;
+        });
+        self.settings.set(restored.settings);
+        self.metrics.set(restored.metrics);
+        self.services.set(restored.services);
+        self.live_samples.set(restored.live_samples);
+        self.pending.set(restored.pending);
+        self.notifications.set(restored.notifications);
+        self.banners.set(restored.banners);
+        self.transfers.set(vec![]);
+        self.connection.set(ConnectionState::Connecting);
+        self.notifications_open.set(false);
+        self.command_open.set(false);
+        true
+    }
+    pub fn exit_to_local_server(self) {
+        let _ = self.select_server(None);
     }
     pub fn t(self, key: &str) -> String {
         self.catalog_revision.get();
@@ -236,17 +792,65 @@ impl AppContext {
     pub fn typed_metrics(self) -> af_web_core::models::SystemMetrics {
         self.metrics.with(deserialize_metrics)
     }
+    /// All HTTP Settings readers and writers share a monotonic generation fenced
+    /// across session, server, and Settings grant transitions. Fresh authorized GETs
+    /// replace stale snapshots without overwriting a newer explicit Settings save.
+    pub(crate) fn begin_settings_request(self) -> SettingsRequest {
+        self.settings_order.update(|order| order.issued += 1);
+        SettingsRequest {
+            epoch: self.session_epoch.get_untracked(),
+            server_epoch: self.server_epoch.get_untracked(),
+            grant_epoch: self.area_revocation_epoch_untracked(PeerArea::Settings),
+            generation: self.settings_order.get_untracked().issued,
+        }
+    }
+    pub(crate) fn finish_settings_request(self, request: SettingsRequest, value: Value) -> bool {
+        if self.session_epoch.try_get_untracked() != Some(request.epoch)
+            || self.server_epoch.try_get_untracked() != Some(request.server_epoch)
+            || self.area_revocation_epoch_untracked(PeerArea::Settings) != request.grant_epoch
+            || !self.can_read_area_untracked(PeerArea::Settings)
+            || self
+                .settings_order
+                .try_get_untracked()
+                .is_none_or(|order| order.accepted > request.generation)
+            || self.user.try_get_untracked().flatten().is_none()
+        {
+            return false;
+        }
+        self.settings_order
+            .update(|order| order.accepted = request.generation);
+        self.settings.set(value);
+        true
+    }
+    pub(crate) fn publish_settings_save(self, value: Value) -> bool {
+        if self.user.try_get_untracked().flatten().is_none()
+            || !self.can_read_area_untracked(PeerArea::Settings)
+        {
+            return false;
+        }
+        self.settings_order.update(|order| {
+            order.issued += 1;
+            order.accepted = order.issued;
+        });
+        self.settings.set(value);
+        true
+    }
     /// All HTTP service writers share an ordering with live telemetry. A newer
-    /// accepted snapshot or account reset invalidates an older HTTP snapshot.
+    /// accepted snapshot, grant revocation, or account reset invalidates an older snapshot.
     pub(crate) fn begin_services_request(self) -> ServicesRequest {
         self.services_order.update(|order| order.issued += 1);
         ServicesRequest {
             epoch: self.session_epoch.get_untracked(),
+            server_epoch: self.server_epoch.get_untracked(),
+            grant_epoch: self.area_revocation_epoch_untracked(PeerArea::Services),
             generation: self.services_order.get_untracked().issued,
         }
     }
     pub(crate) fn finish_services_request(self, request: ServicesRequest, value: Value) -> bool {
         if self.session_epoch.try_get_untracked() != Some(request.epoch)
+            || self.server_epoch.try_get_untracked() != Some(request.server_epoch)
+            || self.area_revocation_epoch_untracked(PeerArea::Services) != request.grant_epoch
+            || !self.can_read_area_untracked(PeerArea::Services)
             || self
                 .services_order
                 .try_get_untracked()
@@ -267,6 +871,11 @@ impl AppContext {
     }
 
     pub(crate) fn publish_live_services(self, value: Value) {
+        if !self.can_read_area_untracked(PeerArea::Services)
+            || self.user.try_get_untracked().flatten().is_none()
+        {
+            return;
+        }
         self.services_order.update(|order| {
             order.issued += 1;
             order.accepted = order.issued;
@@ -575,27 +1184,32 @@ impl AppContext {
         false
     }
     pub fn replace_tab_url(self, tab: TabId) {
-        if self.normalize_fallback_url(tab) {
-            return;
-        }
-        if let Some(window) =
-            web_sys::window().filter(|w| w.location().pathname().ok().as_deref() == Some("/"))
+        #[cfg(target_arch = "wasm32")]
         {
-            if let Ok(url) = web_sys::Url::new(&window.location().href().unwrap_or_default()) {
-                if tab == TabId::Overview {
-                    url.search_params().delete("tab");
-                } else {
-                    url.search_params().set("tab", tab.key());
-                }
-                if let Ok(history) = window.history() {
-                    let _ = history.replace_state_with_url(
-                        &wasm_bindgen::JsValue::NULL,
-                        "",
-                        Some(&format!("{}{}{}", url.pathname(), url.search(), url.hash())),
-                    );
+            if self.normalize_fallback_url(tab) {
+                return;
+            }
+            if let Some(window) =
+                web_sys::window().filter(|w| w.location().pathname().ok().as_deref() == Some("/"))
+            {
+                if let Ok(url) = web_sys::Url::new(&window.location().href().unwrap_or_default()) {
+                    if tab == TabId::Overview {
+                        url.search_params().delete("tab");
+                    } else {
+                        url.search_params().set("tab", tab.key());
+                    }
+                    if let Ok(history) = window.history() {
+                        let _ = history.replace_state_with_url(
+                            &wasm_bindgen::JsValue::NULL,
+                            "",
+                            Some(&format!("{}{}{}", url.pathname(), url.search(), url.hash())),
+                        );
+                    }
                 }
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = tab;
     }
     pub fn toast(self, message: impl Into<String>, error: bool) {
         self.toast_with(message, &[], error);
@@ -618,12 +1232,15 @@ impl AppContext {
                 toasts.remove(0);
             }
         });
+        #[cfg(target_arch = "wasm32")]
         spawn_local(async move {
             gloo_timers::future::TimeoutFuture::new(6000).await;
             if self.toasts.try_get_untracked().is_some() {
                 self.toasts.update(|toasts| toasts.retain(|t| t.id != id));
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = id;
     }
     pub fn render_toast(&self, toast: &Toast) -> String {
         if toast.params.is_empty() {
@@ -636,6 +1253,60 @@ impl AppContext {
                 .collect::<Vec<_>>();
             self.t_with(&toast.message, &borrowed)
         }
+    }
+    pub(crate) fn apply_authenticated_user(self, next_user: Value, revalidating: bool) -> bool {
+        let prev_user = self.user.get_untracked();
+        let same_identity = same_authenticated_identity(prev_user.as_ref(), Some(&next_user));
+        let role_changed = same_identity && user_role_changed(prev_user.as_ref(), &next_user);
+        let is_admin = deserialize_user(&next_user).is_some_and(|user| user.role == "admin");
+        let mut bump_session_epoch = false;
+
+        if !revalidating && !same_identity {
+            if prev_user.is_some() {
+                self.reset_account_scoped_state();
+            } else if self.session_epoch.get_untracked() > 0 {
+                af_web_core::api::bump_auth_epoch_and_abort();
+            }
+            if prev_user.is_some() || self.session_epoch.get_untracked() > 0 {
+                bump_session_epoch = true;
+            }
+        } else if !revalidating && role_changed {
+            // Same authenticated user changed effective role: reset role-scoped caches,
+            // peer selection/snapshot, and mounted shell state without ending the session.
+            self.reset_role_scoped_state();
+            bump_session_epoch = true;
+        }
+
+        if !is_admin {
+            let was_remote = self.active_server_id.get_untracked().is_some();
+            if was_remote && !role_changed {
+                af_web_core::api::bump_server_epoch_and_abort();
+                self.clear_server_projections();
+            } else {
+                af_web_core::api::set_active_server(None);
+                self.active_server_id.set(None);
+                self.active_peer_last.set(None);
+                self.peers_snapshot.set(None);
+                self.server_cache.set(BTreeMap::new());
+                self.active_read_mask.set(u8::MAX);
+                self.sync_active_area_signals();
+            }
+        }
+
+        let tab = self.tab.get_untracked();
+        let clamped = clamp_tab_for_role(tab, is_admin);
+        if tab != clamped {
+            self.tab.set(clamped);
+            self.replace_tab_url(clamped);
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.authenticated_at.set(js_sys::Date::now());
+        self.user.set(Some(next_user));
+        self.sync_active_area_signals();
+        if bump_session_epoch {
+            self.session_epoch.update(|epoch| *epoch += 1);
+        }
+        bump_session_epoch
     }
     pub fn refresh_session(self) {
         self.auth_generation.update(|g| *g += 1);
@@ -674,28 +1345,7 @@ impl AppContext {
             match result {
                 Ok(next_user) => {
                     let revalidating = af_web_core::api::auth_revalidation_pending();
-                    if !revalidating
-                        && !same_authenticated_identity(prev_user.as_ref(), Some(&next_user))
-                    {
-                        if prev_user.is_some() {
-                            self.reset_account_scoped_state();
-                        } else if self.session_epoch.get_untracked() > 0 {
-                            af_web_core::api::bump_auth_epoch_and_abort();
-                        }
-                        if prev_user.is_some() || self.session_epoch.get_untracked() > 0 {
-                            self.session_epoch.update(|epoch| *epoch += 1);
-                        }
-                    }
-                    let tab = self.tab.get_untracked();
-                    let is_admin =
-                        deserialize_user(&next_user).is_some_and(|user| user.role == "admin");
-                    let clamped = clamp_tab_for_role(tab, is_admin);
-                    if tab != clamped {
-                        self.tab.set(clamped);
-                        self.replace_tab_url(clamped);
-                    }
-                    self.authenticated_at.set(js_sys::Date::now());
-                    self.user.set(Some(next_user));
+                    self.apply_authenticated_user(next_user, revalidating);
                     if revalidating
                         && !af_web_core::api::resume_after_auth_revalidation(transport_epoch)
                     {
@@ -709,6 +1359,7 @@ impl AppContext {
                     }
                     af_web_core::api::clear_csrf_token();
                     self.user.set(None);
+                    self.sync_active_area_signals();
                 }
             }
             self.auth_loading.set(false);
@@ -728,8 +1379,23 @@ impl AppContext {
         af_web_core::api::bump_auth_epoch_and_abort();
         self.clear_account_scoped_state();
     }
-    fn clear_account_scoped_state(self) {
-        purge_ai_sessions();
+    fn clear_server_projections(self) {
+        af_web_core::api::set_active_server(None);
+        self.active_server_id.set(None);
+        self.active_peer_last.set(None);
+        self.peers_snapshot.set(None);
+        self.server_cache.set(BTreeMap::new());
+        self.active_read_mask.set(u8::MAX);
+        self.sync_active_area_signals();
+        for slot in self.area_revocation_epochs {
+            slot.update(|epoch| *epoch = epoch.wrapping_add(1));
+        }
+        self.server_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        self.settings_order.update(|order| {
+            order.issued += 1;
+            order.accepted = order.issued;
+        });
         self.settings.set(Value::Null);
         self.metrics.set(Value::Null);
         self.services_order.update(|order| {
@@ -742,11 +1408,20 @@ impl AppContext {
         self.pending_subtab.set(None);
         self.notifications.set(vec![]);
         self.transfers.set(vec![]);
-        self.toasts.set(vec![]);
         self.banners.set(vec![]);
+        self.connection.set(ConnectionState::Connecting);
         self.mobile_open.set(false);
         self.command_open.set(false);
         self.notifications_open.set(false);
+    }
+    fn reset_role_scoped_state(self) {
+        af_web_core::api::bump_server_epoch_and_abort();
+        self.clear_server_projections();
+    }
+    fn clear_account_scoped_state(self) {
+        purge_ai_sessions();
+        self.clear_server_projections();
+        self.toasts.set(vec![]);
     }
     pub fn logout(self) {
         af_web_core::api::bump_auth_epoch_and_abort();

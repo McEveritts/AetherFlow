@@ -2,7 +2,7 @@
 use super::common::*;
 use super::history::HistoryQuery;
 use super::types::*;
-use crate::state::{app, use_api, worker_pool};
+use crate::state::{app, use_api_when, worker_pool, PeerArea};
 use crate::tabs::contracts;
 use crate::tabs::l10n::{tt, tt_with, ObsCard};
 use af_web_core::charts::Point;
@@ -206,8 +206,15 @@ pub(super) fn HistoryAnalytics(
     let params = committed_query.params(Some(&snapshot), false);
     let patterns_path = format!("/api/v1/auth/streaming/patterns?{params}");
     let drilldown_path = format!("/api/v1/auth/streaming/drilldown?{params}");
-    let patterns = use_api(Signal::derive(move || patterns_path.clone()));
-    let drilldown = use_api(Signal::derive(move || drilldown_path.clone()));
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
+    let patterns = use_api_when(
+        can_read_services,
+        Signal::derive(move || patterns_path.clone()),
+    );
+    let drilldown = use_api_when(
+        can_read_services,
+        Signal::derive(move || drilldown_path.clone()),
+    );
     Effect::new(move |_| {
         if patterns
             .error
@@ -227,11 +234,18 @@ pub(super) fn HistoryAnalytics(
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     Effect::new(move |_| {
+        let session_epoch = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
         let report = patterns.data.get();
         let bucket_ms = bucket_ms.get();
         generation.update(|n| *n += 1);
         let ticket = generation.get_untracked();
         if report.is_null() {
+            plays.set(vec![]);
+            hours.set(vec![]);
+            peaks.set(vec![]);
+            busy.set(false);
+            error.set(None);
             return;
         }
         let mut samples = vec![];
@@ -275,7 +289,10 @@ pub(super) fn HistoryAnalytics(
             let response = worker_pool()
                 .execute(WorkerRequest::AggregateStreaming { samples, bucket_ms })
                 .await;
-            if generation.try_get_untracked() != Some(ticket) {
+            if generation.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+            {
                 return;
             }
             match response {

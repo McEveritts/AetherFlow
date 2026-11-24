@@ -157,15 +157,37 @@ pub(super) fn serialize_persisted_receipts(
     }
 }
 
-pub(super) fn persist_receipts(receipts: &BTreeMap<String, CoreRestartReceipt>) {
+pub(super) fn restart_storage_key(server_id: Option<&str>) -> String {
+    match server_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => format!("{CORE_RESTART_STORAGE_KEY}:peer:{id}"),
+        None => CORE_RESTART_STORAGE_KEY.to_string(),
+    }
+}
+
+pub(super) fn persist_receipts_for_server(
+    server_id: Option<&str>,
+    receipts: &BTreeMap<String, CoreRestartReceipt>,
+) {
     storage_set(
-        CORE_RESTART_STORAGE_KEY,
+        &restart_storage_key(server_id),
         &serialize_persisted_receipts(receipts),
     );
 }
 
+pub(super) fn restore_persisted_receipts_for_server(
+    server_id: Option<&str>,
+) -> BTreeMap<String, CoreRestartReceipt> {
+    load_persisted_receipts(storage_get(&restart_storage_key(server_id)).as_deref())
+}
+
+#[allow(dead_code)]
+pub(super) fn persist_receipts(receipts: &BTreeMap<String, CoreRestartReceipt>) {
+    persist_receipts_for_server(None, receipts);
+}
+
+#[allow(dead_code)]
 pub(super) fn restore_persisted_receipts() -> BTreeMap<String, CoreRestartReceipt> {
-    load_persisted_receipts(storage_get(CORE_RESTART_STORAGE_KEY).as_deref())
+    restore_persisted_receipts_for_server(None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,7 +205,7 @@ pub(super) struct CoreRestartTracker {
 impl CoreRestartTracker {
     pub fn start_polling(context: crate::state::AppContext, refresh: Callback<()>) -> Self {
         let receipts = RwSignal::new(BTreeMap::new());
-        let restored = RwSignal::new(false);
+        let restored_for = RwSignal::new(None::<(u64, Option<String>, u64)>);
         let notice = RwSignal::new(None::<CoreRestartNotice>);
         let in_flight = RwSignal::new(false);
         let interval = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
@@ -191,23 +213,27 @@ impl CoreRestartTracker {
         Effect::new(move |_| {
             let loading = context.auth_loading.get();
             let admin = context.is_admin();
-            if loading || !admin {
+            let can_read_services = context.can_read_area(crate::state::PeerArea::Services);
+            let services_grant = context.area_revocation_epoch(crate::state::PeerArea::Services);
+            let server_epoch = context.server_epoch.get();
+            let server_id = context.active_server_id.get();
+            if loading || !admin || !can_read_services {
                 interval.set_value(None);
+                restored_for.set(None);
+                receipts.set(BTreeMap::new());
+                notice.set(None);
                 return;
             }
-            if !restored.get_untracked() {
-                restored.set(true);
-                let saved = restore_persisted_receipts();
-                if !saved.is_empty() {
-                    receipts.update(|map| {
-                        for (key, value) in saved {
-                            map.entry(key).or_insert(value);
-                        }
-                    });
-                }
+            let target_key = (server_epoch, server_id.clone(), services_grant);
+            if restored_for.get_untracked().as_ref() != Some(&target_key) {
+                interval.set_value(None);
+                restored_for.set(Some(target_key));
+                notice.set(None);
+                let saved = restore_persisted_receipts_for_server(server_id.as_deref());
+                receipts.set(saved);
             }
             let current = receipts.get();
-            persist_receipts(&current);
+            persist_receipts_for_server(server_id.as_deref(), &current);
             if current.is_empty() {
                 interval.set_value(None);
                 return;
@@ -218,7 +244,8 @@ impl CoreRestartTracker {
             interval.set_value(Some(gloo_timers::callback::Interval::new(
                 CORE_RESTART_POLL_MS,
                 move || {
-                    if !context.is_admin()
+                    if !context.is_admin_untracked()
+                        || !context.can_read_area_untracked(crate::state::PeerArea::Services)
                         || in_flight.get_untracked()
                         || receipts.with_untracked(BTreeMap::is_empty)
                     {
@@ -226,11 +253,23 @@ impl CoreRestartTracker {
                     }
                     let snapshot = receipts.get_untracked();
                     let epoch = context.session_epoch.get_untracked();
+                    let poll_server_epoch = context.server_epoch.get_untracked();
+                    let poll_services_grant =
+                        context.area_revocation_epoch_untracked(crate::state::PeerArea::Services);
                     in_flight.set(true);
                     let mut busy_guard = crate::tabs::busy::BusyGuard::new(in_flight);
                     spawn_local(async move {
-                        poll_active_restarts(context, epoch, snapshot, receipts, notice, refresh)
-                            .await;
+                        poll_active_restarts(
+                            context,
+                            epoch,
+                            poll_server_epoch,
+                            poll_services_grant,
+                            snapshot,
+                            receipts,
+                            notice,
+                            refresh,
+                        )
+                        .await;
                         if in_flight.try_get_untracked().is_some() {
                             busy_guard.release();
                         }
@@ -302,20 +341,29 @@ impl CoreRestartTracker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_active_restarts(
     context: crate::state::AppContext,
     epoch: u64,
+    server_epoch: u64,
+    services_grant: u64,
     snapshot: BTreeMap<String, CoreRestartReceipt>,
     receipts: RwSignal<BTreeMap<String, CoreRestartReceipt>>,
     notice: RwSignal<Option<CoreRestartNotice>>,
     refresh: Callback<()>,
 ) {
+    let still_valid = || {
+        receipts.try_get_untracked().is_some()
+            && context.session_epoch.try_get_untracked() == Some(epoch)
+            && context.server_epoch.try_get_untracked() == Some(server_epoch)
+            && context.area_revocation_epoch_untracked(crate::state::PeerArea::Services)
+                == services_grant
+            && context.is_admin_untracked()
+            && context.can_read_area_untracked(crate::state::PeerArea::Services)
+    };
     let now = js_sys::Date::now();
     for (key, receipt) in snapshot {
-        if receipts.try_get_untracked().is_none()
-            || context.session_epoch.try_get_untracked() != Some(epoch)
-            || !context.is_admin()
-        {
+        if !still_valid() {
             return;
         }
         if now >= receipt.deadline_ms {
@@ -342,7 +390,11 @@ async fn poll_active_restarts(
                 .as_string()
                 .unwrap_or_default();
             let path = format!("/api/v1/admin/services/restart/status?job_unit={encoded_unit}");
-            match ApiClient.get(&path).await {
+            let status_result = ApiClient.get(&path).await;
+            if !still_valid() {
+                return;
+            }
+            match status_result {
                 Ok(status) => match evaluate_restart_status(&receipt.job_unit, &status) {
                     RestartJobOutcome::Pending => {}
                     RestartJobOutcome::JobFailed(detail) => {
@@ -403,6 +455,9 @@ async fn poll_active_restarts(
 
         if phase == CoreRestartPhase::WaitingForReadiness {
             if let Ok(readiness) = ApiClient.get("/api/v1/auth/ready").await {
+                if !still_valid() {
+                    return;
+                }
                 if is_api_database_ready(&readiness) {
                     finish_restart(
                         context,

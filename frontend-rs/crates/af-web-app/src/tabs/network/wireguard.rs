@@ -4,24 +4,58 @@ use super::*;
 pub(super) fn ProviderControl(provider: &'static str, status: ApiResource) -> impl IntoView {
     let context = app();
     let busy = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
     let confirm = RwSignal::new(false);
     let action = RwSignal::new("start".to_string());
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Network);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        confirm.set(false);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Network) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            confirm.set(false);
+        }
+    });
     let execute = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
         let command = action.get_untracked();
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let payload = json!({"action":command});
-            match ApiClient
+            let result = ApiClient
                 .post(
                     &format!("/api/v1/admin/network/{provider}/service"),
                     Some(&payload),
                 )
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(value) => {
                     if confirm.try_get_untracked().is_some() {
                         confirm.set(false);
@@ -37,9 +71,6 @@ pub(super) fn ProviderControl(provider: &'static str, status: ApiResource) -> im
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
-            }
         });
     });
     view! {
@@ -51,8 +82,22 @@ pub(super) fn ProviderControl(provider: &'static str, status: ApiResource) -> im
                         <button
                             type="button"
                             class="glass-button px-4 py-2"
-                            disabled=move || busy.get()
+                            disabled=move || {
+                                busy.get()
+                                    || !context.can_write_area(crate::state::PeerArea::Network)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Network, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| {
+                                if !context.is_admin_untracked()
+                                    || !context
+                                        .can_write_area_untracked(crate::state::PeerArea::Network)
+                                {
+                                    return;
+                                }
                                 action.set(command.to_string());
                                 if command == "start" {
                                     execute.run(());
@@ -92,6 +137,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
     let selected = RwSignal::new(Value::Null);
     let revoke = RwSignal::new(false);
     let busy = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
     let generation = RwSignal::new(0u64);
     let private_key = RwSignal::new(String::new());
     let generated_public = RwSignal::new(String::new());
@@ -100,6 +146,28 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
     let filename = RwSignal::new("wg-peer.conf".to_string());
     let enrolled_key = RwSignal::new(String::new());
     let enrolled_peer = RwSignal::new(Value::Null);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Network);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        generation.update(|g| *g = g.wrapping_add(1));
+        busy.set(false);
+        create.set(false);
+        editing.set(false);
+        revoke.set(false);
+        export_open.set(false);
+        selected.set(Value::Null);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Network) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            generation.update(|g| *g = g.wrapping_add(1));
+            busy.set(false);
+            create.set(false);
+            revoke.set(false);
+        }
+    });
     Effect::new(move |_| {
         if !create.get() {
             generation.update(|g| *g += 1);
@@ -165,25 +233,41 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
         }
     });
     let generate = move || {
-        if busy.get_untracked() || !enrolled_key.get_untracked().is_empty() {
+        if busy.get_untracked()
+            || !enrolled_key.get_untracked().is_empty()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
-        generation.update(|g| *g += 1);
-        let ticket = generation.get_untracked();
+        generation.update(|g| *g = g.wrapping_add(1));
+        let draft_gen = generation.get_untracked();
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post("/api/v1/admin/network/wireguard/keygen", None)
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(value) => {
-                    if generation.try_get_untracked() != Some(ticket)
+                    if generation.try_get_untracked() != Some(draft_gen)
                         || create.try_get_untracked() != Some(true)
                     {
-                        if busy.try_get_untracked().is_some() {
-                            busy_guard.release();
-                        }
                         return;
                     }
                     let public = text(&value, "public_key");
@@ -201,13 +285,13 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
-            }
         });
     };
     let save = move || {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
         let sent = draft_value(form);
@@ -258,25 +342,37 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
             );
             return;
         }
-        let ticket = generation.get_untracked();
+        let draft_gen = generation.get_untracked();
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         let server = status.data.get_untracked();
         let payload = json!({"public_key":key,"name":text(&sent,"name").trim(),"allowed_ips":text(&sent,"allowed_ips").trim(),"endpoint":text(&sent,"endpoint").trim(),"persistent_keepalive":keepalive});
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let path = if is_edit {
                 format!("/api/v1/admin/network/wireguard/peers/{}", encode(&key))
             } else {
                 "/api/v1/admin/network/wireguard/peers".into()
             };
-            match ApiClient
+            let result = ApiClient
                 .request(&path, if is_edit { "PUT" } else { "POST" }, Some(&payload))
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(value) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     status.refresh();
                     context.toast(
                         tt(
@@ -285,10 +381,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                         ),
                         false,
                     );
-                    if generation.try_get_untracked() != Some(ticket) {
-                        if busy.try_get_untracked().is_some() {
-                            busy_guard.release();
-                        }
+                    if generation.try_get_untracked() != Some(draft_gen) {
                         return;
                     }
                     if !is_edit && create.get_untracked() && !client_private.is_empty() {
@@ -309,29 +402,44 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
-            }
         });
     };
     let remove = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
         let key = selected.with_untracked(|v| text(v, "public_key"));
         if key.is_empty() {
             return;
         }
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .delete(
                     &format!("/api/v1/admin/network/wireguard/peers/{}", encode(&key)),
                     None,
                 )
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(_) => {
                     if revoke.try_get_untracked().is_some() {
                         revoke.set(false);
@@ -341,9 +449,6 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                     context.toast(tt(context, "WireGuard peer revoked"), false);
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
-            }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
             }
         });
     });
@@ -408,7 +513,16 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
             <button
                 type="button"
                 class="glass-button-primary px-4 py-2 mb-5"
-                disabled=move || busy.get() || status.data.get()["wireguard"]["state"] != "running"
+                disabled=move || {
+                    busy.get()
+                        || status.data.get()["wireguard"]["state"] != "running"
+                        || !context.can_write_area(crate::state::PeerArea::Network)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Network, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| {
                     editing.set(false);
                     form.update(|d| d.mark_saved(peer_form(&status.data.get_untracked())));
@@ -511,7 +625,16 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || busy.get() || !enrolled_key.get().is_empty()
+                    disabled=move || {
+                        busy.get()
+                            || !enrolled_key.get().is_empty()
+                            || !context.can_write_area(crate::state::PeerArea::Network)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| generate()
                 >
                     {move || tt(context, "Generate client keypair")}
@@ -519,7 +642,14 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button-primary px-4 py-2"
-                    disabled=move || busy.get()
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| save()
                 >
                     {move || tt(context, if enrolled_key.get().is_empty() {
@@ -550,11 +680,26 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 busy
                 on_save=Callback::new(move |()| save())
                 label="Update peer"
+                disabled=Signal::derive(move || {
+                    !context.can_write_area(crate::state::PeerArea::Network)
+                })
+                title=Signal::derive(move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Network, true)
+                        .unwrap_or_default()
+                })
             />
             <button
                 type="button"
                 class="glass-button px-4 py-2 mt-4 text-rose-300"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Network, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| revoke.set(true)
             >
                 {move || tt(context, "Revoke Peer")}

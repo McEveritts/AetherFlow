@@ -1,10 +1,11 @@
 use super::settings::{
-    draft_value, encode, poll_resource, text, DraftButtons, DraftCheck, DraftInput, DraftSelect,
-    ResourceFeedback,
+    draft_value, encode, poll_resource, poll_resource_when, text, DraftButtons, DraftCheck,
+    DraftInput, DraftSelect, ResourceFeedback,
 };
-use crate::state::{app, json_rows, use_api, ApiResource};
+use crate::state::{app, json_rows, use_api, use_api_when, ApiResource, PeerArea};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{ConfirmDialog, DataGrid, EmptyState, Modal, ObsCard};
+use crate::tabs::GrantInvalidationBoundary;
 use af_web_core::{api::ApiClient, draft::FormDraft};
 use af_web_ui::GridColumn;
 use leptos::prelude::*;
@@ -130,7 +131,9 @@ pub fn NotificationsTab() -> impl IntoView {
                 </Show>
             </ObsCard>
             <Show when=move || context.is_admin()>
-                <NotificationsAdminContent events />
+                <GrantInvalidationBoundary areas=&[PeerArea::Settings]>
+                    <NotificationsAdminContent events />
+                </GrantInvalidationBoundary>
             </Show>
         </section>
     }
@@ -139,19 +142,53 @@ pub fn NotificationsTab() -> impl IntoView {
 #[component]
 fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
     let context = app();
-    let channels = use_api("/api/v1/admin/notifications/channels".to_string());
-    let rules = use_api("/api/v1/admin/notifications/rules".to_string());
-    poll_resource(channels, 15_000);
-    poll_resource(rules, 15_000);
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let channels = use_api_when(
+        can_read_settings,
+        "/api/v1/admin/notifications/channels".to_string(),
+    );
+    let rules = use_api_when(
+        can_read_settings,
+        "/api/v1/admin/notifications/rules".to_string(),
+    );
+    poll_resource_when(channels, 15_000, move || {
+        context.can_read_area_untracked(PeerArea::Settings)
+    });
+    poll_resource_when(rules, 15_000, move || {
+        context.can_read_area_untracked(PeerArea::Settings)
+    });
     let channel = RwSignal::new(FormDraft::new(channel_form()));
     let rule = RwSignal::new(FormDraft::new(rule_form()));
     let channel_open = RwSignal::new(false);
     let rule_open = RwSignal::new(false);
     let rule_id = RwSignal::new(None::<i64>);
     let busy = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
     let selected = RwSignal::new(Value::Null);
     let remove = RwSignal::new(false);
     let delivery = RwSignal::new(Vec::<Value>::new());
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        channel_open.set(false);
+        rule_open.set(false);
+        remove.set(false);
+        rule_id.set(None);
+        selected.set(Value::Null);
+        delivery.set(vec![]);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            remove.set(false);
+            channel_open.set(false);
+            rule_open.set(false);
+        }
+    });
     Effect::new(move |_| {
         let id = rule_id.get();
         if let Some(id) = id {
@@ -175,7 +212,10 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
         }
     });
     let create_channel = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let sent = draft_value(channel);
@@ -216,16 +256,29 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
             return;
         }
         let payload = json!({"name":text(&sent,"name").trim(),"type":if kind=="ntfy"{"webhook"}else{&kind},"config":config,"enabled":sent["enabled"]});
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post("/api/v1/admin/notifications/channels", Some(&payload))
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
             {
+                return;
+            }
+            match result {
                 Ok(_) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     let mut has_newer_edits = false;
                     channel.update(|d| {
                         let _ = d.acknowledge_saved(&sent, channel_form());
@@ -239,13 +292,14 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     });
     let save_rule = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let sent = draft_value(rule);
@@ -260,29 +314,42 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 fields.remove("enabled");
             }
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let path = id
                 .map(|id| format!("/api/v1/admin/notifications/rules/{id}"))
                 .unwrap_or_else(|| "/api/v1/admin/notifications/rules".into());
-            match ApiClient
+            let result = ApiClient
                 .request(
                     &path,
                     if id.is_some() { "PUT" } else { "POST" },
                     Some(&payload),
                 )
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
             {
+                return;
+            }
+            match result {
                 Ok(response) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     let Some((saved_id, baseline)) = saved_rule(id, &sent, &response) else {
                         // A create succeeded, so retrying POST could duplicate
                         // it. Return to the listing if its identity is missing.
                         rule_open.set(false);
                         rules.refresh();
-                        busy.set(false);
+                        busy_guard.release();
                         context.toast(
                             tt_with(
                                 context,
@@ -337,18 +404,26 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     });
     let test_channel = move |value: Value| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let id = text(&value, "id");
         let name = text(&value, "name");
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -356,6 +431,15 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                     None,
                 )
                 .await;
+            if delivery.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
+            {
+                return;
+            }
             let (state, message) = match result {
                 Ok(value) => (
                     "delivered",
@@ -367,19 +451,19 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 Err(error) => ("failed", error.message),
             };
             context.toast(tt(context, &message.clone()), state == "failed");
-            if delivery.try_get_untracked().is_none() {
-                return;
-            }
             delivery.update(|items|{
                 items.insert(0,json!({"channel":name,"status":state,"message":message,"timestamp":js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()}));
                 items.truncate(100);
             });
             events.refresh();
-            busy.set(false);
+            busy_guard.release();
         });
     };
     let delete = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let target = selected.get_untracked();
@@ -389,19 +473,32 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
         } else {
             "channels"
         };
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .delete(
                     &format!("/api/v1/admin/notifications/{kind}/{}", encode(&id)),
                     None,
                 )
-                .await
+                .await;
+            if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
             {
+                return;
+            }
+            match result {
                 Ok(_) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     remove.set(false);
                     if kind == "rules" {
                         rule_open.set(false);
@@ -413,9 +510,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
+            busy_guard.release();
         });
     });
     view! {
@@ -429,11 +524,28 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 }
             >
                 <ObsCard title="Notification channels">
+                    <Show when=move || !can_read_settings.get()>
+                        <p role="status" class="text-xs text-amber-300 mb-4">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Settings, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <div class="flex flex-wrap gap-3 mb-5">
                         <button
                             type="button"
                             class="glass-button-primary px-4 py-2"
-                            disabled=move || busy.get()
+                            disabled=move || {
+                                busy.get()
+                                    || !context.can_write_area(crate::state::PeerArea::Settings)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Settings, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| channel_open.set(true)
                         >
                             {move || tt(context, "Add channel")}
@@ -442,8 +554,10 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                             type="button"
                             class="glass-button px-4 py-2"
                             on:click=move |_| {
-                                channels.refresh();
-                                rules.refresh();
+                                if can_read_settings.get_untracked() {
+                                    channels.refresh();
+                                    rules.refresh();
+                                }
                                 events.refresh();
                             }
                             aria-label=move || tt(context, "Refresh notifications")
@@ -490,7 +604,20 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                                                 <button
                                                     type="button"
                                                     class="glass-button px-4 py-2"
-                                                    disabled=move || busy.get()
+                                                    disabled=move || {
+                                                        busy.get()
+                                                            || !context.can_write_area(
+                                                                crate::state::PeerArea::Settings,
+                                                            )
+                                                    }
+                                                    title=move || {
+                                                        context
+                                                            .area_block_reason(
+                                                                crate::state::PeerArea::Settings,
+                                                                true,
+                                                            )
+                                                            .unwrap_or_default()
+                                                    }
                                                     on:click=move |_| test_channel(test.clone())
                                                 >
                                                     {move || tt(context, "Send Test Notification")}
@@ -498,7 +625,20 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                                                 <button
                                                     type="button"
                                                     class="glass-button px-4 py-2 text-rose-300"
-                                                    disabled=move || busy.get()
+                                                    disabled=move || {
+                                                        busy.get()
+                                                            || !context.can_write_area(
+                                                                crate::state::PeerArea::Settings,
+                                                            )
+                                                    }
+                                                    title=move || {
+                                                        context
+                                                            .area_block_reason(
+                                                                crate::state::PeerArea::Settings,
+                                                                true,
+                                                            )
+                                                            .unwrap_or_default()
+                                                    }
                                                     on:click=move |_| {
                                                         selected.set(target.clone());
                                                         remove.set(true);
@@ -559,7 +699,15 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button-primary px-4 py-2 mb-5"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get()
+                                || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
                             rule_id.set(None);
                             rule.update(|d| d.mark_saved(rule_form()));
@@ -737,12 +885,33 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 <Show when=move || rule_id.get().is_some()>
                     <DraftCheck draft=rule field="enabled" label="Enable alert rule" />
                 </Show>
-                <DraftButtons draft=rule busy on_save=save_rule label="Save alert rule" />
+                <DraftButtons
+                    draft=rule
+                    busy
+                    on_save=save_rule
+                    label="Save alert rule"
+                    disabled=Signal::derive(move || {
+                        !context.can_write_area(crate::state::PeerArea::Settings)
+                    })
+                    title=Signal::derive(move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Settings, true)
+                            .unwrap_or_default()
+                    })
+                />
                 <Show when=move || rule_id.get().is_some()>
                     <button
                         type="button"
                         class="glass-button px-4 py-2 mt-5 text-rose-300"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get()
+                                || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
                             let mut value = selected.get_untracked();
                             value["target_kind"] = json!("rule");

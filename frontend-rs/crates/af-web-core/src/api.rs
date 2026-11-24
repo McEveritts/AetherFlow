@@ -17,13 +17,56 @@ fn normalize_active_server(server: Option<String>) -> Option<String> {
 
 pub fn set_active_server(server: Option<String>) {
     let normalized = normalize_active_server(server);
-    ACTIVE_SERVER.with(|slot| {
-        *slot.borrow_mut() = normalized;
+    let changed = ACTIVE_SERVER.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        if *guard == normalized {
+            false
+        } else {
+            *guard = normalized;
+            true
+        }
     });
+    if changed {
+        bump_server_epoch_and_abort();
+    }
 }
 
 pub fn active_server() -> Option<String> {
     ACTIVE_SERVER.with(|slot| slot.borrow().clone())
+}
+
+pub fn peer_proxy_id(input: &str) -> Option<String> {
+    let path = request_path(input);
+    let rest = path.strip_prefix("/api/v1/peers/")?;
+    let (id, suffix) = rest.split_once('/')?;
+    if id.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    let decoded = percent_decode_str(id).decode_utf8().ok()?;
+    let trimmed = decoded.trim();
+    if trimmed.is_empty() || matches!(trimmed, "." | "..") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+pub fn is_peer_proxy_path(input: &str) -> bool {
+    peer_proxy_id(input).is_some()
+}
+
+pub fn is_server_scoped_path(input: &str) -> bool {
+    let path = request_path(input);
+    let Some(rest) = path.strip_prefix("/api/v1/") else {
+        return false;
+    };
+    if rest.is_empty()
+        || rest == "admin/peers"
+        || rest.starts_with("admin/peers/")
+        || is_dashboard_auth_path(rest)
+    {
+        return false;
+    }
+    true
 }
 
 fn is_dashboard_auth_path(path: &str) -> bool {
@@ -58,14 +101,22 @@ fn is_dashboard_auth_path(path: &str) -> bool {
 }
 
 pub fn api_url(path: &str) -> String {
+    api_url_for_server(active_server().as_deref(), path)
+}
+
+pub fn api_url_for_server(server: Option<&str>, path: &str) -> String {
     if path.starts_with('/') && validate_local_api_path(path).is_err() {
         return "#".to_string();
     }
-    rewrite_api_path(path)
+    rewrite_api_path_for_server(server, path)
 }
 
 fn rewrite_api_path(path: &str) -> String {
-    let Some(server) = active_server() else {
+    rewrite_api_path_for_server(active_server().as_deref(), path)
+}
+
+fn rewrite_api_path_for_server(server: Option<&str>, path: &str) -> String {
+    let Some(server) = server.map(str::trim).filter(|value| !value.is_empty()) else {
         return path.to_string();
     };
     let Some(rest) = path.strip_prefix("/api/v1/") else {
@@ -81,15 +132,38 @@ fn rewrite_api_path(path: &str) -> String {
     {
         return path.to_string();
     }
-    let encoded_server = percent_encode_header_component(&server);
+    let encoded_server = percent_encode_header_component(server);
     format!("/api/v1/peers/{encoded_server}/{rest}")
 }
 
 static AUTH_EPOCH: AtomicU64 = AtomicU64::new(0);
+static SERVER_EPOCH: AtomicU64 = AtomicU64::new(0);
 static AUTH_REVALIDATING: AtomicBool = AtomicBool::new(false);
 
 pub fn current_auth_epoch() -> u64 {
     AUTH_EPOCH.load(Ordering::SeqCst)
+}
+
+pub fn current_server_epoch() -> u64 {
+    SERVER_EPOCH.load(Ordering::SeqCst)
+}
+
+pub fn bump_server_epoch_and_abort() -> u64 {
+    let epoch = SERVER_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    #[cfg(target_arch = "wasm32")]
+    browser::abort_server_scoped_controllers();
+    epoch
+}
+
+pub fn ensure_same_server_epoch(origin_epoch: u64, current_epoch: u64) -> Result<(), ApiError> {
+    if origin_epoch != current_epoch {
+        return Err(ApiError {
+            status: 0,
+            code: Some("SERVER_CHANGED".into()),
+            message: "Server changed; request cancelled".into(),
+        });
+    }
+    Ok(())
 }
 
 pub fn bump_auth_epoch_and_abort() -> u64 {
@@ -356,6 +430,30 @@ fn is_host_authentication_failure(status: u16, input: &str, plugin_marker: Optio
     !proxy_id.is_some_and(|id| !id.is_empty() && plugin_marker == Some(id.as_ref()))
 }
 
+/// Upstream peer authorization failures on `/api/v1/peers/{id}/...` must retain
+/// the managing server's local dashboard session. Only when the managing server's
+/// own session is invalid should a 401 refresh or expire local auth.
+fn should_treat_as_host_auth_failure(
+    status: u16,
+    input: &str,
+    plugin_marker: Option<&str>,
+    peer_marker: Option<&str>,
+    local_session_authenticated: Option<bool>,
+) -> bool {
+    if !is_host_authentication_failure(status, input, plugin_marker) {
+        return false;
+    }
+    if let Some(peer_id) = peer_proxy_id(input) {
+        if peer_marker.is_some_and(|marker| marker == peer_id) {
+            return false;
+        }
+        if local_session_authenticated == Some(true) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn is_csrf_rejection(status: u16, data: &serde_json::Value) -> bool {
     status == 403
         && (data["code"]
@@ -444,7 +542,7 @@ mod browser {
     }
     #[cfg(target_arch = "wasm32")]
     thread_local! {
-        static ACTIVE_CONTROLLERS: RefCell<std::collections::BTreeMap<u64, web_sys::AbortController>> = const { RefCell::new(std::collections::BTreeMap::new()) };
+        static ACTIVE_CONTROLLERS: RefCell<std::collections::BTreeMap<u64, (bool, web_sys::AbortController)>> = const { RefCell::new(std::collections::BTreeMap::new()) };
     }
     #[cfg(target_arch = "wasm32")]
     static NEXT_CONTROLLER_ID: AtomicU64 = AtomicU64::new(0);
@@ -452,12 +550,16 @@ mod browser {
     struct RequestAbort {
         controller: web_sys::AbortController,
         _caller_abort: Option<gloo_events::EventListener>,
+        origin_server_epoch: Option<u64>,
         finished: bool,
         #[cfg(target_arch = "wasm32")]
         id: u64,
     }
     impl RequestAbort {
-        fn new(signal: Option<&web_sys::AbortSignal>) -> Result<Self, ApiError> {
+        fn new(
+            signal: Option<&web_sys::AbortSignal>,
+            server_scoped: bool,
+        ) -> Result<Self, ApiError> {
             let controller = web_sys::AbortController::new().map_err(js_error)?;
             let caller_abort = signal.map(|signal| {
                 if signal.aborted() {
@@ -466,15 +568,19 @@ mod browser {
                 let controller = controller.clone();
                 gloo_events::EventListener::new(signal, "abort", move |_| controller.abort())
             });
+            let origin_server_epoch = server_scoped.then(current_server_epoch);
             #[cfg(target_arch = "wasm32")]
             let id = NEXT_CONTROLLER_ID.fetch_add(1, Ordering::Relaxed);
             #[cfg(target_arch = "wasm32")]
             ACTIVE_CONTROLLERS.with(|controllers| {
-                controllers.borrow_mut().insert(id, controller.clone());
+                controllers
+                    .borrow_mut()
+                    .insert(id, (server_scoped, controller.clone()));
             });
             Ok(Self {
                 controller,
                 _caller_abort: caller_abort,
+                origin_server_epoch,
                 finished: false,
                 #[cfg(target_arch = "wasm32")]
                 id,
@@ -483,6 +589,9 @@ mod browser {
 
         fn ensure_active(&self, origin_epoch: u64) -> Result<(), ApiError> {
             ensure_same_auth_epoch(origin_epoch, current_auth_epoch())?;
+            if let Some(origin_server_epoch) = self.origin_server_epoch {
+                ensure_same_server_epoch(origin_server_epoch, current_server_epoch())?;
+            }
             if self.controller.signal().aborted() {
                 return Err(ApiError {
                     status: 0,
@@ -633,7 +742,27 @@ mod browser {
     #[cfg(target_arch = "wasm32")]
     pub(super) fn abort_active_controllers() {
         let controllers = ACTIVE_CONTROLLERS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
-        for controller in controllers.into_values() {
+        for (_, controller) in controllers.into_values() {
+            controller.abort();
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn abort_server_scoped_controllers() {
+        let to_abort = ACTIVE_CONTROLLERS.with(|slot| {
+            let mut map = slot.borrow_mut();
+            let mut scoped = Vec::new();
+            let ids: Vec<u64> = map
+                .iter()
+                .filter_map(|(&id, (is_scoped, _))| (*is_scoped).then_some(id))
+                .collect();
+            for id in ids {
+                if let Some((_, controller)) = map.remove(&id) {
+                    scoped.push(controller);
+                }
+            }
+            scoped
+        });
+        for controller in to_abort {
             controller.abort();
         }
     }
@@ -773,7 +902,7 @@ mod browser {
             slot.get_or_insert_with(|| {
                 async move {
                     let result = async {
-                        let mut request = RequestAbort::new(None)?;
+                        let mut request = RequestAbort::new(None, false)?;
                         let signal = request.controller.signal();
                         request.ensure_active(origin_epoch)?;
                         let response = raw_fetch(
@@ -851,13 +980,77 @@ mod browser {
         ensure_same_auth_epoch(origin_epoch, current_auth_epoch())?;
         token.map(Some)
     }
+    fn peer_proxy_marker(response: &Response) -> Option<String> {
+        response
+            .headers()
+            .get("X-AetherFlow-Proxied-Peer")
+            .ok()
+            .flatten()
+            .or_else(|| response.headers().get("X-AF-Proxied-Peer").ok().flatten())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    async fn local_session_is_authenticated(origin_epoch: u64) -> Result<bool, ApiError> {
+        let mut request = RequestAbort::new(None, false)?;
+        let signal = request.controller.signal();
+        request.ensure_active(origin_epoch)?;
+        let response = raw_fetch(
+            "/api/v1/auth/session",
+            "GET",
+            None,
+            None,
+            None,
+            Some(&signal),
+        )
+        .await;
+        request.ensure_active(origin_epoch)?;
+        let response = response?;
+        let ok = response.ok();
+        request.finish();
+        Ok(ok)
+    }
+
+    async fn check_host_authentication_failure(
+        response: &Response,
+        path: &str,
+        origin_epoch: u64,
+    ) -> Result<bool, ApiError> {
+        let plugin_marker = response
+            .headers()
+            .get("X-AetherFlow-Proxied-Plugin")
+            .ok()
+            .flatten();
+        let peer_marker = peer_proxy_marker(response);
+        if !should_treat_as_host_auth_failure(
+            response.status(),
+            path,
+            plugin_marker.as_deref(),
+            peer_marker.as_deref(),
+            None,
+        ) {
+            return Ok(false);
+        }
+        if is_peer_proxy_path(path) {
+            let local_ok = local_session_is_authenticated(origin_epoch).await?;
+            return Ok(should_treat_as_host_auth_failure(
+                response.status(),
+                path,
+                plugin_marker.as_deref(),
+                peer_marker.as_deref(),
+                Some(local_ok),
+            ));
+        }
+        Ok(true)
+    }
+
     async fn refresh() -> Result<bool, ApiError> {
         let origin_epoch = current_auth_epoch();
         let future = REFRESH.with(|slot| {
             slot.borrow_mut()
                 .get_or_insert_with(|| {
                     async move {
-                        let mut request = RequestAbort::new(None)?;
+                        let mut request = RequestAbort::new(None, false)?;
                         let signal = request.controller.signal();
                         request.ensure_active(origin_epoch)?;
                         let response = raw_fetch(
@@ -895,7 +1088,7 @@ mod browser {
             body: Option<&serde_json::Value>,
         ) -> Result<RawResponse, ApiError> {
             let origin_epoch = current_auth_epoch();
-            let request = RequestAbort::new(None)?;
+            let request = RequestAbort::new(None, false)?;
             let signal = request.controller.signal();
             let body = body.map(serde_json::Value::to_string);
             request.ensure_active(origin_epoch)?;
@@ -969,7 +1162,7 @@ mod browser {
         ) -> Result<(Response, RequestAbort), ApiError> {
             let rewritten = prepare_api_request_path(path, method)?;
             let path = rewritten.as_str();
-            let request = RequestAbort::new(None)?;
+            let request = RequestAbort::new(None, is_server_scoped_path(path))?;
             let signal = request.controller.signal();
             request.ensure_active(origin_epoch)?;
             let body = body.map(serde_json::Value::to_string);
@@ -994,17 +1187,10 @@ mod browser {
             let mut retries = RequestRetries::default();
             loop {
                 request.ensure_active(origin_epoch)?;
-                if is_host_authentication_failure(
-                    response.status(),
-                    path,
-                    response
-                        .headers()
-                        .get("X-AetherFlow-Proxied-Plugin")
-                        .ok()
-                        .flatten()
-                        .as_deref(),
-                ) && retries.take_refresh(response.status(), path)
-                {
+                let host_auth_failure =
+                    check_host_authentication_failure(&response, path, origin_epoch).await?;
+                request.ensure_active(origin_epoch)?;
+                if host_auth_failure && retries.take_refresh(response.status(), path) {
                     let refreshed = refresh().await;
                     request.ensure_active(origin_epoch)?;
                     // Refresh rotates cookies; discard the cached token on both
@@ -1059,17 +1245,10 @@ mod browser {
                 }
                 break;
             }
-            if is_host_authentication_failure(
-                response.status(),
-                path,
-                response
-                    .headers()
-                    .get("X-AetherFlow-Proxied-Plugin")
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-            ) && !is_login_endpoint(path)
+            if check_host_authentication_failure(&response, path, origin_epoch).await?
+                && !is_login_endpoint(path)
             {
+                request.ensure_active(origin_epoch)?;
                 broadcast_expired();
             }
             Ok((response, request))
@@ -1212,7 +1391,7 @@ mod browser {
             let rewritten = prepare_api_request_path(path, method)?;
             let path = rewritten.as_str();
             let origin_epoch = current_auth_epoch();
-            let request = RequestAbort::new(signal)?;
+            let request = RequestAbort::new(signal, is_server_scoped_path(path))?;
             let request_signal = request.controller.signal();
             let signal = Some(&request_signal);
             request.ensure_active(origin_epoch)?;
@@ -1289,17 +1468,10 @@ mod browser {
             let mut retries = RequestRetries::default();
             loop {
                 request.ensure_active(origin_epoch)?;
-                if is_host_authentication_failure(
-                    response.status(),
-                    path,
-                    response
-                        .headers()
-                        .get("X-AetherFlow-Proxied-Plugin")
-                        .ok()
-                        .flatten()
-                        .as_deref(),
-                ) && retries.take_refresh(response.status(), path)
-                {
+                let host_auth_failure =
+                    check_host_authentication_failure(&response, path, origin_epoch).await?;
+                request.ensure_active(origin_epoch)?;
+                if host_auth_failure && retries.take_refresh(response.status(), path) {
                     let refreshed = refresh().await;
                     request.ensure_active(origin_epoch)?;
                     clear_csrf_token();
@@ -1354,17 +1526,10 @@ mod browser {
                 }
                 break;
             }
-            if is_host_authentication_failure(
-                response.status(),
-                path,
-                response
-                    .headers()
-                    .get("X-AetherFlow-Proxied-Plugin")
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-            ) && !is_login_endpoint(path)
+            if check_host_authentication_failure(&response, path, origin_epoch).await?
+                && !is_login_endpoint(path)
             {
+                request.ensure_active(origin_epoch)?;
                 broadcast_expired();
             }
             request.ensure_active(origin_epoch)?;
@@ -2198,5 +2363,96 @@ mod tests {
             None,
             &serde_json::json!({"error":"Invalid CSRF token"}),
         ));
+    }
+
+    #[test]
+    fn peer_upstream_auth_failures_retain_local_dashboard_session() {
+        let peer_path = "/api/v1/peers/media-2/auth/services";
+        assert_eq!(peer_proxy_id(peer_path).as_deref(), Some("media-2"));
+        assert!(is_peer_proxy_path(peer_path));
+        assert!(!is_peer_proxy_path("/api/v1/auth/services"));
+        assert!(!is_peer_proxy_path("/api/v1/admin/peers/media-2"));
+
+        // Matching peer proxy marker suppresses host auth expiry immediately.
+        assert!(!should_treat_as_host_auth_failure(
+            401,
+            peer_path,
+            None,
+            Some("media-2"),
+            None,
+        ));
+        // Confirmed healthy local session retains dashboard auth even without marker.
+        assert!(!should_treat_as_host_auth_failure(
+            401,
+            peer_path,
+            None,
+            None,
+            Some(true),
+        ));
+        // Mismatched marker with expired local session still expires host auth.
+        assert!(should_treat_as_host_auth_failure(
+            401,
+            peer_path,
+            None,
+            Some("other-peer"),
+            Some(false),
+        ));
+        // 403 peer authorization errors never expire host auth.
+        assert!(!should_treat_as_host_auth_failure(
+            403,
+            peer_path,
+            None,
+            None,
+            Some(false),
+        ));
+        // Local 401 continues to trigger normal host auth recovery/expiry.
+        assert!(should_treat_as_host_auth_failure(
+            401,
+            "/api/v1/auth/services",
+            None,
+            None,
+            Some(true),
+        ));
+    }
+
+    #[test]
+    fn server_epoch_tracks_server_switches_and_scopes_abortable_paths() {
+        let _guard = ActiveServerGuard::new(None);
+        let initial = current_server_epoch();
+
+        // Setting the same server is a no-op.
+        set_active_server(None);
+        assert_eq!(current_server_epoch(), initial);
+
+        set_active_server(Some("media-2".into()));
+        let after_first = current_server_epoch();
+        assert!(after_first > initial);
+        assert!(ensure_same_server_epoch(after_first, after_first).is_ok());
+        assert_eq!(
+            ensure_same_server_epoch(initial, after_first)
+                .unwrap_err()
+                .code
+                .as_deref(),
+            Some("SERVER_CHANGED")
+        );
+
+        // Local auth and local peer management stay immune from server-scoped aborts.
+        assert!(!is_server_scoped_path("/api/v1/auth/session"));
+        assert!(!is_server_scoped_path("/api/v1/auth/refresh"));
+        assert!(!is_server_scoped_path("/api/v1/public/csrf-token"));
+        assert!(!is_server_scoped_path("/api/v1/admin/peers"));
+        assert!(!is_server_scoped_path("/api/v1/admin/peers/media-2/grants"));
+        assert!(!is_server_scoped_path("/health/ready"));
+
+        // Dashboard and peer-proxied endpoints are server-scoped.
+        assert!(is_server_scoped_path("/api/v1/auth/services"));
+        assert!(is_server_scoped_path("/api/v1/admin/settings"));
+        assert!(is_server_scoped_path("/api/v1/peers/media-2/auth/services"));
+        assert!(is_server_scoped_path(
+            "/api/v1/peers/media-2/auth/mcbrowser/uploads/0123456789abcdef0123456789abcdef"
+        ));
+
+        set_active_server(None);
+        assert!(current_server_epoch() > after_first);
     }
 }

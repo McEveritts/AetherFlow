@@ -3,29 +3,50 @@ use super::*;
 #[component]
 pub(super) fn EventsAdmin() -> impl IntoView {
     let context = app();
+    let can_read_files = Signal::derive(move || context.can_read_area(PeerArea::Files));
     let status = RwSignal::new(String::new());
     let trigger = RwSignal::new(String::new());
     let user = RwSignal::new(String::new());
     let limit = RwSignal::new("100".to_owned());
-    let audit = use_api(Signal::derive(move || {
-        let mut url = format!("{BASE}/events?limit={}", encode(&limit.get()));
-        if !status.get().is_empty() {
-            url.push_str(&format!("&status={}", encode(&status.get())));
-        }
-        if !trigger.get().is_empty() {
-            url.push_str(&format!("&trigger={}", encode(&trigger.get())));
-        }
-        if !user.get().is_empty() {
-            url.push_str(&format!("&user_id={}", encode(&user.get())));
-        }
-        url
-    }));
-    let queue = use_api(format!("{BASE}/events/queue?limit=100"));
-    let settings = use_api(format!("{BASE}/events/settings"));
+    let audit = use_api_when(
+        can_read_files,
+        Signal::derive(move || {
+            let mut url = format!("{BASE}/events?limit={}", encode(&limit.get()));
+            if !status.get().is_empty() {
+                url.push_str(&format!("&status={}", encode(&status.get())));
+            }
+            if !trigger.get().is_empty() {
+                url.push_str(&format!("&trigger={}", encode(&trigger.get())));
+            }
+            if !user.get().is_empty() {
+                url.push_str(&format!("&user_id={}", encode(&user.get())));
+            }
+            url
+        }),
+    );
+    let queue = use_api_when(can_read_files, format!("{BASE}/events/queue?limit=100"));
+    let settings = use_api_when(can_read_files, format!("{BASE}/events/settings"));
     let settings_draft = RwSignal::new(None::<FormDraft<Value>>);
     let busy = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
     let failure = RwSignal::new(String::new());
     let selected = RwSignal::new(Value::Null);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Files);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        settings_draft.set(None);
+        selected.set(Value::Null);
+        failure.set(String::new());
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Files) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+        }
+    });
     Effect::new(move |_| {
         let server = settings.data.get();
         if !server["enabled"].is_boolean() {
@@ -40,22 +61,32 @@ pub(super) fn EventsAdmin() -> impl IntoView {
         });
     });
     let save = move |_| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area_untracked(crate::state::PeerArea::Files)
+        {
             return;
         }
         let sent = draft_value(settings_draft);
         if !sent["enabled"].is_boolean() {
             return;
         }
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
         let auth = context.session_epoch.get_untracked();
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .put(&format!("{BASE}/events/settings"), Some(&sent))
                 .await;
             if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                || !context.can_write_area_untracked(PeerArea::Files)
             {
                 return;
             }
@@ -75,16 +106,22 @@ pub(super) fn EventsAdmin() -> impl IntoView {
         });
     };
     let acknowledge = move |_| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || !context.can_write_area_untracked(crate::state::PeerArea::Files)
+        {
             return;
         }
         let id = text(&selected.get_untracked(), "event_id");
         if id.is_empty() {
             return;
         }
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
         busy.set(true);
         let auth = context.session_epoch.get_untracked();
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -93,7 +130,11 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                 )
                 .await;
             if busy.try_get_untracked().is_none()
+                || action_ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                || !context.can_write_area_untracked(PeerArea::Files)
             {
                 return;
             }
@@ -129,6 +170,15 @@ pub(super) fn EventsAdmin() -> impl IntoView {
     view! {
         <div class="space-y-5">
             <ObsCard title=Signal::derive(move || tt(context, "McBrowser.auditEventsTitle"))>
+                <Show when=move || !can_read_files.get()>
+                    <p role="status" class="text-xs text-amber-300 mb-3">
+                        {move || {
+                            context
+                                .area_block_reason(PeerArea::Files, false)
+                                .unwrap_or_default()
+                        }}
+                    </p>
+                </Show>
                 <div class="flex flex-wrap gap-3 mb-4">
                     <label class="text-xs">
                         {move || tt(context, "Status")}
@@ -196,10 +246,18 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button px-4 py-2 self-end"
+                        disabled=move || !can_read_files.get()
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Files, false)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
-                            audit.refresh();
-                            queue.refresh();
-                            settings.refresh();
+                            if can_read_files.get_untracked() {
+                                audit.refresh();
+                                queue.refresh();
+                                settings.refresh();
+                            }
                         }
                         aria-label=move || tt(context, "Refresh")
                     >
@@ -245,6 +303,7 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                             disabled=move || {
                                 busy.get() || settings.loading.get()
                                     || settings_draft.with(Option::is_none)
+                                    || !context.can_write_area(crate::state::PeerArea::Files)
                             }
                             prop:checked=move || draft_value(settings_draft)["enabled"] == true
                             on:change=move |event| {
@@ -260,8 +319,14 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                         class="glass-button px-3 py-2"
                         disabled=move || {
                             busy.get()
+                                || !context.can_write_area(crate::state::PeerArea::Files)
                                 || !settings_draft
                                     .with(|draft| draft.as_ref().is_some_and(FormDraft::is_dirty))
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Files, true)
+                                .unwrap_or_default()
                         }
                         on:click=save
                     >
@@ -270,7 +335,16 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button px-3 py-2"
-                        disabled=move || busy.get() || selected.get()["status"] != "queued"
+                        disabled=move || {
+                            busy.get()
+                                || selected.get()["status"] != "queued"
+                                || !context.can_write_area(crate::state::PeerArea::Files)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Files, true)
+                                .unwrap_or_default()
+                        }
                         on:click=acknowledge
                     >
                         {move || tt(context, "Acknowledge selected task")}

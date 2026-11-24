@@ -1,6 +1,7 @@
 use crate::state::AppContext;
 use af_models::APP_LAUNCH_EXCHANGE_PATH;
 use af_web_core::api::ApiClient;
+use leptos::prelude::GetUntracked;
 use serde_json::{json, Value};
 use url::Url;
 use wasm_bindgen::{JsCast, JsValue};
@@ -15,6 +16,11 @@ pub(crate) fn launch_app(
     service: &Value,
     destination: &str,
 ) {
+    // Peer listeners forbid `/api/v1/admin/apps/launch`; open the peer's own
+    // validated URL directly via the anchor without calling the local launcher.
+    if context.is_remote_untracked() {
+        return;
+    }
     let Some(exchange) = launch_exchange(service, destination).filter(|_| context.is_admin())
     else {
         return;
@@ -37,6 +43,8 @@ pub(crate) fn launch_app(
 
     let app = field(service, &["id", "slug", "process"]);
     let destination = destination.to_string();
+    let session_epoch = context.session_epoch.get_untracked();
+    let server_epoch = context.server_epoch.get_untracked();
     spawn_local(async move {
         let result = ApiClient
             .post(
@@ -44,6 +52,12 @@ pub(crate) fn launch_app(
                 Some(&json!({ "app": app, "destination": destination })),
             )
             .await;
+        if context.session_epoch.try_get_untracked() != Some(session_epoch)
+            || context.server_epoch.try_get_untracked() != Some(server_epoch)
+        {
+            let _ = popup.close();
+            return;
+        }
         let navigation = match result {
             Ok(response) => match response["ticket"].as_str() {
                 Some(ticket) => submit_ticket(&popup, exchange.as_str(), ticket),

@@ -700,7 +700,9 @@ pub fn OverviewTab() -> impl IntoView {
                 />
             </ObsCard>
             <Show when=move || context.is_admin()>
-                <CapacityPredictions />
+                <crate::tabs::GrantInvalidationBoundary areas=&[crate::state::PeerArea::Settings]>
+                    <CapacityPredictions />
+                </crate::tabs::GrantInvalidationBoundary>
             </Show>
         </section>
     }

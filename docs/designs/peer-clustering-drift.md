@@ -90,6 +90,13 @@ File 12 advertises `["links"]` on `/health` once the linking implementation is a
 - The production router records its registered paths and methods for the route coverage test. The OpenAPI parity fixture follows those same registrations, including the versioned-only grant operations.
 - The Cluster editor uses the peer's capability report to decide whether to enable grant delivery. An existing local grant can still be revoked when the peer lacks grant support or the link is down.
 
+## P6 integration decisions
+
+- The versioned managing proxy registers the six HTTP methods served by the current peer management API. These methods use the tracked router and appear in OpenAPI. The receiving listener rejects proxy chaining.
+- The proxy shares the application's streaming transport. It uses the committed grant credential, the separate link credential, and the stored tunnel address. The local proxy caps concurrent requests and WebSockets and keeps the permit until the stream ends. The receiving listener selects the WebSocket pool only for registered socket paths. Stalled uploads release their slots after the idle deadline, and active streams retain their permits until completion.
+- The receiving listener uses the verified grant for WebSocket tickets and checks the active grant during upgrade and revocation. General telemetry requires read access to at least one area and filters fields by that grant. Live logs require Services read access.
+- The proxy scopes the one-use backup ticket cookie to the selected peer and its backup download route. The receiving server validates any presented ticket against the active grant and requested backup. A link-authenticated grant with Settings write access can still authorize a direct backup download.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.

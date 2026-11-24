@@ -1,14 +1,14 @@
 use crate::state::{
     app, clamp_tab_for_role, current_path, json_rows, navigate, query_param, stroke_icon,
-    AppContext, TabId,
+    ActivePeerHealth, AppContext, PeerArea, TabId,
 };
 use af_web_core::{
-    api::{api_url, storage_get, storage_set, ApiClient},
+    api::{storage_get, storage_set, ApiClient},
     worker::{SearchItem, SearchMatch, WorkerRequest, WorkerResponse},
     worker_pool::WorkerPool,
     ws::{BrowserConnection, ConnectionState, TransportEvent},
 };
-use af_web_ui::{Drawer, Modal, OverviewSkeleton, StatusPill};
+use af_web_ui::{Badge, Drawer, Modal, OverviewSkeleton, StatusPill};
 use futures::future::{AbortHandle, Abortable};
 use gloo_events::EventListener;
 use leptos::prelude::*;
@@ -80,35 +80,63 @@ pub fn AuthGuard(children: ChildrenFn) -> impl IntoView {
 struct ShellRefreshState {
     request: RwSignal<u64>,
     metrics: RwSignal<u64>,
-    in_flight: StoredValue<Option<AbortHandle>, LocalStorage>,
+    in_flight: StoredValue<Option<(u64, AbortHandle)>, LocalStorage>,
+}
+
+impl ShellRefreshState {
+    fn finish(self, request: u64) {
+        let _ = self.in_flight.try_update_value(|active| {
+            if active.as_ref().is_some_and(|(id, _)| *id == request) {
+                *active = None;
+            }
+        });
+    }
+}
+
+fn abort_shell_refresh(revisions: ShellRefreshState) {
+    let _ = revisions.in_flight.try_update_value(|active| {
+        if let Some((_, abort)) = active.take() {
+            abort.abort();
+        }
+    });
 }
 
 fn refresh_shell(context: AppContext, revisions: ShellRefreshState) {
     // A slow cohort is allowed to finish. Poll ticks while it is active are
     // coalesced; a later tick starts the next cohort after the guard drops.
-    let Some(Some(registration)) = revisions.in_flight.try_update_value(|active| {
+    let Some(Some((request, registration))) = revisions.in_flight.try_update_value(|active| {
         if active.is_some() {
             return None;
         }
+        revisions.request.update(|n| *n = n.wrapping_add(1));
+        let request = revisions.request.get_untracked();
         let (abort, registration) = AbortHandle::new_pair();
-        *active = Some(abort);
-        Some(registration)
+        *active = Some((request, abort));
+        Some((request, registration))
     }) else {
         return;
     };
     let epoch = context.session_epoch.get_untracked();
-    revisions.request.update(|n| *n = n.wrapping_add(1));
-    let request = revisions.request.get_untracked();
+    let server_epoch = context.server_epoch.get_untracked();
+    let services_grant_epoch = context.area_revocation_epoch_untracked(PeerArea::Services);
     let metrics_revision = revisions.metrics.get_untracked();
     let services_request = context.begin_services_request();
+    let can_read_services = context.can_read_area_untracked(PeerArea::Services);
     spawn_local(async move {
         let work = async move {
             let (metrics, services, notifications) = futures::join!(
                 ApiClient.get("/api/v1/auth/system/metrics"),
-                ApiClient.get("/api/v1/auth/services"),
+                async {
+                    if can_read_services {
+                        Some(ApiClient.get("/api/v1/auth/services").await)
+                    } else {
+                        None
+                    }
+                },
                 ApiClient.get("/api/v1/auth/notifications")
             );
             if context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
                 || context.user.try_get_untracked().flatten().is_none()
                 || revisions.request.try_get_untracked() != Some(request)
             {
@@ -120,19 +148,28 @@ fn refresh_shell(context: AppContext, revisions: ShellRefreshState) {
             {
                 context.publish_metrics(metrics);
             }
-            if let Ok(services) = services {
+            if let Some(Ok(services)) = services {
                 context.finish_services_request(services_request, services);
             }
             if let Ok(notifications) = notifications {
                 context.notifications.set(json_rows(&notifications));
             }
-            if context.is_admin() {
+            if context.is_admin_untracked()
+                && can_read_services
+                && context.can_read_area_untracked(PeerArea::Services)
+                && context.area_revocation_epoch_untracked(PeerArea::Services)
+                    == services_grant_epoch
+            {
                 if let Ok(pending) = ApiClient
                     .get("/api/v1/admin/actions/pending?status=pending&limit=1")
                     .await
                 {
                     if context.session_epoch.try_get_untracked() != Some(epoch)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
                         || revisions.request.try_get_untracked() != Some(request)
+                        || !context.can_read_area_untracked(PeerArea::Services)
+                        || context.area_revocation_epoch_untracked(PeerArea::Services)
+                            != services_grant_epoch
                     {
                         return;
                     }
@@ -149,9 +186,7 @@ fn refresh_shell(context: AppContext, revisions: ShellRefreshState) {
         let _ = Abortable::new(work, registration).await;
         // Abortable has dropped the cohort's request guards before another
         // timer tick can observe an empty slot and start the next cohort.
-        let _ = revisions
-            .in_flight
-            .try_update_value(|active| *active = None);
+        revisions.finish(request);
     });
 }
 #[component]
@@ -173,13 +208,7 @@ fn AuthenticatedShell() -> impl IntoView {
         metrics: RwSignal::new(0),
         in_flight: StoredValue::new_local(None),
     };
-    on_cleanup(move || {
-        revisions.in_flight.update_value(|active| {
-            if let Some(abort) = active.take() {
-                abort.abort();
-            }
-        });
-    });
+    on_cleanup(move || abort_shell_refresh(revisions));
     let initial_tab_explicit = query_param("tab").is_some();
     Effect::new(move |_| {
         let loading = context.auth_loading.get();
@@ -201,102 +230,179 @@ fn AuthenticatedShell() -> impl IntoView {
         })
     }));
     on_cleanup(move || history.set_value(None));
-    refresh_shell(context, revisions);
-    let (settings_abort, settings_registration) = AbortHandle::new_pair();
-    on_cleanup(move || settings_abort.abort());
-    spawn_local(async move {
-        let work = async move {
-            let result = ApiClient.get("/api/v1/auth/settings").await;
-            if context.session_epoch.try_get_untracked() != Some(epoch) {
-                return;
+    if context.is_admin() {
+        context.refresh_peers_snapshot();
+    }
+    let peer_polling = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
+        15_000,
+        move || {
+            if context.is_admin() {
+                context.refresh_peers_snapshot();
             }
-            match result {
-                Ok(settings) => {
-                    // This request only bootstraps the shell. A tab may have loaded
-                    // or saved a newer snapshot while it was pending; use that
-                    // accepted cache for both preferences and shared settings.
-                    let settings = context.settings.with_untracked(|current| {
-                        if current.is_null() {
-                            settings
-                        } else {
-                            current.clone()
+        },
+    )));
+    on_cleanup(move || peer_polling.set_value(None));
+    let initial_server_epoch = context.server_epoch.get_untracked();
+    let settings_abort = StoredValue::new_local(None::<AbortHandle>);
+    let connection = StoredValue::new_local(None::<BrowserConnection>);
+    on_cleanup(move || {
+        settings_abort.update_value(|active| {
+            if let Some(abort) = active.take() {
+                abort.abort();
+            }
+        });
+        connection.set_value(None);
+    });
+    Effect::new(move |_| {
+        let server_epoch = context.server_epoch.get();
+        abort_shell_refresh(revisions);
+        connection.set_value(None);
+        refresh_shell(context, revisions);
+        connection.set_value(Some(BrowserConnection::start_with_services_gate(
+            move || context.can_read_area_untracked(PeerArea::Services),
+            move |event| {
+                if context.session_epoch.try_get_untracked() != Some(epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.user.try_get_untracked().flatten().is_none()
+                {
+                    return;
+                }
+                match event {
+                    TransportEvent::State(state) => {
+                        context.connection.set(state);
+                        if state == ConnectionState::Connected {
+                            context.history_revision.update(|v| *v += 1);
                         }
-                    });
-                    if !initial_tab_explicit && context.tab.get_untracked() == TabId::Overview {
-                        if let Some(default_tab) = settings["defaultDashboard"]
-                            .as_str()
-                            .filter(|tab| !tab.is_empty())
-                        {
-                            let target = TabId::from_key(default_tab);
-                            if clamp_tab_for_role(target, context.is_admin()) == target {
-                                context.tab.set(target);
-                                if target != TabId::Overview {
-                                    context.replace_tab_url(target);
+                    }
+                    TransportEvent::Metrics(metrics) => {
+                        revisions.metrics.update(|n| *n = n.wrapping_add(1));
+                        context.publish_metrics(metrics);
+                    }
+                    TransportEvent::Services(services) => {
+                        context.publish_live_services(services);
+                    }
+                    TransportEvent::Control(event) => match event["type"].as_str() {
+                        Some("MARKETPLACE_UPDATE" | "package:progress" | "SYSTEM_HEAL") => {
+                            context.marketplace_revision.update(|v| *v += 1)
+                        }
+                        Some("ACTION_QUEUED") => {
+                            if context.can_read_area_untracked(PeerArea::Services) {
+                                context.pending.update(|v| *v += 1);
+                            }
+                        }
+                        Some(
+                            "MAINTENANCE" | "MAINTENANCE_MODE" | "SERVER_RESTART"
+                            | "SYSTEM_RESTART",
+                        ) => context.banners.update(|b| {
+                            b.push(
+                                event["data"]["message"]
+                                    .as_str()
+                                    .or_else(|| event["message"].as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| context.t("Shell.maintenance")),
+                            )
+                        }),
+                        _ => {}
+                    },
+                }
+            },
+        )));
+    });
+    Effect::new(move |_| {
+        let server_epoch = context.server_epoch.get();
+        let can_read_settings = context.can_read_area(PeerArea::Settings);
+        let is_remote = context.is_remote_untracked();
+        settings_abort.update_value(|active| {
+            if let Some(abort) = active.take() {
+                abort.abort();
+            }
+        });
+        if !can_read_settings {
+            return;
+        }
+        let settings_request = context.begin_settings_request();
+        let (abort, settings_registration) = AbortHandle::new_pair();
+        settings_abort.set_value(Some(abort));
+        spawn_local(async move {
+            let work = async move {
+                let result = ApiClient.get("/api/v1/auth/settings").await;
+                if context.session_epoch.try_get_untracked() != Some(epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                {
+                    return;
+                }
+                match result {
+                    Ok(settings) => {
+                        if !context.finish_settings_request(settings_request, settings.clone()) {
+                            return;
+                        }
+                        if !is_remote && server_epoch == initial_server_epoch {
+                            if !initial_tab_explicit
+                                && context.tab.get_untracked() == TabId::Overview
+                            {
+                                if let Some(default_tab) = settings["defaultDashboard"]
+                                    .as_str()
+                                    .filter(|tab| !tab.is_empty())
+                                {
+                                    let target = TabId::from_key(default_tab);
+                                    if clamp_tab_for_role(target, context.is_admin_untracked())
+                                        == target
+                                    {
+                                        context.tab.set(target);
+                                        if target != TabId::Overview {
+                                            context.replace_tab_url(target);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(locale) = settings["language"]
+                                .as_str()
+                                .filter(|s| af_web_core::i18n::LOCALES.contains(s))
+                            {
+                                if storage_get("aetherflow-language")
+                                    .filter(|locale| {
+                                        af_web_core::i18n::LOCALES.contains(&locale.as_str())
+                                    })
+                                    .is_none()
+                                {
+                                    context.set_locale(locale);
                                 }
                             }
                         }
                     }
-                    if let Some(locale) = settings["language"]
-                        .as_str()
-                        .filter(|s| af_web_core::i18n::LOCALES.contains(s))
-                    {
-                        // A browser choice (including one made while this request
-                        // was in flight) takes precedence over the server default.
-                        if storage_get("aetherflow-language")
-                            .filter(|locale| af_web_core::i18n::LOCALES.contains(&locale.as_str()))
-                            .is_none()
+                    Err(error) => {
+                        if !matches!(
+                            error.code.as_deref(),
+                            Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                        ) && context.can_read_area_untracked(PeerArea::Settings)
                         {
-                            context.set_locale(locale);
+                            context.toast(context.t(&error.message), true);
                         }
                     }
-                    context.settings.set(settings);
                 }
-                Err(error) => context.toast(context.t(&error.message), true),
-            }
-        };
-        let _ = Abortable::new(work, settings_registration).await;
+            };
+            let _ = Abortable::new(work, settings_registration).await;
+        });
     });
-    let connection = StoredValue::new_local(Some(BrowserConnection::start(move |event| {
-        if context.session_epoch.try_get_untracked() != Some(epoch)
-            || context.user.try_get_untracked().flatten().is_none()
-        {
+    let prev_services_access = StoredValue::new((
+        context.server_epoch.get_untracked(),
+        context.can_read_area_untracked(PeerArea::Services),
+    ));
+    Effect::new(move |_| {
+        let server_epoch = context.server_epoch.get();
+        let can_read_services = context.can_read_area(PeerArea::Services);
+        let (prev_epoch, prev_allowed) = prev_services_access.get_value();
+        prev_services_access.set_value((server_epoch, can_read_services));
+        if prev_epoch != server_epoch {
             return;
         }
-        match event {
-            TransportEvent::State(state) => {
-                context.connection.set(state);
-                if state == ConnectionState::Connected {
-                    context.history_revision.update(|v| *v += 1);
-                }
-            }
-            TransportEvent::Metrics(metrics) => {
-                revisions.metrics.update(|n| *n = n.wrapping_add(1));
-                context.publish_metrics(metrics);
-            }
-            TransportEvent::Services(services) => {
-                context.publish_live_services(services);
-            }
-            TransportEvent::Control(event) => match event["type"].as_str() {
-                Some("MARKETPLACE_UPDATE" | "package:progress" | "SYSTEM_HEAL") => {
-                    context.marketplace_revision.update(|v| *v += 1)
-                }
-                Some("ACTION_QUEUED") => context.pending.update(|v| *v += 1),
-                Some("MAINTENANCE" | "MAINTENANCE_MODE" | "SERVER_RESTART" | "SYSTEM_RESTART") => {
-                    context.banners.update(|b| {
-                        b.push(
-                            event["data"]["message"]
-                                .as_str()
-                                .or_else(|| event["message"].as_str())
-                                .map(str::to_string)
-                                .unwrap_or_else(|| context.t("Shell.maintenance")),
-                        )
-                    })
-                }
-                _ => {}
-            },
+        if prev_allowed && !can_read_services {
+            abort_shell_refresh(revisions);
+        } else if !prev_allowed && can_read_services {
+            abort_shell_refresh(revisions);
+            refresh_shell(context, revisions);
         }
-    })));
-    on_cleanup(move || connection.set_value(None));
+    });
     let polling = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         30_000,
         move || refresh_shell(context, revisions),
@@ -318,6 +424,7 @@ fn AuthenticatedShell() -> impl IntoView {
                 class="flex-1 min-w-0 max-w-full relative z-10 overflow-y-auto focus:outline-none"
             >
                 <Header/>
+                <ActiveServerBar/>
                 <GlobalBanners/>
                 <div class="af-tab-content min-w-0 max-w-full px-4 md:px-8 pb-8">
                     <crate::tabs::TabRouter/>
@@ -538,7 +645,8 @@ fn safe_avatar_src(raw: &str) -> Option<String> {
 }
 
 fn account_avatar_src(raw: &str) -> Option<String> {
-    safe_avatar_src(raw).map(|src| api_url(&src))
+    // The signed-in operator avatar belongs to the local managing server, never a remote peer.
+    safe_avatar_src(raw)
 }
 
 fn palette_items(context: AppContext, locale: &str) -> Vec<SearchItem> {
@@ -577,6 +685,25 @@ fn palette_items(context: AppContext, locale: &str) -> Vec<SearchItem> {
             id: "action:mcbrowser-policy".into(),
             text: t("Settings.mcbrowserPolicy"),
         });
+        if context.is_remote_untracked() {
+            items.push(SearchItem {
+                id: "action:exit-server".into(),
+                text: t("PeerSwitch.commandExitServer"),
+            });
+        }
+        let current_peer = context.active_server_id.get_untracked();
+        for peer in context.eligible_peers() {
+            if current_peer.as_deref() != Some(peer.id.as_str()) {
+                items.push(SearchItem {
+                    id: format!("action:switch-peer:{}", peer.id),
+                    text: af_web_core::i18n::translate_with(
+                        locale,
+                        "PeerSwitch.commandManagePeer",
+                        &[("server", &peer.name)],
+                    ),
+                });
+            }
+        }
     }
     items.push(SearchItem {
         id: "action:logout".into(),
@@ -586,6 +713,12 @@ fn palette_items(context: AppContext, locale: &str) -> Vec<SearchItem> {
 }
 
 fn dispatch_palette_selection(context: AppContext, id: &str) {
+    if let Some(peer_id) = id.strip_prefix("action:switch-peer:") {
+        if context.is_admin() {
+            let _ = context.select_server(Some(peer_id.to_string()));
+        }
+        return;
+    }
     match id {
         "action:toggle-theme" => context.toggle_theme(),
         "action:notifications" => context.notifications_open.set(true),
@@ -595,8 +728,152 @@ fn dispatch_palette_selection(context: AppContext, id: &str) {
         "action:mcbrowser-policy" if context.is_admin() => {
             context.navigate_to_subtab(TabId::McBrowser, "policy");
         }
+        "action:exit-server" => context.exit_to_local_server(),
         "action:logout" => context.logout(),
         _ => context.select_tab(TabId::from_key(id)),
+    }
+}
+
+#[component]
+pub fn ActiveServerBar() -> impl IntoView {
+    let context = app();
+    view! {
+        <Show when=move || context.is_remote()>
+            {move || {
+                let server_id = context.active_server_id.get().unwrap_or_default();
+                let server_name = context
+                    .active_server_name()
+                    .unwrap_or_else(|| server_id.clone());
+                let accent = context.active_server_accent();
+                let health = context
+                    .active_peer_health()
+                    .unwrap_or(ActivePeerHealth::Revoked);
+                let degraded = !health.allows_management();
+                let bar_style = if degraded {
+                    "bg-rose-500/10 border-rose-500/40 text-rose-200".to_string()
+                } else {
+                    accent
+                        .map(|a| format!("{} {}", a.bar_class, a.text_class))
+                        .unwrap_or_else(|| "bg-cyan-500/10 border-cyan-500/30 text-cyan-200".into())
+                };
+                let dot_style = if degraded {
+                    "w-2.5 h-2.5 rounded-full shrink-0 bg-rose-500".to_string()
+                } else {
+                    accent
+                        .map(|a| format!("w-2.5 h-2.5 rounded-full shrink-0 {}", a.dot_class))
+                        .unwrap_or_else(|| "w-2.5 h-2.5 rounded-full shrink-0 bg-cyan-400".into())
+                };
+                let access_summary = context
+                    .active_peer()
+                    .and_then(|peer| peer.grants.outbound)
+                    .map(|grant| {
+                        crate::tabs::cluster::peers::summarize_access_map(
+                            &context.locale.get(),
+                            &grant.access,
+                        )
+                    })
+                    .unwrap_or_default();
+                let health_detail = match health {
+                    ActivePeerHealth::Unreachable => Some(context.t_with(
+                        "PeerSwitch.peerUnreachableReason",
+                        &[("server", &server_name)],
+                    )),
+                    ActivePeerHealth::Revoked => Some(context.t_with(
+                        "PeerSwitch.peerRevokedReason",
+                        &[("server", &server_name)],
+                    )),
+                    ActivePeerHealth::Incompatible => Some(context.t_with(
+                        "PeerSwitch.peerIncompatibleReason",
+                        &[("server", &server_name)],
+                    )),
+                    ActivePeerHealth::NoGrant => Some(context.t_with(
+                        "PeerSwitch.noGrantReason",
+                        &[("server", &server_name)],
+                    )),
+                    ActivePeerHealth::Limited => context.active_peer().and_then(|peer| {
+                        if peer.missing_capabilities.is_empty() {
+                            None
+                        } else {
+                            let caps = peer.missing_capabilities.join(", ");
+                            Some(context.t_with(
+                                "Cluster.compatLimitedHint",
+                                &[("peer", &server_name), ("caps", &caps)],
+                            ))
+                        }
+                    }),
+                    ActivePeerHealth::Healthy => None,
+                };
+                let health_attr = match health {
+                    ActivePeerHealth::Healthy => "healthy",
+                    ActivePeerHealth::Limited => "limited",
+                    ActivePeerHealth::Unreachable => "unreachable",
+                    ActivePeerHealth::Incompatible => "incompatible",
+                    ActivePeerHealth::Revoked => "revoked",
+                    ActivePeerHealth::NoGrant => "no-grant",
+                };
+                view! {
+                    <div
+                        role="region"
+                        aria-label=move || context.t("PeerSwitch.identityBarLabel")
+                        data-testid="active-server-bar"
+                        data-server-id=server_id
+                        data-server-accent=accent.map(|a| a.key).unwrap_or("cyan")
+                        data-server-health=health_attr
+                        class=format!(
+                            "mx-4 md:mx-8 mt-4 rounded-xl border px-4 py-3 flex flex-wrap items-center justify-between gap-3 {bar_style}"
+                        )
+                    >
+                        <div class="flex flex-wrap items-center gap-3 min-w-0">
+                            <span class=dot_style aria-hidden="true"></span>
+                            <div class="min-w-0 space-y-0.5">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="font-semibold text-sm">
+                                        {context.t_with(
+                                            "PeerSwitch.managingBanner",
+                                            &[("server", &server_name)],
+                                        )}
+                                    </span>
+                                    <Badge
+                                        label=context.t(health.status_key())
+                                        tone=health.badge_tone()
+                                    />
+                                </div>
+                                {(!access_summary.is_empty() && health.allows_management()).then(|| {
+                                    view! {
+                                        <p class="text-xs text-slate-300 break-words">
+                                            {access_summary}
+                                        </p>
+                                    }
+                                })}
+                                {health_detail.map(|detail| {
+                                    view! {
+                                        <p
+                                            role=if degraded { "alert" } else { "status" }
+                                            data-testid="active-server-health-detail"
+                                            class=if degraded {
+                                                "text-xs text-rose-200 font-medium"
+                                            } else {
+                                                "text-xs text-amber-200"
+                                            }
+                                        >
+                                            {detail}
+                                        </p>
+                                    }
+                                })}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            class="glass-button px-3 py-2 text-xs font-medium shrink-0"
+                            data-testid="exit-active-server"
+                            on:click=move |_| context.exit_to_local_server()
+                        >
+                            {move || context.t("PeerSwitch.exitToThisServer")}
+                        </button>
+                    </div>
+                }
+            }}
+        </Show>
     }
 }
 
@@ -608,6 +885,7 @@ pub fn Header() -> impl IntoView {
     let avatar_failed = RwSignal::new(false);
     Effect::new(move |_| {
         let _ = context.typed_user().map(|u| u.avatar_url);
+        context.active_server_id.track();
         avatar_failed.set(false);
     });
     view! {
@@ -628,6 +906,43 @@ pub fn Header() -> impl IntoView {
                 </div>
             </div>
             <div class="af-header-actions flex items-center gap-2 min-w-0">
+                <Show when=move || {
+                    context.is_admin()
+                        && (!context.eligible_peers().is_empty() || context.is_remote())
+                }>
+                    <select
+                        data-testid="server-switcher"
+                        aria-label=move || context.t("PeerSwitch.switchServerLabel")
+                        class="glass-input px-2.5 py-1.5 text-sm max-w-44"
+                        prop:value=move || context.active_server_id.get().unwrap_or_default()
+                        on:change=move |event| {
+                            let val = event_target_value(&event);
+                            if val.is_empty() {
+                                context.exit_to_local_server();
+                            } else {
+                                let _ = context.select_server(Some(val));
+                            }
+                        }
+                    >
+                        <option value="">{move || context.t("PeerSwitch.thisServer")}</option>
+                        {move || {
+                            let mut options = context.eligible_peers();
+                            if let Some(active) = context.active_peer() {
+                                if !options.iter().any(|p| p.id == active.id) {
+                                    options.push(active);
+                                }
+                            }
+                            options
+                                .into_iter()
+                                .map(|peer| {
+                                    view! {
+                                        <option value=peer.id.clone()>{peer.name}</option>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </select>
+                </Show>
                 <StatusPill state=context.connection locale=context.locale/>
                 <button
                     class="af-command-button glass-button px-3 text-sm inline-flex items-center gap-2"
@@ -896,13 +1211,13 @@ pub fn OnboardingWizard() -> impl IntoView {
     let busy = RwSignal::new(false);
     Effect::new(move |_| {
         let settings = context.settings.get();
-        open.set(context.is_admin() && settings["setupCompleted"] == false);
+        open.set(context.is_admin() && !context.is_remote() && settings["setupCompleted"] == false);
         if !settings.is_null() && !dirty.get_untracked() {
             domain.set(settings["baseDomain"].as_str().unwrap_or_default().into());
         }
     });
     let finish = move || {
-        if !context.is_admin() || busy.get_untracked() {
+        if !context.is_admin() || context.is_remote_untracked() || busy.get_untracked() {
             return;
         }
         busy.set(true);
@@ -910,16 +1225,19 @@ pub fn OnboardingWizard() -> impl IntoView {
         settings["setupCompleted"] = json!(true);
         settings["baseDomain"] = json!(domain.get_untracked().trim());
         let epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
         spawn_local(async move {
             let result = ApiClient
                 .request("/api/v1/admin/settings", "PUT", Some(&settings))
                 .await;
-            if context.session_epoch.try_get_untracked() != Some(epoch) {
+            if context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+            {
                 return;
             }
             match result {
                 Ok(_) => {
-                    context.settings.set(settings);
+                    let _ = context.publish_settings_save(settings);
                     open.set(false);
                     context.toast(context.t("Onboarding.ready"), false);
                 }
@@ -1068,15 +1386,29 @@ pub fn GlobalCommandPalette() -> impl IntoView {
 #[component]
 pub fn NotificationDrawer() -> impl IntoView {
     let context = app();
+    let can_write_settings = move || context.can_write_area(PeerArea::Settings);
+    let write_reason = move || {
+        context
+            .area_block_reason(PeerArea::Settings, true)
+            .unwrap_or_default()
+    };
     view! {
         <Drawer open=context.notifications_open title=Signal::derive(move || context.t("Shell.notifications"))>
             <button
                 class="glass-button px-3 py-2 mb-4"
+                disabled=move || !can_write_settings()
+                title=write_reason
                 on:click=move |_| {
+                    if !can_write_settings() {
+                        return;
+                    }
                     let epoch = context.session_epoch.get_untracked();
+                    let server_epoch = context.server_epoch.get_untracked();
                     spawn_local(async move {
                         let result = ApiClient.request("/api/v1/auth/notifications/dismiss-all", "POST", None).await;
-                        if context.session_epoch.try_get_untracked() != Some(epoch) {
+                        if context.session_epoch.try_get_untracked() != Some(epoch)
+                            || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        {
                             return;
                         }
                         match result {
@@ -1110,12 +1442,20 @@ pub fn NotificationDrawer() -> impl IntoView {
                                 </p>
                                 <p class="text-sm text-slate-400 mt-2">{note["message"].as_str().unwrap_or_default().to_string()}</p>
                                 <button
-                                    class="text-xs text-indigo-300 mt-2"
+                                    class="text-xs text-indigo-300 mt-2 disabled:opacity-50"
+                                    disabled=move || !can_write_settings()
+                                    title=write_reason
                                     on:click=move |_| {
+                                        if !can_write_settings() {
+                                            return;
+                                        }
                                         let epoch = context.session_epoch.get_untracked();
+                                        let server_epoch = context.server_epoch.get_untracked();
                                         spawn_local(async move {
                                             let result = ApiClient.request(&format!("/api/v1/auth/notifications/{id}/read"), "PUT", None).await;
-                                            if context.session_epoch.try_get_untracked() != Some(epoch) {
+                                            if context.session_epoch.try_get_untracked() != Some(epoch)
+                                                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                                            {
                                                 return;
                                             }
                                             match result {
@@ -1171,6 +1511,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aborted_refresh_cannot_clear_replacement() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let (first, _) = AbortHandle::new_pair();
+            let revisions = ShellRefreshState {
+                request: RwSignal::new(1),
+                metrics: RwSignal::new(0),
+                in_flight: StoredValue::new_local(Some((1, first.clone()))),
+            };
+            abort_shell_refresh(revisions);
+            assert!(first.is_aborted());
+
+            let (second, _) = AbortHandle::new_pair();
+            revisions.in_flight.set_value(Some((2, second.clone())));
+            revisions.finish(1);
+            assert!(revisions.in_flight.with_value(Option::is_some));
+            abort_shell_refresh(revisions);
+            assert!(second.is_aborted());
+
+            let (third, _) = AbortHandle::new_pair();
+            revisions.in_flight.set_value(Some((3, third)));
+            revisions.finish(3);
+            assert!(revisions.in_flight.with_value(Option::is_none));
+        });
+    }
+
+    #[test]
     fn avatar_src_rejects_script_and_protocol_relative_urls() {
         assert_eq!(
             safe_avatar_src("/api/v1/auth/profile/avatar"),
@@ -1209,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    fn account_avatar_src_rewrites_validated_api_paths_only_after_allowlist() {
+    fn account_avatar_src_stays_on_local_server_and_enforces_allowlist() {
         let _guard = ActiveServerGuard::new(None);
         assert_eq!(
             account_avatar_src("/api/v1/auth/profile/avatar"),
@@ -1219,15 +1586,11 @@ mod tests {
         af_web_core::api::set_active_server(Some("media-2".into()));
         assert_eq!(
             account_avatar_src("/api/v1/auth/profile/avatar"),
-            Some("/api/v1/peers/media-2/auth/profile/avatar".into())
+            Some("/api/v1/auth/profile/avatar".into())
         );
         assert_eq!(
             account_avatar_src("/api/v1/auth/profile/avatar?v=2"),
-            Some("/api/v1/peers/media-2/auth/profile/avatar?v=2".into())
-        );
-        assert_eq!(
-            account_avatar_src("/api/v1/peers/media-2/auth/profile/avatar"),
-            Some("/api/v1/peers/media-2/auth/profile/avatar".into())
+            Some("/api/v1/auth/profile/avatar?v=2".into())
         );
         assert_eq!(
             account_avatar_src("/img/avatar.png"),

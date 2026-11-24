@@ -4,13 +4,14 @@ use super::host_resolution::{
     PROXY_RESOLVE_TIMEOUT,
 };
 use super::proxy_helpers::{
-    canonical_forwarded_headers, forward_proxy_http_headers, internal_domain_forbidden,
-    is_forwarded_header_name, is_hop_by_hop_header, is_spoofable_identity_header,
-    is_strict_loopback_https_url, is_trusted_proxy_ip, librespeed_tls_client,
-    local_domain_client_allowed, managed_app_route_unavailable,
-    resolve_optional_authenticated_user, strip_gateway_session_cookies, upstream_uses_tls,
-    verify_proxy_basic_credentials, PROXY_HTTP_CLIENT, PROXY_LOOPBACK_TLS_CLIENT,
-    PROXY_LOOPBACK_TLS_WS_CLIENT,
+    canonical_forwarded_headers, connect_upstream_tcp, connection_header_tokens,
+    internal_domain_forbidden, is_forwarded_header_name, is_hop_by_hop_header,
+    is_spoofable_identity_header, is_strict_loopback_https_url, is_trusted_proxy_ip,
+    is_websocket_upgrade_request, librespeed_tls_client, local_domain_client_allowed,
+    managed_app_route_unavailable, resolve_optional_authenticated_user,
+    strip_gateway_session_cookies, upstream_uses_tls, verify_proxy_basic_credentials, GuardedBody,
+    StreamProxyErrorKind, StreamProxyOptions, StreamProxyUpgradePolicy, PROXY_HTTP_CLIENT,
+    PROXY_LOOPBACK_TLS_CLIENT, PROXY_LOOPBACK_TLS_WS_CLIENT,
 };
 use super::rate_limit::{rate_limited_response, PROXY_BASIC_AUTH_LIMITER};
 use crate::auth::api_error;
@@ -20,11 +21,759 @@ use af_runner::package_executor::{
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::Request;
-use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::watch;
+use tokio::time::Instant;
+use url::Url;
+
+const WS_HANDSHAKE_HEADERS: [&str; 4] = [
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-protocol",
+    "sec-websocket-extensions",
+];
+
+struct SignalingStream<S> {
+    inner: S,
+    progress: Option<watch::Sender<Option<Instant>>>,
+    track_progress: bool,
+}
+
+impl<S> SignalingStream<S> {
+    fn finish(&mut self) {
+        if let Some(progress) = self.progress.take() {
+            progress.send_replace(None);
+        }
+    }
+}
+
+impl<S> Drop for SignalingStream<S> {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+impl<S, T, E> futures::Stream for SignalingStream<S>
+where
+    S: futures::Stream<Item = Result<T, E>> + Unpin,
+    T: AsRef<[u8]>,
+{
+    type Item = Result<T, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let poll = Pin::new(&mut self.inner).poll_next(cx);
+        match &poll {
+            Poll::Ready(None | Some(Err(_))) => self.finish(),
+            Poll::Ready(Some(Ok(chunk))) if self.track_progress && !chunk.as_ref().is_empty() => {
+                if let Some(progress) = &self.progress {
+                    progress.send_replace(Some(Instant::now()));
+                }
+            }
+            _ => {}
+        }
+        poll
+    }
+}
+
+async fn wait_for_http_proxy_timeout(
+    mut progress: watch::Receiver<Option<Instant>>,
+    upload_idle_timeout: Option<Duration>,
+    header_timeout: Duration,
+) -> &'static str {
+    if let Some(idle) = upload_idle_timeout {
+        // Wait independently of the body poller so downstream backpressure also counts as idle.
+        loop {
+            let Some(last_progress) = *progress.borrow_and_update() else {
+                break;
+            };
+            tokio::select! {
+                biased;
+                changed = progress.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep_until(last_progress + idle) => return "request body",
+            }
+        }
+    } else {
+        let _ = progress.wait_for(Option::is_none).await;
+    }
+    tokio::time::sleep(header_timeout).await;
+    "response headers"
+}
+
+fn build_stream_proxy_error(
+    on_error: Option<super::proxy_helpers::StreamProxyErrorFn>,
+    kind: StreamProxyErrorKind,
+    detail: String,
+) -> Response {
+    if let Some(mapper) = on_error {
+        return mapper(kind, detail);
+    }
+    match kind {
+        StreamProxyErrorKind::BadGateway => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "bad_gateway",
+                "message": detail,
+            })),
+        )
+            .into_response(),
+        StreamProxyErrorKind::GatewayTimeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({
+                "error": "gateway_timeout",
+                "message": detail,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn is_upgrade_request_for_policy(
+    req: &Request,
+    policy: StreamProxyUpgradePolicy,
+) -> Option<String> {
+    match policy {
+        StreamProxyUpgradePolicy::Disabled => None,
+        StreamProxyUpgradePolicy::WebSocketOnly => {
+            if is_websocket_upgrade_request(req.headers(), req.method()) {
+                Some("websocket".to_string())
+            } else {
+                None
+            }
+        }
+        StreamProxyUpgradePolicy::AnyUpgrade => {
+            let upgrade_header = req
+                .headers()
+                .get(header::UPGRADE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let is_upgrade = !upgrade_header.is_empty()
+                && (upgrade_header.eq_ignore_ascii_case("websocket")
+                    || req
+                        .headers()
+                        .get(header::CONNECTION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|c| c.to_ascii_lowercase().contains("upgrade"))
+                        .unwrap_or(false));
+            is_upgrade.then_some(upgrade_header)
+        }
+    }
+}
+
+fn copy_filtered_response_headers(
+    out_headers: &mut HeaderMap,
+    upstream_headers: &HeaderMap,
+    preserve_upgrade_headers: bool,
+) {
+    let conn_tokens = if preserve_upgrade_headers {
+        HashSet::new()
+    } else {
+        connection_header_tokens(upstream_headers)
+    };
+    for (k, v) in upstream_headers.iter() {
+        let name = k.as_str();
+        if !preserve_upgrade_headers
+            && (is_hop_by_hop_header(name) || conn_tokens.contains(&name.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        out_headers.append(k.clone(), v.clone());
+    }
+}
+
+fn copy_filtered_reqwest_response_headers(
+    out_headers: &mut HeaderMap,
+    upstream_headers: &reqwest::header::HeaderMap,
+    preserve_upgrade_headers: bool,
+) {
+    let mut conn_tokens = HashSet::new();
+    if !preserve_upgrade_headers {
+        for val in upstream_headers.get_all(reqwest::header::CONNECTION) {
+            if let Ok(raw) = val.to_str() {
+                for part in raw.split(',') {
+                    let token = part.trim();
+                    if !token.is_empty() {
+                        conn_tokens.insert(token.to_ascii_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    for (k, v) in upstream_headers.iter() {
+        let name = k.as_str();
+        if !preserve_upgrade_headers
+            && (is_hop_by_hop_header(name) || conn_tokens.contains(&name.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        if let (Ok(hk), Ok(hv)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_bytes(v.as_bytes()),
+        ) {
+            out_headers.append(hk, hv);
+        }
+    }
+}
+
+fn apply_upgrade_request_headers(
+    dst: &mut HeaderMap,
+    upstream_headers: &HeaderMap,
+    incoming_headers: &HeaderMap,
+    upstream_host: Option<&str>,
+    upgrade_header: &str,
+) {
+    let conn_tokens = connection_header_tokens(upstream_headers);
+    for (k, v) in upstream_headers.iter() {
+        let name = k.as_str();
+        if is_hop_by_hop_header(name)
+            || conn_tokens.contains(&name.to_ascii_lowercase())
+            || name.eq_ignore_ascii_case("host")
+        {
+            continue;
+        }
+        dst.append(k.clone(), v.clone());
+    }
+    if let Some(host) = upstream_host.filter(|h| !h.is_empty()) {
+        if let Ok(hv) = HeaderValue::from_str(host) {
+            dst.insert(header::HOST, hv);
+        }
+    }
+    if let Ok(up_hv) = HeaderValue::from_str(upgrade_header) {
+        dst.insert(header::UPGRADE, up_hv);
+    }
+    dst.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+    for ws_hdr in WS_HANDSHAKE_HEADERS {
+        if let Some(val) = incoming_headers.get(ws_hdr) {
+            if let Ok(hn) = HeaderName::from_bytes(ws_hdr.as_bytes()) {
+                dst.insert(hn, val.clone());
+            }
+        }
+    }
+}
+
+fn apply_reqwest_headers(
+    mut builder: reqwest::RequestBuilder,
+    upstream_headers: &HeaderMap,
+    upstream_host: Option<&str>,
+    include_ws_headers_from: Option<(&HeaderMap, &str)>,
+) -> reqwest::RequestBuilder {
+    let conn_tokens = connection_header_tokens(upstream_headers);
+    for (k, v) in upstream_headers.iter() {
+        let name = k.as_str();
+        if is_hop_by_hop_header(name)
+            || conn_tokens.contains(&name.to_ascii_lowercase())
+            || name.eq_ignore_ascii_case("host")
+        {
+            continue;
+        }
+        if let (Ok(rk), Ok(mut rv)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_bytes(v.as_bytes()),
+        ) {
+            if v.is_sensitive() {
+                rv.set_sensitive(true);
+            }
+            builder = builder.header(rk, rv);
+        }
+    }
+    if let Some(host) = upstream_host.filter(|h| !h.is_empty()) {
+        if let Ok(hv) = reqwest::header::HeaderValue::from_str(host) {
+            builder = builder.header(reqwest::header::HOST, hv);
+        }
+    }
+    if let Some((incoming_headers, upgrade_header)) = include_ws_headers_from {
+        if let Ok(up_hv) = reqwest::header::HeaderValue::from_str(upgrade_header) {
+            builder = builder.header(reqwest::header::UPGRADE, up_hv);
+        }
+        builder = builder.header(reqwest::header::CONNECTION, "Upgrade");
+        for ws_hdr in WS_HANDSHAKE_HEADERS {
+            if let Some(val) = incoming_headers.get(ws_hdr) {
+                if let (Ok(rk), Ok(rv)) = (
+                    reqwest::header::HeaderName::from_bytes(ws_hdr.as_bytes()),
+                    reqwest::header::HeaderValue::from_bytes(val.as_bytes()),
+                ) {
+                    builder = builder.header(rk, rv);
+                }
+            }
+        }
+    }
+    builder
+}
+
+fn spawn_bidirectional_tunnel<C, U, FutC, FutU, E1, E2>(
+    client_upgrade: FutC,
+    upstream_upgrade: FutU,
+    upgrade_timeout: Duration,
+    guard: Option<Box<dyn std::any::Any + Send + Sync>>,
+    ws_cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    log_context: String,
+) where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    FutC: std::future::Future<Output = Result<C, E1>> + Send + 'static,
+    FutU: std::future::Future<Output = Result<U, E2>> + Send + 'static,
+    E1: std::fmt::Display + Send + 'static,
+    E2: std::fmt::Display + Send + 'static,
+{
+    tokio::spawn(async move {
+        let _guard = guard;
+        let mut cancel_rx = ws_cancel;
+
+        let upgraded = async {
+            let join = async move {
+                tokio::try_join!(
+                    async move { client_upgrade.await.map_err(|e| e.to_string()) },
+                    async move { upstream_upgrade.await.map_err(|e| e.to_string()) },
+                )
+            };
+            if let Some(rx) = cancel_rx.as_mut() {
+                tokio::select! {
+                    _ = rx => Err("cancelled".to_string()),
+                    res = tokio::time::timeout(upgrade_timeout, join) => match res {
+                        Ok(pair) => pair,
+                        Err(_) => Err("upgrade handshake timed out".to_string()),
+                    }
+                }
+            } else {
+                match tokio::time::timeout(upgrade_timeout, join).await {
+                    Ok(pair) => pair,
+                    Err(_) => Err("upgrade handshake timed out".to_string()),
+                }
+            }
+        }
+        .await;
+
+        let (client_io, upstream_io) = match upgraded {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::debug!(context = %log_context, error = %err, "proxy websocket upgrade tunnel closed before copy");
+                return;
+            }
+        };
+
+        // Pump both directions independently and bound half-open drain after either peer closes so
+        // an abrupt disconnect or remote revocation never leaks a per-link WebSocket permit on a
+        // stalled client socket while still allowing any final Close frame to flush cleanly.
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client_read, mut client_write) = tokio::io::split(client_io);
+        let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream_io);
+        let mut c2u = Box::pin(async move {
+            let res = tokio::io::copy(&mut client_read, &mut upstream_write).await;
+            let _ = upstream_write.shutdown().await;
+            res
+        });
+        let mut u2c = Box::pin(async move {
+            let res = tokio::io::copy(&mut upstream_read, &mut client_write).await;
+            let _ = client_write.shutdown().await;
+            res
+        });
+        let half_close_drain = Duration::from_millis(250);
+
+        if let Some(rx) = cancel_rx {
+            tokio::select! {
+                _ = rx => {
+                    tracing::debug!(context = %log_context, "proxy websocket tunnel torn down by cancellation");
+                }
+                res = &mut u2c => {
+                    if let Err(err) = res {
+                        tracing::debug!(context = %log_context, error = %err, "proxy websocket upstream stream ended");
+                    }
+                    let _ = tokio::time::timeout(half_close_drain, &mut c2u).await;
+                }
+                res = &mut c2u => {
+                    if let Err(err) = res {
+                        tracing::debug!(context = %log_context, error = %err, "proxy websocket client stream ended");
+                    }
+                    let _ = tokio::time::timeout(half_close_drain, &mut u2c).await;
+                }
+            }
+        } else {
+            tokio::select! {
+                res = &mut u2c => {
+                    if let Err(err) = res {
+                        tracing::debug!(context = %log_context, error = %err, "proxy websocket upstream stream ended");
+                    }
+                    let _ = tokio::time::timeout(half_close_drain, &mut c2u).await;
+                }
+                res = &mut c2u => {
+                    if let Err(err) = res {
+                        tracing::debug!(context = %log_context, error = %err, "proxy websocket client stream ended");
+                    }
+                    let _ = tokio::time::timeout(half_close_drain, &mut u2c).await;
+                }
+            }
+        }
+    });
+}
+
+/// Shared streaming HTTP and WebSocket upgrade proxy transport used by both
+/// [`app_subdomain_proxy_middleware`] and the P6 peer management proxy.
+pub(crate) async fn stream_proxy(
+    req: Request,
+    target: Url,
+    client: &reqwest::Client,
+    mut opts: StreamProxyOptions,
+) -> Response {
+    let upgrade_header_opt = is_upgrade_request_for_policy(&req, opts.upgrade_policy);
+    let use_tls = target.scheme().eq_ignore_ascii_case("https");
+    let method = req.method().clone();
+    let incoming_headers = req.headers().clone();
+
+    if let Some(upgrade_header) = upgrade_header_opt {
+        if use_tls {
+            let ws_client = opts.tls_ws_client.as_ref().unwrap_or(client);
+            let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+                .unwrap_or(reqwest::Method::GET);
+            let mut ws_req = ws_client.request(reqwest_method, target.as_str());
+            ws_req = apply_reqwest_headers(
+                ws_req,
+                &opts.upstream_headers,
+                opts.upstream_host.as_deref(),
+                Some((&incoming_headers, &upgrade_header)),
+            );
+
+            let upstream_resp = match tokio::time::timeout(opts.header_timeout, ws_req.send()).await
+            {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(err)) => {
+                    tracing::warn!(context = %opts.log_context, error = %err, "TLS websocket upstream error");
+                    let kind = if err.is_timeout() {
+                        StreamProxyErrorKind::GatewayTimeout
+                    } else {
+                        StreamProxyErrorKind::BadGateway
+                    };
+                    return build_stream_proxy_error(
+                        opts.on_error.take(),
+                        kind,
+                        format!("Upstream {} is unavailable.", opts.log_context),
+                    );
+                }
+                Err(_) => {
+                    return build_stream_proxy_error(
+                        opts.on_error.take(),
+                        StreamProxyErrorKind::GatewayTimeout,
+                        format!("Upstream {} upgrade timed out.", opts.log_context),
+                    );
+                }
+            };
+
+            if upstream_resp.status() == reqwest::StatusCode::SWITCHING_PROTOCOLS {
+                let resp_headers_clone = upstream_resp.headers().clone();
+                let client_upgrade = hyper::upgrade::on(req);
+                let upstream_upgrade = upstream_resp.upgrade();
+                spawn_bidirectional_tunnel(
+                    async move {
+                        client_upgrade
+                            .await
+                            .map(hyper_util::rt::TokioIo::new)
+                            .map_err(|e| e.to_string())
+                    },
+                    async move { upstream_upgrade.await.map_err(|e| e.to_string()) },
+                    opts.header_timeout,
+                    opts.guard.take(),
+                    opts.ws_cancel.take(),
+                    opts.log_context.clone(),
+                );
+
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                copy_filtered_reqwest_response_headers(
+                    response.headers_mut(),
+                    &resp_headers_clone,
+                    true,
+                );
+                if let Some(transform) = opts.response_transform.take() {
+                    transform(&mut response, true);
+                }
+                if !response.headers().contains_key(header::UPGRADE) {
+                    if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
+                        response.headers_mut().insert(header::UPGRADE, up_hv);
+                    }
+                }
+                if !response.headers().contains_key(header::CONNECTION) {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+                }
+                return response;
+            } else {
+                let status = StatusCode::from_u16(upstream_resp.status().as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let resp_headers_clone = upstream_resp.headers().clone();
+                let stream = upstream_resp.bytes_stream();
+                let mut response = Response::new(GuardedBody::wrap(
+                    Body::from_stream(stream),
+                    opts.guard.take(),
+                ));
+                *response.status_mut() = status;
+                copy_filtered_reqwest_response_headers(
+                    response.headers_mut(),
+                    &resp_headers_clone,
+                    false,
+                );
+                if let Some(transform) = opts.response_transform.take() {
+                    transform(&mut response, false);
+                }
+                return response;
+            }
+        }
+
+        // Plain HTTP WebSocket upgrade over raw TCP + hyper HTTP/1.1 with strict deadline budget.
+        let deadline = tokio::time::Instant::now() + opts.header_timeout;
+        let connect_budget = opts
+            .ws_connect_timeout
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        let tcp_stream = match connect_upstream_tcp(&target, opts.tcp_bind.as_ref(), connect_budget)
+            .await
+        {
+            Ok(stream) => stream,
+            Err(kind) => {
+                tracing::warn!(context = %opts.log_context, ?kind, "websocket upstream connect error");
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    kind,
+                    match kind {
+                        StreamProxyErrorKind::BadGateway => {
+                            format!("Upstream {} is unavailable.", opts.log_context)
+                        }
+                        StreamProxyErrorKind::GatewayTimeout => {
+                            format!("Upstream {} timed out connecting.", opts.log_context)
+                        }
+                    },
+                );
+            }
+        };
+
+        let io = hyper_util::rt::TokioIo::new(tcp_stream);
+        let handshake_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let (mut sender, conn) = match tokio::time::timeout(
+            handshake_budget,
+            hyper::client::conn::http1::handshake(io),
+        )
+        .await
+        {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => {
+                tracing::warn!(context = %opts.log_context, error = %err, "websocket upstream HTTP/1 handshake error");
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::BadGateway,
+                    format!("Upstream {} is unavailable.", opts.log_context),
+                );
+            }
+            Err(_) => {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::GatewayTimeout,
+                    format!("Upstream {} handshake timed out.", opts.log_context),
+                );
+            }
+        };
+
+        tokio::spawn(async move {
+            if let Err(err) = conn.with_upgrades().await {
+                tracing::debug!(error = %err, "upstream websocket connection ended");
+            }
+        });
+
+        let target_pq = match target.query() {
+            Some(q) => format!("{}?{}", target.path(), q),
+            None => target.path().to_string(),
+        };
+        let mut req_builder = hyper::Request::builder().method(method).uri(&target_pq);
+        if let Some(hdrs) = req_builder.headers_mut() {
+            apply_upgrade_request_headers(
+                hdrs,
+                &opts.upstream_headers,
+                &incoming_headers,
+                opts.upstream_host.as_deref(),
+                &upgrade_header,
+            );
+        }
+
+        let Ok(upstream_ws_req) =
+            req_builder.body(http_body_util::Empty::<axum::body::Bytes>::new())
+        else {
+            return build_stream_proxy_error(
+                opts.on_error.take(),
+                StreamProxyErrorKind::BadGateway,
+                format!("Upstream {} is unavailable.", opts.log_context),
+            );
+        };
+
+        let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let mut upstream_resp = match tokio::time::timeout(
+            send_budget,
+            sender.send_request(upstream_ws_req),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
+                tracing::warn!(context = %opts.log_context, error = %err, "websocket upstream response error");
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::BadGateway,
+                    format!("Upstream {} is unavailable.", opts.log_context),
+                );
+            }
+            Err(_) => {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::GatewayTimeout,
+                    format!("Upstream {} upgrade timed out.", opts.log_context),
+                );
+            }
+        };
+
+        if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+            let resp_headers_clone = upstream_resp.headers().clone();
+            let client_upgrade = hyper::upgrade::on(req);
+            let upstream_upgrade = hyper::upgrade::on(&mut upstream_resp);
+            spawn_bidirectional_tunnel(
+                async move {
+                    client_upgrade
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                        .map_err(|e| e.to_string())
+                },
+                async move {
+                    upstream_upgrade
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                        .map_err(|e| e.to_string())
+                },
+                opts.header_timeout,
+                opts.guard.take(),
+                opts.ws_cancel.take(),
+                opts.log_context.clone(),
+            );
+
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            copy_filtered_response_headers(response.headers_mut(), &resp_headers_clone, true);
+            if let Some(transform) = opts.response_transform.take() {
+                transform(&mut response, true);
+            }
+            if !response.headers().contains_key(header::UPGRADE) {
+                if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
+                    response.headers_mut().insert(header::UPGRADE, up_hv);
+                }
+            }
+            if !response.headers().contains_key(header::CONNECTION) {
+                response
+                    .headers_mut()
+                    .insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+            }
+            return response;
+        } else {
+            let (upstream, body) = upstream_resp.into_parts();
+            let mut response = Response::new(GuardedBody::wrap(Body::new(body), opts.guard.take()));
+            *response.status_mut() = upstream.status;
+            copy_filtered_response_headers(response.headers_mut(), &upstream.headers, false);
+            if let Some(transform) = opts.response_transform.take() {
+                transform(&mut response, false);
+            }
+            return response;
+        }
+    }
+
+    // Streaming HTTP request & response (no buffering; header timeout does not cap multi-minute bodies).
+    let has_body = if opts.discard_request_body {
+        false
+    } else {
+        !hyper::body::Body::is_end_stream(req.body())
+            || incoming_headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .is_some_and(|len| len > 0)
+            || incoming_headers.contains_key(header::TRANSFER_ENCODING)
+    };
+
+    let reqwest_method =
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut upstream_req = client.request(reqwest_method, target.as_str());
+    upstream_req = apply_reqwest_headers(
+        upstream_req,
+        &opts.upstream_headers,
+        opts.upstream_host.as_deref(),
+        None,
+    );
+
+    let send_res = if has_body {
+        let (progress_tx, progress_rx) = watch::channel(Some(Instant::now()));
+        let stream = SignalingStream {
+            inner: req.into_body().into_data_stream(),
+            progress: Some(progress_tx),
+            track_progress: opts.upload_idle_timeout.is_some(),
+        };
+        upstream_req = upstream_req.body(reqwest::Body::wrap_stream(stream));
+        tokio::select! {
+            res = upstream_req.send() => Ok(res),
+            stage = wait_for_http_proxy_timeout(progress_rx, opts.upload_idle_timeout, opts.header_timeout) => Err(stage),
+        }
+    } else {
+        tokio::time::timeout(opts.header_timeout, upstream_req.send())
+            .await
+            .map_err(|_| "response headers")
+    };
+
+    match send_res {
+        Ok(Ok(upstream_resp)) => {
+            let status = StatusCode::from_u16(upstream_resp.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let upstream_headers = upstream_resp.headers().clone();
+            let stream = upstream_resp.bytes_stream();
+            let mut response = Response::new(GuardedBody::wrap(
+                Body::from_stream(stream),
+                opts.guard.take(),
+            ));
+            *response.status_mut() = status;
+            copy_filtered_reqwest_response_headers(
+                response.headers_mut(),
+                &upstream_headers,
+                false,
+            );
+            if let Some(transform) = opts.response_transform.take() {
+                transform(&mut response, false);
+            }
+            response
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(context = %opts.log_context, error = %err, "stream proxy upstream error");
+            let kind = if err.is_timeout() {
+                StreamProxyErrorKind::GatewayTimeout
+            } else {
+                StreamProxyErrorKind::BadGateway
+            };
+            build_stream_proxy_error(
+                opts.on_error.take(),
+                kind,
+                format!("Upstream {} is unavailable.", opts.log_context),
+            )
+        }
+        Err(stage) => {
+            tracing::warn!(context = %opts.log_context, stage, "stream proxy timeout");
+            build_stream_proxy_error(
+                opts.on_error.take(),
+                StreamProxyErrorKind::GatewayTimeout,
+                format!("Upstream {} timed out.", opts.log_context),
+            )
+        }
+    }
+}
 
 pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Response {
     // Apache uses this header to require an application route. It cannot grant
@@ -175,22 +924,6 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         return response;
     }
 
-    let upgrade_header = req
-        .headers()
-        .get(header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let is_ws_upgrade = !upgrade_header.is_empty()
-        && (upgrade_header.eq_ignore_ascii_case("websocket")
-            || req
-                .headers()
-                .get(header::CONNECTION)
-                .and_then(|v| v.to_str().ok())
-                .map(|c| c.to_ascii_lowercase().contains("upgrade"))
-                .unwrap_or(false));
-
-    let method_str = req.method().as_str().to_string();
     let path_and_query = req
         .uri()
         .path_and_query()
@@ -215,7 +948,29 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     let use_tls = pinned_client.is_some()
         || (app_name != "librespeed" && upstream_uses_tls(&app_name, target_port as u16));
     let scheme = if use_tls { "https" } else { "http" };
-    let target_url = format!("{scheme}://127.0.0.1:{target_port}{path_and_query}");
+    let target_url_str = format!("{scheme}://127.0.0.1:{target_port}{path_and_query}");
+
+    if use_tls && !is_strict_loopback_https_url(&target_url_str) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "bad_gateway",
+                "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+            })),
+        )
+            .into_response();
+    }
+
+    let Ok(target_url) = Url::parse(&target_url_str) else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "bad_gateway",
+                "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+            })),
+        )
+            .into_response();
+    };
 
     let mut incoming_headers = req.headers().clone();
     if requires_auth {
@@ -223,480 +978,116 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     }
     strip_gateway_session_cookies(&mut incoming_headers, requires_auth);
 
-    if is_ws_upgrade {
-        if use_tls {
-            if !is_strict_loopback_https_url(&target_url) {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": "bad_gateway",
-                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-
-            let reqwest_method =
-                reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-            let mut ws_req = pinned_client
-                .as_ref()
-                .unwrap_or(&PROXY_LOOPBACK_TLS_WS_CLIENT)
-                .request(reqwest_method, &target_url);
-            ws_req = forward_proxy_http_headers(
-                ws_req,
-                &incoming_headers,
-                &raw_host,
-                peer_ip_opt,
-                trust_forwarded,
-            );
-            ws_req = ws_req.header(reqwest::header::CONNECTION, "Upgrade");
-            if let Some(ref user) = authenticated_user {
-                ws_req = ws_req.header("X-Aetherflow-User", user);
-            }
-
-            let upstream_resp = match tokio::time::timeout(Duration::from_secs(15), ws_req.send())
-                .await
-            {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(err)) => {
-                    tracing::warn!(
-                        app = %app_name,
-                        host = %raw_host,
-                        port = target_port,
-                        error = %err,
-                        "subdomain reverse proxy TLS websocket upstream error"
-                    );
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({
-                            "error": "bad_gateway",
-                            "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                        })),
-                    )
-                        .into_response();
-                }
-                Err(_) => {
-                    return (
-                        StatusCode::GATEWAY_TIMEOUT,
-                        Json(serde_json::json!({
-                            "error": "gateway_timeout",
-                            "message": format!("Upstream service {} on port {} upgrade timed out.", app_name, target_port),
-                        })),
-                    )
-                        .into_response();
-                }
-            };
-
-            if upstream_resp.status() == reqwest::StatusCode::SWITCHING_PROTOCOLS {
-                let resp_headers_clone = upstream_resp.headers().clone();
-                let client_upgrade = hyper::upgrade::on(req);
-                let upstream_upgrade = upstream_resp.upgrade();
-
-                tokio::spawn(async move {
-                    match tokio::try_join!(
-                        async move { client_upgrade.await.map_err(std::io::Error::other) },
-                        async move { upstream_upgrade.await.map_err(std::io::Error::other) }
-                    ) {
-                        Ok((client_upgraded, mut upstream_upgraded)) => {
-                            let mut client_io = hyper_util::rt::TokioIo::new(client_upgraded);
-                            let _ = tokio::io::copy_bidirectional(
-                                &mut client_io,
-                                &mut upstream_upgraded,
-                            )
-                            .await;
-                        }
-                        Err(err) => {
-                            tracing::debug!(error = %err, "subdomain TLS websocket upgrade tunnel closed");
-                        }
-                    }
-                });
-
-                let mut response = Response::new(Body::empty());
-                *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-                let out_headers = response.headers_mut();
-                for (k, v) in resp_headers_clone.iter() {
-                    if let (Ok(hk), Ok(hv)) = (
-                        HeaderName::from_bytes(k.as_str().as_bytes()),
-                        HeaderValue::from_bytes(v.as_bytes()),
-                    ) {
-                        out_headers.append(hk, hv);
-                    }
-                }
-                if !out_headers.contains_key(header::UPGRADE) {
-                    if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
-                        out_headers.insert(header::UPGRADE, up_hv);
-                    }
-                }
-                if !out_headers.contains_key(header::CONNECTION) {
-                    out_headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
-                }
-                return response;
-            } else {
-                let status = StatusCode::from_u16(upstream_resp.status().as_u16())
-                    .unwrap_or(StatusCode::BAD_GATEWAY);
-                let resp_headers_clone = upstream_resp.headers().clone();
-                let stream = upstream_resp.bytes_stream();
-                let mut response = Response::new(Body::from_stream(stream));
-                *response.status_mut() = status;
-                let out_headers = response.headers_mut();
-                for (k, v) in resp_headers_clone.iter() {
-                    if is_hop_by_hop_header(k.as_str()) {
-                        continue;
-                    }
-                    if let (Ok(hk), Ok(hv)) = (
-                        HeaderName::from_bytes(k.as_str().as_bytes()),
-                        HeaderValue::from_bytes(v.as_bytes()),
-                    ) {
-                        out_headers.append(hk, hv);
-                    }
-                }
-                return response;
-            }
+    let mut upstream_headers = HeaderMap::new();
+    for (k, v) in incoming_headers.iter() {
+        let name_str = k.as_str();
+        if is_hop_by_hop_header(name_str)
+            || is_forwarded_header_name(name_str)
+            || is_spoofable_identity_header(name_str)
+            || name_str.eq_ignore_ascii_case("host")
+        {
+            continue;
         }
-
-        let tcp_stream = match tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16)),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    app = %app_name,
-                    host = %raw_host,
-                    port = target_port,
-                    error = %err,
-                    "subdomain reverse proxy websocket upstream connect error"
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": "bad_gateway",
-                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-            Err(_) => {
-                tracing::warn!(
-                    app = %app_name,
-                    host = %raw_host,
-                    port = target_port,
-                    "subdomain reverse proxy websocket upstream connect timeout"
-                );
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(serde_json::json!({
-                        "error": "gateway_timeout",
-                        "message": format!("Upstream service {} on port {} timed out connecting.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-        };
-
-        let io = hyper_util::rt::TokioIo::new(tcp_stream);
-        let (mut sender, conn) = match tokio::time::timeout(
-            Duration::from_secs(10),
-            hyper::client::conn::http1::handshake(io),
-        )
-        .await
-        {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    app = %app_name,
-                    host = %raw_host,
-                    port = target_port,
-                    error = %err,
-                    "subdomain reverse proxy websocket handshake error"
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": "bad_gateway",
-                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-            Err(_) => {
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(serde_json::json!({
-                        "error": "gateway_timeout",
-                        "message": format!("Upstream service {} on port {} handshake timed out.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-        };
-
-        tokio::spawn(async move {
-            if let Err(err) = conn.with_upgrades().await {
-                tracing::debug!(error = %err, "upstream websocket connection ended");
-            }
-        });
-
-        let mut req_builder = hyper::Request::builder()
-            .method(req.method().clone())
-            .uri(&path_and_query);
-
-        if let Some(hdrs) = req_builder.headers_mut() {
-            for (k, v) in incoming_headers.iter() {
-                let name_str = k.as_str();
-                if is_hop_by_hop_header(name_str)
-                    || is_forwarded_header_name(name_str)
-                    || is_spoofable_identity_header(name_str)
-                    || name_str.eq_ignore_ascii_case("host")
-                {
-                    continue;
-                }
-                hdrs.append(k.clone(), v.clone());
-            }
-            if !raw_host.is_empty() {
-                if let Ok(hv) = HeaderValue::from_str(&raw_host) {
-                    hdrs.insert(header::HOST, hv);
-                }
-            }
-            for (hn, hv) in canonical_forwarded_headers(
-                &incoming_headers,
-                &raw_host,
-                peer_ip_opt,
-                trust_forwarded,
-            ) {
-                hdrs.insert(hn, hv);
-            }
-            if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
-                hdrs.insert(header::UPGRADE, up_hv);
-            }
-            hdrs.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
-
-            for ws_hdr in [
-                "sec-websocket-key",
-                "sec-websocket-version",
-                "sec-websocket-protocol",
-                "sec-websocket-extensions",
-            ] {
-                if let Some(val) = incoming_headers.get(ws_hdr) {
-                    if let Ok(hn) = HeaderName::from_bytes(ws_hdr.as_bytes()) {
-                        hdrs.insert(hn, val.clone());
-                    }
-                }
-            }
-
-            hdrs.remove("x-aetherflow-user");
-            if let Some(ref user) = authenticated_user {
-                if let Ok(user_hv) = HeaderValue::from_str(user) {
-                    hdrs.insert(HeaderName::from_static("x-aetherflow-user"), user_hv);
-                }
-            }
-        }
-
-        let Ok(upstream_ws_req) =
-            req_builder.body(http_body_util::Empty::<axum::body::Bytes>::new())
-        else {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": "bad_gateway",
-                    "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                })),
-            )
-                .into_response();
-        };
-
-        let mut upstream_resp = match tokio::time::timeout(
-            Duration::from_secs(15),
-            sender.send_request(upstream_ws_req),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    app = %app_name,
-                    host = %raw_host,
-                    port = target_port,
-                    error = %err,
-                    "subdomain reverse proxy websocket upstream response error"
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": "bad_gateway",
-                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-            Err(_) => {
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(serde_json::json!({
-                        "error": "gateway_timeout",
-                        "message": format!("Upstream service {} on port {} upgrade timed out.", app_name, target_port),
-                    })),
-                )
-                    .into_response();
-            }
-        };
-
-        if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
-            let resp_headers_clone = upstream_resp.headers().clone();
-            let client_upgrade = hyper::upgrade::on(req);
-            let upstream_upgrade = hyper::upgrade::on(&mut upstream_resp);
-
-            tokio::spawn(async move {
-                match tokio::try_join!(client_upgrade, upstream_upgrade) {
-                    Ok((client_upgraded, upstream_upgraded)) => {
-                        let mut client_io = hyper_util::rt::TokioIo::new(client_upgraded);
-                        let mut upstream_io = hyper_util::rt::TokioIo::new(upstream_upgraded);
-                        let _ =
-                            tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await;
-                    }
-                    Err(err) => {
-                        tracing::debug!(error = %err, "subdomain websocket upgrade tunnel closed");
-                    }
-                }
-            });
-
-            let mut response = Response::new(Body::empty());
-            *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-            let out_headers = response.headers_mut();
-            for (k, v) in resp_headers_clone.iter() {
-                out_headers.append(k.clone(), v.clone());
-            }
-            if !out_headers.contains_key(header::UPGRADE) {
-                if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
-                    out_headers.insert(header::UPGRADE, up_hv);
-                }
-            }
-            if !out_headers.contains_key(header::CONNECTION) {
-                out_headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
-            }
-            return response;
-        } else {
-            let (upstream, body) = upstream_resp.into_parts();
-            let mut response = Response::new(Body::new(body));
-            *response.status_mut() = upstream.status;
-            let out_headers = response.headers_mut();
-            for (k, v) in &upstream.headers {
-                if !is_hop_by_hop_header(k.as_str()) {
-                    out_headers.append(k.clone(), v.clone());
-                }
-            }
-            return response;
+        upstream_headers.append(k.clone(), v.clone());
+    }
+    for (hn, hv) in
+        canonical_forwarded_headers(&incoming_headers, &raw_host, peer_ip_opt, trust_forwarded)
+    {
+        upstream_headers.insert(hn, hv);
+    }
+    if let Some(ref user) = authenticated_user {
+        if let Ok(user_hv) = HeaderValue::from_str(user) {
+            upstream_headers.insert(HeaderName::from_static("x-aetherflow-user"), user_hv);
         }
     }
 
     let client = if use_tls {
-        if !is_strict_loopback_https_url(&target_url) {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": "bad_gateway",
-                    "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-                })),
-            )
-                .into_response();
-        }
         pinned_client.as_ref().unwrap_or(&PROXY_LOOPBACK_TLS_CLIENT)
     } else {
         &*PROXY_HTTP_CLIENT
     };
-
-    let has_body = !hyper::body::Body::is_end_stream(req.body())
-        || incoming_headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .is_some_and(|len| len > 0)
-        || incoming_headers.contains_key(header::TRANSFER_ENCODING);
-
-    let reqwest_method =
-        reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut upstream_req = client.request(reqwest_method, &target_url);
-
-    upstream_req = forward_proxy_http_headers(
-        upstream_req,
-        &incoming_headers,
-        &raw_host,
-        peer_ip_opt,
-        trust_forwarded,
-    );
-    if let Some(user) = authenticated_user {
-        upstream_req = upstream_req.header("X-Aetherflow-User", user);
-    }
-
-    if has_body {
-        upstream_req = upstream_req.body(reqwest::Body::wrap_stream(
-            req.into_body().into_data_stream(),
-        ));
-    }
-
-    let send_res = if has_body {
-        Ok(upstream_req.send().await)
+    let tls_ws_client = if use_tls {
+        Some(
+            pinned_client
+                .clone()
+                .unwrap_or_else(|| PROXY_LOOPBACK_TLS_WS_CLIENT.clone()),
+        )
     } else {
-        tokio::time::timeout(Duration::from_secs(30), upstream_req.send()).await
+        None
     };
 
-    match send_res {
-        Ok(Ok(upstream_resp)) => {
-            let status = StatusCode::from_u16(upstream_resp.status().as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
-            let upstream_headers = upstream_resp.headers().clone();
-            let stream = upstream_resp.bytes_stream();
-            let mut response = Response::new(Body::from_stream(stream));
-            *response.status_mut() = status;
-
-            let resp_headers = response.headers_mut();
-            for (k, v) in upstream_headers.iter() {
-                if is_hop_by_hop_header(k.as_str()) {
-                    continue;
-                }
-                if let (Ok(hk), Ok(hv)) = (
-                    HeaderName::from_bytes(k.as_str().as_bytes()),
-                    HeaderValue::from_bytes(v.as_bytes()),
-                ) {
-                    resp_headers.append(hk, hv);
-                }
-            }
-            response
-        }
-        Ok(Err(err)) => {
-            tracing::warn!(
-                app = %app_name,
-                host = %raw_host,
-                port = target_port,
-                error = %err,
-                "subdomain reverse proxy upstream error"
-            );
-            (
+    let is_upgrade =
+        is_upgrade_request_for_policy(&req, StreamProxyUpgradePolicy::AnyUpgrade).is_some();
+    let app_err_name = app_name.clone();
+    let err_port = target_port;
+    let opts = StreamProxyOptions {
+        upstream_headers,
+        upstream_host: (!raw_host.is_empty()).then_some(raw_host.clone()),
+        tcp_bind: None,
+        tls_ws_client,
+        header_timeout: if is_upgrade {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(30)
+        },
+        upload_idle_timeout: None,
+        ws_connect_timeout: Duration::from_secs(10),
+        upgrade_policy: StreamProxyUpgradePolicy::AnyUpgrade,
+        guard: None,
+        ws_cancel: None,
+        response_transform: None,
+        on_error: Some(Box::new(move |kind, _| {
+            match kind {
+            StreamProxyErrorKind::BadGateway => (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
                     "error": "bad_gateway",
-                    "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    "message": format!("Upstream service {} on port {} is unavailable.", app_err_name, err_port),
                 })),
             )
-                .into_response()
-        }
-        Err(_) => {
-            tracing::warn!(
-                app = %app_name,
-                host = %raw_host,
-                port = target_port,
-                "subdomain reverse proxy upstream timeout"
-            );
-            (
+                .into_response(),
+            StreamProxyErrorKind::GatewayTimeout => (
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(serde_json::json!({
                     "error": "gateway_timeout",
-                    "message": format!("Upstream service {} on port {} timed out.", app_name, target_port),
+                    "message": format!("Upstream service {} on port {} timed out.", app_err_name, err_port),
                 })),
             )
-                .into_response()
+                .into_response(),
         }
+        })),
+        log_context: format!("subdomain:{app_name}:{target_port}"),
+        discard_request_body: false,
+    };
+
+    stream_proxy(req, target_url, client, opts).await
+}
+
+#[cfg(test)]
+mod upload_progress_tests {
+    use super::*;
+    use axum::body::Bytes;
+    use futures::StreamExt as _;
+
+    #[tokio::test]
+    async fn upload_activity_counts_only_when_bytes_are_forwarded() {
+        let (progress_tx, mut progress_rx) = watch::channel(Some(Instant::now()));
+        let chunks = futures::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::new()),
+            Ok(Bytes::from_static(b"upload data")),
+        ]);
+        let mut stream = SignalingStream {
+            inner: chunks,
+            progress: Some(progress_tx),
+            track_progress: true,
+        };
+
+        assert!(stream.next().await.unwrap().unwrap().is_empty());
+        assert!(!progress_rx.has_changed().unwrap());
+        assert!(!stream.next().await.unwrap().unwrap().is_empty());
+        assert!(progress_rx.has_changed().unwrap());
+        assert!(progress_rx.borrow_and_update().is_some());
+        assert!(stream.next().await.is_none());
+        assert!(progress_rx.borrow().is_none());
     }
 }

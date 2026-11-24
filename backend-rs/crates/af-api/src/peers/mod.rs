@@ -6,8 +6,11 @@ pub mod health;
 pub mod links;
 pub mod listener;
 pub mod pairing;
+pub mod proxy;
 pub mod scopes;
 
+#[cfg(test)]
+mod proxy_tests;
 #[cfg(test)]
 mod tests;
 
@@ -36,6 +39,8 @@ pub const PEER_PROTOCOL_VERSION: i64 = 1;
 pub const MIN_PEER_PROTOCOL_VERSION: i64 = 1;
 pub const DEFAULT_PEER_LISTEN_PORT: u16 = 9443;
 pub const DEFAULT_PEER_MAX_CONN: usize = 64;
+pub const DEFAULT_PEER_MAX_WS: usize = 16;
+pub const DEFAULT_PEER_PROXY_HEADER_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_PEER_RTT_WARN_MS: f64 = 25.0;
 pub const PUBLIC_PAIRING_BODY_LIMIT_BYTES: usize = 4096;
 pub const HEADER_LINK_TOKEN: &str = "x-af-link-token";
@@ -538,6 +543,28 @@ impl TunnelHttpError {
 type ClockFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 type MonotonicClockFn = Arc<dyn Fn() -> Duration + Send + Sync>;
 
+/// Extension attached by the peer tunnel listener so downstream handlers (such as WebSocket
+/// ticket issuance and live revocation subscriptions) bind strictly to the originating
+/// `PeerRuntime` in both production and isolated multi-server test fixtures.
+#[derive(Clone)]
+pub struct PeerListenerRuntime(pub(crate) Arc<PeerRuntime>);
+
+/// Extension carrying a per-link WebSocket semaphore permit from the peer tunnel listener into an
+/// upgraded WebSocket task so the permit stays held for the full socket lifetime and releases
+/// immediately on rejection, disconnect, or revocation.
+#[derive(Clone)]
+pub struct PeerWsPermit(pub(crate) Arc<StdMutex<Option<tokio::sync::OwnedSemaphorePermit>>>);
+
+impl PeerWsPermit {
+    pub(crate) fn new(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self(Arc::new(StdMutex::new(Some(permit))))
+    }
+
+    pub(crate) fn take(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
 /// Shared runtime state for peer clustering.
 pub struct PeerRuntime {
     pub(crate) db: PeerDb,
@@ -553,7 +580,9 @@ pub struct PeerRuntime {
     /// ownership surrounds all credential I/O. Never held across outbound tunnel HTTP.
     pub(crate) link_locks: KeyedAsyncLockPool,
     pub(crate) link_semaphores: StdMutex<HashMap<String, Weak<Semaphore>>>,
+    pub(crate) link_ws_semaphores: StdMutex<HashMap<String, Weak<Semaphore>>>,
     pub(crate) tunnel_clients: StdMutex<HashMap<TunnelClientBindingKey, reqwest::Client>>,
+    pub(crate) proxy_tunnel_clients: StdMutex<HashMap<TunnelClientBindingKey, reqwest::Client>>,
     pub(crate) listener_state: TokioMutex<Option<ListenerHandle>>,
     pub(crate) health_shutdown: TokioMutex<Option<watch::Sender<bool>>>,
     pub(crate) clock: ClockFn,
@@ -561,6 +590,8 @@ pub struct PeerRuntime {
     pub(crate) lock_wait_timeout: Duration,
     pub(crate) listen_port: u16,
     pub(crate) max_conn_per_link: usize,
+    pub(crate) max_ws_per_link: usize,
+    pub(crate) proxy_header_timeout: Duration,
     pub(crate) rtt_warn_ms: f64,
     pub(crate) server_name_override: Option<String>,
     pub(crate) version_override: Option<String>,
@@ -596,7 +627,9 @@ impl PeerRuntime {
             attempt_locks: KeyedAsyncLockPool::new(),
             link_locks: KeyedAsyncLockPool::new(),
             link_semaphores: StdMutex::new(HashMap::new()),
+            link_ws_semaphores: StdMutex::new(HashMap::new()),
             tunnel_clients: StdMutex::new(HashMap::new()),
+            proxy_tunnel_clients: StdMutex::new(HashMap::new()),
             listener_state: TokioMutex::new(None),
             health_shutdown: TokioMutex::new(None),
             clock: Arc::new(Utc::now),
@@ -604,6 +637,8 @@ impl PeerRuntime {
             lock_wait_timeout: PEER_LOCK_WAIT_TIMEOUT,
             listen_port: configured_peer_listen_port(),
             max_conn_per_link: configured_peer_max_conn(),
+            max_ws_per_link: configured_peer_max_ws(),
+            proxy_header_timeout: Duration::from_secs(DEFAULT_PEER_PROXY_HEADER_TIMEOUT_SECS),
             rtt_warn_ms: configured_peer_rtt_warn_ms(),
             server_name_override: None,
             version_override: None,
@@ -712,6 +747,49 @@ impl PeerRuntime {
             }
         };
         sem.try_acquire_owned().ok()
+    }
+
+    pub(crate) fn acquire_link_ws_permit(
+        &self,
+        link_key: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let sem = {
+            let mut map = self
+                .link_ws_semaphores
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if map.len() > MAX_RETAINED_LOCK_WEAKS {
+                map.retain(|_, weak| weak.strong_count() > 0);
+            }
+            if let Some(existing) = map.get(link_key).and_then(Weak::upgrade) {
+                existing
+            } else {
+                let fresh = Arc::new(Semaphore::new(self.max_ws_per_link));
+                map.insert(link_key.to_string(), Arc::downgrade(&fresh));
+                fresh
+            }
+        };
+        sem.try_acquire_owned().ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_link_http_permits(&self, link_key: &str) -> usize {
+        self.link_semaphores
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(link_key)
+            .and_then(Weak::upgrade)
+            .map_or(self.max_conn_per_link, |s| s.available_permits())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_link_ws_permits(&self, link_key: &str) -> usize {
+        self.link_ws_semaphores
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(link_key)
+            .and_then(Weak::upgrade)
+            .map_or(self.max_ws_per_link, |s| s.available_permits())
     }
 
     /// Builds an outbound tunnel HTTP URL strictly from a stored peer tunnel IP address.
@@ -850,7 +928,7 @@ impl PeerRuntime {
         }
     }
 
-    async fn resolve_outbound_tunnel_binding(
+    pub(crate) async fn resolve_outbound_tunnel_binding(
         &self,
         dest_ip: IpAddr,
     ) -> Result<TunnelClientBindingKey, TunnelHttpError> {
@@ -938,6 +1016,51 @@ impl PeerRuntime {
         let client = builder.build().map_err(|err| {
             TunnelHttpError::Unreachable(format!(
                 "Failed building bound tunnel HTTP client: {}",
+                redact_sensitive_text(&err.to_string())
+            ))
+        })?;
+
+        if map.len() >= MAX_CACHED_TUNNEL_CLIENTS {
+            map.clear();
+        }
+        map.insert(binding.clone(), client.clone());
+        Ok(client)
+    }
+
+    /// Returns a bound streaming proxy HTTP client using `proxy_header_timeout` strictly for TCP
+    /// connect (never imposing a whole-stream timeout on multi-minute uploads or downloads).
+    pub(crate) fn get_or_build_proxy_tunnel_client(
+        &self,
+        binding: &TunnelClientBindingKey,
+    ) -> Result<reqwest::Client, TunnelHttpError> {
+        let mut map = self
+            .proxy_tunnel_clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = map.get(binding) {
+            return Ok(existing.clone());
+        }
+
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(self.proxy_header_timeout)
+            .local_address(binding.local_ip);
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(ref iface) = binding.interface {
+            builder = builder.interface(iface);
+        }
+        #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
+        if binding.interface.is_some() {
+            return Err(TunnelHttpError::InvalidTarget(
+                "Tunnel interface binding requires Linux SO_BINDTODEVICE".to_string(),
+            ));
+        }
+
+        let client = builder.build().map_err(|err| {
+            TunnelHttpError::Unreachable(format!(
+                "Failed building bound tunnel proxy HTTP client: {}",
                 redact_sensitive_text(&err.to_string())
             ))
         })?;
@@ -1229,6 +1352,43 @@ pub(crate) fn public_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
     tracked_public_routes_with_runtime(runtime).into_router()
 }
 
+/// Admin-only versioned peer management proxy router mounted strictly under `/api/v1/peers`.
+#[allow(dead_code)]
+pub fn proxy_routes() -> Router {
+    proxy_routes_with_runtime(PeerRuntime::global())
+}
+
+pub(crate) fn tracked_proxy_routes() -> crate::routes::TrackedRouter {
+    tracked_proxy_routes_with_runtime(PeerRuntime::global())
+}
+
+pub(crate) fn tracked_proxy_routes_with_runtime(
+    runtime: Arc<PeerRuntime>,
+) -> crate::routes::TrackedRouter {
+    use crate::routes::inventory::{get, TrackedRouter};
+    TrackedRouter::new()
+        .route(
+            "/:id/*rest",
+            get(proxy::handle_peer_proxy)
+                .head(proxy::handle_peer_proxy)
+                .post(proxy::handle_peer_proxy)
+                .put(proxy::handle_peer_proxy)
+                .patch(proxy::handle_peer_proxy)
+                .delete(proxy::handle_peer_proxy),
+        )
+        .layer(axum::extract::DefaultBodyLimit::disable())
+        .layer(middleware::from_fn(reject_peer_principal_middleware))
+        .layer(middleware::from_fn(crate::auth::admin_only_middleware))
+        .layer(middleware::from_fn(crate::auth::csrf_middleware))
+        .layer(middleware::from_fn(crate::auth::auth_middleware))
+        .with_state(runtime)
+}
+
+#[allow(dead_code)]
+pub(crate) fn proxy_routes_with_runtime(runtime: Arc<PeerRuntime>) -> Router {
+    tracked_proxy_routes_with_runtime(runtime).into_router()
+}
+
 /// Subscribes to peer link and grant revocation broadcasts.
 #[allow(dead_code)]
 pub fn subscribe_revocations() -> broadcast::Receiver<RevocationEvent> {
@@ -1286,6 +1446,14 @@ pub(crate) fn configured_peer_max_conn() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_PEER_MAX_CONN)
+}
+
+pub(crate) fn configured_peer_max_ws() -> usize {
+    env::var("AF_PEER_MAX_WS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_PEER_MAX_WS)
 }
 
 pub(crate) fn configured_peer_rtt_warn_ms() -> f64 {

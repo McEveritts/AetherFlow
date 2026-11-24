@@ -1,9 +1,10 @@
 use super::settings::{
-    bytes, download_text, draft_value, edit, encode, poll_resource, text, DraftButtons, DraftCheck,
-    DraftInput, DraftSelect, JsonDraft, ResourceFeedback,
+    bytes, download_text, draft_value, edit, encode, poll_resource_when, text, DraftButtons,
+    DraftCheck, DraftInput, DraftSelect, JsonDraft, ResourceFeedback,
 };
 use crate::state::{
-    app, json_rows, owned_resource_reads, run_resource_read, use_api, ApiResource, ResourceReads,
+    app, json_rows, owned_resource_reads, run_resource_read, use_api, use_api_when, ApiResource,
+    PeerArea, ResourceReads,
 };
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{ConfirmDialog, DataGrid, EmptyState, Modal, ObsCard};
@@ -42,8 +43,11 @@ pub fn NetworkTab() -> impl IntoView {
 #[component]
 fn NetworkAdminContent() -> impl IntoView {
     let context = app();
-    let status = use_api("/api/v1/admin/network/status".to_string());
-    poll_resource(status, 10_000);
+    let can_read_network = Signal::derive(move || context.can_read_area(PeerArea::Network));
+    let status = use_api_when(can_read_network, "/api/v1/admin/network/status".to_string());
+    poll_resource_when(status, 10_000, move || {
+        context.can_read_area_untracked(PeerArea::Network)
+    });
     view! {
         <section class="space-y-6 py-5 min-w-0 max-w-full">
             <Show
@@ -75,7 +79,8 @@ fn NetworkAdminContent() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button px-4 py-2"
-                            disabled=move || status.loading.get()
+                            disabled=move || status.loading.get() || !can_read_network.get()
+                            title=move || context.area_block_reason(PeerArea::Network, false).unwrap_or_default()
                             on:click=move |_| status.refresh()
                             aria-label=move || tt(context, "Refresh network")
                         >
@@ -108,8 +113,25 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
     };
     let generation = RwSignal::new(0u64);
     let reads = owned_resource_reads();
+    let last_epochs = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+    ));
     Effect::new(move |_| {
         let auth = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
+        if last_epochs.get_value() != (auth, server_epoch) {
+            last_epochs.set_value((auth, server_epoch));
+            reads.with_value(ResourceReads::cancel);
+            diagnostics.data.set(Value::Null);
+            diagnostics.error.set(None);
+            diagnostics.loading.set(false);
+            if diagnostics.revision.get_untracked() != 0 {
+                diagnostics.revision.set(0);
+                return;
+            }
+        }
+        let can_read_network = context.can_read_area(crate::state::PeerArea::Network);
         let available = crate::tabs::contracts::decode::<crate::tabs::contracts::NetworkStatus>(
             &status.data.get(),
         )
@@ -118,10 +140,13 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
         let provider = provider.get();
         generation.update(|ticket| *ticket += 1);
         let ticket = generation.get_untracked();
-        if !diagnostics_allowed(available, requested) {
+        if !can_read_network || !diagnostics_allowed(available, requested) {
             reads.with_value(ResourceReads::cancel);
             diagnostics.loading.set(false);
             diagnostics.error.set(None);
+            if !can_read_network {
+                diagnostics.data.set(Value::Null);
+            }
             return;
         }
         diagnostics.loading.set(true);
@@ -137,6 +162,7 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
             };
             if generation.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
             {
                 return;
             }
@@ -144,6 +170,14 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
                 Ok(data) => {
                     diagnostics.data.set(data);
                     diagnostics.error.set(None);
+                }
+                Err(error)
+                    if matches!(
+                        error.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) =>
+                {
+                    return;
                 }
                 Err(error) => diagnostics.error.set(Some(error)),
             }
@@ -173,8 +207,12 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || diagnostics.loading.get()
+                    disabled=move || diagnostics.loading.get() || !context.can_read_area(PeerArea::Network)
+                    title=move || context.area_block_reason(PeerArea::Network, false).unwrap_or_default()
                     on:click=move |_| {
+                        if !context.can_read_area_untracked(PeerArea::Network) {
+                            return;
+                        }
                         diagnostics.refresh();
                         hardware.refresh();
                     }

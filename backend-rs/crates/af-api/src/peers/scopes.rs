@@ -149,6 +149,10 @@ impl CanonicalPath {
     pub fn segments(&self) -> &[String] {
         &self.segments
     }
+
+    pub(crate) fn is_websocket_path(&self) -> bool {
+        matches!(self.as_str(), "/api/v1/auth/ws" | "/api/v1/auth/ws/logs")
+    }
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -431,21 +435,27 @@ const FORBIDDEN_RULES: &[ForbiddenRule] = &[
         method: None,
         pattern: "/api/v1/auth/plugins/:id/proxy/*",
     },
-    // WebSocket endpoints are deferred to P6 (File 34) and fail closed in P5
-    ForbiddenRule {
-        method: None,
-        pattern: "/api/v1/auth/ws",
-    },
-    ForbiddenRule {
-        method: None,
-        pattern: "/api/v1/auth/ws/*",
-    },
 ];
 
 /// Exhaustive allowlist of versioned `/api/v1/*` management routes mapped to exact HTTP methods
 /// and required area/mode scopes.
 const ALLOWED_RULES: &[AllowedRule] = &[
     // ── Read-only overview routes (require some effective read/write access; all-none denied) ──
+    AllowedRule {
+        method: "GET",
+        pattern: "/api/v1/auth/ws",
+        requirement: ScopeRequirement::AnyReadAccess,
+    },
+    AllowedRule {
+        method: "GET",
+        pattern: "/api/v1/auth/ws/ticket",
+        requirement: ScopeRequirement::AnyReadAccess,
+    },
+    AllowedRule {
+        method: "GET",
+        pattern: "/api/v1/auth/ws/logs",
+        requirement: ScopeRequirement::Area(Area::Services, Mode::Read),
+    },
     AllowedRule {
         method: "GET",
         pattern: "/api/v1/auth/ready",
@@ -1638,6 +1648,21 @@ mod tests {
         assert!(routes
             .iter()
             .any(|r| r.method == Method::POST && r.path == "/api/v1/admin/peers/:id/grant-offer"));
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            assert!(
+                routes
+                    .iter()
+                    .any(|r| r.method == method && r.path == "/api/v1/peers/:id/*rest"),
+                "expected peer proxy registration for {method} /api/v1/peers/:id/*rest"
+            );
+        }
 
         if let Err(problems) = verify_production_route_coverage(&routes) {
             panic!(
@@ -1839,8 +1864,6 @@ mod tests {
             (Method::GET, "/api/v1/auth/plugins/demo/ui"),
             (Method::GET, "/api/v1/auth/plugins/demo/proxy"),
             (Method::POST, "/api/v1/auth/plugins/demo/proxy/sub/path"),
-            (Method::GET, "/api/v1/auth/ws"),
-            (Method::GET, "/api/v1/auth/ws/ticket"),
             (Method::GET, "/api/v1/public/csrf-token"),
             (Method::POST, "/api/v1/public/auth/login"),
             (Method::GET, "/api/v1/public/mcbrowser/shares/tok-1"),
@@ -1850,6 +1873,50 @@ mod tests {
                 classify(&method, &c),
                 RouteDecision::Forbidden,
                 "expected {method} {p} to be Forbidden"
+            );
+        }
+
+        for (path, expected) in [
+            ("/api/v1/auth/ws", true),
+            ("/api/v1/auth/ws/logs", true),
+            ("/api/v1/auth/ws/ticket", false),
+            ("/api/v1/auth/deploy/stream", false),
+            ("/api/v1/admin/backup/download/a.sqlite", false),
+        ] {
+            assert_eq!(
+                canonicalize(path).unwrap().is_websocket_path(),
+                expected,
+                "{path}"
+            );
+        }
+
+        // P6 WebSocket routes: telemetry requires AnyReadAccess, logs requires Services: Read;
+        // unknown WS subpaths and mutating methods remain fail-closed Unclassified.
+        assert_eq!(
+            classify(&Method::GET, &canonicalize("/api/v1/auth/ws").unwrap()),
+            RouteDecision::Allowed(ScopeRequirement::AnyReadAccess)
+        );
+        assert_eq!(
+            classify(
+                &Method::GET,
+                &canonicalize("/api/v1/auth/ws/ticket").unwrap()
+            ),
+            RouteDecision::Allowed(ScopeRequirement::AnyReadAccess)
+        );
+        assert_eq!(
+            classify(&Method::GET, &canonicalize("/api/v1/auth/ws/logs").unwrap()),
+            RouteDecision::Allowed(ScopeRequirement::Area(Area::Services, Mode::Read))
+        );
+        for (method, p) in [
+            (Method::POST, "/api/v1/auth/ws"),
+            (Method::POST, "/api/v1/auth/ws/ticket"),
+            (Method::DELETE, "/api/v1/auth/ws/logs"),
+            (Method::GET, "/api/v1/auth/ws/unknown"),
+        ] {
+            assert_eq!(
+                classify(&method, &canonicalize(p).unwrap()),
+                RouteDecision::Unclassified,
+                "expected {method} {p} to fail closed as Unclassified"
             );
         }
 

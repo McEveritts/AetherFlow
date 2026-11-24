@@ -1,4 +1,31 @@
 use super::*;
+use crate::state::PeerArea;
+
+const POLICY_READ_REQS: [(PeerArea, bool); 2] =
+    [(PeerArea::Files, false), (PeerArea::Users, false)];
+const POLICY_WRITE_REQS: [(PeerArea, bool); 2] = [(PeerArea::Files, true), (PeerArea::Users, true)];
+const POLICY_AREAS: [PeerArea; 2] = [PeerArea::Files, PeerArea::Users];
+
+pub(super) fn initial_policy_target(is_remote: bool, user: Option<&Value>) -> String {
+    if is_remote {
+        return String::new();
+    }
+    user.and_then(|user| user["id"].as_u64())
+        .map(|id| id.to_string())
+        .unwrap_or_default()
+}
+
+pub(super) fn should_auto_load_policy(
+    is_remote: bool,
+    is_admin: bool,
+    can_read_policy: bool,
+    target: &str,
+) -> bool {
+    !is_remote
+        && is_admin
+        && can_read_policy
+        && target.parse::<u64>().ok().filter(|id| *id > 0).is_some()
+}
 
 pub(super) fn draft_value(draft: RwSignal<Option<FormDraft<Value>>>) -> Value {
     draft.with(|draft| {
@@ -44,6 +71,7 @@ pub(super) struct PolicyForm {
     pub(super) loaded: RwSignal<String>,
     pub(super) draft: RwSignal<Option<FormDraft<Value>>>,
     pub(super) busy: RwSignal<bool>,
+    pub(super) saving: RwSignal<bool>,
     pub(super) failure: RwSignal<String>,
     pub(super) ticket: RwSignal<u64>,
 }
@@ -52,21 +80,45 @@ impl PolicyForm {
         self.draft
             .with(|draft| draft.as_ref().is_some_and(FormDraft::is_dirty))
     }
+    pub(super) fn clear_state(self) {
+        self.ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
+        self.busy.set(false);
+        self.saving.set(false);
+        self.draft.set(None);
+        self.loaded.set(String::new());
+        self.failure.set(String::new());
+    }
+    pub(super) fn cancel_save(self) {
+        if self.saving.get_untracked() {
+            self.ticket
+                .update(|ticket| *ticket = ticket.wrapping_add(1));
+            self.busy.set(false);
+            self.saving.set(false);
+        }
+    }
     pub(super) fn load(self) {
-        if self.busy.get_untracked() || !app().is_admin() {
+        let context = app();
+        if self.busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_all_areas_untracked(&POLICY_READ_REQS)
+        {
             return;
         }
-        let target = self.target.get_untracked();
+        let target = self.target.get_untracked().trim().to_string();
         if target.parse::<u64>().ok().filter(|id| *id > 0).is_none() {
             self.failure.set("Enter a positive user ID.".into());
             return;
         }
+        self.saving.set(false);
         self.busy.set(true);
         self.failure.set(String::new());
-        self.ticket.update(|ticket| *ticket += 1);
+        self.ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
         let ticket = self.ticket.get_untracked();
-        let context = app();
         let auth = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let grant_epoch = context.areas_revocation_epoch_untracked(&POLICY_AREAS);
         let mut busy_guard =
             crate::tabs::busy::BusyGuard::for_generation(self.busy, self.ticket, ticket);
         spawn_local(async move {
@@ -75,6 +127,10 @@ impl PolicyForm {
                 .await;
             if self.ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.areas_revocation_epoch_untracked(&POLICY_AREAS) != grant_epoch
+                || !context.is_admin_untracked()
+                || !context.can_all_areas_untracked(&POLICY_READ_REQS)
             {
                 return;
             }
@@ -94,12 +150,29 @@ impl PolicyForm {
                     }
                     self.loaded.set(target);
                 }
-                Err(failure) => self.failure.set(failure.to_string()),
+                Err(failure) => {
+                    if !matches!(
+                        failure.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) {
+                        self.failure.set(failure.to_string());
+                    }
+                }
             }
         });
     }
     pub(super) fn save(self) {
-        if self.busy.get_untracked() || !self.dirty() || !app().is_admin() {
+        let context = app();
+        if self.busy.get_untracked()
+            || !self.dirty()
+            || !context.is_admin_untracked()
+            || !context.can_all_areas_untracked(&POLICY_WRITE_REQS)
+        {
+            return;
+        }
+        let target = self.loaded.get_untracked().trim().to_string();
+        if target.parse::<u64>().ok().filter(|id| *id > 0).is_none() {
+            self.failure.set("Enter a positive user ID.".into());
             return;
         }
         let payload = draft_value(self.draft);
@@ -114,12 +187,19 @@ impl PolicyForm {
                 .set("A policy may contain at most 256 rules.".into());
             return;
         }
-        let target = self.loaded.get_untracked();
-        let context = app();
         let auth = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let grant_epoch = context.areas_revocation_epoch_untracked(&POLICY_AREAS);
+        self.ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = self.ticket.get_untracked();
+        self.saving.set(true);
         self.busy.set(true);
         self.failure.set(String::new());
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(self.busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(self.busy, self.ticket, ticket);
+        let mut saving_guard =
+            crate::tabs::busy::BusyGuard::for_generation(self.saving, self.ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .put(
@@ -127,11 +207,16 @@ impl PolicyForm {
                     Some(&payload),
                 )
                 .await;
-            if self.busy.try_get_untracked().is_none()
+            if self.ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.areas_revocation_epoch_untracked(&POLICY_AREAS) != grant_epoch
+                || !context.is_admin_untracked()
+                || !context.can_all_areas_untracked(&POLICY_WRITE_REQS)
             {
                 return;
             }
+            saving_guard.release();
             busy_guard.release();
             match result {
                 Ok(server) => {
@@ -142,7 +227,14 @@ impl PolicyForm {
                     });
                     context.toast(tt(context, "Storage policy saved"), false);
                 }
-                Err(failure) => self.failure.set(failure.to_string()),
+                Err(failure) => {
+                    if !matches!(
+                        failure.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) {
+                        self.failure.set(failure.to_string());
+                    }
+                }
             }
         });
     }
@@ -150,17 +242,15 @@ impl PolicyForm {
 #[component]
 pub(super) fn PolicyAdmin() -> impl IntoView {
     let context = app();
-    let initial = context.user.with_untracked(|user| {
-        user.as_ref()
-            .and_then(|user| user["id"].as_u64())
-            .map(|id| id.to_string())
-            .unwrap_or_default()
-    });
+    let initial = context
+        .user
+        .with_untracked(|user| initial_policy_target(context.is_remote_untracked(), user.as_ref()));
     let form = PolicyForm {
         target: RwSignal::new(initial),
         loaded: RwSignal::new(String::new()),
         draft: RwSignal::new(None),
         busy: RwSignal::new(false),
+        saving: RwSignal::new(false),
         failure: RwSignal::new(String::new()),
         ticket: RwSignal::new(0),
     };
@@ -182,7 +272,50 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
         })
     }));
     on_cleanup(move || unload.set_value(None));
-    form.load();
+    let can_read_policy =
+        Signal::derive(move || context.is_admin() && context.can_all_areas(&POLICY_READ_REQS));
+    let can_write_policy =
+        Signal::derive(move || context.is_admin() && context.can_all_areas(&POLICY_WRITE_REQS));
+    let can_edit_now = move || {
+        !form.busy.get_untracked()
+            && context.is_admin_untracked()
+            && context.can_all_areas_untracked(&POLICY_WRITE_REQS)
+    };
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        form.clear_state();
+        switch.set(false);
+        reset.set(false);
+        let is_remote = context.is_remote_untracked();
+        let next_target = context
+            .user
+            .with_untracked(|user| initial_policy_target(is_remote, user.as_ref()));
+        form.target.set(next_target.clone());
+        if should_auto_load_policy(
+            is_remote,
+            context.is_admin_untracked(),
+            can_read_policy.get_untracked(),
+            &next_target,
+        ) {
+            form.load();
+        }
+    });
+    Effect::new(move |_| {
+        let readable = can_read_policy.get();
+        let _ = context.areas_revocation_epoch(&POLICY_AREAS);
+        if !readable {
+            form.clear_state();
+            switch.set(false);
+            reset.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        if !can_write_policy.get() {
+            form.cancel_save();
+            reset.set(false);
+        }
+    });
     view! {
         <ObsCard title=Signal::derive(move || tt(context, "McBrowser.storagePolicyTitle"))>
             <p class="text-sm text-slate-400 mb-4">
@@ -191,6 +324,30 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                     "Manage per-user storage scope, permissions and ordered path rules. Extension restrictions can be expressed with regular expressions.",
                 )}
             </p>
+            {move || {
+                context
+                    .areas_block_reason(&[
+                        (crate::state::PeerArea::Files, false),
+                        (crate::state::PeerArea::Users, false),
+                    ])
+                    .or_else(|| {
+                        context.areas_block_reason(&[
+                            (crate::state::PeerArea::Files, true),
+                            (crate::state::PeerArea::Users, true),
+                        ])
+                    })
+                    .map(|reason| {
+                        view! {
+                            <p
+                                role="status"
+                                data-testid="mcbrowser-policy-access-note"
+                                class="text-xs text-amber-300 mb-3"
+                            >
+                                {reason}
+                            </p>
+                        }
+                    })
+            }}
             <div class="flex flex-wrap gap-2 mb-4">
                 <label class="flex-1 min-w-32">
                     <span class="text-sm">{move || tt(context, "Target user ID")}</span>
@@ -199,14 +356,22 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                         min="1"
                         class=FORM
                         prop:value=move || form.target.get()
-                        disabled=move || form.busy.get()
+                        disabled=move || form.busy.get() || !can_read_policy.get()
                         on:input=move |event| form.target.set(event_target_value(&event))
                     />
                 </label>
                 <button
                     type="button"
                     class="glass-button px-4 py-2 self-end"
-                    disabled=move || form.busy.get()
+                    disabled=move || form.busy.get() || !can_read_policy.get()
+                    title=move || {
+                        context
+                            .areas_block_reason(&[
+                                (crate::state::PeerArea::Files, false),
+                                (crate::state::PeerArea::Users, false),
+                            ])
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| {
                         if form.dirty()
                             && form.target.get_untracked() != form.loaded.get_untracked()
@@ -246,12 +411,17 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                         <span>{move || tt(context, "Storage scope (relative path)")}</span>
                         <input
                             class=FORM
+                            disabled=move || form.busy.get() || !can_write_policy.get()
                             prop:value=move || text(&draft_value(form.draft), "scope")
-                            on:input=move |event| draft_edit(
-                                form.draft,
-                                "scope",
-                                json!(event_target_value(&event)),
-                            )
+                            on:input=move |event| {
+                                if can_edit_now() {
+                                    draft_edit(
+                                        form.draft,
+                                        "scope",
+                                        json!(event_target_value(&event)),
+                                    );
+                                }
+                            }
                         />
                     </label>
                     <div class="flex flex-wrap gap-4">
@@ -271,14 +441,19 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                     <label class="flex gap-2 text-sm capitalize">
                                         <input
                                             type="checkbox"
+                                            disabled=move || form.busy.get() || !can_write_policy.get()
                                             prop:checked=move || {
                                                 draft_value(form.draft)["permissions"][key] == true
                                             }
-                                            on:change=move |event| draft_edit(
-                                                form.draft,
-                                                &format!("/permissions/{key}"),
-                                                json!(event_target_checked(&event)),
-                                            )
+                                            on:change=move |event| {
+                                                if can_edit_now() {
+                                                    draft_edit(
+                                                        form.draft,
+                                                        &format!("/permissions/{key}"),
+                                                        json!(event_target_checked(&event)),
+                                                    );
+                                                }
+                                            }
                                         />
                                         <span>{move || tt(context, key)}</span>
                                     </label>
@@ -306,54 +481,74 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                             </span>
                                             <input
                                                 class=FORM
+                                                disabled=move || form.busy.get() || !can_write_policy.get()
                                                 prop:value=move || text(
                                                     &draft_value(form.draft)["rules"][index],
                                                     "path",
                                                 )
-                                                on:input=move |event| rule_edit(
-                                                    form.draft,
-                                                    index,
-                                                    "path",
-                                                    json!(event_target_value(&event)),
-                                                )
+                                                on:input=move |event| {
+                                                    if can_edit_now() {
+                                                        rule_edit(
+                                                            form.draft,
+                                                            index,
+                                                            "path",
+                                                            json!(event_target_value(&event)),
+                                                        );
+                                                    }
+                                                }
                                             />
                                         </label>
                                         <div class="flex flex-wrap gap-3">
                                             <label class="flex gap-2 text-xs">
                                                 <input
                                                     type="checkbox"
+                                                    disabled=move || form.busy.get() || !can_write_policy.get()
                                                     prop:checked=move || {
                                                         draft_value(form.draft)["rules"][index]["allow"] == true
                                                     }
-                                                    on:change=move |event| rule_edit(
-                                                        form.draft,
-                                                        index,
-                                                        "allow",
-                                                        json!(event_target_checked(&event)),
-                                                    )
+                                                    on:change=move |event| {
+                                                        if can_edit_now() {
+                                                            rule_edit(
+                                                                form.draft,
+                                                                index,
+                                                                "allow",
+                                                                json!(event_target_checked(&event)),
+                                                            );
+                                                        }
+                                                    }
                                                 />
                                                 {move || tt(context, "Allow")}
                                             </label>
                                             <label class="flex gap-2 text-xs">
                                                 <input
                                                     type="checkbox"
+                                                    disabled=move || form.busy.get() || !can_write_policy.get()
                                                     prop:checked=move || {
                                                         draft_value(form.draft)["rules"][index]["regex"] == true
                                                     }
-                                                    on:change=move |event| rule_edit(
-                                                        form.draft,
-                                                        index,
-                                                        "regex",
-                                                        json!(event_target_checked(&event)),
-                                                    )
+                                                    on:change=move |event| {
+                                                        if can_edit_now() {
+                                                            rule_edit(
+                                                                form.draft,
+                                                                index,
+                                                                "regex",
+                                                                json!(event_target_checked(&event)),
+                                                            );
+                                                        }
+                                                    }
                                                 />
                                                 {move || tt(context, "Regular expression")}
                                             </label>
                                             <button
                                                 type="button"
                                                 class="glass-button px-2"
-                                                disabled=move || index == 0
+                                                disabled=move || {
+                                                    index == 0 || form.busy.get() || !can_write_policy.get()
+                                                }
                                                 on:click=move |_| {
+                                                    if !can_edit_now() {
+                                                        return;
+                                                    }
                                                     let mut rules = draft_value(form.draft)["rules"]
                                                         .as_array()
                                                         .cloned()
@@ -370,12 +565,17 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                                 type="button"
                                                 class="glass-button px-2"
                                                 disabled=move || {
-                                                    index + 1
-                                                        >= draft_value(form.draft)["rules"]
-                                                            .as_array()
-                                                            .map_or(0, Vec::len)
+                                                    form.busy.get()
+                                                        || !can_write_policy.get()
+                                                        || index + 1
+                                                            >= draft_value(form.draft)["rules"]
+                                                                .as_array()
+                                                                .map_or(0, Vec::len)
                                                 }
                                                 on:click=move |_| {
+                                                    if !can_edit_now() {
+                                                        return;
+                                                    }
                                                     let mut rules = draft_value(form.draft)["rules"]
                                                         .as_array()
                                                         .cloned()
@@ -391,7 +591,11 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                             <button
                                                 type="button"
                                                 class="glass-button px-2 text-rose-300"
+                                                disabled=move || form.busy.get() || !can_write_policy.get()
                                                 on:click=move |_| {
+                                                    if !can_edit_now() {
+                                                        return;
+                                                    }
                                                     let mut rules = draft_value(form.draft)["rules"]
                                                         .as_array()
                                                         .cloned()
@@ -412,16 +616,21 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                                 <span>{move || tt(context, "Regex expression")}</span>
                                                 <input
                                                     class=FORM
+                                                    disabled=move || form.busy.get() || !can_write_policy.get()
                                                     prop:value=move || text(
                                                         &draft_value(form.draft)["rules"][index]["regexp"],
                                                         "raw",
                                                     )
-                                                    on:input=move |event| rule_edit(
-                                                        form.draft,
-                                                        index,
-                                                        "regexp",
-                                                        json!({"raw":event_target_value(&event)}),
-                                                    )
+                                                    on:input=move |event| {
+                                                        if can_edit_now() {
+                                                            rule_edit(
+                                                                form.draft,
+                                                                index,
+                                                                "regexp",
+                                                                json!({"raw":event_target_value(&event)}),
+                                                            );
+                                                        }
+                                                    }
                                                 />
                                             </label>
                                         </Show>
@@ -435,10 +644,22 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                             type="button"
                             class="glass-button px-3 py-2"
                             disabled=move || {
-                                draft_value(form.draft)["rules"].as_array().map_or(0, Vec::len)
-                                    >= 256
+                                form.busy.get()
+                                    || !can_write_policy.get()
+                                    || draft_value(form.draft)["rules"]
+                                        .as_array()
+                                        .map_or(0, Vec::len)
+                                        >= 256
+                            }
+                            title=move || {
+                                context
+                                    .areas_block_reason(&POLICY_WRITE_REQS)
+                                    .unwrap_or_default()
                             }
                             on:click=move |_| {
+                                if !can_edit_now() {
+                                    return;
+                                }
                                 let mut rules = draft_value(form.draft)["rules"]
                                     .as_array()
                                     .cloned()
@@ -452,7 +673,14 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button-primary px-4 py-2"
-                            disabled=move || form.busy.get() || !form.dirty()
+                            disabled=move || {
+                                form.busy.get() || !form.dirty() || !can_write_policy.get()
+                            }
+                            title=move || {
+                                context
+                                    .areas_block_reason(&POLICY_WRITE_REQS)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| form.save()
                         >
                             {move || tt(context, "Save policy")}
@@ -460,7 +688,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button px-4 py-2"
-                            disabled=move || form.busy.get() || !form.dirty()
+                            disabled=move || form.busy.get() || !form.dirty() || !can_write_policy.get()
                             on:click=move |_| reset.set(true)
                         >
                             {move || tt(context, "Discard edits…")}
@@ -492,5 +720,25 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                 })
             />
         </ObsCard>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_admin_starts_empty_and_never_auto_loads_remotely_while_preserving_local_self_default()
+    {
+        let admin = json!({"id": 7, "username": "alice", "role": "admin"});
+        assert_eq!(initial_policy_target(false, Some(&admin)), "7");
+        assert!(should_auto_load_policy(false, true, true, "7"));
+        assert!(!should_auto_load_policy(false, false, true, "7"));
+        assert!(!should_auto_load_policy(false, true, false, "7"));
+
+        // Remote mode must start empty and never auto-load local admin's user ID.
+        assert_eq!(initial_policy_target(true, Some(&admin)), "");
+        assert!(!should_auto_load_policy(true, true, true, ""));
+        assert!(!should_auto_load_policy(true, true, true, "7"));
     }
 }

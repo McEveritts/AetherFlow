@@ -25,6 +25,7 @@ pub(super) fn is_spa_fallback_path(path: &str) -> bool {
 }
 
 pub(super) fn purge_ai_sessions() {
+    #[cfg(target_arch = "wasm32")]
     if let Some(window) = web_sys::window() {
         for storage in [window.session_storage(), window.local_storage()]
             .into_iter()

@@ -7,6 +7,8 @@ Features:
 - B27: Cluster Peer Links Panel Boundaries
 """
 
+import re
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 NETWORK_MOD = "frontend-rs/crates/af-web-app/src/tabs/network/mod.rs"
@@ -172,7 +174,12 @@ class TestB26QuotaRefreshThrottling(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         tab = inspector.read_file(QUOTAS_RS)
-        self.assert_true(bool(tab and "disabled=move || busy.get() || sync_busy.get()" in tab), "B26: Refresh button must prevent rapid double-clicks")
+        button = re.search(r"<button\b([^>]*on:click=move \|_\| refresh\(\)[^>]*)>", tab or "")
+        disabled_while_busy = r"disabled=move\s*\|\|\s*\{?\s*busy\.get\(\)\s*\|\|\s*sync_busy\.get\(\)"
+        self.assert_true(
+            bool(button and re.search(disabled_while_busy, button[1])),
+            "B26: Refresh button must prevent rapid double-clicks",
+        )
 
 
 class TestB26NonAdminQuotasForbidden(TestCase):

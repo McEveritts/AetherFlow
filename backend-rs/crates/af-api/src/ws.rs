@@ -5,7 +5,8 @@ mod tickets;
 
 pub use logs::handle_log_websocket;
 #[cfg(test)]
-use logs::{open_confined_live_log_file, websocket_origin_matches_host};
+use logs::open_confined_live_log_file;
+pub(crate) use logs::websocket_origin_matches_host;
 pub use proxy::{
     build_set_cookie, extract_client_ip, extract_client_ip_for_peer, extract_cookie,
     is_trusted_proxy_peer, normalize_request_forwarding_for_peer, InboundProxyForwarded,
@@ -18,11 +19,15 @@ pub use telemetry::{
 };
 pub(crate) use telemetry::{package_diagnostics_allowed, sanitize_services_for_viewer};
 #[cfg(test)]
-use telemetry::{websocket_message_for_session, Telemetry};
+use telemetry::{websocket_message_for_peer_session, websocket_message_for_session, Telemetry};
 #[cfg(test)]
-use tickets::{consume_live_ws_ticket, refresh_ws_authorization, WsTicketEntry};
+use tickets::{
+    classify_revocation_recv, consume_live_ws_ticket, refresh_ws_authorization,
+    RevocationWakeOutcome, WsPeerBinding, WsTicketEntry,
+};
 pub use tickets::{
-    handle_websocket, issue_ws_ticket_for_session, issue_ws_ticket_for_user, PeerIp, WsTicketQuery,
+    handle_issue_ws_ticket, handle_websocket, issue_ws_ticket_for_session,
+    issue_ws_ticket_for_user, PeerIp, WsTicketQuery,
 };
 
 #[cfg(test)]

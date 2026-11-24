@@ -74,8 +74,6 @@ pub(crate) use backup_uploads::{
 use backup_uploads::{process_backup_chunk_upload, BackupUploadResult, BackupUploadSessionMeta};
 
 use backups::is_valid_backup_filename;
-#[allow(unused_imports)]
-pub(crate) use backups::read_verified_backup_checksum;
 #[cfg(test)]
 use backups::{
     backup_download_chunk, compute_file_sha256, issue_backup_download_ticket, open_verified_backup,
@@ -86,6 +84,12 @@ pub use backups::{
     download_backup, get_active_db_path, get_backup_dir, get_backups_list,
     get_optimal_backup_window, perform_system_backup, prepare_backup_download, prune_old_backups,
     run_backup, set_backup_schedule, BackupFile,
+};
+#[allow(unused_imports)]
+pub(crate) use backups::{
+    extract_isolated_backup_ticket_cookie, is_canonical_backup_download_path,
+    read_verified_backup_checksum, BackupTicketCookieError, BACKUP_DOWNLOAD_COOKIE,
+    BACKUP_DOWNLOAD_COOKIE_PATH,
 };
 
 #[allow(unused_imports)]

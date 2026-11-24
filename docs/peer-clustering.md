@@ -31,6 +31,16 @@ The editor shows access in both directions. To set up reciprocal access, send a 
 
 You can revoke the access you granted from the same editor. The link continues reporting health, and any access the peer granted to this server stays in effect.
 
+## Manage another server
+
+The other server must grant this server access. When the link is healthy and supports remote management, select that server in the dashboard header or open it from Cluster. The identity bar shows which server the dashboard is managing. Use **Exit to this server** to return to your local dashboard.
+
+A remote dashboard uses the access that the selected server granted to this server. Read access lets you inspect the corresponding area. Changes require write access to every affected area. The selected server's name appears in destructive confirmations.
+
+Sign-in, session management, pairing, and grant administration stay on the local server. Third-party app links open on the selected server's own host. If the selected server stops responding, check its Cluster link or return to the local dashboard. A long-running job started on a peer runs on that peer and continues if the dashboard disconnects. Reopen the job status on the same peer before retrying an operation with an uncertain outcome.
+
+Revoking the grant blocks remote management on the receiving server and closes its peer management WebSockets. Link health remains available.
+
 ## Planned storage and transcoding controls
 
 - **Exports and mounts (P7).** Select the folder and peer tunnel address for each NFS export. Read-only is the default. Select read-write only for folders where the remote server must make changes. Configure media libraries to use a subfolder inside the peer mount. AetherFlow checks the WireGuard handshake and the mount's sentinel to decide when to stop or restore the mount.

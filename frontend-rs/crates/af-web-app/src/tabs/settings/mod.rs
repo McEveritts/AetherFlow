@@ -1,6 +1,9 @@
-use crate::state::{app, json_rows, use_api, ApiResource, TabId};
+use crate::state::{
+    app, json_rows, run_resource_read, use_api_when, ApiResource, PeerArea, ResourceReads, TabId,
+};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{ConfirmDialog, DataGrid, EmptyState, Modal, ObsCard, TabPanel, TabsBar};
+use crate::tabs::GrantInvalidationBoundary;
 use af_web_core::{
     api::{storage_get, storage_set, ApiClient},
     draft::FormDraft,
@@ -51,15 +54,103 @@ fn settings_value(server: Value) -> Value {
     value
 }
 
+fn use_settings_resource(can_read: Signal<bool>) -> ApiResource {
+    let context = app();
+    let resource = ApiResource {
+        data: RwSignal::new(Value::Null),
+        loading: RwSignal::new(false),
+        error: RwSignal::new(None),
+        revision: RwSignal::new(0),
+    };
+    let generation = RwSignal::new(0u64);
+    let reads = StoredValue::new_local(ResourceReads::default());
+    on_cleanup(move || reads.update_value(|reads| reads.cancel()));
+    Effect::new(move |_| {
+        let epoch = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
+        let allowed = can_read.get();
+        let grant_epoch = context.area_revocation_epoch(PeerArea::Settings);
+        let revision = resource.revision.get();
+        generation.update(|value| *value = value.wrapping_add(1));
+        let ticket = generation.get_untracked();
+        if !allowed {
+            reads.update_value(|reads| reads.cancel());
+            resource.data.set(Value::Null);
+            resource.error.set(None);
+            resource.loading.set(false);
+            return;
+        }
+        let request = context.begin_settings_request();
+        resource.loading.set(true);
+        resource.error.set(None);
+        let Some(job) = reads.try_update_value(ResourceReads::next) else {
+            return;
+        };
+        spawn_local(async move {
+            let work = async {
+                if generation.try_get_untracked() != Some(ticket)
+                    || resource.revision.try_get_untracked() != Some(revision)
+                    || context.session_epoch.try_get_untracked() != Some(epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Settings) != grant_epoch
+                    || !context.can_read_area_untracked(PeerArea::Settings)
+                {
+                    return None;
+                }
+                Some(ApiClient.get("/api/v1/auth/settings").await)
+            };
+            let Some(Some(result)) = run_resource_read(job, work).await else {
+                return;
+            };
+            if generation.try_get_untracked() != Some(ticket)
+                || resource.revision.try_get_untracked() != Some(revision)
+                || context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != grant_epoch
+                || !context.can_read_area_untracked(PeerArea::Settings)
+            {
+                return;
+            }
+            match result {
+                Ok(value) => {
+                    let normalized = settings_value(value);
+                    if context.finish_settings_request(request, normalized.clone()) {
+                        resource.data.set(normalized);
+                    }
+                    resource.error.set(None);
+                }
+                Err(error) => {
+                    if !matches!(
+                        error.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) {
+                        resource.error.set(Some(error));
+                    }
+                }
+            }
+            resource.loading.set(false);
+        });
+    });
+    resource
+}
+
 #[component]
 pub fn SettingsTab() -> impl IntoView {
     let context = app();
-    let settings = use_api("/api/v1/auth/settings".to_string());
-    poll_resource(settings, 30_000);
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let settings = use_settings_resource(can_read_settings);
+    poll_resource_when(settings, 30_000, move || {
+        context.can_read_area_untracked(PeerArea::Settings)
+    });
     let draft = RwSignal::new(FormDraft::new(settings_value(
-        context.settings.get_untracked(),
+        if can_read_settings.get_untracked() {
+            context.settings.get_untracked()
+        } else {
+            Value::Null
+        },
     )));
     let busy = RwSignal::new(false);
+    let save_ticket = RwSignal::new(0u64);
     let active = RwSignal::new(
         context
             .take_pending_subtab(TabId::Settings)
@@ -76,15 +167,39 @@ pub fn SettingsTab() -> impl IntoView {
     })));
     let pref_busy = RwSignal::new(false);
     Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        let allowed = can_read_settings.get();
+        save_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        draft.set(FormDraft::new(settings_value(if allowed {
+            context.settings.get_untracked()
+        } else {
+            Value::Null
+        })));
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            save_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        if !can_read_settings.get() {
+            return;
+        }
         let value = settings.data.get();
         if value.is_object() {
             let value = settings_value(value);
-            draft.update(|draft| draft.apply_server_refresh(value.clone()));
-            context.settings.set(value);
+            draft.update(|draft| draft.apply_server_refresh(value));
         }
     });
     let save = Callback::new(move |()| {
-        if busy.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area(PeerArea::Settings)
+        {
             return;
         }
         let sent = draft_value(draft);
@@ -96,13 +211,32 @@ pub fn SettingsTab() -> impl IntoView {
             context.toast(tt(context, "Enter a model identifier"), true);
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        save_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = save_ticket.get_untracked();
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, save_ticket, ticket);
         spawn_local(async move {
             let result = async {
                 // The backend accepts the complete schema. Merge only dirty fields
                 // into a fresh server snapshot to preserve concurrent operator saves.
                 let mut payload = settings_value(ApiClient.get("/api/v1/auth/settings").await?);
+                if save_ticket.try_get_untracked() != Some(ticket)
+                    || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                    || !context.is_admin_untracked()
+                    || !context.can_write_area_untracked(PeerArea::Settings)
+                {
+                    return Err(af_web_core::api::ApiError {
+                        status: 0,
+                        code: Some("SERVER_CHANGED".into()),
+                        message: "Server changed; request cancelled".into(),
+                    });
+                }
                 for field in fields {
                     if let (Some(target), Some(value)) =
                         (payload.pointer_mut(&field), sent.pointer(&field))
@@ -116,7 +250,15 @@ pub fn SettingsTab() -> impl IntoView {
                 ApiClient.get("/api/v1/auth/settings").await
             }
             .await;
-            if draft.try_get_untracked().is_none() {
+            if draft.try_get_untracked().is_none()
+                || save_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.is_admin_untracked()
+                || !context.can_read_area_untracked(PeerArea::Settings)
+                || !context.can_write_area_untracked(PeerArea::Settings)
+            {
                 return;
             }
             match result {
@@ -125,7 +267,7 @@ pub fn SettingsTab() -> impl IntoView {
                     draft.update(|draft| {
                         let _ = draft.acknowledge_saved(&sent, server.clone());
                     });
-                    context.settings.set(server.clone());
+                    context.publish_settings_save(server.clone());
                     settings.commit(server);
                     context.toast(tt(context, "Settings saved"), false);
                 }
@@ -169,6 +311,18 @@ pub fn SettingsTab() -> impl IntoView {
                     ]
                 })
             />
+            <Show when=move || !can_read_settings.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Settings, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <ResourceFeedback resource=settings />
             <TabPanel id_prefix="settings" id=Signal::derive(move || active.get())>
                 <div class="space-y-6">
@@ -290,6 +444,17 @@ pub fn SettingsTab() -> impl IntoView {
                                     busy
                                     on_save=save
                                     label=move || tt(context, "Settings.saveSettings")
+                                    disabled=Signal::derive(move || {
+                                        !context.can_write_area(crate::state::PeerArea::Settings)
+                                    })
+                                    title=Signal::derive(move || {
+                                        context
+                                            .area_block_reason(
+                                                crate::state::PeerArea::Settings,
+                                                true,
+                                            )
+                                            .unwrap_or_default()
+                                    })
                                 />
                             </Show>
                         </ObsCard>
@@ -634,19 +799,27 @@ pub fn SettingsTab() -> impl IntoView {
                         <ProviderSettings draft busy on_save=save />
                     </Show>
                     <Show when=move || active.get() == "general" && context.is_admin()>
-                        <SystemUpdates draft settings_busy=busy />
+                        <GrantInvalidationBoundary areas=&[PeerArea::Updates]>
+                            <SystemUpdates draft settings_busy=busy />
+                        </GrantInvalidationBoundary>
                     </Show>
                     <Show when=move || active.get() == "profile">
                         <ProfileSecurity />
                     </Show>
                     <Show when=move || active.get() == "backups" && context.is_admin()>
-                        <BackupsSettings />
+                        <GrantInvalidationBoundary areas=&[PeerArea::Settings]>
+                            <BackupsSettings />
+                        </GrantInvalidationBoundary>
                     </Show>
                     <Show when=move || active.get() == "oidc" && context.is_admin()>
-                        <OidcSettings />
+                        <GrantInvalidationBoundary areas=&[PeerArea::Settings]>
+                            <OidcSettings />
+                        </GrantInvalidationBoundary>
                     </Show>
                     <Show when=move || active.get() == "metadata" && context.is_admin()>
-                        <MetadataSettings />
+                        <GrantInvalidationBoundary areas=&[PeerArea::Settings]>
+                            <MetadataSettings />
+                        </GrantInvalidationBoundary>
                     </Show>
                     <Show when=move || {
                         !context.is_admin()

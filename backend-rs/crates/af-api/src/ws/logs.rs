@@ -1,9 +1,16 @@
 use super::proxy::{extract_client_ip_for_peer, is_trusted_proxy_peer};
 use super::telemetry::package_diagnostics_allowed;
-use super::tickets::{current_ws_authorization, PeerIp, WsTicketEntry};
+use super::tickets::{
+    classify_revocation_recv, consume_live_ws_ticket_for_context, current_ws_authorization,
+    current_ws_authorization_ex, ticket_client_ip_matches, PeerIp, RevocationWakeOutcome,
+    WsPeerBinding, WsPeerScope, WsTicketEntry, WsTicketQuery,
+};
+use crate::auth::{AuthUser, PeerPrincipal};
+use crate::peers::{PeerListenerRuntime, PeerRuntime, PeerWsPermit};
 use axum::extract::ws::{Message, WebSocketUpgrade};
+use axum::extract::{Extension, Query};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::time::MissedTickBehavior;
@@ -149,7 +156,7 @@ fn is_valid_ws_host_authority(raw_host: &str) -> bool {
         })
 }
 
-pub(super) fn websocket_origin_matches_host(
+pub(crate) fn websocket_origin_matches_host(
     headers: &HeaderMap,
     peer_ip: Option<std::net::IpAddr>,
     cookie_authenticated: bool,
@@ -300,8 +307,13 @@ pub(super) fn websocket_origin_matches_host(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_log_websocket(
-    axum::Extension(user): axum::Extension<crate::auth::AuthUser>,
+    Extension(user): Extension<AuthUser>,
+    Query(q): Query<WsTicketQuery>,
+    peer: Option<Extension<PeerPrincipal>>,
+    peer_runtime: Option<Extension<PeerListenerRuntime>>,
+    peer_ws_permit: Option<Extension<PeerWsPermit>>,
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -309,35 +321,161 @@ pub async fn handle_log_websocket(
     if !package_diagnostics_allowed(&user) {
         return crate::auth::api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
     }
-    let cookie_authenticated = headers.contains_key(axum::http::header::COOKIE)
-        && !headers.contains_key(axum::http::header::AUTHORIZATION);
-    if !websocket_origin_matches_host(&headers, peer_ip, cookie_authenticated) {
-        return crate::auth::api_error(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Cross-origin WebSocket upgrade rejected",
-        );
-    }
-    let effective_jti = if user.jti.trim().is_empty() {
-        let mut nonce = [0u8; 16];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-        format!("ws-anon-{}", hex::encode(nonce))
+
+    let peer_principal = peer.map(|Extension(p)| p);
+    let client_ip = extract_client_ip_for_peer(&headers, peer_ip);
+
+    let mut authorization = if let Some(principal) = peer_principal {
+        if user.user_id <= 0
+            || user.user_id != principal.run_as_user_id
+            || !principal.access.services.allows_read()
+        {
+            return crate::auth::api_error(
+                StatusCode::FORBIDDEN,
+                "PEER_SCOPE_DENIED",
+                "Peer live logs require an active services:read grant",
+            );
+        }
+        let runtime = peer_runtime
+            .map(|Extension(r)| r.0)
+            .unwrap_or_else(PeerRuntime::global);
+        if !q.ticket.is_empty() {
+            let Some(entry) = consume_live_ws_ticket_for_context(
+                &q.ticket,
+                Some(&principal),
+                Some(runtime),
+                None,
+                WsPeerScope::Logs,
+            )
+            .await
+            else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "code": "WS_INVALID_TICKET",
+                        "message": "Invalid or expired ticket"
+                    })),
+                )
+                    .into_response();
+            };
+            if !ticket_client_ip_matches(&entry.client_ip, &client_ip) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "code": "WS_IP_MISMATCH",
+                        "message": "Ticket IP mismatch"
+                    })),
+                )
+                    .into_response();
+            }
+            entry
+        } else {
+            WsTicketEntry {
+                user_id: principal.run_as_user_id,
+                session_jti: format!("peer-grant:{}", principal.grant_id),
+                session_ver: None,
+                client_ip,
+                expires_at: Instant::now(),
+                diagnostics_allowed: true,
+                peer: Some(WsPeerBinding {
+                    link_id: principal.link_id,
+                    grant_id: principal.grant_id,
+                    run_as_user_id: principal.run_as_user_id,
+                    access: principal.access,
+                }),
+                peer_runtime: Some(runtime),
+            }
+        }
     } else {
-        user.jti.clone()
+        let cookie_authenticated = headers.contains_key(axum::http::header::COOKIE)
+            && !headers.contains_key(axum::http::header::AUTHORIZATION);
+        if !websocket_origin_matches_host(&headers, peer_ip, cookie_authenticated) {
+            return crate::auth::api_error(
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+                "Cross-origin WebSocket upgrade rejected",
+            );
+        }
+        if !q.ticket.is_empty() {
+            let Some(entry) = consume_live_ws_ticket_for_context(
+                &q.ticket,
+                None,
+                None,
+                Some(user.user_id),
+                WsPeerScope::Logs,
+            )
+            .await
+            else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "code": "WS_INVALID_TICKET",
+                        "message": "Invalid or expired ticket"
+                    })),
+                )
+                    .into_response();
+            };
+            if !entry.diagnostics_allowed {
+                return crate::auth::api_error(
+                    StatusCode::FORBIDDEN,
+                    "FORBIDDEN",
+                    "Admin access required",
+                );
+            }
+            if !ticket_client_ip_matches(&entry.client_ip, &client_ip) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "code": "WS_IP_MISMATCH",
+                        "message": "Ticket IP mismatch"
+                    })),
+                )
+                    .into_response();
+            }
+            entry
+        } else {
+            let effective_jti = if user.jti.trim().is_empty() {
+                let mut nonce = [0u8; 16];
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+                format!("ws-anon-{}", hex::encode(nonce))
+            } else {
+                user.jti.clone()
+            };
+            WsTicketEntry {
+                user_id: user.user_id,
+                session_jti: effective_jti,
+                session_ver: None,
+                client_ip,
+                expires_at: Instant::now(),
+                diagnostics_allowed: true,
+                peer: None,
+                peer_runtime: None,
+            }
+        }
     };
-    let mut authorization = WsTicketEntry {
-        user_id: user.user_id,
-        session_jti: effective_jti,
-        session_ver: None,
-        client_ip: extract_client_ip_for_peer(&headers, peer_ip),
-        expires_at: Instant::now(),
-        diagnostics_allowed: true,
-    };
+
+    // Subscribe to peer revocations BEFORE entering `on_upgrade` so revocations between upgrade
+    // acceptance and stream startup cannot be missed; immediate recheck runs inside `on_upgrade`.
+    let mut revocation_rx = authorization
+        .peer_runtime
+        .as_ref()
+        .map(|rt| rt.subscribe_revocations());
+    let held_ws_permit = peer_ws_permit.and_then(|Extension(p)| p.take());
+    let is_peer = authorization.peer.is_some();
+
     ws.max_message_size(64 * 1024)
         .max_frame_size(16 * 1024)
         .on_upgrade(move |mut socket| async move {
+            let _held_ws_permit = held_ws_permit;
             // Upgrading a connection does not grant a lasting raw-log capability.
-            if current_ws_authorization(&mut authorization).await != Some(true) {
+            let initial_allowed = if is_peer {
+                current_ws_authorization_ex(&mut authorization, WsPeerScope::Logs)
+                    .await
+                    .is_some()
+            } else {
+                current_ws_authorization(&mut authorization).await == Some(true)
+            };
+            if !initial_allowed {
                 let _ = socket.send(Message::Close(None)).await;
                 return;
             }
@@ -419,17 +557,51 @@ pub async fn handle_log_websocket(
             let mut filter = WsLogFilter::default();
             let mut ping_interval = tokio::time::interval(Duration::from_secs(54));
             ping_interval.tick().await;
-            let mut auth_interval = tokio::time::interval(Duration::from_secs(5));
+            let mut auth_interval = tokio::time::interval(if is_peer {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_secs(5)
+            });
             auth_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             auth_interval.tick().await;
 
             loop {
                 tokio::select! {
+                    recv = async {
+                        match revocation_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some(ref binding) = authorization.peer {
+                            match classify_revocation_recv(recv, binding) {
+                                RevocationWakeOutcome::CloseNow => {
+                                    let _ = socket.send(Message::Close(None)).await;
+                                    break;
+                                }
+                                RevocationWakeOutcome::RecheckDb => {
+                                    if current_ws_authorization_ex(&mut authorization, WsPeerScope::Logs)
+                                        .await
+                                        .is_none()
+                                    {
+                                        let _ = socket.send(Message::Close(None)).await;
+                                        break;
+                                    }
+                                }
+                                RevocationWakeOutcome::Ignore => {}
+                            }
+                        }
+                    }
                     msg_opt = socket.recv() => {
                         match msg_opt {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(new_filter) = serde_json::from_str::<WsLogFilter>(&text) {
                                     filter = new_filter;
+                                }
+                            }
+                            Some(Ok(Message::Ping(payload))) => {
+                                if socket.send(Message::Pong(payload)).await.is_err() {
+                                    break;
                                 }
                             }
                             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
@@ -439,13 +611,27 @@ pub async fn handle_log_websocket(
                         }
                     }
                     _ = auth_interval.tick() => {
-                        if current_ws_authorization(&mut authorization).await != Some(true) {
+                        let still_allowed = if is_peer {
+                            current_ws_authorization_ex(&mut authorization, WsPeerScope::Logs)
+                                .await
+                                .is_some()
+                        } else {
+                            current_ws_authorization(&mut authorization).await == Some(true)
+                        };
+                        if !still_allowed {
                             let _ = socket.send(Message::Close(None)).await;
                             break;
                         }
                     }
                     Some(entry) = rx.recv() => {
-                        if current_ws_authorization(&mut authorization).await != Some(true) {
+                        let still_allowed = if is_peer {
+                            current_ws_authorization_ex(&mut authorization, WsPeerScope::Logs)
+                                .await
+                                .is_some()
+                        } else {
+                            current_ws_authorization(&mut authorization).await == Some(true)
+                        };
+                        if !still_allowed {
                             let _ = socket.send(Message::Close(None)).await;
                             break;
                         }
@@ -463,7 +649,14 @@ pub async fn handle_log_websocket(
                         }
                     }
                     _ = ping_interval.tick() => {
-                        if current_ws_authorization(&mut authorization).await != Some(true) {
+                        let still_allowed = if is_peer {
+                            current_ws_authorization_ex(&mut authorization, WsPeerScope::Logs)
+                                .await
+                                .is_some()
+                        } else {
+                            current_ws_authorization(&mut authorization).await == Some(true)
+                        };
+                        if !still_allowed {
                             let _ = socket.send(Message::Close(None)).await;
                             break;
                         }

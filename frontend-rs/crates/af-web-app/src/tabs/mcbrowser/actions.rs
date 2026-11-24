@@ -1,5 +1,9 @@
 use super::*;
 
+pub(super) fn action_requires_files_write(kind: &str) -> bool {
+    kind != "info"
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Actions {
     pub(super) open: RwSignal<bool>,
@@ -11,6 +15,8 @@ pub(super) struct Actions {
     pub(super) format: RwSignal<String>,
     pub(super) recursive: RwSignal<bool>,
     pub(super) busy: RwSignal<bool>,
+    pub(super) write_ticket: RwSignal<u64>,
+    pub(super) read_ticket: RwSignal<u64>,
     pub(super) failure: RwSignal<String>,
     pub(super) results: RwSignal<Vec<Value>>,
     pub(super) selected: RwSignal<BTreeSet<String>>,
@@ -28,6 +34,8 @@ impl Actions {
             format: RwSignal::new("zip".into()),
             recursive: RwSignal::new(false),
             busy: RwSignal::new(false),
+            write_ticket: RwSignal::new(0),
+            read_ticket: RwSignal::new(0),
             failure: RwSignal::new(String::new()),
             results: RwSignal::new(vec![]),
             selected,
@@ -35,7 +43,12 @@ impl Actions {
         }
     }
     pub(super) fn show(self, kind: &str, targets: Vec<String>, directory: String) {
-        if self.busy.get_untracked() {
+        let context = app();
+        let requires_write = action_requires_files_write(kind);
+        if self.busy.get_untracked()
+            || (requires_write && !context.can_write_area_untracked(PeerArea::Files))
+            || (!requires_write && !context.can_read_area_untracked(PeerArea::Files))
+        {
             return;
         }
         self.destination.set(match kind {
@@ -103,11 +116,32 @@ impl Actions {
         let format = self.format.get_untracked();
         let recursive = self.recursive.get_untracked();
         let context = app();
-        let auth = context.session_epoch.get_untracked();
+        let requires_write = action_requires_files_write(kind.as_str());
+        if (requires_write && !context.can_write_area_untracked(PeerArea::Files))
+            || (!requires_write && !context.can_read_area_untracked(PeerArea::Files))
+        {
+            return;
+        }
+        let ticket_signal = if requires_write {
+            self.write_ticket
+        } else {
+            self.read_ticket
+        };
+        ticket_signal.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = ticket_signal.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            PeerArea::Files,
+            requires_write,
+            false,
+            ticket_signal,
+            ticket,
+        );
         self.busy.set(true);
         self.failure.set(String::new());
         self.results.set(vec![]);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(self.busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(self.busy, ticket_signal, ticket);
         spawn_local(async move {
             let mut requests: Vec<(String, String, &'static str, Option<Value>)> = vec![];
             match kind.as_str() {
@@ -133,15 +167,11 @@ impl Actions {
             let mut failed = false;
             let mut failed_paths = vec![];
             for (path, endpoint, method, payload) in requests {
-                if context.session_epoch.try_get_untracked() != Some(auth)
-                    || self.busy.try_get_untracked().is_none()
-                {
+                if self.busy.try_get_untracked().is_none() || !fence.is_valid() {
                     return;
                 }
                 let result = ApiClient.request(&endpoint, method, payload.as_ref()).await;
-                if context.session_epoch.try_get_untracked() != Some(auth)
-                    || self.busy.try_get_untracked().is_none()
-                {
+                if self.busy.try_get_untracked().is_none() || !fence.is_valid() {
                     return;
                 }
                 let record = match result {
@@ -158,6 +188,9 @@ impl Actions {
                     }
                 };
                 self.results.update(|rows| rows.push(record));
+            }
+            if self.busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
             }
             busy_guard.release();
             self.confirm.set(false);
@@ -181,13 +214,42 @@ impl Actions {
 #[component]
 pub(super) fn ActionsDialog(actions: Actions) -> impl IntoView {
     let context = app();
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Files);
+        actions.write_ticket.update(|t| *t = t.wrapping_add(1));
+        actions.read_ticket.update(|t| *t = t.wrapping_add(1));
+        actions.busy.set(false);
+        actions.open.set(false);
+        actions.confirm.set(false);
+        actions.failure.set(String::new());
+        actions.results.set(vec![]);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Files) {
+            actions.write_ticket.update(|t| *t = t.wrapping_add(1));
+            if action_requires_files_write(&actions.kind.get_untracked()) {
+                actions.busy.set(false);
+                actions.confirm.set(false);
+                actions.open.set(false);
+            }
+        }
+    });
     view! {
         <Modal open=actions.open title="File operation">
             <form
                 class="space-y-4"
                 on:submit=move |event: web_sys::SubmitEvent| {
                     event.prevent_default();
-                    if actions.kind.get_untracked() == "delete" {
+                    let kind = actions.kind.get_untracked();
+                    let requires_write = action_requires_files_write(&kind);
+                    if (requires_write && !context.can_write_area_untracked(PeerArea::Files))
+                        || (!requires_write && !context.can_read_area_untracked(PeerArea::Files))
+                    {
+                        return;
+                    }
+                    if kind == "delete" {
                         actions.confirm.set(true);
                     } else {
                         actions.run();
@@ -296,7 +358,12 @@ pub(super) fn ActionsDialog(actions: Actions) -> impl IntoView {
                 <button
                     type="submit"
                     class="glass-button-primary px-4 py-2"
-                    disabled=move || actions.busy.get()
+                    disabled=move || {
+                        let requires_write = action_requires_files_write(&actions.kind.get());
+                        actions.busy.get()
+                            || (requires_write && !context.can_write_area(PeerArea::Files))
+                            || (!requires_write && !context.can_read_area(PeerArea::Files))
+                    }
                 >
                     {move || tt(
                         context,
@@ -341,5 +408,31 @@ pub(super) fn ActionsDialog(actions: Actions) -> impl IntoView {
                     }
                 })
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_requires_files_write;
+
+    #[test]
+    fn checksums_and_mutating_actions_require_files_write_while_info_uses_read() {
+        assert!(!action_requires_files_write("info"));
+        for kind in [
+            "checksums",
+            "folder",
+            "file",
+            "rename",
+            "move",
+            "copy",
+            "delete",
+            "archive",
+            "extract",
+        ] {
+            assert!(
+                action_requires_files_write(kind),
+                "action {kind} posts to a Files:Write endpoint and must require write access"
+            );
+        }
     }
 }

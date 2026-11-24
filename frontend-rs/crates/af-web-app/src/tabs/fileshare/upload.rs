@@ -56,6 +56,7 @@ pub(super) async fn stream_upload(
     progress: RwSignal<u32>,
 ) -> Result<(), String> {
     let epoch = context.session_epoch.get_untracked();
+    let server_epoch = context.server_epoch.get_untracked();
     if signal.aborted() {
         return Err("Upload cancelled.".into());
     }
@@ -66,7 +67,10 @@ pub(super) async fn stream_upload(
     let encoded_name = af_web_core::api::percent_encode_header_component(&file_name);
     let total_chunks = chunks.to_string();
     for index in 0..chunks {
-        if signal.aborted() || context.session_epoch.try_get_untracked() != Some(epoch) {
+        if signal.aborted()
+            || context.session_epoch.try_get_untracked() != Some(epoch)
+            || context.server_epoch.try_get_untracked() != Some(server_epoch)
+        {
             return Err("Upload cancelled.".into());
         }
         let start = index * CHUNK_BYTES;

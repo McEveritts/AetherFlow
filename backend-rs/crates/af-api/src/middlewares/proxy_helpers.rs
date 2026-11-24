@@ -1,13 +1,20 @@
 use super::host_resolution::strip_host_port_and_dot;
 use crate::auth::{api_error, decode_session_claims, resolve_raw_token};
-use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::body::{Body, Bytes};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::Response;
+use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use once_cell::sync::Lazy;
 use rusqlite::OptionalExtension;
+use std::any::Any;
+use std::collections::HashSet;
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
+use url::Url;
 
 pub(super) static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -152,6 +159,7 @@ pub(super) fn is_spoofable_identity_header(name: &str) -> bool {
         )
 }
 
+#[cfg(test)]
 pub(super) fn forward_proxy_http_headers(
     mut upstream_req: reqwest::RequestBuilder,
     incoming_headers: &axum::http::HeaderMap,
@@ -409,7 +417,7 @@ pub(super) fn internal_domain_forbidden() -> Response {
     )
 }
 
-pub(super) fn is_hop_by_hop_header(name: &str) -> bool {
+pub(crate) fn is_hop_by_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "connection"
@@ -419,7 +427,224 @@ pub(super) fn is_hop_by_hop_header(name: &str) -> bool {
             | "te"
             | "trailer"
             | "transfer-encoding"
+            | "upgrade"
+            | "http2-settings"
     )
+}
+
+/// Collects lowercased header names nominated as hop-by-hop by any `Connection` header (RFC 9110 §7.6.1).
+pub(crate) fn connection_header_tokens(headers: &HeaderMap) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    for val in headers.get_all(header::CONNECTION) {
+        if let Ok(raw) = val.to_str() {
+            for part in raw.split(',') {
+                let token = part.trim();
+                if !token.is_empty() {
+                    tokens.insert(token.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    tokens
+}
+
+pub(crate) fn is_websocket_upgrade_request(headers: &HeaderMap, method: &Method) -> bool {
+    if *method != Method::GET {
+        return false;
+    }
+    let upgrade_ws = headers
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("websocket"));
+    let conn_upgrade = headers.get_all(header::CONNECTION).iter().any(|val| {
+        val.to_str().ok().is_some_and(|raw| {
+            raw.split(',')
+                .any(|tok| tok.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    upgrade_ws && conn_upgrade
+}
+
+/// Upgrade protocol policy for [`super::subdomain_proxy::stream_proxy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamProxyUpgradePolicy {
+    Disabled,
+    /// Subdomain proxy: preserves existing upgrade detection for WebSockets and generic HTTP upgrades.
+    AnyUpgrade,
+    /// Peer proxy: permits only `GET` + `Connection: Upgrade` + `Upgrade: websocket`.
+    WebSocketOnly,
+}
+
+/// Optional local source IP and Linux `SO_BINDTODEVICE` interface binding for plain TCP upstream
+/// connections (used by peer management proxy WebSocket upgrades).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StreamProxySocketBind {
+    pub(crate) local_ip: IpAddr,
+    pub(crate) interface: Option<String>,
+}
+
+/// Transport error category emitted by [`super::subdomain_proxy::stream_proxy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamProxyErrorKind {
+    BadGateway,
+    GatewayTimeout,
+}
+
+pub(crate) type StreamProxyErrorFn =
+    Box<dyn FnOnce(StreamProxyErrorKind, String) -> Response + Send>;
+
+pub(crate) type StreamProxyResponseTransform = Box<dyn FnOnce(&mut Response, bool) + Send>;
+
+/// Configuration options for [`super::subdomain_proxy::stream_proxy`].
+pub(crate) struct StreamProxyOptions {
+    /// Pre-filtered request headers to forward upstream (hop-by-hop headers are stripped
+    /// automatically; WebSocket handshake headers are preserved for accepted upgrades).
+    pub(crate) upstream_headers: HeaderMap,
+    /// Explicit `Host` header to send upstream (subdomain proxy sends the browser host; peer proxy
+    /// sends the derived tunnel `<ip>:<port>` authority).
+    pub(crate) upstream_host: Option<String>,
+    /// Optional local IP + interface binding for plain TCP WebSocket upstream connections.
+    pub(crate) tcp_bind: Option<StreamProxySocketBind>,
+    /// Optional dedicated `reqwest::Client` for TLS WebSocket upgrades (subdomain proxy only).
+    pub(crate) tls_ws_client: Option<reqwest::Client>,
+    /// Connect + response header timeout budget; does NOT limit multi-minute streaming bodies or
+    /// established WebSocket tunnels.
+    pub(crate) header_timeout: Duration,
+    /// Optional time without upload progress, independent of total request duration.
+    pub(crate) upload_idle_timeout: Option<Duration>,
+    /// Connect timeout for plain TCP WebSocket upstream sockets (bounded by `header_timeout`).
+    pub(crate) ws_connect_timeout: Duration,
+    /// Upgrade protocol policy.
+    pub(crate) upgrade_policy: StreamProxyUpgradePolicy,
+    /// Resource/permit guard held for the entire streaming response body or upgraded WebSocket
+    /// tunnel lifetime, automatically released on completion, stream error, cancellation, or drop.
+    pub(crate) guard: Option<Box<dyn Any + Send + Sync>>,
+    /// Optional cancellation signal that tears down an active upgraded WebSocket tunnel and
+    /// releases `guard` immediately.
+    pub(crate) ws_cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Optional response transform hook called with `(&mut response, is_switching_protocols)`.
+    pub(crate) response_transform: Option<StreamProxyResponseTransform>,
+    /// Optional custom error response mapper.
+    pub(crate) on_error: Option<StreamProxyErrorFn>,
+    /// Structured log context (never contains raw credentials).
+    pub(crate) log_context: String,
+    /// When `true`, discards the incoming request body instead of streaming it upstream (used for
+    /// remote backup step-up POST so local admin passwords are never forwarded over the tunnel).
+    pub(crate) discard_request_body: bool,
+}
+
+/// Zero-copy `Body` wrapper that holds an arbitrary resource/permit guard until the stream reaches
+/// EOF, yields an error, or is dropped (client disconnect / cancellation).
+pub(crate) struct GuardedBody<G = Box<dyn Any + Send + Sync>> {
+    inner: Body,
+    guard: Option<G>,
+}
+
+impl<G: Send + Sync + Unpin + 'static> GuardedBody<G> {
+    pub(crate) fn wrap(inner: Body, guard: Option<G>) -> Body {
+        match guard {
+            Some(g) => Body::new(Self {
+                inner,
+                guard: Some(g),
+            }),
+            None => inner,
+        }
+    }
+}
+
+impl<G: Unpin> HttpBody for GuardedBody<G> {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let poll = Pin::new(&mut self.inner).poll_frame(cx);
+        if matches!(poll, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
+            self.guard.take();
+        }
+        poll
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Connects an upstream TCP socket for plain-HTTP WebSocket upgrades, enforcing optional local
+/// tunnel IP + Linux `SO_BINDTODEVICE` interface binding.
+pub(super) async fn connect_upstream_tcp(
+    target: &Url,
+    bind: Option<&StreamProxySocketBind>,
+    timeout: Duration,
+) -> Result<tokio::net::TcpStream, StreamProxyErrorKind> {
+    let port = target
+        .port_or_known_default()
+        .ok_or(StreamProxyErrorKind::BadGateway)?;
+
+    if let Some(bind_cfg) = bind {
+        let host_str = target
+            .host_str()
+            .ok_or(StreamProxyErrorKind::BadGateway)?
+            .trim_matches(['[', ']']);
+        let dest_ip = host_str
+            .parse::<IpAddr>()
+            .map_err(|_| StreamProxyErrorKind::BadGateway)?
+            .to_canonical();
+        let local_ip = bind_cfg.local_ip.to_canonical();
+        if dest_ip.is_ipv4() != local_ip.is_ipv4() {
+            return Err(StreamProxyErrorKind::BadGateway);
+        }
+
+        let socket = match local_ip {
+            IpAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            IpAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        }
+        .map_err(|_| StreamProxyErrorKind::BadGateway)?;
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(ref iface) = bind_cfg.interface {
+            socket
+                .bind_device(Some(iface.as_bytes()))
+                .map_err(|_| StreamProxyErrorKind::BadGateway)?;
+        }
+        #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
+        if bind_cfg.interface.is_some() {
+            return Err(StreamProxyErrorKind::BadGateway);
+        }
+
+        socket
+            .bind(SocketAddr::new(local_ip, 0))
+            .map_err(|_| StreamProxyErrorKind::BadGateway)?;
+
+        let dest_addr = SocketAddr::new(dest_ip, port);
+        match tokio::time::timeout(timeout, socket.connect(dest_addr)).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(_)) => Err(StreamProxyErrorKind::BadGateway),
+            Err(_) => Err(StreamProxyErrorKind::GatewayTimeout),
+        }
+    } else {
+        let host = target
+            .host_str()
+            .ok_or(StreamProxyErrorKind::BadGateway)?
+            .trim_matches(['[', ']'])
+            .to_string();
+        match tokio::time::timeout(
+            timeout,
+            tokio::net::TcpStream::connect((host.as_str(), port)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(_)) => Err(StreamProxyErrorKind::BadGateway),
+            Err(_) => Err(StreamProxyErrorKind::GatewayTimeout),
+        }
+    }
 }
 
 pub(super) fn managed_app_route_unavailable() -> Response {

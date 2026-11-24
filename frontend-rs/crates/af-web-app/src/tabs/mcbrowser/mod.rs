@@ -1,9 +1,9 @@
 //! Private filesystem workspace. Mutations use the authenticated API, TUS
 //! transfers reconcile server offsets, and editor drafts retain their read ETag.
-use super::fileshare::{
-    encode, relative_path, share_url, text, ShareCreateModal, ShareLinkDetails,
+use super::fileshare::{encode, relative_path, text, ShareCreateModal, ShareLinkDetails};
+use crate::state::{
+    app, json_rows, use_api_when, worker_pool, ApiResource, AppContext, PeerArea, TabId,
 };
-use crate::state::{app, json_rows, use_api, worker_pool, ApiResource, AppContext, TabId};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{
     Badge, ConfirmDialog, DataGrid, Drawer, EmptyState, Modal, ObsCard, SearchInput, TabPanel,
@@ -52,19 +52,24 @@ fn resolve_mcbrowser_subtab(requested: &str, is_admin: bool) -> &'static str {
 #[component]
 pub fn McBrowserTab() -> impl IntoView {
     let context = app();
+    let can_read_files = Signal::derive(move || context.can_read_area(PeerArea::Files));
     let path = RwSignal::new(String::new());
-    let entries = use_api(Signal::derive(move || {
-        format!("{BASE}/entries?path={}", encode(&path.get()))
-    }));
-    let usage = use_api(format!("{BASE}/usage"));
-    let policy = use_api(format!("{BASE}/policy"));
-    let preferences = use_api(format!("{BASE}/preferences"));
+    let entries = use_api_when(
+        can_read_files,
+        Signal::derive(move || format!("{BASE}/entries?path={}", encode(&path.get()))),
+    );
+    let usage = use_api_when(can_read_files, format!("{BASE}/usage"));
+    let policy = use_api_when(can_read_files, format!("{BASE}/policy"));
+    let preferences = use_api_when(can_read_files, format!("{BASE}/preferences"));
     let initial_subtab = context
         .take_pending_subtab(TabId::McBrowser)
         .map(|target| resolve_mcbrowser_subtab(&target, context.is_admin()).to_owned())
         .unwrap_or_else(|| "workspace".to_owned());
     let subtab = RwSignal::new(initial_subtab);
     let refresh = Callback::new(move |()| {
+        if !context.can_read_area_untracked(PeerArea::Files) {
+            return;
+        }
         entries.refresh();
         usage.refresh();
         policy.refresh();
@@ -116,12 +121,20 @@ pub fn McBrowserTab() -> impl IntoView {
         }
     });
     let flush_preferences = move || {
+        if !context.can_write_area_untracked(crate::state::PeerArea::Files) {
+            return;
+        }
         let auth = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
         let run_epoch = pref_epoch.get_untracked();
         spawn_local(async move {
             loop {
                 if pref_disposed.try_get_value() != Some(false)
                     || context.session_epoch.try_get_untracked() != Some(auth)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                    || !context.can_write_area_untracked(PeerArea::Files)
                     || pref_epoch.try_get_untracked() != Some(run_epoch)
                 {
                     return;
@@ -137,6 +150,9 @@ pub fn McBrowserTab() -> impl IntoView {
                     .await;
                 if pref_disposed.try_get_value() != Some(false)
                     || context.session_epoch.try_get_untracked() != Some(auth)
+                    || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                    || !context.can_write_area_untracked(PeerArea::Files)
                     || pref_epoch.try_get_untracked() != Some(run_epoch)
                 {
                     return;
@@ -167,11 +183,33 @@ pub fn McBrowserTab() -> impl IntoView {
     };
     Effect::new(move |_| {
         context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Files);
         pref_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
         let _ = pref_sync.try_update_value(PreferenceSyncState::reset);
         pref_error.set(None);
         editor_theme.set("chrome".to_owned());
         preferences.data.set(Value::Null);
+        path.set(String::new());
+        selected.set(BTreeSet::new());
+        search_generation.update(|generation| *generation += 1);
+        search_data.set(None);
+        search_busy.set(false);
+        search_error.set(String::new());
+        media_open.set(false);
+        media_path.set(String::new());
+        share_open.set(false);
+        share_path.set(String::new());
+        share_preview.set(false);
+        share_preview_url.set(String::new());
+        switch_editor.set(false);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Files) {
+            pref_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+            let _ = pref_sync.try_update_value(PreferenceSyncState::reset);
+            pref_error.set(None);
+        }
     });
     Effect::new(move |_| {
         let data = preferences.data.get();
@@ -264,12 +302,17 @@ pub fn McBrowserTab() -> impl IntoView {
     let search = move |event: web_sys::SubmitEvent| {
         event.prevent_default();
         let query = search_query.get_untracked().trim().to_owned();
-        if query.is_empty() || search_busy.get_untracked() {
+        if query.is_empty()
+            || search_busy.get_untracked()
+            || !context.can_read_area_untracked(PeerArea::Files)
+        {
             return;
         }
         search_generation.update(|generation| *generation += 1);
         let ticket = search_generation.get_untracked();
         let auth = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
         let endpoint = format!(
             "{BASE}/search?path={}&q={}&type={}&ai=true",
             encode(&path.get_untracked()),
@@ -284,6 +327,9 @@ pub fn McBrowserTab() -> impl IntoView {
             let result = ApiClient.get(&endpoint).await;
             if search_generation.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                || !context.can_read_area_untracked(PeerArea::Files)
             {
                 return;
             }
@@ -390,8 +436,13 @@ pub fn McBrowserTab() -> impl IntoView {
         })
     });
     let upload_files = move |files: web_sys::FileList| {
-        if !can("create") {
-            context.toast(tt(context, "Upload permission is required."), true);
+        if !can("create") || !context.can_write_area(crate::state::PeerArea::Files) {
+            context.toast(
+                context
+                    .area_block_reason(crate::state::PeerArea::Files, true)
+                    .unwrap_or_else(|| tt(context, "Upload permission is required.")),
+                true,
+            );
             return;
         }
         queue.add(files, &path.get_untracked(), &conflict.get_untracked());
@@ -455,6 +506,15 @@ pub fn McBrowserTab() -> impl IntoView {
             <TabPanel id_prefix="mcbrowser" id=Signal::derive(move || subtab.get())>
                 <Show when=move || subtab.get() == "workspace">
                     <ObsCard>
+                        <Show when=move || !can_read_files.get()>
+                            <p role="status" class="text-xs text-amber-300 mb-3">
+                                {move || {
+                                    context
+                                        .area_block_reason(PeerArea::Files, false)
+                                        .unwrap_or_default()
+                                }}
+                            </p>
+                        </Show>
                         <div class="flex flex-wrap items-center justify-between gap-3 mb-2">
                             <p class="text-sm text-slate-300">
                                 {move || {
@@ -497,6 +557,12 @@ pub fn McBrowserTab() -> impl IntoView {
                                 <button
                                     type="button"
                                     class="glass-button px-3 py-2"
+                                    disabled=move || !can_read_files.get()
+                                    title=move || {
+                                        context
+                                            .area_block_reason(PeerArea::Files, false)
+                                            .unwrap_or_default()
+                                    }
                                     on:click=move |_| refresh.run(())
                                     aria-label=move || tt(context, "Refresh")
                                 >
@@ -653,7 +719,8 @@ pub fn McBrowserTab() -> impl IntoView {
                             }>
                                 <For
                                     each=move || sorted.get()
-                                    key=|row| (
+                                    key=move |row| (
+                                        context.active_server_id.get(),
                                         text(row, "path"),
                                         row["size"].as_u64().unwrap_or(0),
                                         text(row, "modified"),
@@ -661,16 +728,14 @@ pub fn McBrowserTab() -> impl IntoView {
                                     children=move |row| {
                                         let row = StoredValue::new(row);
                                         let thumb_failed = RwSignal::new(false);
-                                        let thumb_src = row.with_value(|row| {
+                                        let thumb_path = row.with_value(|row| {
                                             let row_path = text(row, "path");
                                             let size = row["size"].as_u64().unwrap_or(0);
                                             if row["kind"] != "directory"
                                                 && media_kind(&row_path) == "image"
                                                 && size <= MAX_THUMBNAIL_SOURCE_BYTES
                                             {
-                                                Some(mcbrowser_preview_thumb_url_encoded(&encode(
-                                                    &row_path,
-                                                )))
+                                                Some(encode(&row_path))
                                             } else {
                                                 None
                                             }
@@ -684,7 +749,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                                     "flex flex-wrap items-center gap-3 p-3 border-b border-white/5 min-w-0"
                                                 }
                                             }>
-                                                {thumb_src.clone().map(|src| {
+                                                {thumb_path.clone().map(|encoded| {
                                                     let alt = thumb_alt.clone();
                                                     view! {
                                                         <Show when=move || grid.get() && can("read") && !thumb_failed.get()>
@@ -694,7 +759,13 @@ pub fn McBrowserTab() -> impl IntoView {
                                                                 on:click=move |_| open_entry.run(row.get_value())
                                                             >
                                                                 <img
-                                                                    src=src.clone()
+                                                                    src={
+                                                                        let encoded = encoded.clone();
+                                                                        move || {
+                                                                            context.active_server_id.track();
+                                                                            mcbrowser_preview_thumb_url_encoded(&encoded)
+                                                                        }
+                                                                    }
                                                                     alt=alt.clone()
                                                                     loading="lazy"
                                                                     decoding="async"
@@ -783,14 +854,18 @@ pub fn McBrowserTab() -> impl IntoView {
                                                     .with_value(|row| {
                                                         (row["kind"] != "directory")
                                                             .then(|| {
-                                                                let href = mcbrowser_download_url_encoded(
-                                                                    &encode(&text(row, "path")),
-                                                                );
+                                                                let encoded = encode(&text(row, "path"));
                                                                 view! {
                                                                     <Show when=move || can("download")>
                                                                         <a
                                                                             class="glass-button text-xs px-3 py-2"
-                                                                            href=href.clone()
+                                                                            href={
+                                                                                let encoded = encoded.clone();
+                                                                                move || {
+                                                                                    context.active_server_id.track();
+                                                                                    mcbrowser_download_url_encoded(&encoded)
+                                                                                }
+                                                                            }
                                                                             download
                                                                         >
                                                                             {move || tt(context, "Common.download")}
@@ -861,7 +936,9 @@ pub fn McBrowserTab() -> impl IntoView {
             <EditorPanel
                 editor
                 editor_theme
-                readonly=Signal::derive(move || !can("modify"))
+                readonly=Signal::derive(move || {
+                    !can("modify") || !context.can_write_area(crate::state::PeerArea::Files)
+                })
             />
             <MediaPreview
                 open=media_open
@@ -875,7 +952,9 @@ pub fn McBrowserTab() -> impl IntoView {
                 open=share_open
                 initial_path=share_path
                 on_created=Callback::new(move |row| {
-                    if let Some(url) = share_url(&row) {
+                    if let Some(url) =
+                        crate::tabs::fileshare::share_url_for_context_untracked(context, &row)
+                    {
                         share_preview_url.set(url);
                     }
                     refresh.run(());

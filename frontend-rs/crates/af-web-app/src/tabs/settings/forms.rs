@@ -20,10 +20,17 @@ pub fn edit(draft: JsonDraft, key: &str, value: Value) {
     });
 }
 pub fn poll_resource(resource: ApiResource, milliseconds: u32) {
+    poll_resource_when(resource, milliseconds, || true);
+}
+pub fn poll_resource_when(
+    resource: ApiResource,
+    milliseconds: u32,
+    can_poll: impl Fn() -> bool + 'static,
+) {
     let timer = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         milliseconds,
         move || {
-            if !resource.loading.get_untracked() {
+            if can_poll() && !resource.loading.get_untracked() {
                 resource.refresh();
             }
         },
@@ -178,12 +185,14 @@ pub fn DraftCheck(
     draft: JsonDraft,
     field: &'static str,
     #[prop(into)] label: TextProp,
+    #[prop(optional, into)] disabled: Signal<bool>,
 ) -> impl IntoView {
     let context = app();
     view! {
         <label class="flex items-center gap-3 text-sm py-2">
             <input
                 type="checkbox"
+                disabled=move || disabled.get()
                 prop:checked=move || draft_value(draft)[field].as_bool().unwrap_or(false)
                 on:change=move |event| edit(draft, field, json!(event_target_checked(&event)))
             />
@@ -198,6 +207,8 @@ pub fn DraftButtons(
     on_save: Callback<()>,
     #[prop(optional, into)] label: TextProp,
     #[prop(optional, into)] saving_label: TextProp,
+    #[prop(optional, into)] disabled: Signal<bool>,
+    #[prop(optional, into)] title: Signal<String>,
 ) -> impl IntoView {
     let context = app();
     view! {
@@ -222,7 +233,8 @@ pub fn DraftButtons(
             <button
                 type="button"
                 class="glass-button-primary px-4 py-2"
-                disabled=move || busy.get() || !draft.with(FormDraft::is_dirty)
+                disabled=move || busy.get() || disabled.get() || !draft.with(FormDraft::is_dirty)
+                title=move || title.get()
                 on:click=move |_| on_save.run(())
             >
                 {move || {

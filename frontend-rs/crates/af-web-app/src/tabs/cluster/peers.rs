@@ -736,6 +736,42 @@ fn PeerRowCard(
                             {move || tt(context, "Cluster.manageGrantsAction")}
                         </button>
                     </Show>
+                    {move || {
+                        let current = peer.get();
+                        let current_peer = current?;
+                        let id = current_peer.id.clone();
+                        let is_active = context.active_server_id.get().as_deref() == Some(id.as_str());
+                        let eligibility = crate::state::peer_switch_eligibility(&current_peer);
+                        let disabled = is_active || eligibility.is_err();
+                        let title = match eligibility {
+                            Ok(()) => String::new(),
+                            Err(key) => tt(context, key),
+                        };
+                        let label = if is_active {
+                            tt(context, "PeerSwitch.currentlyManaging")
+                        } else {
+                            tt(context, "PeerSwitch.manageServer")
+                        };
+                        Some(view! {
+                            <button
+                                type="button"
+                                class=if is_active {
+                                    "glass-button px-3 py-1.5 text-sm text-cyan-200 border-cyan-500/30"
+                                } else {
+                                    "glass-button-primary px-3 py-1.5 text-sm disabled:opacity-50"
+                                }
+                                data-testid=format!("peer-manage-{}", id)
+                                data-active=is_active.to_string()
+                                disabled=disabled
+                                title=title
+                                on:click=move |_| {
+                                    let _ = context.select_server(Some(id.clone()));
+                                }
+                            >
+                                {label}
+                            </button>
+                        })
+                    }}
                     <Show when=move || editable.get()>
                         <button
                             type="button"

@@ -8,6 +8,8 @@ Features:
 - F23: Real App Topology Map
 """
 
+import re
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 OVERVIEW_MOD = "frontend-rs/crates/af-web-app/src/tabs/overview/mod.rs"
@@ -71,13 +73,16 @@ class TestF19ZeroFakeSineWaveMathematics(TestCase):
 
 class TestF19PredictionsMountLoadsInitialReport(TestCase):
     def __init__(self):
-        super().__init__("T1_F19_05", "F19", 1, "CapacityPredictions loads existing prediction report on mount via use_api")
+        super().__init__("T1_F19_05", "F19", 1, "CapacityPredictions loads the prediction report on mount when Settings read is granted")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        widgets = inspector.read_file(OVERVIEW_WIDGETS)
+        widgets = inspector.read_file(OVERVIEW_WIDGETS) or ""
+        component = widgets.partition("fn CapacityPredictions(")[2].split("#[component]", 1)[0]
+        permission = r"let\s+can_read_settings\s*=\s*Signal::derive\(move\s*\|\|\s*context\.can_read_area\(PeerArea::Settings\)\)"
+        report = r'use_api_when\(\s*can_read_settings\s*,\s*"/api/v1/admin/ai/predictions"'
         self.assert_true(
-            bool(widgets and 'use_api("/api/v1/admin/ai/predictions"' in widgets),
-            "F19: CapacityPredictions must fetch prediction report on component mount",
+            bool(re.search(permission, component) and re.search(report, component)),
+            "F19: CapacityPredictions must fetch the report on mount when Settings read is granted",
         )
 
 

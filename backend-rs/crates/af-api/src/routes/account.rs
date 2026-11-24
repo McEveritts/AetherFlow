@@ -1,7 +1,7 @@
 use crate::auth::{api_error, AuthUser};
-use crate::ws::{
-    extract_client_ip, extract_client_ip_for_peer, issue_ws_ticket_for_session, PeerIp,
-};
+use crate::ws::extract_client_ip;
+#[cfg(test)]
+use crate::ws::PeerIp;
 use af_models::User;
 use axum::extract::{Extension, Path};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -10,24 +10,14 @@ use chrono::Utc;
 use rusqlite::params;
 use serde::Deserialize;
 
+#[cfg(test)]
 pub(super) async fn issue_ws_ticket(
     Extension(auth_user): Extension<AuthUser>,
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
 ) -> Response {
-    if auth_user.plugin_id.is_some()
-        || !auth_user.plugin_scopes.is_empty()
-        || auth_user.role == "plugin"
-    {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "PLUGIN_WEBSOCKET_FORBIDDEN",
-            "Scoped plugins cannot create operator WebSocket sessions; use scoped telemetry reads",
-        );
-    }
-    let ip = extract_client_ip_for_peer(&headers, peer_ip);
-    let ticket = issue_ws_ticket_for_session(auth_user.user_id, &auth_user.jti, &ip);
-    Json(serde_json::json!({ "ticket": ticket })).into_response()
+    crate::ws::handle_issue_ws_ticket(Extension(auth_user), None, None, PeerIp(peer_ip), headers)
+        .await
 }
 
 #[derive(Deserialize)]

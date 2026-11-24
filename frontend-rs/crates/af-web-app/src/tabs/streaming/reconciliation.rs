@@ -16,6 +16,7 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
     let preview = RwSignal::new(Value::Null);
     let approved = RwSignal::new(false);
     let busy = RwSignal::new(false);
+    let op_ticket = RwSignal::new(0u64);
     let confirm = RwSignal::new(false);
     let result = RwSignal::new(None::<String>);
     let generation = RwSignal::new(0u64);
@@ -23,10 +24,29 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
         preview.set(Value::Null);
         approved.set(false);
         confirm.set(false);
-        generation.update(|n| *n += 1);
+        generation.update(|n| *n = n.wrapping_add(1));
+    });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Services);
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        invalidate.run(());
+        result.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Services) {
+            op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            invalidate.run(());
+        }
     });
     let get_preview = Callback::new(move |(): ()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
+        {
             return;
         }
         invalidate.run(());
@@ -58,8 +78,19 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
             ));
             return;
         }
+        let draft_ticket = generation.get_untracked();
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         busy.set(true);
-        let ticket = generation.get_untracked();
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .post(
@@ -67,9 +98,13 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                     Some(&json!({"candidateIds":candidate_ids,"limit":limit_value})),
                 )
                 .await;
-            if generation.try_get_untracked() != Some(ticket) {
+            if busy.try_get_untracked().is_none()
+                || generation.try_get_untracked() != Some(draft_ticket)
+                || !fence.is_valid()
+            {
                 return;
             }
+            busy_guard.release();
             match response {
                 Ok(data) => {
                     preview.set(data);
@@ -77,11 +112,14 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                 }
                 Err(e) => result.set(Some(e.message)),
             }
-            busy.set(false);
         });
     });
     let apply = Callback::new(move |(): ()| {
-        if busy.get_untracked() || !approved.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !approved.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
+        {
             return;
         }
         let data = contracts::decode::<ReconciliationPreview>(&preview.get_untracked());
@@ -96,14 +134,30 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
             return;
         }
         let body = json!({"previewHash":data.preview_hash,"approvalToken":data.approval_token});
+        let draft_ticket = generation.get_untracked();
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .post("/api/v1/admin/streaming/reconciliation/apply", Some(&body))
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || generation.try_get_untracked() != Some(draft_ticket)
+                || !fence.is_valid()
+            {
                 return;
             }
+            busy_guard.release();
             match response {
                 Ok(data) => {
                     result.set(Some(
@@ -125,7 +179,6 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                 })),
             }
             invalidate.run(());
-            busy.set(false);
         });
     });
     view! {
@@ -165,7 +218,14 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
             </label>
             <button
                 class="glass-button px-4 py-2"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Services)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Services, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| get_preview.run(())
             >
                 {move || tt(context, "Generate server dry-run diff")}
@@ -207,8 +267,21 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                     </label>
                     <button
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || busy.get() || !approved.get()
-                        on:click=move |_| confirm.set(true)
+                        disabled=move || {
+                            busy.get()
+                                || !approved.get()
+                                || !context.can_write_area(crate::state::PeerArea::Services)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Services, true)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if context.can_write_area_untracked(crate::state::PeerArea::Services) {
+                                confirm.set(true);
+                            }
+                        }
                     >
                         {move || tt(context, "Apply reviewed reconciliation")}
                     </button>

@@ -1,5 +1,7 @@
-use super::settings::{download_text, poll_resource, text, ResourceFeedback};
-use crate::state::{app, use_api};
+use super::settings::{download_text, poll_resource_when, text, ResourceFeedback};
+use crate::state::{
+    app, owned_resource_reads, run_resource_read, use_api_when, PeerArea, ResourceReads,
+};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{DataGrid, Drawer, EmptyState, ObsCard, SearchInput};
 use crate::tabs::services::ServiceLogsModal;
@@ -112,34 +114,94 @@ fn AuditAdminContent() -> impl IntoView {
     let start = RwSignal::new(String::new());
     let end = RwSignal::new(String::new());
     let query = RwSignal::new(String::new());
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
     let path = Signal::derive(move || audit_path(page.get(), &actor.get(), &action.get()));
-    let audit = use_api(path);
-    poll_resource(audit, 30_000);
+    let audit = use_api_when(can_read_settings, path);
+    poll_resource_when(audit, 30_000, move || {
+        context.can_read_area_untracked(PeerArea::Settings)
+    });
     let selected = RwSignal::new(Value::Null);
     let drawer = RwSignal::new(false);
     let detail_action = RwSignal::new(None::<Value>);
     let detail_loading = RwSignal::new(false);
     let detail_error = RwSignal::new(None::<String>);
     let detail_ticket = RwSignal::new(0u64);
+    let detail_reads = owned_resource_reads();
     let log_service = RwSignal::new(None::<Value>);
     let log_open = RwSignal::new(false);
+    let export_busy = RwSignal::new(false);
+    let last_epochs = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+        context.area_revocation_epoch_untracked(PeerArea::Settings),
+    ));
+    Effect::new(move |_| {
+        let next = (
+            context.session_epoch.get(),
+            context.server_epoch.get(),
+            context.area_revocation_epoch(PeerArea::Settings),
+        );
+        if last_epochs.get_value() == next && can_read_settings.get() {
+            return;
+        }
+        last_epochs.set_value(next);
+        detail_reads.with_value(ResourceReads::cancel);
+        detail_ticket.update(|n| *n = n.wrapping_add(1));
+        drawer.set(false);
+        selected.set(Value::Null);
+        detail_action.set(None);
+        detail_loading.set(false);
+        detail_error.set(None);
+        log_open.set(false);
+        log_service.set(None);
+        export_busy.set(false);
+        page.set(0);
+    });
+    Effect::new(move |_| {
+        context.area_revocation_epoch(PeerArea::Services);
+        if !context.can_read_area(PeerArea::Services) {
+            detail_reads.with_value(ResourceReads::cancel);
+            detail_ticket.update(|n| *n = n.wrapping_add(1));
+            detail_action.set(None);
+            detail_loading.set(false);
+            detail_error.set(None);
+            log_open.set(false);
+            log_service.set(None);
+        }
+    });
     let kpis = Signal::derive(move || {
         let total = audit.data.with(|v| v["total"].as_u64().unwrap_or(0));
         let current = super::contracts::grid_rows::<super::contracts::AuditLog>(&audit.data.get());
         audit_kpi_counts(total, &current)
     });
     let inspect_action = move |id: i64| {
-        if !context.is_admin() || id <= 0 {
+        if !context.is_admin() || !context.can_read_area_untracked(PeerArea::Services) || id <= 0 {
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let services_grant = context.area_revocation_epoch_untracked(PeerArea::Services);
         detail_ticket.update(|n| *n = n.wrapping_add(1));
         let ticket = detail_ticket.get_untracked();
         detail_loading.set(true);
         detail_error.set(None);
         detail_action.set(None);
+        let Some(job) = detail_reads.try_update_value(ResourceReads::next) else {
+            return;
+        };
         spawn_local(async move {
-            let result = ApiClient.get(&format!("/api/v1/admin/actions/{id}")).await;
-            if detail_ticket.try_get_untracked() != Some(ticket) {
+            let Some(result) =
+                run_resource_read(job, ApiClient.get(&format!("/api/v1/admin/actions/{id}"))).await
+            else {
+                return;
+            };
+            if detail_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Services) != services_grant
+                || !context.is_admin_untracked()
+                || !context.can_read_area_untracked(PeerArea::Services)
+            {
                 return;
             }
             detail_loading.set(false);
@@ -152,6 +214,11 @@ fn AuditAdminContent() -> impl IntoView {
                     };
                     detail_action.set(Some(action));
                 }
+                Err(error)
+                    if matches!(
+                        error.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) => {}
                 Err(error) => detail_error.set(Some(error.message)),
             }
         });
@@ -190,16 +257,20 @@ fn AuditAdminContent() -> impl IntoView {
             "created_at".into(),
         ],
     );
-    let export_busy = RwSignal::new(false);
     let export = move |format: &'static str| {
         if export_busy.get_untracked() {
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
         let request = export_request(&filtered.get_untracked(), format);
         export_busy.set(true);
         spawn_local(async move {
             let response = crate::state::worker_pool().execute(request.clone()).await;
-            if export_busy.try_get_untracked().is_none() {
+            if export_busy.try_get_untracked().is_none()
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+            {
                 return;
             }
             // The same serializer also handles unavailable or failed workers.
@@ -217,6 +288,12 @@ fn AuditAdminContent() -> impl IntoView {
                 WorkerResponse::Error { message } => Err(message),
                 _ => Err("Unexpected audit export worker response".to_owned()),
             };
+            if export_busy.try_get_untracked().is_none()
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+            {
+                return;
+            }
             let result = payload.and_then(|(content, mime, extension)| {
                 download_text(&content, &format!("aetherflow-audit.{extension}"), &mime)
             });
@@ -358,11 +435,33 @@ fn AuditAdminContent() -> impl IntoView {
                         value=query
                         placeholder="Worker search: actor, action, target, detail or IP"
                     />
+                    <Show when=move || !can_read_settings.get()>
+                        <p
+                            role="status"
+                            class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 mb-4"
+                        >
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Settings, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <div class="flex flex-wrap items-center gap-3 my-5">
                         <button
                             type="button"
                             class="glass-button px-4 py-2"
-                            on:click=move |_| audit.refresh()
+                            disabled=move || !can_read_settings.get()
+                            title=move || {
+                                context
+                                    .area_block_reason(PeerArea::Settings, false)
+                                    .unwrap_or_default()
+                            }
+                            on:click=move |_| {
+                                if context.can_read_area_untracked(PeerArea::Settings) {
+                                    audit.refresh();
+                                }
+                            }
                             aria-label=move || tt(context, "Refresh log")
                         >
                             {move || tt(context, "Common.refresh")}
@@ -476,9 +575,18 @@ fn AuditAdminContent() -> impl IntoView {
                         <button
                             type="button"
                             class="glass-button-primary px-4 py-2 min-h-11"
+                            disabled=move || !context.can_read_area(PeerArea::Services)
+                            title=move || {
+                                context
+                                    .area_block_reason(PeerArea::Services, false)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| {
                                 let target = selected.with_untracked(|v| text(v, "target_id"));
-                                if !target.is_empty() && context.is_admin() {
+                                if !target.is_empty()
+                                    && context.is_admin()
+                                    && context.can_read_area(PeerArea::Services)
+                                {
                                     log_service.set(Some(json!({
                                         "id": target.clone(),
                                         "name": target.clone(),
@@ -491,6 +599,18 @@ fn AuditAdminContent() -> impl IntoView {
                         >
                             {move || tt(context, "Open service logs")}
                         </button>
+                    </Show>
+                    <Show when=move || {
+                        selected.with(|v| text(v, "target_type") == "pending_action")
+                            && !context.can_read_area(PeerArea::Services)
+                    }>
+                        <p role="status" class="text-xs text-amber-300">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Services, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
                     </Show>
                     <Show when=move || detail_loading.get()>
                         <p role="status" class="text-xs text-indigo-300">
@@ -520,7 +640,12 @@ fn AuditAdminContent() -> impl IntoView {
                     </pre>
                 </div>
             </Drawer>
-            <Show when=move || log_open.get() && log_service.with(Option::is_some) && context.is_admin()>
+            <Show when=move || {
+                log_open.get()
+                    && log_service.with(Option::is_some)
+                    && context.is_admin()
+                    && context.can_read_area(PeerArea::Services)
+            }>
                 <ServiceLogsModal open=log_open service=log_service />
             </Show>
         </section>

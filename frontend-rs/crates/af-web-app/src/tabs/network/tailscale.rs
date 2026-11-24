@@ -16,6 +16,7 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
         json!({"accept_routes":false,"advertise_exit_node":false,"exit_node":"","exit_node_allow_lan_access":false}),
     ));
     let busy = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
     let auth_url = RwSignal::new(String::new());
     let down = RwSignal::new(false);
     let logout = RwSignal::new(false);
@@ -45,25 +46,59 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
             }
         }
     });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Network);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        auth_url.set(String::new());
+        down.set(false);
+        logout.set(false);
+        logout_error.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Network) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            down.set(false);
+            logout.set(false);
+        }
+    });
     let connect = move |reauth: bool| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         busy.set(true);
         auth_url.set(String::new());
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post(
                     "/api/v1/admin/network/tailscale/connect",
                     Some(&json!({"reauth":reauth})),
                 )
-                .await
-            {
+                .await;
+            if auth_url.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(value) => {
-                    if auth_url.try_get_untracked().is_none() {
-                        return;
-                    }
                     let url = text(&value, "auth_url");
                     if safe_login_url(&url) {
                         auth_url.set(url);
@@ -90,13 +125,13 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
-            }
         });
     };
     let save_routes = Callback::new(move |()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
         let sent = draft_value(routes);
@@ -106,20 +141,32 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post(
                     "/api/v1/admin/network/tailscale/routes",
                     Some(&json!({"routes":values})),
                 )
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(value) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     let saved = value["routes"]
                         .as_array()
                         .map(|v| {
@@ -143,27 +190,39 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
-            }
         });
     });
     let save_settings = Callback::new(move |()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+        {
             return;
         }
         let sent = draft_value(draft);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = action_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Network,
+            true,
+            true,
+            action_ticket,
+            ticket,
+        );
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
         spawn_local(async move {
-            match ApiClient
+            let result = ApiClient
                 .post("/api/v1/admin/network/tailscale/settings", Some(&sent))
-                .await
-            {
+                .await;
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                return;
+            }
+            busy_guard.release();
+            match result {
                 Ok(_) => {
-                    if busy.try_get_untracked().is_none() {
-                        return;
-                    }
                     draft.update(|d| {
                         let _ = d.acknowledge_saved(&sent, sent.clone());
                     });
@@ -171,9 +230,6 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                     context.toast(tt(context, "Tailscale preferences saved"), false);
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
-            }
-            if busy.try_get_untracked().is_some() {
-                busy_guard.release();
             }
         });
     });
@@ -210,7 +266,14 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button-primary px-4 py-2"
-                    disabled=move || busy.get()
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| connect(false)
                 >
                     {move || tt(context, "Up / Interactive login")}
@@ -218,7 +281,14 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || busy.get()
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| connect(true)
                 >
                     {move || tt(context, "Reauthenticate")}
@@ -226,18 +296,42 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || busy.get()
-                    on:click=move |_| down.set(true)
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    }
+                    on:click=move |_| {
+                        if context.is_admin_untracked()
+                            && context.can_write_area_untracked(crate::state::PeerArea::Network)
+                        {
+                            down.set(true);
+                        }
+                    }
                 >
                     {move || tt(context, "Down")}
                 </button>
                 <button
                     type="button"
                     class="glass-button px-4 py-2 text-rose-300"
-                    disabled=move || busy.get()
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Network, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| {
-                        logout_error.set(None);
-                        logout.set(true);
+                        if context.is_admin_untracked()
+                            && context.can_write_area_untracked(crate::state::PeerArea::Network)
+                        {
+                            logout_error.set(None);
+                            logout.set(true);
+                        }
                     }
                 >
                     {move || tt(context, "Logout")}
@@ -277,6 +371,14 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                         busy
                         on_save=save_routes
                         label="Save advertised routes"
+                        disabled=Signal::derive(move || {
+                            !context.can_write_area(crate::state::PeerArea::Network)
+                        })
+                        title=Signal::derive(move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Network, true)
+                                .unwrap_or_default()
+                        })
                     />
                     <p class="text-xs text-slate-400 mt-3">
                         {move || tt(
@@ -307,7 +409,19 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                         field="exit_node_allow_lan_access"
                         label="Allow LAN access when using an exit node"
                     />
-                    <DraftButtons draft busy on_save=save_settings />
+                    <DraftButtons
+                        draft
+                        busy
+                        on_save=save_settings
+                        disabled=Signal::derive(move || {
+                            !context.can_write_area(crate::state::PeerArea::Network)
+                        })
+                        title=Signal::derive(move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Network, true)
+                                .unwrap_or_default()
+                        })
+                    />
                 </div>
             </div>
             <DataGrid
@@ -333,13 +447,34 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
             message="This host will leave the active mesh connection. Your current connection may be interrupted."
             busy
             on_confirm=Callback::new(move |()| {
-                if busy.get_untracked() {
+                if busy.get_untracked()
+                    || !context.is_admin_untracked()
+                    || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+                {
                     return;
                 }
+                action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+                let ticket = action_ticket.get_untracked();
+                let fence = crate::tabs::busy::AreaFence::capture(
+                    context,
+                    crate::state::PeerArea::Network,
+                    true,
+                    true,
+                    action_ticket,
+                    ticket,
+                );
                 busy.set(true);
-                let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+                let mut busy_guard =
+                    crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
                 spawn_local(async move {
-                    match ApiClient.post("/api/v1/admin/network/tailscale/disconnect", None).await {
+                    let result = ApiClient
+                        .post("/api/v1/admin/network/tailscale/disconnect", None)
+                        .await;
+                    if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                        return;
+                    }
+                    busy_guard.release();
+                    match result {
                         Ok(_) => {
                             if down.try_get_untracked().is_some() {
                                 down.set(false);
@@ -350,9 +485,6 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                         }
                         Err(error) => context.toast(tt(context, &error.message), true),
                     }
-                    if busy.try_get_untracked().is_some() {
-                        busy_guard.release();
-                    }
                 });
             })
         />
@@ -362,17 +494,35 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
             message="Logging out expires this node key and removes active tailnet connectivity until you re-authenticate."
             busy
             on_confirm=Callback::new(move |()| {
-                if busy.get_untracked() {
+                if busy.get_untracked()
+                    || !context.is_admin_untracked()
+                    || !context.can_write_area_untracked(crate::state::PeerArea::Network)
+                {
                     return;
                 }
+                action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+                let ticket = action_ticket.get_untracked();
+                let fence = crate::tabs::busy::AreaFence::capture(
+                    context,
+                    crate::state::PeerArea::Network,
+                    true,
+                    true,
+                    action_ticket,
+                    ticket,
+                );
                 logout_error.set(None);
                 busy.set(true);
-                let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+                let mut busy_guard =
+                    crate::tabs::busy::BusyGuard::for_generation(busy, action_ticket, ticket);
                 spawn_local(async move {
-                    match ApiClient
+                    let result = ApiClient
                         .post("/api/v1/admin/network/tailscale/logout", None)
-                        .await
-                    {
+                        .await;
+                    if busy.try_get_untracked().is_none() || !fence.is_valid() {
+                        return;
+                    }
+                    busy_guard.release();
+                    match result {
                         Ok(value) => {
                             if logout.try_get_untracked().is_some() {
                                 logout.set(false);
@@ -389,9 +539,6 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                             }
                             context.toast(tt(context, &error.message), true);
                         }
-                    }
-                    if busy.try_get_untracked().is_some() {
-                        busy_guard.release();
                     }
                 });
             })

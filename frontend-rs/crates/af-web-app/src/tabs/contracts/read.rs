@@ -1,7 +1,7 @@
 //! Typed read envelopes; grid serialization happens after API validation.
 use super::*;
-pub use crate::state::use_api_typed;
 use crate::state::ApiResource;
+pub use crate::state::{use_api_typed, use_api_typed_when};
 use leptos::prelude::*;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

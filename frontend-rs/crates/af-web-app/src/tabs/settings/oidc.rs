@@ -3,7 +3,8 @@ use super::*;
 #[component]
 pub(super) fn OidcSettings() -> impl IntoView {
     let context = app();
-    let clients = use_api("/api/v1/admin/oidc/clients".to_string());
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let clients = use_api_when(can_read_settings, "/api/v1/admin/oidc/clients".to_string());
     let draft = RwSignal::new(FormDraft::new(
         json!({"name":"","redirects":"","public":false}),
     ));
@@ -13,12 +14,21 @@ pub(super) fn OidcSettings() -> impl IntoView {
     let remove = RwSignal::new(false);
     let selected = RwSignal::new(Value::Null);
     Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        reveal.set(false);
+        remove.set(false);
+        selected.set(Value::Null);
+        secret.set(Value::Null);
+    });
+    Effect::new(move |_| {
         if !reveal.get() {
             secret.set(Value::Null);
         }
     });
     let create = move || {
-        if busy.get_untracked() {
+        if busy.get_untracked() || context.is_remote_untracked() {
             return;
         }
         let sent = draft_value(draft);
@@ -36,6 +46,7 @@ pub(super) fn OidcSettings() -> impl IntoView {
             return;
         }
         let payload = json!({"name":text(&sent,"name").trim(),"redirect_uris":redirects,"public":sent["public"]});
+        let server_epoch = context.server_epoch.get_untracked();
         busy.set(true);
         let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
         spawn_local(async move {
@@ -44,7 +55,9 @@ pub(super) fn OidcSettings() -> impl IntoView {
                 .await
             {
                 Ok(value) => {
-                    if secret.try_get_untracked().is_none() {
+                    if secret.try_get_untracked().is_none()
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                    {
                         return;
                     }
                     secret.set(value);
@@ -57,7 +70,11 @@ pub(super) fn OidcSettings() -> impl IntoView {
                         );
                     });
                 }
-                Err(error) => context.toast(tt(context, &error.message), true),
+                Err(error) => {
+                    if context.server_epoch.try_get_untracked() == Some(server_epoch) {
+                        context.toast(tt(context, &error.message), true);
+                    }
+                }
             }
             if busy.try_get_untracked().is_some() {
                 busy_guard.release();
@@ -66,12 +83,30 @@ pub(super) fn OidcSettings() -> impl IntoView {
     };
     view! {
         <ObsCard title=Signal::derive(move || tt(context, "Settings.oidcClients"))>
+            <Show when=move || !can_read_settings.get()>
+                <p role="status" class="text-xs text-amber-300 mb-3">
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Settings, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <p class="text-sm text-slate-400 mb-4">
                 {move || tt(
                     context,
                     "Register relying parties for openid, profile, and email. Public clients require PKCE (S256). To change a registration, register its replacement and remove the old client.",
                 )}
             </p>
+            <Show when=move || context.is_remote()>
+                <p
+                    role="status"
+                    data-testid="oidc-remote-readonly-note"
+                    class="text-xs text-amber-300 mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2"
+                >
+                    {move || tt(context, "PeerSwitch.oidcRemoteReadOnly")}
+                </p>
+            </Show>
             <form
                 class="space-y-4"
                 on:submit=move |event| {
@@ -79,13 +114,20 @@ pub(super) fn OidcSettings() -> impl IntoView {
                     create();
                 }
             >
-                <DraftInput draft field="name" label="Client name" required=true />
+                <DraftInput
+                    draft
+                    field="name"
+                    label="Client name"
+                    required=true
+                    disabled=Signal::derive(move || context.is_remote())
+                />
                 <label class="block text-sm space-y-2">
                     <span>{move || tt(context, "Redirect URIs (one per line)")}</span>
                     <textarea
                         class="glass-input px-3 py-2 w-full"
                         rows="3"
                         required
+                        disabled=move || context.is_remote()
                         prop:value=move || text(&draft_value(draft), "redirects")
                         on:input=move |event| edit(
                             draft,
@@ -98,11 +140,19 @@ pub(super) fn OidcSettings() -> impl IntoView {
                     draft
                     field="public"
                     label="Public client (PKCE required, no client secret)"
+                    disabled=Signal::derive(move || context.is_remote())
                 />
                 <button
                     type="submit"
                     class="glass-button-primary px-4 py-2"
-                    disabled=move || busy.get()
+                    disabled=move || busy.get() || context.is_remote()
+                    title=move || {
+                        if context.is_remote() {
+                            tt(context, "PeerSwitch.oidcRemoteReadOnly")
+                        } else {
+                            String::new()
+                        }
+                    }
                 >
                     {move || tt(context, "Register OIDC client")}
                 </button>
@@ -120,6 +170,10 @@ pub(super) fn OidcSettings() -> impl IntoView {
                     clients.data.with(|v| v["clients"].as_array().cloned().unwrap_or_default())
                 })
                 on_select=Callback::new(move |row: Value| {
+                    if context.is_remote_untracked() {
+                        context.toast(tt(context, "PeerSwitch.oidcRemoteReadOnly"), true);
+                        return;
+                    }
                     selected.set(row);
                     remove.set(true);
                 })
@@ -175,9 +229,10 @@ pub(super) fn OidcSettings() -> impl IntoView {
             message="The selected relying party will no longer be able to sign in using this client registration."
             busy
             on_confirm=Callback::new(move |()| {
-                if busy.get_untracked() {
+                if busy.get_untracked() || context.is_remote_untracked() {
                     return;
                 }
+                let server_epoch = context.server_epoch.get_untracked();
                 busy.set(true);
                 let id = selected.with_untracked(|v| text(v, "id"));
                 let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
@@ -187,14 +242,20 @@ pub(super) fn OidcSettings() -> impl IntoView {
                         .await
                     {
                         Ok(_) => {
-                            if busy.try_get_untracked().is_none() {
+                            if busy.try_get_untracked().is_none()
+                                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                            {
                                 return;
                             }
                             clients.refresh();
                             remove.set(false);
                             context.toast(tt(context, "OIDC client removed"), false);
                         }
-                        Err(error) => context.toast(tt(context, &error.message), true),
+                        Err(error) => {
+                            if context.server_epoch.try_get_untracked() == Some(server_epoch) {
+                                context.toast(tt(context, &error.message), true);
+                            }
+                        }
                     }
                     if busy.try_get_untracked().is_some() {
                         busy_guard.release();

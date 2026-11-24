@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TabId {
     #[default]
     Overview,

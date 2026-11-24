@@ -194,9 +194,169 @@ fn websocket_jti_revocation_does_not_rebind_after_grace_expires() {
         diagnostics_allowed: true,
         session_jti: "jti-rotated-old".to_string(),
         session_ver: Some(0),
+        peer: None,
+        peer_runtime: None,
     };
     assert_eq!(
         super::refresh_ws_authorization(&connection, &mut entry),
         None
+    );
+}
+
+#[test]
+fn peer_websocket_telemetry_filters_services_and_marketplace_by_grant() {
+    use af_db::peers::{AccessLevel, AccessMap};
+
+    let metrics = serde_json::json!({
+        "type": "METRICS_UPDATE",
+        "data": {
+            "system": { "cpu_usage": 31 },
+            "services": {
+                "sonarr": {
+                    "id": "sonarr",
+                    "status": "running",
+                    "api_key": "synthetic-secret",
+                    "log_line": "PASSWORD=installer-secret"
+                }
+            }
+        }
+    })
+    .to_string();
+
+    // No services access -> services stripped to null, system telemetry retained.
+    let no_services = AccessMap {
+        settings: AccessLevel::Read,
+        ..Default::default()
+    };
+    let filtered = super::websocket_message_for_peer_session(metrics.clone(), &no_services)
+        .expect("system telemetry still delivered");
+    let parsed: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+    assert_eq!(parsed["data"]["system"]["cpu_usage"], 31);
+    assert!(parsed["data"]["services"].is_null());
+
+    // Services read without marketplace read -> sanitized viewer projection (no secrets/raw log).
+    let services_only = AccessMap {
+        services: AccessLevel::Read,
+        ..Default::default()
+    };
+    let filtered = super::websocket_message_for_peer_session(metrics.clone(), &services_only)
+        .expect("services projection delivered");
+    let parsed: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+    assert_eq!(parsed["data"]["services"]["sonarr"]["status"], "running");
+    assert!(parsed["data"]["services"]["sonarr"]
+        .get("api_key")
+        .is_none());
+    assert!(!filtered.contains("synthetic-secret"));
+    assert!(!filtered.contains("installer-secret"));
+
+    // Services + marketplace read -> full metrics update with diagnostic secrets redacted.
+    let both = AccessMap {
+        services: AccessLevel::Read,
+        marketplace: AccessLevel::Read,
+        ..Default::default()
+    };
+    let passed = super::websocket_message_for_peer_session(metrics.clone(), &both).unwrap();
+    assert!(!passed.contains("installer-secret"));
+    let parsed_both: serde_json::Value = serde_json::from_str(&passed).unwrap();
+    assert_eq!(
+        parsed_both["data"]["services"]["sonarr"]["status"],
+        "running"
+    );
+    assert_eq!(
+        parsed_both["data"]["services"]["sonarr"]["log_line"],
+        "PASSWORD=[REDACTED]"
+    );
+
+    // package:progress is dropped without marketplace read and redacted with marketplace read.
+    let progress = serde_json::json!({
+        "type": "package:progress",
+        "package_id": "sonarr",
+        "job_id": "job-7",
+        "action": "update",
+        "status": "updating",
+        "progress": 50,
+        "line": "TOKEN=super-secret-value"
+    })
+    .to_string();
+    assert!(super::websocket_message_for_peer_session(progress.clone(), &services_only).is_none());
+    let allowed_progress = super::websocket_message_for_peer_session(progress, &both)
+        .expect("marketplace read receives redacted progress");
+    assert!(!allowed_progress.contains("super-secret-value"));
+    assert!(allowed_progress.contains("[REDACTED]"));
+}
+
+#[test]
+fn peer_revocation_wake_classification_handles_matches_isolation_and_lag() {
+    use crate::peers::RevocationEvent;
+    use af_db::peers::AccessMap;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let binding = super::WsPeerBinding {
+        link_id: "link-a".to_string(),
+        grant_id: "grant-1".to_string(),
+        run_as_user_id: 1,
+        access: AccessMap::default(),
+    };
+
+    assert_eq!(
+        super::classify_revocation_recv(
+            Ok(RevocationEvent::LinkRevoked {
+                link_id: "link-a".to_string(),
+                peer_name: "peer-a".to_string(),
+            }),
+            &binding,
+        ),
+        super::RevocationWakeOutcome::CloseNow
+    );
+    assert_eq!(
+        super::classify_revocation_recv(
+            Ok(RevocationEvent::LinkRevoked {
+                link_id: "link-other".to_string(),
+                peer_name: "peer-other".to_string(),
+            }),
+            &binding,
+        ),
+        super::RevocationWakeOutcome::Ignore
+    );
+    assert_eq!(
+        super::classify_revocation_recv(
+            Ok(RevocationEvent::GrantRevoked {
+                link_id: "link-a".to_string(),
+                grant_id: "grant-1".to_string(),
+                run_as_user_id: 1,
+            }),
+            &binding,
+        ),
+        super::RevocationWakeOutcome::CloseNow
+    );
+    assert_eq!(
+        super::classify_revocation_recv(
+            Ok(RevocationEvent::GrantRevoked {
+                link_id: "link-a".to_string(),
+                grant_id: "grant-2".to_string(),
+                run_as_user_id: 1,
+            }),
+            &binding,
+        ),
+        super::RevocationWakeOutcome::RecheckDb
+    );
+    assert_eq!(
+        super::classify_revocation_recv(
+            Ok(RevocationEvent::GrantRevoked {
+                link_id: "link-other".to_string(),
+                grant_id: "grant-other".to_string(),
+                run_as_user_id: 1,
+            }),
+            &binding,
+        ),
+        super::RevocationWakeOutcome::Ignore
+    );
+    assert_eq!(
+        super::classify_revocation_recv(Err(RecvError::Lagged(7)), &binding),
+        super::RevocationWakeOutcome::RecheckDb
+    );
+    assert_eq!(
+        super::classify_revocation_recv(Err(RecvError::Closed), &binding),
+        super::RevocationWakeOutcome::RecheckDb
     );
 }

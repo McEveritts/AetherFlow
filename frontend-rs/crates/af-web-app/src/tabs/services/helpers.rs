@@ -310,42 +310,173 @@ pub(crate) fn external_access_target(info: &Value) -> Option<String> {
     let id = field(info, &["id", "slug", "process"]);
     (!id.is_empty()).then_some(id)
 }
-pub(crate) fn launch_url_with_host(
+fn valid_launch_url(raw: &str, is_remote: bool, allow_relative_local: bool) -> bool {
+    if !is_remote
+        && allow_relative_local
+        && raw.starts_with('/')
+        && !raw.starts_with("//")
+        && !raw.contains('\\')
+    {
+        return true;
+    }
+    url::Url::parse(raw).ok().is_some_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && (!is_remote
+                || url
+                    .host_str()
+                    .is_some_and(crate::state::is_valid_public_remote_host))
+    })
+}
+
+fn remote_scope_allowed(scope: Option<&str>) -> bool {
+    match scope {
+        None => true,
+        Some(value) => value.eq_ignore_ascii_case("public"),
+    }
+}
+
+/// Canonical launch-URL resolution policy shared across Services, Marketplace, and MediaFlow.
+///
+/// Remote servers only permit validated public DNS destinations (explicit `launch_scope: "public"`
+/// or un-scoped public URLs/domains) and never emit local/internal/LAN/loopback/network scopes,
+/// non-public hosts, IP literals, single-label hosts, relative paths, or local browser hostnames.
+pub(crate) fn resolve_launch_url_for_server(
     info: &Value,
     settings: &Value,
     browser_host: Option<&str>,
+    is_remote: bool,
+    allow_mediaflow_aliases: bool,
 ) -> Option<String> {
-    if info["launch_scope"] == af_models::APP_LAUNCH_SCOPE_UNAVAILABLE {
+    let scope = info["launch_scope"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if scope
+        .is_some_and(|value| value.eq_ignore_ascii_case(af_models::APP_LAUNCH_SCOPE_UNAVAILABLE))
+    {
         return None;
     }
-    let explicit_launch = field(info, &["launch_url"]);
-    if !explicit_launch.is_empty() || info["launch_scope"].is_string() {
-        return url::Url::parse(&explicit_launch)
-            .ok()
-            .filter(|url| {
-                matches!(url.scheme(), "http" | "https")
-                    && url.has_host()
-                    && url.username().is_empty()
-                    && url.password().is_none()
-            })
-            .map(|_| explicit_launch);
+    if is_remote && !remote_scope_allowed(scope) {
+        return None;
     }
-    let path = af_models::app_metadata::validate_app_web_path(&field(info, &["web_path"]))
-        .unwrap_or_default();
-    let public = field(info, &["public_domain"]);
-    if info["external_access_enabled"] == true && valid_domain(&public) {
-        return Some(format!(
-            "{}://{public}{path}",
-            if info["tls_enabled"] == false {
-                "http"
-            } else {
-                "https"
+    let explicit_launch = if allow_mediaflow_aliases {
+        field(info, &["launch_url", "launchUrl"])
+    } else {
+        field(info, &["launch_url"])
+    };
+    if !explicit_launch.is_empty() || scope.is_some() {
+        return valid_launch_url(&explicit_launch, is_remote, allow_mediaflow_aliases)
+            .then_some(explicit_launch);
+    }
+    if allow_mediaflow_aliases {
+        let alias = field(info, &["web_ui_url", "webUiUrl", "public_url", "url"]);
+        if !alias.is_empty() {
+            return valid_launch_url(&alias, is_remote, true).then_some(alias);
+        }
+    }
+    let raw_path = if allow_mediaflow_aliases {
+        field(info, &["web_path", "webPath"])
+    } else {
+        field(info, &["web_path"])
+    };
+    let path = af_models::app_metadata::validate_app_web_path(&raw_path).unwrap_or_default();
+    let public = if allow_mediaflow_aliases {
+        field(info, &["public_domain", "publicDomain"])
+    } else {
+        field(info, &["public_domain"])
+    };
+    let public_allowed = if allow_mediaflow_aliases {
+        info["external_access_enabled"] != false
+    } else {
+        info["external_access_enabled"] == true
+    };
+    if public_allowed && !public.is_empty() {
+        if allow_mediaflow_aliases
+            && (public.starts_with("http://") || public.starts_with("https://"))
+        {
+            if valid_launch_url(&public, is_remote, true) {
+                return Some(public);
             }
-        ));
+            return None;
+        }
+        if valid_domain(&public)
+            && (!is_remote || crate::state::is_valid_public_remote_host(&public))
+        {
+            return Some(format!(
+                "{}://{public}{path}",
+                if info["tls_enabled"] == false {
+                    "http"
+                } else {
+                    "https"
+                }
+            ));
+        }
+        if is_remote {
+            return None;
+        }
     }
-    if !has_web_ui(info) {
+    if allow_mediaflow_aliases {
+        if core_service(info)
+            || info["has_web_ui"] == false
+            || info["default_port"].as_u64() == Some(0)
+            || matches!(
+                info["service_type"].as_str(),
+                Some("cli" | "daemon" | "oneshot")
+            )
+        {
+            return None;
+        }
+    } else if !has_web_ui(info) {
         return None;
     }
+
+    let base = field(settings, &["baseDomain", "base_domain"])
+        .trim()
+        .trim_start_matches("*.")
+        .to_ascii_lowercase();
+    let id = field(info, &["id", "slug"]);
+    let base_candidate = || {
+        (info["external_access_enabled"] != false
+            && public.is_empty()
+            && info["bind_scope"] != "loopback"
+            && valid_domain(&base)
+            && (!is_remote || crate::state::is_valid_public_remote_host(&base))
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !id.is_empty())
+        .then(|| format!("https://{id}.{base}{path}"))
+    };
+
+    if is_remote {
+        return base_candidate();
+    }
+
+    if allow_mediaflow_aliases {
+        if let Some(url) = base_candidate() {
+            return Some(url);
+        }
+        let local = field(
+            info,
+            &[
+                "local_domain",
+                "localDomain",
+                "internal_domain",
+                "internalDomain",
+            ],
+        );
+        if !local.is_empty() {
+            if local.starts_with("http://") || local.starts_with("https://") {
+                return valid_launch_url(&local, false, true).then_some(local);
+            }
+            if valid_domain(&local) {
+                return Some(format!("http://{local}{path}"));
+            }
+        }
+        return None;
+    }
+
     let port = effective_web_port(info)?;
     let scheme = if info["web_scheme"] == "https" {
         "https"
@@ -366,22 +497,45 @@ pub(crate) fn launch_url_with_host(
         }
         return Some(format!("{scheme}://{host}:{port}{path}"));
     }
-    let base = field(settings, &["baseDomain", "base_domain"]);
-    let id = field(info, &["id", "slug"]);
-    if info["external_access_enabled"] != false
-        && public.is_empty()
-        && valid_domain(&base)
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && !id.is_empty()
-    {
-        return Some(format!("https://{id}.{base}{path}"));
+    if let Some(url) = base_candidate() {
+        return Some(url);
     }
     let host = browser_host?;
     Some(format!("{scheme}://{host}:{port}{path}"))
 }
+
+#[cfg(test)]
+pub(crate) fn launch_url_with_host(
+    info: &Value,
+    settings: &Value,
+    browser_host: Option<&str>,
+) -> Option<String> {
+    resolve_launch_url_for_server(info, settings, browser_host, false, false)
+}
+
+pub(crate) fn launch_url_for_server(
+    info: &Value,
+    settings: &Value,
+    is_remote: bool,
+) -> Option<String> {
+    let host = if is_remote {
+        None
+    } else {
+        web_sys::window().and_then(|w| w.location().hostname().ok())
+    };
+    resolve_launch_url_for_server(info, settings, host.as_deref(), is_remote, false)
+}
+
+pub(crate) fn mediaflow_launch_url_for_server(
+    info: &Value,
+    settings: &Value,
+    is_remote: bool,
+) -> Option<String> {
+    resolve_launch_url_for_server(info, settings, None, is_remote, true)
+}
+#[allow(dead_code)]
 pub(super) fn launch_url(info: &Value, settings: &Value) -> Option<String> {
-    let host = web_sys::window().and_then(|w| w.location().hostname().ok());
-    launch_url_with_host(info, settings, host.as_deref())
+    launch_url_for_server(info, settings, false)
 }
 pub(super) fn valid_domain(value: &str) -> bool {
     !value.is_empty()
@@ -731,6 +885,113 @@ mod tests {
             launch_url_with_host(&fallback_invalid, &json!({}), Some("panel.example.com"))
                 .as_deref(),
             Some("http://bazarr.aether.local")
+        );
+    }
+
+    #[test]
+    fn remote_server_launch_url_never_falls_back_to_local_browser_hostname() {
+        let bare_port = json!({
+            "id": "sonarr",
+            "default_port": 8989,
+            "active_port": 8989,
+            "external_access_enabled": false
+        });
+        assert_eq!(
+            launch_url_with_host(&bare_port, &json!({}), Some("server-a.example.com")).as_deref(),
+            Some("http://server-a.example.com:8989")
+        );
+        assert_eq!(launch_url_for_server(&bare_port, &json!({}), true), None);
+
+        let peer_explicit = json!({
+            "id": "sonarr",
+            "default_port": 8989,
+            "launch_scope": "public",
+            "launch_url": "https://sonarr.peer-b.example.com"
+        });
+        assert_eq!(
+            launch_url_for_server(&peer_explicit, &json!({}), true).as_deref(),
+            Some("https://sonarr.peer-b.example.com")
+        );
+
+        let peer_public_domain = json!({
+            "id": "jellyfin",
+            "default_port": 8096,
+            "public_domain": "jellyfin.peer-b.example.com",
+            "external_access_enabled": true,
+            "tls_enabled": true
+        });
+        assert_eq!(
+            launch_url_for_server(&peer_public_domain, &json!({}), true).as_deref(),
+            Some("https://jellyfin.peer-b.example.com")
+        );
+
+        // Real-style backend DTOs: non-public scopes and non-public hosts must be suppressed remotely
+        // while preserving local launch behavior.
+        let remote_settings = json!({"baseDomain": "peer-b.example.com"});
+        for blocked in [
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"internal","launch_url":"http://sonarr.aether.local"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"network","launch_url":"http://192.168.1.25:8989"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"network","launch_url":"https://sonarr.peer-b.example.com"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"local","launch_url":"https://sonarr.peer-b.example.com"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"lan","launch_url":"https://sonarr.peer-b.example.com"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"loopback","launch_url":"http://127.0.0.1:8989"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"unavailable","launch_url":"https://sonarr.peer-b.example.com"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"http://192.168.1.25:8989"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"http://10.0.0.9:8989"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"http://172.16.4.2:8989"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"http://100.64.0.9:8989"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"https://nas-box/sonarr"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"https://sonarr.lan/sonarr"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"https://sonarr.home.arpa"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"https://sonarr.aether.local"}),
+            json!({"id":"sonarr","default_port":8989,"launch_scope":"public","launch_url":"http://localhost:8989"}),
+            json!({"id":"sonarr","default_port":8989,"internal_domain":"sonarr.aether.local","external_access_enabled":false}),
+            json!({"id":"sonarr","default_port":8989,"public_domain":"10.0.0.5","external_access_enabled":true}),
+            json!({"id":"sonarr","default_port":8989,"public_domain":"sonarr.home.arpa","external_access_enabled":true}),
+            json!({"id":"sonarr","default_port":8989,"public_domain":"singlelabel","external_access_enabled":true}),
+        ] {
+            assert_eq!(
+                launch_url_for_server(&blocked, &remote_settings, true),
+                None,
+                "remote services/marketplace launch must block: {blocked}"
+            );
+            assert_eq!(
+                mediaflow_launch_url_for_server(&blocked, &remote_settings, true),
+                None,
+                "remote mediaflow launch must block: {blocked}"
+            );
+        }
+
+        // Non-public baseDomain settings must not synthesize remote launch URLs.
+        let sonarr = json!({"id": "sonarr", "default_port": 8989});
+        for bad_base in ["home.lan", "peer.aether.local", "10.0.0.1", "intranet"] {
+            assert_eq!(
+                launch_url_for_server(&sonarr, &json!({"baseDomain": bad_base}), true),
+                None,
+                "bad remote baseDomain {bad_base}"
+            );
+        }
+
+        // Local server still preserves internal/network/loopback DTO launch behavior.
+        let local_internal = json!({
+            "id": "sonarr",
+            "default_port": 8989,
+            "launch_scope": "internal",
+            "launch_url": "http://sonarr.aether.local"
+        });
+        assert_eq!(
+            launch_url_with_host(&local_internal, &json!({}), Some("panel.example.com")).as_deref(),
+            Some("http://sonarr.aether.local")
+        );
+        let local_network = json!({
+            "id": "sonarr",
+            "default_port": 8989,
+            "launch_scope": "network",
+            "launch_url": "http://192.168.1.25:8989"
+        });
+        assert_eq!(
+            launch_url_with_host(&local_network, &json!({}), Some("panel.example.com")).as_deref(),
+            Some("http://192.168.1.25:8989")
         );
     }
 }

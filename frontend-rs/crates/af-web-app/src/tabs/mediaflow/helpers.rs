@@ -167,96 +167,17 @@ pub(super) fn pipeline_service_counts(rows: &[Value], ids: &[&str]) -> (usize, u
     (active, installed_count)
 }
 
-fn is_safe_launch_url(url: &str) -> bool {
-    (url.starts_with('/') && !url.starts_with("//") && !url.contains('\\'))
-        || url::Url::parse(url).ok().is_some_and(|u| {
-            matches!(u.scheme(), "http" | "https")
-                && u.username().is_empty()
-                && u.password().is_none()
-        })
+pub(super) fn safe_launch_url_for_server(
+    service: &Value,
+    settings: &Value,
+    is_remote: bool,
+) -> Option<String> {
+    crate::tabs::services::mediaflow_launch_url_for_server(service, settings, is_remote)
 }
 
-fn valid_domain(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-}
-
+#[cfg(test)]
 pub(super) fn safe_launch_url(service: &Value) -> Option<String> {
-    if service["launch_scope"] == af_models::APP_LAUNCH_SCOPE_UNAVAILABLE {
-        return None;
-    }
-    for key in ["launch_url", "launchUrl"] {
-        if let Some(raw) = service[key]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return is_safe_launch_url(raw).then(|| raw.to_string());
-        }
-    }
-    if service["launch_scope"].is_string() {
-        return None;
-    }
-    for key in ["web_ui_url", "webUiUrl", "public_url", "url"] {
-        if let Some(raw) = service[key]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return is_safe_launch_url(raw).then(|| raw.to_string());
-        }
-    }
-    let path = service["web_path"]
-        .as_str()
-        .or_else(|| service["webPath"].as_str())
-        .and_then(|s| af_models::app_metadata::validate_app_web_path(s).ok())
-        .unwrap_or_default();
-    if service["external_access_enabled"] != false {
-        if let Some(public) = service["public_domain"]
-            .as_str()
-            .or_else(|| service["publicDomain"].as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if public.starts_with("http://") || public.starts_with("https://") {
-                if is_safe_launch_url(public) {
-                    return Some(public.to_string());
-                }
-            } else if valid_domain(public) {
-                let scheme = if service["tls_enabled"] == false {
-                    "http"
-                } else {
-                    "https"
-                };
-                return Some(format!("{scheme}://{public}{path}"));
-            }
-        }
-    }
-    for key in [
-        "local_domain",
-        "localDomain",
-        "internal_domain",
-        "internalDomain",
-    ] {
-        if let Some(local) = service[key]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if local.starts_with("http://") || local.starts_with("https://") {
-                if is_safe_launch_url(local) {
-                    return Some(local.to_string());
-                }
-            } else if valid_domain(local) {
-                return Some(format!("http://{local}{path}"));
-            }
-        }
-    }
-    None
+    safe_launch_url_for_server(service, &Value::Null, false)
 }
 pub(super) fn bytes(bytes: f64) -> String {
     if !bytes.is_finite() || bytes <= 0.0 {
@@ -321,6 +242,82 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn remote_mediaflow_launch_urls_require_validated_non_local_targets() {
+        let remote_settings = json!({"baseDomain": "peer-b.example.com"});
+
+        // Valid remote public launch_url and public_domain succeed.
+        assert_eq!(
+            safe_launch_url_for_server(
+                &json!({
+                    "id": "sonarr",
+                    "launch_scope": "public",
+                    "launch_url": "https://sonarr.peer-b.example.com/sonarr"
+                }),
+                &json!({}),
+                true
+            )
+            .as_deref(),
+            Some("https://sonarr.peer-b.example.com/sonarr")
+        );
+        assert_eq!(
+            safe_launch_url_for_server(
+                &json!({
+                    "id": "radarr",
+                    "public_domain": "radarr.peer-b.example.com",
+                    "external_access_enabled": true,
+                    "tls_enabled": true,
+                    "web_path": "/radarr"
+                }),
+                &json!({}),
+                true
+            )
+            .as_deref(),
+            Some("https://radarr.peer-b.example.com/radarr")
+        );
+        assert_eq!(
+            safe_launch_url_for_server(
+                &json!({
+                    "id": "jellyfin",
+                    "external_access_enabled": true,
+                    "web_path": "/web"
+                }),
+                &remote_settings,
+                true
+            )
+            .as_deref(),
+            Some("https://jellyfin.peer-b.example.com/web")
+        );
+
+        // Relative paths, loopback/localhost, .aether.local, local_domain, and local scopes are blocked remotely.
+        for blocked in [
+            json!({"id": "sonarr", "launch_url": "/sonarr"}),
+            json!({"id": "sonarr", "launch_url": "http://localhost:8989/sonarr"}),
+            json!({"id": "sonarr", "launch_url": "http://127.0.0.1:8989/sonarr"}),
+            json!({"id": "sonarr", "launch_url": "http://[::1]:8989/sonarr"}),
+            json!({"id": "sonarr", "launch_url": "http://sonarr.aether.local/sonarr"}),
+            json!({"id": "sonarr", "launch_scope": "local", "launch_url": "https://sonarr.peer-b.example.com"}),
+            json!({"id": "sonarr", "launch_scope": "network", "launch_url": "http://192.168.1.20:8989"}),
+            json!({"id": "sonarr", "launch_scope": "internal", "launch_url": "http://sonarr.aether.local"}),
+            json!({"id": "sonarr", "launch_scope": "public", "launch_url": "http://192.168.1.20:8989"}),
+            json!({"id": "sonarr", "launch_scope": "public", "launch_url": "https://sonarr.lan/sonarr"}),
+            json!({"id": "sonarr", "launch_scope": "public", "launch_url": "https://nas-box/sonarr"}),
+            json!({"id": "sonarr", "web_ui_url": "/sonarr"}),
+            json!({"id": "sonarr", "web_ui_url": "http://10.0.0.15:8989"}),
+            json!({"id": "sonarr", "local_domain": "sonarr.aether.local", "external_access_enabled": false}),
+            json!({"id": "sonarr", "internal_domain": "sonarr.aether.local", "external_access_enabled": false}),
+            json!({"id": "sonarr", "public_domain": "sonarr.aether.local", "external_access_enabled": true}),
+            json!({"id": "sonarr", "public_domain": "10.0.0.15", "external_access_enabled": true}),
+            json!({"id": "sonarr", "bind_scope": "loopback", "external_access_enabled": true}),
+        ] {
+            assert_eq!(
+                safe_launch_url_for_server(&blocked, &remote_settings, true),
+                None,
+                "remote launch must reject local fallback: {blocked}"
+            );
+        }
     }
 
     #[test]

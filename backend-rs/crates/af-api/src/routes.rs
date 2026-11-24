@@ -54,7 +54,10 @@ use crate::streaming_ext::{
 #[cfg(test)]
 #[allow(unused_imports)]
 use crate::ws::PeerIp;
-use crate::ws::{handle_log_websocket, handle_websocket, normalize_request_forwarding_for_peer};
+use crate::ws::{
+    handle_issue_ws_ticket, handle_log_websocket, handle_websocket,
+    normalize_request_forwarding_for_peer,
+};
 #[cfg(test)]
 #[allow(unused_imports)]
 use af_models::{AppIngressConfig, MarketplaceApp, User};
@@ -111,9 +114,11 @@ mod streaming;
 pub(crate) use inventory::RegisteredRoute;
 pub(crate) use inventory::TrackedRouter;
 
+#[cfg(test)]
+use account::issue_ws_ticket;
 use account::{
-    delete_avatar, delete_user, get_users, issue_ws_ticket, update_avatar, update_password,
-    update_profile, update_user_role,
+    delete_avatar, delete_user, get_users, update_avatar, update_password, update_profile,
+    update_user_role,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -245,6 +250,11 @@ const OPENAPI_VIEWER_CSP: &str = concat!(
 // Security Headers, Request ID & API Versioning Middlewares
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Validated or generated request ID inserted by [`security_headers_middleware`] so downstream
+/// handlers and the peer management proxy share the exact correlation ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RequestId(pub(crate) String);
+
 pub async fn security_headers_middleware(mut req: Request, next: Next) -> Response {
     normalize_request_forwarding_for_peer(&mut req);
     let req_id_header = req
@@ -260,6 +270,7 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         })
         .cloned()
         .unwrap_or_else(|| HeaderValue::from(Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+    let req_id_str = req_id_header.to_str().unwrap_or("0").to_string();
 
     let is_legacy_api =
         req.uri().path().starts_with("/api/") && !req.uri().path().starts_with("/api/v1/");
@@ -278,11 +289,14 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         })
         .map(str::to_string);
 
-    tracing::Span::current().record("request_id", req_id_header.to_str().unwrap_or("0"));
+    tracing::Span::current().record("request_id", req_id_str.as_str());
+    req.extensions_mut().insert(RequestId(req_id_str));
     req.headers_mut()
         .insert("X-Request-ID", req_id_header.clone());
 
-    let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
+    let is_plugin_ui = !req_path.starts_with("/api/v1/peers/")
+        && req_path.contains("/plugins/")
+        && req_path.ends_with("/ui");
     let mut resp = next.run(req).await;
     let is_plugin_proxy = resp.extensions().get::<ProxiedPluginResponse>().is_some();
     let is_openapi_viewer = (req_path.starts_with("/api/v1/public/swagger/")
@@ -523,7 +537,7 @@ fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRou
     let auth_routes = TrackedRouter::new()
         .merge(crate::mcbrowser::tracked_router())
         .route("/ws", get(handle_websocket))
-        .route("/ws/ticket", get(issue_ws_ticket))
+        .route("/ws/ticket", get(handle_issue_ws_ticket))
         .route("/ws/logs", get(handle_log_websocket))
         .route("/oidc/consent", post(oidc_consent))
         .route("/oidc/device/verify", post(oidc_device_verify))
@@ -859,7 +873,9 @@ fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRou
         .merge(compat_routes)
         .merge(ingress_compat_routes);
     if include_peer_routes {
-        router.merge(crate::peers::tracked_public_routes())
+        router
+            .merge(crate::peers::tracked_public_routes())
+            .nest("/peers", crate::peers::tracked_proxy_routes())
     } else {
         router
     }

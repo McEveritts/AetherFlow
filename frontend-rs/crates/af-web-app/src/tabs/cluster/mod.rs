@@ -561,6 +561,7 @@ fn ClusterAdminContent() -> impl IntoView {
                             }
                         }
                     }
+                    context.apply_peers_snapshot(data.clone());
                     snapshot.set(Some(data));
                     load_error.set(None);
                 }
@@ -635,6 +636,15 @@ fn ClusterAdminContent() -> impl IntoView {
                         <h2 class="text-lg font-semibold">
                             {move || tt(context, "Tabs.clusterHeading")}
                         </h2>
+                        <Show when=move || context.is_remote()>
+                            <p
+                                role="note"
+                                data-testid="cluster-local-scope-note"
+                                class="text-xs text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded-lg px-3 py-1.5"
+                            >
+                                {move || tt(context, "PeerSwitch.clusterLocalNote")}
+                            </p>
+                        </Show>
                         <p class="text-sm text-slate-400">
                             {move || {
                                 match snapshot.get() {

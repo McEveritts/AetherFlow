@@ -176,6 +176,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
     let frozen = RwSignal::new(Value::Null);
     let preview = RwSignal::new(Value::Null);
     let busy = RwSignal::new(false);
+    let op_ticket = RwSignal::new(0u64);
     let approved = RwSignal::new(false);
     let confirm = RwSignal::new(false);
     let result = RwSignal::new(None::<String>);
@@ -189,33 +190,79 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             }
         });
     });
+    let reset_export_abort = move || {
+        export_abort.update_value(|controller| {
+            if let Some(old) = controller.take() {
+                old.abort();
+            }
+            *controller = web_sys::AbortController::new().ok();
+        });
+    };
     let invalidate = Callback::new(move |(): ()| {
         preview.set(Value::Null);
         frozen.set(Value::Null);
         approved.set(false);
         confirm.set(false);
-        generation.update(|n| *n += 1);
+        generation.update(|n| *n = n.wrapping_add(1));
     });
-    let export = Callback::new(move |(): ()| {
-        if busy.get_untracked() || !context.is_admin() {
+    let last_epochs = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+        context.area_revocation_epoch_untracked(crate::state::PeerArea::Settings),
+    ));
+    Effect::new(move |_| {
+        let next = (
+            context.session_epoch.get(),
+            context.server_epoch.get(),
+            context.area_revocation_epoch(crate::state::PeerArea::Settings),
+        );
+        if last_epochs.get_value() == next {
             return;
         }
-        let epoch = context.session_epoch.get_untracked();
+        last_epochs.set_value(next);
+        reset_export_abort();
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        invalidate.run(());
+        result.set(None);
+        export_omitted.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Settings) {
+            reset_export_abort();
+            op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            invalidate.run(());
+        }
+    });
+    let export = Callback::new(move |(): ()| {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
+            return;
+        }
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Settings,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         let auth_epoch = current_auth_epoch();
         let signal = export_abort
             .with_value(|controller| controller.as_ref().map(web_sys::AbortController::signal));
         export_omitted.set(None);
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let is_current = || {
                 busy.try_get_untracked().is_some()
-                    && context.session_epoch.try_get_untracked() == Some(epoch)
+                    && fence.is_valid()
                     && current_auth_epoch() == auth_epoch
-                    && context
-                        .user
-                        .try_get_untracked()
-                        .flatten()
-                        .is_some_and(|user| user["role"] == "admin")
             };
             let response: Result<(), String> = async {
                 let response = ApiClient
@@ -294,14 +341,17 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             if !is_current() {
                 return;
             }
+            busy_guard.release();
             if let Err(e) = response {
                 result.set(Some(e));
             }
-            busy.set(false);
         });
     });
     let get_preview = Callback::new(move |(): ()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         invalidate.run(());
@@ -313,15 +363,30 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 return;
             }
         };
-        let ticket = generation.get_untracked();
+        let draft_ticket = generation.get_untracked();
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Settings,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .post("/api/v1/admin/streaming/portability/preview", Some(&body))
                 .await;
-            if generation.try_get_untracked() != Some(ticket) {
+            if busy.try_get_untracked().is_none()
+                || generation.try_get_untracked() != Some(draft_ticket)
+                || !fence.is_valid()
+            {
                 return;
             }
+            busy_guard.release();
             match response {
                 Ok(data) => {
                     let mut body = body;
@@ -330,7 +395,6 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                         result.set(Some(
                             "Archive preview is missing its approval token.".into(),
                         ));
-                        busy.set(false);
                         return;
                     }
                     body["approvalToken"] = json!(summary.approval_token);
@@ -340,11 +404,14 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 }
                 Err(e) => result.set(Some(e.message)),
             }
-            busy.set(false);
         });
     });
     let restore = Callback::new(move |(): ()| {
-        if busy.get_untracked() || !approved.get_untracked() || !context.is_admin() {
+        if busy.get_untracked()
+            || !approved.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let body = frozen.get_untracked();
@@ -360,14 +427,30 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             ));
             return;
         }
+        let draft_ticket = generation.get_untracked();
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Settings,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .post("/api/v1/admin/streaming/portability/restore", Some(&body))
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || generation.try_get_untracked() != Some(draft_ticket)
+                || !fence.is_valid()
+            {
                 return;
             }
+            busy_guard.release();
             match response {
                 Ok(data) => {
                     result.set(Some(
@@ -387,14 +470,20 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 })),
             }
             invalidate.run(());
-            busy.set(false);
         });
     });
     view! {
         <div class="space-y-4 pt-3">
             <button
                 class="glass-button px-4 py-2"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Settings, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| export.run(())
             >
                 {move || tt(context, "Export native JSON archive")}
@@ -483,7 +572,14 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             </label>
             <button
                 class="glass-button px-4 py-2"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Settings, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| get_preview.run(())
             >
                 {move || tt(context, "Preview restore diff")}
@@ -530,8 +626,21 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                     </label>
                     <button
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || busy.get() || !approved.get()
-                        on:click=move |_| confirm.set(true)
+                        disabled=move || {
+                            busy.get()
+                                || !approved.get()
+                                || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if context.can_write_area_untracked(crate::state::PeerArea::Settings) {
+                                confirm.set(true);
+                            }
+                        }
                     >
                         {move || tt(context, "Restore approved archive")}
                     </button>

@@ -3,7 +3,7 @@ use super::paths::*;
 use super::storage::host_storage;
 use super::types::*;
 use super::upload::{browser_error, stream_upload, upload_id, MAX_UPLOAD_BYTES};
-use crate::state::{app, use_api};
+use crate::state::{app, use_api_when, PeerArea};
 use crate::tabs::l10n::{tt, tt_with, ConfirmDialog, EmptyState, ObsCard};
 use crate::tabs::settings::{bytes, ResourceFeedback};
 use af_web_core::api::{api_url, ApiClient};
@@ -12,17 +12,28 @@ use wasm_bindgen_futures::spawn_local;
 #[component]
 pub(crate) fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
     let context = app();
-    let resource = use_api(Signal::derive(move || {
-        format!("/api/v1/auth/fs?path={}", encode(&current_path.get()))
-    }));
+    let can_read_files = Signal::derive(move || context.can_read_area(PeerArea::Files));
+    let resource = use_api_when(
+        can_read_files,
+        Signal::derive(move || format!("/api/v1/auth/fs?path={}", encode(&current_path.get()))),
+    );
     view! {
         <div
             class="rounded-xl border border-white/15 bg-slate-950 p-3 max-h-64 overflow-auto space-y-1"
             aria-label=move || tt(context, "Directory picker")
         >
+            <Show when=move || !can_read_files.get()>
+                <p role="status" class="text-xs text-amber-300 p-2">
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Files, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <ResourceFeedback resource />
             {move || {
-                (if resource.loading.get() || resource.error.get().is_some() {
+                (if !can_read_files.get() || resource.loading.get() || resource.error.get().is_some() {
                     Vec::new()
                 } else {
                     directory_names(&resource.data.get())
@@ -48,7 +59,9 @@ pub(crate) fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
                     .collect_view()
             }}
             <Show when=move || {
-                !resource.loading.get() && resource.error.get().is_none()
+                can_read_files.get()
+                    && !resource.loading.get()
+                    && resource.error.get().is_none()
                     && directory_names(&resource.data.get()).is_empty()
             }>
                 <p class="text-sm text-slate-400 p-2">
@@ -68,18 +81,22 @@ fn fileshare_download_url_encoded(encoded_name: &str, encoded_path: &str) -> Str
 #[component]
 pub(super) fn LocalStorage() -> impl IntoView {
     let context = app();
+    let can_read_files = Signal::derive(move || context.can_read_area(PeerArea::Files));
     let current_path = RwSignal::new("/".to_owned());
     let manual_path = RwSignal::new("/".to_owned());
     let picker_open = RwSignal::new(false);
-    let listing = use_api(Signal::derive(move || {
-        format!(
-            "/api/v1/auth/fileshare?path={}",
-            encode(&current_path.get())
-        )
-    }));
+    let listing = use_api_when(
+        can_read_files,
+        Signal::derive(move || {
+            format!(
+                "/api/v1/auth/fileshare?path={}",
+                encode(&current_path.get())
+            )
+        }),
+    );
     let files = Memo::new(move |_| parse_files(&listing.data.get()));
     let rows = Signal::derive(move || {
-        if listing.loading.get() || listing.error.get().is_some() {
+        if !can_read_files.get() || listing.loading.get() || listing.error.get().is_some() {
             Vec::new()
         } else {
             files.get().unwrap_or_default()
@@ -100,24 +117,45 @@ pub(super) fn LocalStorage() -> impl IntoView {
     let uploading = RwSignal::new(false);
     let progress = RwSignal::new(0u32);
     let controller = StoredValue::new_local(None::<web_sys::AbortController>);
-    let upload_epoch = StoredValue::new(context.session_epoch.get_untracked());
+    let upload_epoch = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+        context.area_revocation_epoch_untracked(PeerArea::Files),
+    ));
+    let input = NodeRef::<leptos::html::Input>::new();
+    let delete_open = RwSignal::new(false);
+    let deleting = RwSignal::new(false);
+    let upload_ticket = RwSignal::new(0u64);
+    let delete_ticket = RwSignal::new(0u64);
+    let delete_target = RwSignal::new(None::<(String, String)>);
     Effect::new(move |_| {
-        let epoch = context.session_epoch.get();
-        if upload_epoch.get_value() != epoch {
+        let next = (
+            context.session_epoch.get(),
+            context.server_epoch.get(),
+            context.area_revocation_epoch(PeerArea::Files),
+        );
+        let can_read = can_read_files.get();
+        let can_write = context.can_write_area(PeerArea::Files);
+        if upload_epoch.get_value() != next || !can_read || !can_write {
             controller.update_value(|controller| {
                 if let Some(controller) = controller.take() {
                     controller.abort();
                 }
             });
+            upload_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            delete_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
             uploading.set(false);
+            deleting.set(false);
             progress.set(0);
-            upload_epoch.set_value(epoch);
+            delete_open.set(false);
+            delete_target.set(None);
+            if upload_epoch.get_value() != next || !can_read {
+                current_path.set("/".to_owned());
+                picker_open.set(false);
+            }
+            upload_epoch.set_value(next);
         }
     });
-    let input = NodeRef::<leptos::html::Input>::new();
-    let delete_open = RwSignal::new(false);
-    let deleting = RwSignal::new(false);
-    let delete_target = RwSignal::new(None::<(String, String)>);
     Effect::new(move |_| manual_path.set(current_path.get()));
     on_cleanup(move || {
         controller.update_value(|controller| {
@@ -127,8 +165,13 @@ pub(super) fn LocalStorage() -> impl IntoView {
         })
     });
     let upload = Callback::new(move |file: web_sys::File| {
-        if !context.is_admin() {
-            context.toast(tt(context, "Admin role required for host writes"), true);
+        if !context.is_admin() || !context.can_write_area_untracked(PeerArea::Files) {
+            context.toast(
+                context
+                    .area_block_reason(PeerArea::Files, true)
+                    .unwrap_or_else(|| tt(context, "Admin role required for host writes")),
+                true,
+            );
             return;
         }
         if uploading.get_untracked() {
@@ -154,15 +197,24 @@ pub(super) fn LocalStorage() -> impl IntoView {
         };
         let signal = abort.signal();
         controller.set_value(Some(abort));
+        upload_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = upload_ticket.get_untracked();
         uploading.set(true);
         progress.set(0);
         let path = current_path.get_untracked();
         let auth = context.session_epoch.get_untracked();
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(uploading);
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(uploading, upload_ticket, ticket);
         spawn_local(async move {
             let result = stream_upload(context, &file, &path, &id, &signal, progress).await;
             if uploading.try_get_untracked().is_none()
+                || upload_ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                || !context.can_write_area_untracked(PeerArea::Files)
             {
                 return;
             }
@@ -181,7 +233,9 @@ pub(super) fn LocalStorage() -> impl IntoView {
                             ),
                             false,
                         );
-                        listing.refresh();
+                        if context.can_read_area_untracked(PeerArea::Files) {
+                            listing.refresh();
+                        }
                     }
                     Err(error) => context.toast(tt(context, &error), true),
                 }
@@ -190,15 +244,23 @@ pub(super) fn LocalStorage() -> impl IntoView {
         });
     });
     let remove = Callback::new(move |()| {
-        if !context.is_admin() || deleting.get_untracked() {
+        if !context.is_admin()
+            || !context.can_write_area_untracked(PeerArea::Files)
+            || deleting.get_untracked()
+        {
             return;
         }
         let Some((path, name)) = delete_target.get_untracked() else {
             return;
         };
+        delete_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = delete_ticket.get_untracked();
         deleting.set(true);
         let auth = context.session_epoch.get_untracked();
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(deleting);
+        let server_epoch = context.server_epoch.get_untracked();
+        let files_grant = context.area_revocation_epoch_untracked(PeerArea::Files);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(deleting, delete_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .delete(
@@ -211,7 +273,11 @@ pub(super) fn LocalStorage() -> impl IntoView {
                 )
                 .await;
             if deleting.try_get_untracked().is_none()
+                || delete_ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Files) != files_grant
+                || !context.can_write_area_untracked(PeerArea::Files)
             {
                 return;
             }
@@ -223,7 +289,9 @@ pub(super) fn LocalStorage() -> impl IntoView {
                         tt_with(context, "Deleted {name}", &[("name", &(name).to_string())]),
                         false,
                     );
-                    listing.refresh();
+                    if context.can_read_area_untracked(PeerArea::Files) {
+                        listing.refresh();
+                    }
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
             }
@@ -238,6 +306,18 @@ pub(super) fn LocalStorage() -> impl IntoView {
         );
     view! {
         <div class="space-y-5 min-w-0 max-w-full">
+            <Show when=move || !can_read_files.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Files, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <div class="flex flex-wrap justify-between gap-3 items-center">
                 <p class="text-sm text-slate-400 break-all">
                     {move || {
@@ -252,8 +332,16 @@ pub(super) fn LocalStorage() -> impl IntoView {
                     <button
                         type="button"
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || !context.is_admin() || uploading.get()
-                        title=move || tt(context, "Admin role required for host writes")
+                        disabled=move || {
+                            !context.is_admin()
+                                || uploading.get()
+                                || !context.can_write_area(PeerArea::Files)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Files, true)
+                                .unwrap_or_else(|| tt(context, "Admin role required for host writes"))
+                        }
                         on:click=move |_| {
                             if let Some(input) = input.get() {
                                 input.click();
@@ -266,7 +354,17 @@ pub(super) fn LocalStorage() -> impl IntoView {
                         type="button"
                         class="glass-button px-4 py-2"
                         aria-label=move || tt(context, "Refresh Directory")
-                        on:click=move |_| listing.refresh()
+                        disabled=move || !can_read_files.get()
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Files, false)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if can_read_files.get_untracked() {
+                                listing.refresh();
+                            }
+                        }
                     >
                         {move || tt(context, "Common.refresh")}
                     </button>
@@ -395,12 +493,22 @@ pub(super) fn LocalStorage() -> impl IntoView {
                         type="button"
                         class="glass-button px-4 py-2"
                         aria-expanded=move || picker_open.get().to_string()
-                        on:click=move |_| picker_open.update(|open| *open = !*open)
+                        disabled=move || !can_read_files.get()
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Files, false)
+                                .unwrap_or_default()
+                        }
+                        on:click=move |_| {
+                            if can_read_files.get_untracked() {
+                                picker_open.update(|open| *open = !*open);
+                            }
+                        }
                     >
                         {move || tt(context, "Browse Directories")}
                     </button>
                 </form>
-                <Show when=move || picker_open.get()>
+                <Show when=move || picker_open.get() && can_read_files.get()>
                     <div class="mt-3">
                         <DirectoryPicker current_path />
                     </div>
@@ -458,7 +566,16 @@ pub(super) fn LocalStorage() -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    disabled=move || !context.is_admin() || uploading.get()
+                    disabled=move || {
+                        !context.is_admin()
+                            || uploading.get()
+                            || !context.can_write_area(crate::state::PeerArea::Files)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Files, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| {
                         if let Some(input) = input.get() {
                             input.click();
@@ -580,6 +697,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                                                                     <a
                                                                         class="glass-button px-3 py-2"
                                                                         href=move || {
+                                                                            context.active_server_id.track();
                                                                             fileshare_download_url_encoded(
                                                                                 &encode(&download_name),
                                                                                 &encode(&current_path.get()),
@@ -595,11 +713,26 @@ pub(super) fn LocalStorage() -> impl IntoView {
                                                         <button
                                                             type="button"
                                                             class="glass-button px-3 py-2 text-rose-300"
-                                                            disabled=move || !context.is_admin() || deleting.get()
-                                                            title=move || tt(
-                                                                context,
-                                                                "Admin role required for host writes",
-                                                            )
+                                                            disabled=move || {
+                                                                !context.is_admin()
+                                                                    || deleting.get()
+                                                                    || !context.can_write_area(
+                                                                        crate::state::PeerArea::Files,
+                                                                    )
+                                                            }
+                                                            title=move || {
+                                                                context
+                                                                    .area_block_reason(
+                                                                        crate::state::PeerArea::Files,
+                                                                        true,
+                                                                    )
+                                                                    .unwrap_or_else(|| {
+                                                                        tt(
+                                                                            context,
+                                                                            "Admin role required for host writes",
+                                                                        )
+                                                                    })
+                                                            }
                                                             on:click=move |event| {
                                                                 event.stop_propagation();
                                                                 delete_target

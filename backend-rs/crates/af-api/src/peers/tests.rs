@@ -62,7 +62,7 @@ fn next_loopback_pair() -> (IpAddr, IpAddr) {
     )
 }
 
-fn fixture_wg_pubkey(seed: u8) -> String {
+pub(super) fn fixture_wg_pubkey(seed: u8) -> String {
     let mut bytes = [0u8; 32];
     for (idx, b) in bytes.iter_mut().enumerate() {
         *b = seed.wrapping_add(idx as u8).max(1);
@@ -70,7 +70,7 @@ fn fixture_wg_pubkey(seed: u8) -> String {
     STANDARD.encode(bytes)
 }
 
-fn open_isolated_peer_db() -> Arc<StdMutex<Connection>> {
+pub(super) fn open_isolated_peer_db() -> Arc<StdMutex<Connection>> {
     let conn = Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch(
         r#"
@@ -258,13 +258,13 @@ fn open_isolated_peer_db() -> Arc<StdMutex<Connection>> {
 }
 
 #[derive(Default)]
-struct FakeRunnerState {
+pub(super) struct FakeRunnerState {
     pubkey: String,
     tunnel_ip: String,
     wg_port: u16,
     identity_created: bool,
     peers: HashMap<String, FakeWgPeer>,
-    credentials: HashMap<(PeerCredentialSlot, String), String>,
+    pub(super) credentials: HashMap<(PeerCredentialSlot, String), String>,
     calls: Vec<String>,
     next_add_error: Option<PeerNetworkError>,
     next_remove_error: Option<PeerNetworkError>,
@@ -282,12 +282,12 @@ struct FakeWgPeer {
     handshake_age_secs: Option<u64>,
 }
 
-struct FakePeerRunner {
-    state: StdMutex<FakeRunnerState>,
+pub(super) struct FakePeerRunner {
+    pub(super) state: StdMutex<FakeRunnerState>,
 }
 
 impl FakePeerRunner {
-    fn new(pubkey: String, tunnel_ip: IpAddr, wg_port: u16) -> Arc<Self> {
+    pub(super) fn new(pubkey: String, tunnel_ip: IpAddr, wg_port: u16) -> Arc<Self> {
         Arc::new(Self {
             state: StdMutex::new(FakeRunnerState {
                 pubkey,
@@ -650,9 +650,9 @@ impl PeerRunner for FakePeerRunner {
 /// Test-only public pairing transport that forwards validated `https://` requests directly into
 /// a target runtime's real `public_routes_with_runtime` Axum router (exercising the 4 KiB body
 /// limit, rate limiter, JSON parsing, and atomic single-use DB transaction).
-struct RouterPublicTransport {
-    target_runtime: Arc<PeerRuntime>,
-    client_ip: SocketAddr,
+pub(super) struct RouterPublicTransport {
+    pub(super) target_runtime: Arc<PeerRuntime>,
+    pub(super) client_ip: SocketAddr,
 }
 
 impl PublicPairingTransport for RouterPublicTransport {
@@ -686,7 +686,7 @@ impl PublicPairingTransport for RouterPublicTransport {
     }
 }
 
-struct UnreachablePublicTransport;
+pub(super) struct UnreachablePublicTransport;
 
 impl PublicPairingTransport for UnreachablePublicTransport {
     fn post_pairing_request<'a>(
@@ -698,13 +698,13 @@ impl PublicPairingTransport for UnreachablePublicTransport {
     }
 }
 
-struct FakeClock {
+pub(super) struct FakeClock {
     epoch: AtomicI64,
     monotonic_secs: AtomicU64,
 }
 
 impl FakeClock {
-    fn new(start: i64) -> Arc<Self> {
+    pub(super) fn new(start: i64) -> Arc<Self> {
         Arc::new(Self {
             epoch: AtomicI64::new(start),
             monotonic_secs: AtomicU64::new(100),
@@ -722,7 +722,7 @@ impl FakeClock {
         self.epoch.fetch_add(delta_secs, Ordering::SeqCst);
     }
 
-    fn as_fn(self: &Arc<Self>) -> Arc<dyn Fn() -> DateTime<Utc> + Send + Sync> {
+    pub(super) fn as_fn(self: &Arc<Self>) -> Arc<dyn Fn() -> DateTime<Utc> + Send + Sync> {
         let clock = Arc::clone(self);
         Arc::new(move || {
             DateTime::<Utc>::from_timestamp(clock.epoch.load(Ordering::SeqCst), 0)
@@ -730,7 +730,7 @@ impl FakeClock {
         })
     }
 
-    fn as_monotonic_fn(self: &Arc<Self>) -> Arc<dyn Fn() -> Duration + Send + Sync> {
+    pub(super) fn as_monotonic_fn(self: &Arc<Self>) -> Arc<dyn Fn() -> Duration + Send + Sync> {
         let clock = Arc::clone(self);
         Arc::new(move || Duration::from_secs(clock.monotonic_secs.load(Ordering::SeqCst)))
     }
@@ -760,7 +760,9 @@ fn build_test_runtime_with_db_and_timeout(
         attempt_locks: KeyedAsyncLockPool::new(),
         link_locks: KeyedAsyncLockPool::new(),
         link_semaphores: StdMutex::new(HashMap::new()),
+        link_ws_semaphores: StdMutex::new(HashMap::new()),
         tunnel_clients: StdMutex::new(HashMap::new()),
+        proxy_tunnel_clients: StdMutex::new(HashMap::new()),
         listener_state: TokioMutex::new(None),
         health_shutdown: TokioMutex::new(None),
         clock: clock.as_fn(),
@@ -768,6 +770,8 @@ fn build_test_runtime_with_db_and_timeout(
         lock_wait_timeout,
         listen_port: 0,
         max_conn_per_link: 64,
+        max_ws_per_link: 16,
+        proxy_header_timeout: Duration::from_secs(30),
         rtt_warn_ms: 25.0,
         server_name_override: Some(name.to_string()),
         version_override: Some("4.0.0-test".to_string()),
@@ -829,7 +833,7 @@ fn admin_user() -> AuthUser {
     }
 }
 
-async fn call_admin(
+pub(super) async fn call_admin(
     rt: &Arc<PeerRuntime>,
     method: Method,
     uri: &str,
@@ -2911,7 +2915,7 @@ impl PublicPairingTransport for ControlledPublicTransport {
     }
 }
 
-async fn pair_two_test_runtimes(
+pub(super) async fn pair_two_test_runtimes(
     rt_a: &Arc<PeerRuntime>,
     rt_b: &Arc<PeerRuntime>,
     ip_a: IpAddr,
@@ -9126,7 +9130,9 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
         attempt_locks: KeyedAsyncLockPool::new(),
         link_locks: KeyedAsyncLockPool::new(),
         link_semaphores: StdMutex::new(HashMap::new()),
+        link_ws_semaphores: StdMutex::new(HashMap::new()),
         tunnel_clients: StdMutex::new(HashMap::new()),
+        proxy_tunnel_clients: StdMutex::new(HashMap::new()),
         listener_state: TokioMutex::new(None),
         health_shutdown: TokioMutex::new(None),
         clock: clock.as_fn(),
@@ -9134,6 +9140,8 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
         lock_wait_timeout: Duration::from_secs(5),
         listen_port: 0,
         max_conn_per_link: 64,
+        max_ws_per_link: 16,
+        proxy_header_timeout: Duration::from_secs(30),
         rtt_warn_ms: 25.0,
         server_name_override: Some("managed-b".to_string()),
         version_override: Some("4.0.0-p5".to_string()),
@@ -9583,7 +9591,11 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
             "/api/v1/admin/apps/launch",
             "PEER_SCOPE_DENIED",
         ),
-        (Method::GET, "/api/v1/auth/ws", "PEER_SCOPE_DENIED"),
+        (
+            Method::GET,
+            "/api/v1/auth/ws/unknown",
+            "PEER_ROUTE_UNCLASSIFIED",
+        ),
         (
             Method::GET,
             "/api/admin/settings",

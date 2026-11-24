@@ -1,6 +1,6 @@
 //! Reusable telemetry surfaces and administrator capacity analysis.
 use super::telemetry::*;
-use crate::state::{app, json_rows, use_api};
+use crate::state::{app, json_rows, use_api, use_api_when, PeerArea};
 use crate::tabs::l10n::{tt, tt_with, EmptyState, ObsCard};
 use af_web_core::{
     api::ApiClient,
@@ -1293,39 +1293,133 @@ fn parse_bandwidth_applied_details(
 #[component]
 pub(super) fn CapacityPredictions() -> impl IntoView {
     let context = app();
-    let report = use_api("/api/v1/admin/ai/predictions".to_string());
-    let history_30d = use_api(capacity_history_url());
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let report = use_api_when(
+        can_read_settings,
+        "/api/v1/admin/ai/predictions".to_string(),
+    );
+    let history_30d = use_api_when(can_read_settings, capacity_history_url());
     let capacity_series =
         Memo::new(move |_| derive_capacity_history(&json_rows(&history_30d.data.get())));
     let busy = RwSignal::new(false);
     let applying = RwSignal::new(false);
+    let action_ticket = RwSignal::new(0u64);
+    let apply_ticket = RwSignal::new(0u64);
     let bandwidth = RwSignal::new(Value::Null);
     let bandwidth_feedback = RwSignal::new(None::<BandwidthApplyOutcome>);
+    let last_epochs = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+        context.area_revocation_epoch_untracked(PeerArea::Settings),
+    ));
+    Effect::new(move |_| {
+        let next = (
+            context.session_epoch.get(),
+            context.server_epoch.get(),
+            context.area_revocation_epoch(PeerArea::Settings),
+        );
+        let allowed = can_read_settings.get();
+        if last_epochs.get_value() == next && allowed {
+            return;
+        }
+        last_epochs.set_value(next);
+        action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        apply_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        applying.set(false);
+        bandwidth.set(Value::Null);
+        bandwidth_feedback.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        context.area_revocation_epoch(PeerArea::Network);
+        if !context.can_write_area(PeerArea::Network) {
+            apply_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            applying.set(false);
+            bandwidth_feedback.set(None);
+        }
+    });
     view! {
         <ObsCard title=Signal::derive(move || tt(context, "Overview.capacityPredictions"))>
+            <Show when=move || !can_read_settings.get()>
+                <p role="status" class="text-xs text-amber-300 mb-4">
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Settings, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
                 <div class="flex flex-wrap gap-3">
                     <button
                         class="glass-button px-4 py-2 min-h-11"
-                        disabled=move || busy.get() || applying.get()
+                        disabled=move || {
+                            busy.get()
+                                || applying.get()
+                                || !context.can_write_area(PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
-                            if !context.is_admin() || busy.get_untracked() || applying.get_untracked() {
+                            if !context.is_admin()
+                                || !context.can_write_area(PeerArea::Settings)
+                                || busy.get_untracked()
+                                || applying.get_untracked()
+                            {
                                 return;
                             }
+                            let epoch = context.session_epoch.get_untracked();
+                            let server_epoch = context.server_epoch.get_untracked();
+                            let settings_grant =
+                                context.area_revocation_epoch_untracked(PeerArea::Settings);
+                            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+                            let ticket = action_ticket.get_untracked();
                             busy.set(true);
+                            let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(
+                                busy,
+                                action_ticket,
+                                ticket,
+                            );
                             history_30d.refresh();
                             spawn_local(async move {
                                 let result = ApiClient
                                     .post("/api/v1/admin/ai/predictions/analyze", None)
                                     .await;
-                                if busy.is_disposed() {
+                                if busy.is_disposed()
+                                    || action_ticket.try_get_untracked() != Some(ticket)
+                                    || context.session_epoch.try_get_untracked() != Some(epoch)
+                                    || context.server_epoch.try_get_untracked()
+                                        != Some(server_epoch)
+                                    || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                                        != settings_grant
+                                    || !context.is_admin_untracked()
+                                    || !context.can_read_area_untracked(PeerArea::Settings)
+                                    || !context.can_write_area_untracked(PeerArea::Settings)
+                                {
                                     return;
                                 }
                                 match result {
                                     Ok(value) => report.commit(value),
+                                    Err(e)
+                                        if matches!(
+                                            e.code.as_deref(),
+                                            Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                                        ) =>
+                                    {
+                                        return;
+                                    }
                                     Err(e) => context.toast(tt(context, &e.message), true),
                                 }
-                                busy.set(false);
+                                busy_guard.release();
                             });
                         }
                     >
@@ -1333,25 +1427,67 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                     </button>
                     <button
                         class="glass-button px-4 py-2 min-h-11"
-                        disabled=move || busy.get() || applying.get()
+                        disabled=move || {
+                            busy.get()
+                                || applying.get()
+                                || !context.can_write_area(PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
-                            if !context.is_admin() || busy.get_untracked() || applying.get_untracked() {
+                            if !context.is_admin()
+                                || !context.can_write_area(PeerArea::Settings)
+                                || busy.get_untracked()
+                                || applying.get_untracked()
+                            {
                                 return;
                             }
+                            let epoch = context.session_epoch.get_untracked();
+                            let server_epoch = context.server_epoch.get_untracked();
+                            let settings_grant =
+                                context.area_revocation_epoch_untracked(PeerArea::Settings);
+                            action_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+                            let ticket = action_ticket.get_untracked();
                             busy.set(true);
+                            let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(
+                                busy,
+                                action_ticket,
+                                ticket,
+                            );
                             bandwidth_feedback.set(None);
                             spawn_local(async move {
                                 let result = ApiClient
                                     .post("/api/v1/admin/ai/bandwidth/analyze", None)
                                     .await;
-                                if busy.is_disposed() {
+                                if busy.is_disposed()
+                                    || action_ticket.try_get_untracked() != Some(ticket)
+                                    || context.session_epoch.try_get_untracked() != Some(epoch)
+                                    || context.server_epoch.try_get_untracked()
+                                        != Some(server_epoch)
+                                    || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                                        != settings_grant
+                                    || !context.is_admin_untracked()
+                                    || !context.can_read_area_untracked(PeerArea::Settings)
+                                    || !context.can_write_area_untracked(PeerArea::Settings)
+                                {
                                     return;
                                 }
                                 match result {
                                     Ok(value) => bandwidth.set(value),
+                                    Err(e)
+                                        if matches!(
+                                            e.code.as_deref(),
+                                            Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                                        ) =>
+                                    {
+                                        return;
+                                    }
                                     Err(e) => context.toast(tt(context, &e.message), true),
                                 }
-                                busy.set(false);
+                                busy_guard.release();
                             });
                         }
                     >
@@ -1535,24 +1671,60 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                     </Show>
                     <button
                         class="glass-button px-4 py-2 min-h-11 mt-3"
-                        disabled=move || !context.is_admin() || busy.get() || applying.get()
-                            || bandwidth.with(bandwidth_limits).is_none()
+                        disabled=move || {
+                            !context.is_admin()
+                                || !context.can_write_area(crate::state::PeerArea::Network)
+                                || busy.get()
+                                || applying.get()
+                                || bandwidth.with(bandwidth_limits).is_none()
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Network, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
-                            if !context.is_admin() || busy.get_untracked() || applying.get_untracked() {
+                            if !context.is_admin()
+                                || !context.can_write_area(crate::state::PeerArea::Network)
+                                || busy.get_untracked()
+                                || applying.get_untracked()
+                            {
                                 return;
                             }
                             let Some(limits) = bandwidth.with_untracked(bandwidth_limits) else {
                                 return;
                             };
                             let epoch = context.session_epoch.get_untracked();
+                            let server_epoch = context.server_epoch.get_untracked();
+                            let settings_grant =
+                                context.area_revocation_epoch_untracked(PeerArea::Settings);
+                            let network_grant =
+                                context.area_revocation_epoch_untracked(PeerArea::Network);
+                            apply_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+                            let ticket = apply_ticket.get_untracked();
                             applying.set(true);
+                            let mut apply_guard = crate::tabs::busy::BusyGuard::for_generation(
+                                applying,
+                                apply_ticket,
+                                ticket,
+                            );
                             bandwidth_feedback.set(None);
                             spawn_local(async move {
                                 let result = ApiClient
                                     .fetch("/api/v1/admin/ai/bandwidth/apply", "POST", Some(&limits))
                                     .await;
                                 if applying.is_disposed()
+                                    || apply_ticket.try_get_untracked() != Some(ticket)
                                     || context.session_epoch.try_get_untracked() != Some(epoch)
+                                    || context.server_epoch.try_get_untracked()
+                                        != Some(server_epoch)
+                                    || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                                        != settings_grant
+                                    || context.area_revocation_epoch_untracked(PeerArea::Network)
+                                        != network_grant
+                                    || !context.is_admin_untracked()
+                                    || !context.can_read_area_untracked(PeerArea::Settings)
+                                    || !context.can_write_area_untracked(PeerArea::Network)
                                 {
                                     return;
                                 }
@@ -1562,7 +1734,20 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                         let status = response.status();
                                         let body_text = response.text().await.unwrap_or_default();
                                         if applying.is_disposed()
-                                            || context.session_epoch.try_get_untracked() != Some(epoch)
+                                            || apply_ticket.try_get_untracked() != Some(ticket)
+                                            || context.session_epoch.try_get_untracked()
+                                                != Some(epoch)
+                                            || context.server_epoch.try_get_untracked()
+                                                != Some(server_epoch)
+                                            || context.area_revocation_epoch_untracked(
+                                                PeerArea::Settings,
+                                            ) != settings_grant
+                                            || context.area_revocation_epoch_untracked(
+                                                PeerArea::Network,
+                                            ) != network_grant
+                                            || !context.is_admin_untracked()
+                                            || !context.can_read_area_untracked(PeerArea::Settings)
+                                            || !context.can_write_area_untracked(PeerArea::Network)
                                         {
                                             return;
                                         }
@@ -1573,6 +1758,14 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                         );
                                         bandwidth_feedback.set(Some(outcome));
                                     }
+                                    Err(failure)
+                                        if matches!(
+                                            failure.code.as_deref(),
+                                            Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                                        ) =>
+                                    {
+                                        return;
+                                    }
                                     Err(failure) => {
                                         let message = tt(context, &failure.message);
                                         bandwidth_feedback.set(Some(BandwidthApplyOutcome {
@@ -1582,7 +1775,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                         }));
                                     }
                                 }
-                                applying.set(false);
+                                apply_guard.release();
                             });
                         }
                     >

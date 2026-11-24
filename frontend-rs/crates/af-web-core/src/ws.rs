@@ -23,6 +23,16 @@ pub const MAX_FAILURES: u32 = MAX_FAILURES_BEFORE_POLLING;
 
 const TELEMETRY_WS_TICKET_PATH: &str = "/api/v1/auth/ws/ticket";
 const TELEMETRY_WS_PATH: &str = "/api/v1/auth/ws";
+pub const FALLBACK_METRICS_PATH: &str = "/api/v1/auth/system/metrics";
+pub const FALLBACK_SERVICES_PATH: &str = "/api/v1/auth/services";
+
+pub fn fallback_poll_paths(can_poll_services: bool) -> &'static [&'static str] {
+    if can_poll_services {
+        &[FALLBACK_METRICS_PATH, FALLBACK_SERVICES_PATH]
+    } else {
+        &[FALLBACK_METRICS_PATH]
+    }
+}
 
 fn telemetry_ticket_path() -> String {
     crate::api::api_url(TELEMETRY_WS_TICKET_PATH)
@@ -37,6 +47,51 @@ fn ws_protocol(location_protocol: &str) -> &'static str {
         "wss"
     } else {
         "ws"
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogStreamFilter {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub unit: String,
+    #[serde(default)]
+    pub priority: String,
+    #[serde(default)]
+    pub keyword: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogStreamState {
+    Connecting,
+    Connected,
+    Reconnecting,
+    Fallback,
+    Closed,
+}
+
+#[derive(Clone, Debug)]
+pub enum LogStreamEvent {
+    State(LogStreamState),
+    Entry(Value),
+    Closed { code: u16, reason: String },
+}
+
+pub fn logs_socket_path() -> String {
+    crate::api::api_url("/api/v1/auth/ws/logs")
+}
+
+pub fn build_logs_ws_url(location_protocol: &str, host: &str, ticket: &str) -> String {
+    build_ws_url(location_protocol, host, &logs_socket_path(), ticket)
+}
+
+pub fn parse_log_stream_message(text: &str) -> Option<Value> {
+    let envelope: WsEnvelope = serde_json::from_str(text).ok()?;
+    if envelope.kind == "LOG_ENTRY" && envelope.data.is_object() {
+        Some(envelope.data)
+    } else {
+        None
     }
 }
 
@@ -224,17 +279,37 @@ mod browser {
         socket: RefCell<Option<web_sys::WebSocket>>,
         listeners: RefCell<Vec<EventListener>>,
         callback: Rc<dyn Fn(TransportEvent)>,
+        can_poll_services: Rc<dyn Fn() -> bool>,
         connecting: Cell<bool>,
         polling: Cell<bool>,
         stopped: Cell<bool>,
         generation: Cell<u64>,
+        origin_auth_epoch: u64,
+        origin_server_epoch: u64,
         ticket_abort: RefCell<Option<AbortHandle>>,
     }
     fn now() -> u64 {
         js_sys::Date::now() as u64
     }
+    fn is_current(inner: &Inner) -> bool {
+        !inner.stopped.get()
+            && crate::api::current_auth_epoch() == inner.origin_auth_epoch
+            && crate::api::current_server_epoch() == inner.origin_server_epoch
+    }
+    fn stop_if_stale(inner: &Inner) -> bool {
+        if is_current(inner) {
+            return false;
+        }
+        if !inner.stopped.replace(true) {
+            invalidate_attempt(inner);
+            inner.engine.borrow_mut().stop();
+        }
+        true
+    }
     fn emit_state(inner: &Inner) {
-        (inner.callback)(TransportEvent::State(inner.engine.borrow().state));
+        if is_current(inner) {
+            (inner.callback)(TransportEvent::State(inner.engine.borrow().state));
+        }
     }
     fn invalidate_attempt(inner: &Inner) {
         inner.connecting.set(false);
@@ -248,7 +323,7 @@ mod browser {
         }
     }
     fn expire_connect_attempt(inner: &Inner, generation: u64) {
-        if inner.stopped.get() || inner.generation.get() != generation {
+        if stop_if_stale(inner) || inner.generation.get() != generation {
             return;
         }
         let expired = inner
@@ -271,7 +346,7 @@ mod browser {
         });
     }
     fn failed(inner: &Inner) {
-        if inner.stopped.get() {
+        if stop_if_stale(inner) {
             return;
         }
         invalidate_attempt(inner);
@@ -282,23 +357,29 @@ mod browser {
         emit_state(inner);
     }
     fn poll(inner: Rc<Inner>) {
-        if inner.polling.replace(true) || inner.stopped.get() {
+        if inner.polling.replace(true) || stop_if_stale(&inner) {
+            inner.polling.set(false);
             return;
         }
         let generation = inner.generation.get();
+        let poll_services =
+            fallback_poll_paths((inner.can_poll_services)()).contains(&FALLBACK_SERVICES_PATH);
         spawn_local(async move {
-            let (metrics, services) = futures::join!(
-                ApiClient.get("/api/v1/auth/system/metrics"),
-                ApiClient.get("/api/v1/auth/services")
-            );
-            if !inner.stopped.get()
+            let (metrics, services) = futures::join!(ApiClient.get(FALLBACK_METRICS_PATH), async {
+                if poll_services {
+                    Some(ApiClient.get(FALLBACK_SERVICES_PATH).await)
+                } else {
+                    None
+                }
+            });
+            if !stop_if_stale(&inner)
                 && inner.generation.get() == generation
                 && inner.engine.borrow().state != ConnectionState::Connected
             {
                 if let Ok(metrics) = metrics {
                     (inner.callback)(TransportEvent::Metrics(metrics));
                 }
-                if let Ok(services) = services {
+                if let Some(Ok(services)) = services {
                     (inner.callback)(TransportEvent::Services(services));
                 }
             }
@@ -306,7 +387,7 @@ mod browser {
         });
     }
     fn connect(inner: Rc<Inner>) {
-        if inner.stopped.get() || inner.connecting.replace(true) {
+        if stop_if_stale(&inner) || inner.connecting.replace(true) {
             return;
         }
         let generation = inner.generation.get().wrapping_add(1);
@@ -323,7 +404,7 @@ mod browser {
             )
             .await;
             expire_connect_attempt(&inner, generation);
-            if inner.stopped.get() || inner.generation.get() != generation {
+            if stop_if_stale(&inner) || inner.generation.get() != generation {
                 return;
             }
             inner.ticket_abort.borrow_mut().take();
@@ -359,7 +440,7 @@ mod browser {
             let open = EventListener::new(&socket, "open", move |_| {
                 if let Some(inner) = weak
                     .upgrade()
-                    .filter(|inner| !inner.stopped.get() && inner.generation.get() == generation)
+                    .filter(|inner| !stop_if_stale(inner) && inner.generation.get() == generation)
                 {
                     expire_connect_attempt(&inner, generation);
                     if inner.generation.get() != generation {
@@ -374,7 +455,7 @@ mod browser {
             let close = EventListener::new(&socket, "close", move |_| {
                 if let Some(inner) = weak
                     .upgrade()
-                    .filter(|inner| inner.generation.get() == generation)
+                    .filter(|inner| !stop_if_stale(inner) && inner.generation.get() == generation)
                 {
                     failed(&inner);
                 }
@@ -383,7 +464,7 @@ mod browser {
             let error = EventListener::new(&socket, "error", move |_| {
                 if let Some(inner) = weak
                     .upgrade()
-                    .filter(|inner| inner.generation.get() == generation)
+                    .filter(|inner| !stop_if_stale(inner) && inner.generation.get() == generation)
                 {
                     failed(&inner);
                 }
@@ -392,7 +473,7 @@ mod browser {
             let message = EventListener::new(&socket, "message", move |event| {
                 if let Some(inner) = weak
                     .upgrade()
-                    .filter(|inner| !inner.stopped.get() && inner.generation.get() == generation)
+                    .filter(|inner| !stop_if_stale(inner) && inner.generation.get() == generation)
                 {
                     inner.engine.borrow_mut().received();
                     if let Some(text) = event
@@ -435,6 +516,12 @@ mod browser {
     }
     impl BrowserConnection {
         pub fn start(callback: impl Fn(TransportEvent) + 'static) -> Self {
+            Self::start_with_services_gate(|| true, callback)
+        }
+        pub fn start_with_services_gate(
+            can_poll_services: impl Fn() -> bool + 'static,
+            callback: impl Fn(TransportEvent) + 'static,
+        ) -> Self {
             let disabled = web_sys::window()
                 .and_then(|w| js_sys::Reflect::get(&w, &"__AF_DISABLE_WS__".into()).ok())
                 .and_then(|v| v.as_bool())
@@ -444,14 +531,20 @@ mod browser {
                 socket: RefCell::new(None),
                 listeners: RefCell::new(vec![]),
                 callback: Rc::new(callback),
+                can_poll_services: Rc::new(can_poll_services),
                 connecting: Cell::new(false),
                 polling: Cell::new(false),
                 stopped: Cell::new(false),
                 generation: Cell::new(0),
+                origin_auth_epoch: crate::api::current_auth_epoch(),
+                origin_server_epoch: crate::api::current_server_epoch(),
                 ticket_abort: RefCell::new(None),
             });
             emit_state(&inner);
             let tick = |inner: Rc<Inner>| {
+                if stop_if_stale(&inner) {
+                    return;
+                }
                 expire_connect_attempt(&inner, inner.generation.get());
                 let actions = inner.engine.borrow_mut().tick(now());
                 for action in actions {
@@ -472,7 +565,7 @@ mod browser {
             tick(inner.clone());
             let weak: Weak<Inner> = Rc::downgrade(&inner);
             let timer = Interval::new(250, move || {
-                if let Some(inner) = weak.upgrade().filter(|i| !i.stopped.get()) {
+                if let Some(inner) = weak.upgrade().filter(|i| !stop_if_stale(i)) {
                     tick(inner);
                 }
             });
@@ -488,6 +581,214 @@ mod browser {
         }
     }
     impl Drop for BrowserConnection {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    struct LogInner {
+        socket: RefCell<Option<web_sys::WebSocket>>,
+        listeners: RefCell<Vec<EventListener>>,
+        callback: Rc<dyn Fn(LogStreamEvent)>,
+        filter: RefCell<LogStreamFilter>,
+        stopped: Cell<bool>,
+        generation: Cell<u64>,
+        origin_auth_epoch: u64,
+        origin_server_epoch: u64,
+        ticket_abort: RefCell<Option<AbortHandle>>,
+    }
+
+    fn log_is_current(inner: &LogInner) -> bool {
+        !inner.stopped.get()
+            && crate::api::current_auth_epoch() == inner.origin_auth_epoch
+            && crate::api::current_server_epoch() == inner.origin_server_epoch
+    }
+
+    fn log_invalidate(inner: &LogInner) {
+        inner.generation.set(inner.generation.get().wrapping_add(1));
+        if let Some(abort) = inner.ticket_abort.borrow_mut().take() {
+            abort.abort();
+        }
+        inner.listeners.borrow_mut().clear();
+        if let Some(socket) = inner.socket.borrow_mut().take() {
+            let _ = socket.close();
+        }
+    }
+
+    fn log_stop_if_stale(inner: &LogInner) -> bool {
+        if log_is_current(inner) {
+            return false;
+        }
+        if !inner.stopped.replace(true) {
+            log_invalidate(inner);
+        }
+        true
+    }
+
+    fn send_log_filter(socket: &web_sys::WebSocket, filter: &LogStreamFilter) {
+        if socket.ready_state() == web_sys::WebSocket::OPEN {
+            if let Ok(payload) = serde_json::to_string(filter) {
+                let _ = socket.send_with_str(&payload);
+            }
+        }
+    }
+
+    pub struct LogStreamConnection {
+        inner: Rc<LogInner>,
+    }
+
+    impl LogStreamConnection {
+        pub fn start(filter: LogStreamFilter, callback: impl Fn(LogStreamEvent) + 'static) -> Self {
+            let disabled = web_sys::window()
+                .and_then(|w| js_sys::Reflect::get(&w, &"__AF_DISABLE_WS__".into()).ok())
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let inner = Rc::new(LogInner {
+                socket: RefCell::new(None),
+                listeners: RefCell::new(vec![]),
+                callback: Rc::new(callback),
+                filter: RefCell::new(filter),
+                stopped: Cell::new(false),
+                generation: Cell::new(0),
+                origin_auth_epoch: crate::api::current_auth_epoch(),
+                origin_server_epoch: crate::api::current_server_epoch(),
+                ticket_abort: RefCell::new(None),
+            });
+            if disabled {
+                (inner.callback)(LogStreamEvent::State(LogStreamState::Fallback));
+                return Self { inner };
+            }
+            (inner.callback)(LogStreamEvent::State(LogStreamState::Connecting));
+            let generation = inner.generation.get().wrapping_add(1);
+            inner.generation.set(generation);
+            let (abort, registration) = AbortHandle::new_pair();
+            *inner.ticket_abort.borrow_mut() = Some(abort);
+            let ticket_path = telemetry_ticket_path();
+            let socket_path = logs_socket_path();
+            let task_inner = Rc::clone(&inner);
+            spawn_local(async move {
+                let result = Abortable::new(
+                    ApiClient.get_typed::<WsTicketResponse>(&ticket_path),
+                    registration,
+                )
+                .await;
+                if log_stop_if_stale(&task_inner) || task_inner.generation.get() != generation {
+                    return;
+                }
+                task_inner.ticket_abort.borrow_mut().take();
+                let ticket = match result {
+                    Ok(Ok(response)) if !response.ticket.is_empty() => response.ticket,
+                    Ok(Err(err)) if matches!(err.status, 401 | 403) => {
+                        let code = if err.status == 401 { 4401 } else { 4403 };
+                        (task_inner.callback)(LogStreamEvent::Closed {
+                            code,
+                            reason: err.message,
+                        });
+                        (task_inner.callback)(LogStreamEvent::State(LogStreamState::Closed));
+                        return;
+                    }
+                    _ => {
+                        (task_inner.callback)(LogStreamEvent::State(LogStreamState::Fallback));
+                        return;
+                    }
+                };
+                let Some(window) = web_sys::window() else {
+                    (task_inner.callback)(LogStreamEvent::State(LogStreamState::Fallback));
+                    return;
+                };
+                let protocol = window.location().protocol().unwrap_or_default();
+                let host = window.location().host().unwrap_or_default();
+                let url = build_ws_url(&protocol, &host, &socket_path, &ticket);
+                let socket = match web_sys::WebSocket::new(&url) {
+                    Ok(socket) => socket,
+                    Err(_) => {
+                        (task_inner.callback)(LogStreamEvent::State(LogStreamState::Fallback));
+                        return;
+                    }
+                };
+                task_inner.listeners.borrow_mut().clear();
+                if let Some(old) = task_inner.socket.borrow_mut().take() {
+                    let _ = old.close();
+                }
+                let weak = Rc::downgrade(&task_inner);
+                let open_socket = socket.clone();
+                let open = EventListener::new(&socket, "open", move |_| {
+                    if let Some(inner) = weak.upgrade().filter(|inner| {
+                        !log_stop_if_stale(inner) && inner.generation.get() == generation
+                    }) {
+                        (inner.callback)(LogStreamEvent::State(LogStreamState::Connected));
+                        send_log_filter(&open_socket, &inner.filter.borrow());
+                    }
+                });
+                let weak = Rc::downgrade(&task_inner);
+                let close = EventListener::new(&socket, "close", move |event| {
+                    if let Some(inner) = weak.upgrade().filter(|inner| {
+                        !log_stop_if_stale(inner) && inner.generation.get() == generation
+                    }) {
+                        let (code, reason) = event
+                            .dyn_ref::<web_sys::CloseEvent>()
+                            .map(|ev| (ev.code(), ev.reason()))
+                            .unwrap_or((1006, String::new()));
+                        let is_remote = crate::api::active_server().is_some();
+                        let auth_closed = matches!(code, 1008 | 4001 | 4003 | 4401 | 4403)
+                            || (is_remote && matches!(code, 1000 | 1005));
+                        log_invalidate(&inner);
+                        (inner.callback)(LogStreamEvent::Closed { code, reason });
+                        let next_state = if auth_closed {
+                            LogStreamState::Closed
+                        } else {
+                            LogStreamState::Fallback
+                        };
+                        (inner.callback)(LogStreamEvent::State(next_state));
+                    }
+                });
+                let weak = Rc::downgrade(&task_inner);
+                let error = EventListener::new(&socket, "error", move |_| {
+                    if let Some(inner) = weak.upgrade().filter(|inner| {
+                        !log_stop_if_stale(inner) && inner.generation.get() == generation
+                    }) {
+                        log_invalidate(&inner);
+                        (inner.callback)(LogStreamEvent::State(LogStreamState::Fallback));
+                    }
+                });
+                let weak = Rc::downgrade(&task_inner);
+                let message = EventListener::new(&socket, "message", move |event| {
+                    if let Some(inner) = weak.upgrade().filter(|inner| {
+                        !log_stop_if_stale(inner) && inner.generation.get() == generation
+                    }) {
+                        if let Some(text) = event
+                            .dyn_ref::<web_sys::MessageEvent>()
+                            .and_then(|e| e.data().as_string())
+                        {
+                            if let Some(entry) = parse_log_stream_message(&text) {
+                                (inner.callback)(LogStreamEvent::Entry(entry));
+                            }
+                        }
+                    }
+                });
+                *task_inner.listeners.borrow_mut() = vec![open, close, error, message];
+                *task_inner.socket.borrow_mut() = Some(socket);
+            });
+            Self { inner }
+        }
+
+        pub fn set_filter(&self, filter: LogStreamFilter) {
+            if log_stop_if_stale(&self.inner) {
+                return;
+            }
+            *self.inner.filter.borrow_mut() = filter.clone();
+            if let Some(socket) = self.inner.socket.borrow().as_ref() {
+                send_log_filter(socket, &filter);
+            }
+        }
+
+        pub fn stop(&self) {
+            self.inner.stopped.set(true);
+            log_invalidate(&self.inner);
+        }
+    }
+
+    impl Drop for LogStreamConnection {
         fn drop(&mut self) {
             self.stop();
         }
@@ -819,5 +1120,53 @@ mod tests {
                 "{dot_or_blank:?}"
             );
         }
+    }
+
+    #[test]
+    fn log_stream_helpers_route_active_server_and_parse_log_entries() {
+        let _guard = ActiveServerGuard::new(None);
+        assert_eq!(logs_socket_path(), "/api/v1/auth/ws/logs");
+        assert_eq!(
+            build_logs_ws_url("https:", "panel.example:8443", "tok"),
+            "wss://panel.example:8443/api/v1/auth/ws/logs?ticket=tok"
+        );
+
+        crate::api::set_active_server(Some("media-2".into()));
+        assert_eq!(logs_socket_path(), "/api/v1/peers/media-2/auth/ws/logs");
+        assert_eq!(
+            build_logs_ws_url("http:", "127.0.0.1:8080", "tok+1"),
+            "ws://127.0.0.1:8080/api/v1/peers/media-2/auth/ws/logs?ticket=tok%2B1"
+        );
+
+        let parsed = parse_log_stream_message(
+            r#"{"type":"LOG_ENTRY","data":{"timestamp":"2026-11-23T00:00:00Z","unit":"sonarr","priority":"info","message":"Ready"}}"#,
+        )
+        .expect("valid LOG_ENTRY");
+        assert_eq!(parsed["unit"], "sonarr");
+        assert_eq!(parsed["message"], "Ready");
+        assert!(parse_log_stream_message(r#"{"type":"PONG"}"#).is_none());
+        assert!(
+            parse_log_stream_message(r#"{"type":"LOG_ENTRY","data":"not-an-object"}"#).is_none()
+        );
+        assert!(parse_log_stream_message("not-json").is_none());
+
+        let filter = LogStreamFilter {
+            source: "journald".into(),
+            unit: "sonarr.service".into(),
+            priority: "err".into(),
+            keyword: "timeout".into(),
+        };
+        let encoded: Value = serde_json::to_value(&filter).unwrap();
+        assert_eq!(encoded["unit"], "sonarr.service");
+        assert_eq!(encoded["keyword"], "timeout");
+    }
+
+    #[test]
+    fn fallback_polling_gates_services_endpoint_on_active_grant() {
+        assert_eq!(
+            fallback_poll_paths(true),
+            &[FALLBACK_METRICS_PATH, FALLBACK_SERVICES_PATH]
+        );
+        assert_eq!(fallback_poll_paths(false), &[FALLBACK_METRICS_PATH]);
     }
 }

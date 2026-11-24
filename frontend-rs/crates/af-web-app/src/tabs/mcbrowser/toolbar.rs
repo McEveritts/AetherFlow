@@ -177,7 +177,16 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             <button
                 type="button"
                 class="glass-button px-3 py-2"
-                disabled=move || !can("create") || actions.busy.get()
+                disabled=move || {
+                    !can("create")
+                        || actions.busy.get()
+                        || !context.can_write_area(crate::state::PeerArea::Files)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Files, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| actions.show("folder", vec![], path.get_untracked())
             >
                 {move || tt(context, "McBrowser.newFolder")}
@@ -185,7 +194,16 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             <button
                 type="button"
                 class="glass-button px-3 py-2"
-                disabled=move || !can("create") || actions.busy.get()
+                disabled=move || {
+                    !can("create")
+                        || actions.busy.get()
+                        || !context.can_write_area(crate::state::PeerArea::Files)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Files, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| actions.show("file", vec![], path.get_untracked())
             >
                 {move || tt(context, "McBrowser.newFile")}
@@ -193,7 +211,14 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             <button
                 type="button"
                 class="glass-button-primary px-3 py-2"
-                disabled=move || !can("create")
+                disabled=move || {
+                    !can("create") || !context.can_write_area(crate::state::PeerArea::Files)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Files, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| {
                     if let Some(input) = file_input.get() {
                         input.click();
@@ -272,6 +297,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             {["rename", "move", "copy", "delete", "archive", "extract", "checksums", "info"]
                 .into_iter()
                 .map(|kind| {
+                    let requires_write = actions::action_requires_files_write(kind);
                     view! {
                         <button
                             type="button"
@@ -279,6 +305,10 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
                             disabled=move || {
                                 let count = selected.with(BTreeSet::len);
                                 count == 0 || actions.busy.get()
+                                    || (requires_write
+                                        && !context.can_write_area(crate::state::PeerArea::Files))
+                                    || (!requires_write
+                                        && !context.can_read_area(crate::state::PeerArea::Files))
                                     || (matches!(kind, "rename" | "extract" | "checksums" | "info")
                                         && count != 1)
                                     || !match kind {
@@ -294,6 +324,14 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
                                         _ => can("read"),
                                     }
                             }
+                            title=move || {
+                                context
+                                    .area_block_reason(
+                                        crate::state::PeerArea::Files,
+                                        requires_write,
+                                    )
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| run_selected(kind)
                         >
                             {move || action_label(context, kind)}
@@ -304,8 +342,24 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             <button
                 type="button"
                 class="glass-button px-3 py-2"
-                disabled=move || selected.with(BTreeSet::len) != 1 || !can("share")
+                disabled=move || {
+                    selected.with(BTreeSet::len) != 1
+                        || !can("share")
+                        || !context.can_write_area(crate::state::PeerArea::Files)
+                        || !crate::tabs::fileshare::share_origin_available(context)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Files, true)
+                        .or_else(|| crate::tabs::fileshare::share_origin_block_reason(context))
+                        .unwrap_or_default()
+                }
                 on:click=move |_| {
+                    if !context.can_write_area(crate::state::PeerArea::Files)
+                        || !crate::tabs::fileshare::share_origin_available_untracked(context)
+                    {
+                        return;
+                    }
                     share_path
                         .set(
                             selected

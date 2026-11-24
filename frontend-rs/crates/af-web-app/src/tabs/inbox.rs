@@ -1,6 +1,8 @@
 //! Explicit human decisions; the backend owns execution and audit timestamps.
-use super::contracts::{use_api_typed, PendingCount};
-use crate::state::{app, use_api};
+use super::contracts::{use_api_typed_when, PendingCount};
+use crate::state::{
+    app, owned_resource_reads, run_resource_read, use_api_when, PeerArea, ResourceReads,
+};
 use crate::tabs::l10n::{tt, tt_with};
 use crate::tabs::l10n::{Badge, ConfirmDialog, EmptyState, Modal, ObsCard, TabPanel, TabsBar};
 use af_web_core::{api::ApiClient, draft::FormDraft};
@@ -451,22 +453,27 @@ fn ApprovalInbox() -> impl IntoView {
         filter.track();
         page.set(0);
     });
-    let resource = use_api(Signal::derive(move || {
-        let filter = filter.get();
-        let api_status = match filter.as_str() {
-            "approved" => "approved_history",
-            "pending" => "pending",
-            "rejected" => "rejected",
-            _ => "all",
-        };
-        format!(
-            "/api/v1/admin/actions/pending?status={api_status}&limit={PAGE_SIZE}&offset={}",
-            page.get() * PAGE_SIZE
-        )
-    }));
-    let pending = use_api_typed::<PendingCount>(Signal::derive(|| {
-        "/api/v1/admin/actions/pending?status=pending&limit=1".to_string()
-    }));
+    let can_read_services = Signal::derive(move || context.can_read_area(PeerArea::Services));
+    let resource = use_api_when(
+        can_read_services,
+        Signal::derive(move || {
+            let filter = filter.get();
+            let api_status = match filter.as_str() {
+                "approved" => "approved_history",
+                "pending" => "pending",
+                "rejected" => "rejected",
+                _ => "all",
+            };
+            format!(
+                "/api/v1/admin/actions/pending?status={api_status}&limit={PAGE_SIZE}&offset={}",
+                page.get() * PAGE_SIZE
+            )
+        }),
+    );
+    let pending = use_api_typed_when::<PendingCount>(
+        can_read_services,
+        Signal::derive(|| "/api/v1/admin/actions/pending?status=pending&limit=1".to_string()),
+    );
     let total = Memo::new(move |_| {
         resource.data.with(|data| {
             data["total"].as_u64().unwrap_or_else(|| {
@@ -480,7 +487,34 @@ fn ApprovalInbox() -> impl IntoView {
     let detail_loading = RwSignal::new(false);
     let detail_error = RwSignal::new(None::<String>);
     let generation = RwSignal::new(0u64);
+    let detail_reads = owned_resource_reads();
+    let last_epochs = StoredValue::new((
+        context.session_epoch.get_untracked(),
+        context.server_epoch.get_untracked(),
+        context.area_revocation_epoch_untracked(PeerArea::Services),
+    ));
     Effect::new(move |_| {
+        let next = (
+            context.session_epoch.get(),
+            context.server_epoch.get(),
+            context.area_revocation_epoch(PeerArea::Services),
+        );
+        if last_epochs.get_value() == next && can_read_services.get() {
+            return;
+        }
+        last_epochs.set_value(next);
+        detail_reads.with_value(ResourceReads::cancel);
+        generation.update(|g| *g += 1);
+        open.set(false);
+        selected.set(Value::Null);
+        detail_loading.set(false);
+        detail_error.set(None);
+        page.set(0);
+    });
+    Effect::new(move |_| {
+        if !can_read_services.get() {
+            return;
+        }
         if let Some(total) = pending.data.get().reported_total() {
             context.pending.set(total as usize);
         }
@@ -493,14 +527,32 @@ fn ApprovalInbox() -> impl IntoView {
             .collect::<Vec<_>>()
     });
     let refresh_selected = Callback::new(move |id: i64| {
-        if !open.get_untracked() || selected.with_untracked(|a| a["id"].as_i64() != Some(id)) {
+        if !open.get_untracked()
+            || !context.can_read_area_untracked(PeerArea::Services)
+            || selected.with_untracked(|a| a["id"].as_i64() != Some(id))
+        {
             return;
         }
+        let epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let services_grant = context.area_revocation_epoch_untracked(PeerArea::Services);
         generation.update(|g| *g += 1);
         let ticket = generation.get_untracked();
+        let Some(job) = detail_reads.try_update_value(ResourceReads::next) else {
+            return;
+        };
         spawn_local(async move {
-            let result = ApiClient.get(&format!("/api/v1/admin/actions/{id}")).await;
-            if generation.try_get_untracked() != Some(ticket) {
+            let Some(result) =
+                run_resource_read(job, ApiClient.get(&format!("/api/v1/admin/actions/{id}"))).await
+            else {
+                return;
+            };
+            if generation.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Services) != services_grant
+                || !context.can_read_area_untracked(PeerArea::Services)
+            {
                 return;
             }
             if let Ok(value) = result {
@@ -518,6 +570,9 @@ fn ApprovalInbox() -> impl IntoView {
     let interval = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         15_000,
         move || {
+            if !context.can_read_area_untracked(PeerArea::Services) {
+                return;
+            }
             if !resource.loading.get_untracked() {
                 resource.refresh();
             }
@@ -555,18 +610,36 @@ fn ApprovalInbox() -> impl IntoView {
         (critical_high, medium, low)
     });
     let inspect = Callback::new(move |action: Value| {
+        if !context.can_read_area_untracked(PeerArea::Services) {
+            return;
+        }
         let Some(id) = action["id"].as_i64() else {
             return;
         };
+        let epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let services_grant = context.area_revocation_epoch_untracked(PeerArea::Services);
         selected.set(action);
         open.set(true);
         detail_loading.set(true);
         detail_error.set(None);
         generation.update(|g| *g += 1);
         let ticket = generation.get_untracked();
+        let Some(job) = detail_reads.try_update_value(ResourceReads::next) else {
+            return;
+        };
         spawn_local(async move {
-            let result = ApiClient.get(&format!("/api/v1/admin/actions/{id}")).await;
-            if generation.try_get_untracked() != Some(ticket) {
+            let Some(result) =
+                run_resource_read(job, ApiClient.get(&format!("/api/v1/admin/actions/{id}"))).await
+            else {
+                return;
+            };
+            if generation.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Services) != services_grant
+                || !context.can_read_area_untracked(PeerArea::Services)
+            {
                 return;
             }
             match result {
@@ -583,6 +656,14 @@ fn ApprovalInbox() -> impl IntoView {
                             "Action detail response did not match the requested action.".into(),
                         ));
                     }
+                }
+                Err(error)
+                    if matches!(
+                        error.code.as_deref(),
+                        Some("SERVER_CHANGED" | "SESSION_CHANGED" | "ABORTED")
+                    ) =>
+                {
+                    return;
                 }
                 Err(error) => detail_error.set(Some(error.message)),
             }
@@ -601,8 +682,10 @@ fn ApprovalInbox() -> impl IntoView {
             }
         });
         context.pending.update(|n| *n = n.saturating_sub(1));
-        resource.refresh();
-        pending.refresh();
+        if context.can_read_area_untracked(PeerArea::Services) {
+            resource.refresh();
+            pending.refresh();
+        }
     });
     view! {
         <section class="space-y-5 py-5 min-w-0 max-w-full">
@@ -620,16 +703,35 @@ fn ApprovalInbox() -> impl IntoView {
                 </div>
                 <button
                     class="glass-button px-4 py-2"
-                    disabled=move || resource.loading.get()
+                    disabled=move || resource.loading.get() || !can_read_services.get()
+                    title=move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| {
-                        resource.refresh();
-                        pending.refresh();
+                        if context.can_read_area_untracked(PeerArea::Services) {
+                            resource.refresh();
+                            pending.refresh();
+                        }
                     }
                     aria-label=move || tt(context, "Refresh")
                 >
                     {move || tt(context, "Common.refresh")}
                 </button>
             </div>
+            <Show when=move || !can_read_services.get()>
+                <p
+                    role="status"
+                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                >
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Services, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <p role="status" class="text-sm text-amber-300">
                 {move || tt_with(context, "Inbox.awaitingApprovalCount", &[("count", &context.pending.get().to_string())])}
             </p>
@@ -845,9 +947,29 @@ fn ActionDetailModal(
     let draft = RwSignal::new(FormDraft::new(json!({"reason":""})));
     let draft_id = RwSignal::new(Value::Null);
     let busy = RwSignal::new(false);
+    let exec_ticket = RwSignal::new(0u64);
     let confirm = RwSignal::new(false);
     let decision = RwSignal::new("approve".to_string());
     let outcome = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Services);
+        exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        open.set(false);
+        busy.set(false);
+        confirm.set(false);
+        outcome.set(None);
+        draft.set(FormDraft::new(json!({"reason":""})));
+        draft_id.set(Value::Null);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Services) {
+            exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            confirm.set(false);
+        }
+    });
     Effect::new(move |_| {
         let id = action.get()["id"].clone();
         if id != draft_id.get_untracked() {
@@ -864,7 +986,8 @@ fn ActionDetailModal(
         if busy.get_untracked()
             || loading.get_untracked()
             || error.with_untracked(Option::is_some)
-            || !context.is_admin()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
         {
             return;
         }
@@ -879,15 +1002,28 @@ fn ActionDetailModal(
         if !matches!(verb.as_str(), "approve" | "reject") {
             return;
         }
+        exec_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = exec_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            exec_ticket,
+            ticket,
+        );
         busy.set(true);
         outcome.set(None);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, exec_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(&format!("/api/v1/admin/actions/{id}/{verb}"), None)
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
                 return;
             }
+            busy_guard.release();
             match result {
                 Ok(data) => {
                     let updated = data["action"].clone();
@@ -961,11 +1097,14 @@ fn ActionDetailModal(
                 }
             }
             confirm.set(false);
-            busy.set(false);
         });
     });
     let request = Callback::new(move |verb: String| {
-        if busy.get_untracked() || loading.get_untracked() || error.with_untracked(Option::is_some)
+        if busy.get_untracked()
+            || loading.get_untracked()
+            || error.with_untracked(Option::is_some)
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
         {
             return;
         }
@@ -1239,7 +1378,15 @@ fn ActionDetailModal(
                         <button
                             class="glass-button-primary px-4 py-2"
                             disabled=move || {
-                                busy.get() || loading.get() || error.with(Option::is_some)
+                                busy.get()
+                                    || loading.get()
+                                    || error.with(Option::is_some)
+                                    || !context.can_write_area(crate::state::PeerArea::Services)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Services, true)
+                                    .unwrap_or_default()
                             }
                             on:click=move |_| request.run("approve".into())
                         >
@@ -1254,7 +1401,15 @@ fn ActionDetailModal(
                         <button
                             class="glass-button px-4 py-2 text-rose-300"
                             disabled=move || {
-                                busy.get() || loading.get() || error.with(Option::is_some)
+                                busy.get()
+                                    || loading.get()
+                                    || error.with(Option::is_some)
+                                    || !context.can_write_area(crate::state::PeerArea::Services)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Services, true)
+                                    .unwrap_or_default()
                             }
                             on:click=move |_| request.run("reject".into())
                         >

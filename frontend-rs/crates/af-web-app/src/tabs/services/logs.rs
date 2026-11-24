@@ -1,8 +1,11 @@
 //! Administrator journal session and export controls.
 use super::helpers::{copy_text, field, service_units};
-use crate::state::{app, json_rows, use_api};
+use crate::state::{app, json_rows, use_api_when, PeerArea};
 use crate::tabs::l10n::{tt, tt_with, Badge, Modal, SearchInput};
-use af_web_core::api::ApiClient;
+use af_web_core::{
+    api::ApiClient,
+    ws::{LogStreamConnection, LogStreamEvent, LogStreamFilter, LogStreamState},
+};
 use af_web_ui::use_worker_rows;
 use leptos::prelude::*;
 use serde_json::{json, Value};
@@ -45,7 +48,7 @@ fn download_logs(name: &str, content: &str) -> Result<(), String> {
 }
 
 fn log_level(row: &Value) -> String {
-    let explicit = field(row, &["level", "severity"]).to_ascii_uppercase();
+    let explicit = field(row, &["level", "severity", "priority"]).to_ascii_uppercase();
     let message = field(row, &["message", "line"]).to_ascii_uppercase();
     if let Some(priority) = row["priority"]
         .as_u64()
@@ -85,6 +88,11 @@ pub(crate) fn ServiceLogsModal(
     let ai_analysis = RwSignal::new(None::<Value>);
     let ai_ticket = RwSignal::new(0u64);
     let remediation_open = RwSignal::new(false);
+    let stream_entries = RwSignal::new(Vec::<Value>::new());
+    let stream_state = RwSignal::new(LogStreamState::Fallback);
+    let stream_closed_notice = RwSignal::new(None::<String>);
+    let stream_conn = StoredValue::new_local(None::<LogStreamConnection>);
+    on_cleanup(move || stream_conn.set_value(None));
     let units = Signal::derive(move || {
         service.with(|v| {
             let Some(v) = v else {
@@ -107,31 +115,159 @@ pub(crate) fn ServiceLogsModal(
             unit.set(units.first().cloned().unwrap_or_default());
         }
     });
-    // Mounted only while an administrator has opened a service's log session.
-    let logs = use_api(Signal::derive(move || {
-        format!(
-            "/api/v1/admin/logs?unit={}&lines={}&limit={}",
-            js_sys::encode_uri_component(&unit.get()),
-            lines.get(),
-            lines.get()
-        )
-    }));
+    // Mounted only while an administrator has opened a service's log session and has Services read access.
+    let logs = use_api_when(
+        Signal::derive(move || {
+            open.get() && context.is_admin() && context.can_read_area(PeerArea::Services)
+        }),
+        Signal::derive(move || {
+            format!(
+                "/api/v1/admin/logs?unit={}&lines={}&limit={}",
+                js_sys::encode_uri_component(&unit.get()),
+                lines.get(),
+                lines.get()
+            )
+        }),
+    );
     Effect::new(move |_| {
         unit.track();
         lines.track();
-        // Never relabel a previous unit's cached lines or diagnostics as the newly selected journal.
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Services);
+        let can_read_services =
+            context.is_admin_untracked() && context.can_read_area_untracked(PeerArea::Services);
+        // Never relabel a previous unit's, server's, or revoked grant's cached lines/diagnostics as the current journal.
         logs.data.set(Value::Null);
+        logs.error.set(None);
+        stream_entries.set(Vec::new());
+        stream_closed_notice.set(None);
         ai_ticket.update(|n| *n = n.wrapping_add(1));
         analyzing.set(false);
         ai_analysis.set(None);
         remediation_open.set(false);
+        if !can_read_services {
+            stream_conn.set_value(None);
+            open.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        if !context.is_admin() || !context.can_read_area(PeerArea::Services) {
+            logs.data.set(Value::Null);
+            logs.error.set(None);
+            stream_entries.set(Vec::new());
+            stream_closed_notice.set(None);
+            ai_ticket.update(|n| *n = n.wrapping_add(1));
+            analyzing.set(false);
+            ai_analysis.set(None);
+            remediation_open.set(false);
+            stream_conn.set_value(None);
+            open.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        context.area_revocation_epoch(PeerArea::Settings);
+        if !context.is_admin() || !context.can_write_area(PeerArea::Settings) {
+            ai_ticket.update(|n| *n = n.wrapping_add(1));
+            analyzing.set(false);
+            ai_analysis.set(None);
+            remediation_open.set(false);
+        }
+    });
+    Effect::new(move |_| {
+        let server_epoch = context.server_epoch.get();
+        let session_epoch = context.session_epoch.get();
+        let services_grant = context.area_revocation_epoch(PeerArea::Services);
+        let active_open = open.get();
+        let active_follow = following.get();
+        let can_read = context.is_admin() && context.can_read_area(PeerArea::Services);
+        stream_conn.set_value(None);
+        if !active_open || !active_follow || !can_read {
+            if !active_open || stream_closed_notice.with_untracked(Option::is_none) {
+                stream_state.set(LogStreamState::Fallback);
+            }
+            if !active_open || !can_read {
+                stream_closed_notice.set(None);
+            }
+            return;
+        }
+        stream_closed_notice.set(None);
+        let initial_filter = LogStreamFilter {
+            source: String::new(),
+            unit: unit.get_untracked(),
+            priority: String::new(),
+            keyword: String::new(),
+        };
+        let conn = LogStreamConnection::start(initial_filter, move |event| {
+            if context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Services) != services_grant
+                || !context.is_admin_untracked()
+                || !context.can_read_area_untracked(PeerArea::Services)
+                || open.try_get_untracked() != Some(true)
+            {
+                return;
+            }
+            match event {
+                LogStreamEvent::State(next) => {
+                    stream_state.set(next);
+                    if next == LogStreamState::Connected {
+                        stream_closed_notice.set(None);
+                    }
+                }
+                LogStreamEvent::Entry(entry) => {
+                    let cap = lines
+                        .try_get_untracked()
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(100);
+                    let _ = stream_entries.try_update(|items| {
+                        items.push(entry);
+                        if items.len() > cap {
+                            let excess = items.len() - cap;
+                            items.drain(0..excess);
+                        }
+                    });
+                }
+                LogStreamEvent::Closed { code, .. } => {
+                    let revoked = matches!(code, 1008 | 4001 | 4003 | 4401 | 4403)
+                        || (context.is_remote_untracked() && matches!(code, 1000 | 1005));
+                    if revoked {
+                        stream_closed_notice.set(Some(tt_with(
+                            context,
+                            "PeerSwitch.liveLogsRevoked",
+                            &[("code", &code.to_string())],
+                        )));
+                        following.set(false);
+                        if context.is_remote_untracked() {
+                            context.refresh_peers_snapshot();
+                        }
+                    }
+                }
+            }
+        });
+        stream_conn.set_value(Some(conn));
+    });
+    Effect::new(move |_| {
+        let current_unit = unit.get();
+        let _ = stream_conn.try_with_value(|conn| {
+            if let Some(conn) = conn {
+                conn.set_filter(LogStreamFilter {
+                    source: String::new(),
+                    unit: current_unit,
+                    priority: String::new(),
+                    keyword: String::new(),
+                });
+            }
+        });
     });
     let interval = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         2000,
         move || {
             if following.get_untracked()
                 && open.get_untracked()
-                && context.is_admin()
+                && context.is_admin_untracked()
+                && context.can_read_area_untracked(PeerArea::Services)
+                && stream_state.get_untracked() == LogStreamState::Fallback
                 && !logs.loading.get_untracked()
             {
                 logs.refresh();
@@ -141,10 +277,14 @@ pub(crate) fn ServiceLogsModal(
     on_cleanup(move || interval.set_value(None));
     let rows = Signal::derive(move || {
         let data = logs.data.get();
-        let source = data["logs"]
+        let mut source = data["logs"]
             .as_array()
             .cloned()
             .unwrap_or_else(|| json_rows(&data));
+        let streamed = stream_entries.get();
+        if !streamed.is_empty() {
+            source.extend(streamed);
+        }
         let count = lines.get().parse::<usize>().unwrap_or(100);
         let start = source.len().saturating_sub(count);
         source
@@ -195,11 +335,35 @@ pub(crate) fn ServiceLogsModal(
     view! {
         <Modal open title="Service Logs">
             <div class="space-y-4 min-w-0">
-                <h3 class="font-semibold break-words">
-                    {move || {
-                        service.with(|v| v.as_ref().map(|v| field(v, &["name", "id", "slug"])))
-                    }}
-                </h3>
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <h3 class="font-semibold break-words">
+                        {move || {
+                            service.with(|v| v.as_ref().map(|v| field(v, &["name", "id", "slug"])))
+                        }}
+                    </h3>
+                    <span data-testid="logs-stream-status">
+                        {move || {
+                            let (key, tone) = match stream_state.get() {
+                                LogStreamState::Connected => ("PeerSwitch.liveLogsConnected", "success"),
+                                LogStreamState::Connecting | LogStreamState::Reconnecting => {
+                                    ("PeerSwitch.liveLogsConnecting", "warning")
+                                }
+                                LogStreamState::Closed => ("PeerSwitch.liveLogsClosed", "danger"),
+                                LogStreamState::Fallback => ("PeerSwitch.liveLogsFallback", "muted"),
+                            };
+                            view! { <Badge label=tt(context, key) tone=tone /> }
+                        }}
+                    </span>
+                </div>
+                <Show when=move || stream_closed_notice.with(Option::is_some)>
+                    <p
+                        role="alert"
+                        data-testid="logs-stream-closed"
+                        class="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200"
+                    >
+                        {move || stream_closed_notice.get().unwrap_or_default()}
+                    </p>
+                </Show>
                 <div
                     class="flex flex-wrap gap-3 items-center"
                     role="group"
@@ -265,9 +429,21 @@ pub(crate) fn ServiceLogsModal(
                         <button
                             type="button"
                             class="glass-button-primary px-3 py-2 min-h-11"
-                            disabled=move || analyzing.get() || visible.with(Vec::is_empty)
+                            disabled=move || {
+                                analyzing.get()
+                                    || visible.with(Vec::is_empty)
+                                    || !context.can_write_area(PeerArea::Settings)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(PeerArea::Settings, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| {
-                                if !context.is_admin() || analyzing.get_untracked() {
+                                if !context.is_admin()
+                                    || !context.can_write_area(PeerArea::Settings)
+                                    || analyzing.get_untracked()
+                                {
                                     return;
                                 }
                                 let captured = visible.with_untracked(|rows| {
@@ -287,10 +463,22 @@ pub(crate) fn ServiceLogsModal(
                                 }
                                 let active_unit = unit.get_untracked();
                                 let prompt = build_ai_debug_prompt(&active_unit, &captured);
+                                let session_epoch = context.session_epoch.get_untracked();
+                                let server_epoch = context.server_epoch.get_untracked();
+                                let services_grant =
+                                    context.area_revocation_epoch_untracked(PeerArea::Services);
+                                let settings_grant =
+                                    context.area_revocation_epoch_untracked(PeerArea::Settings);
                                 ai_ticket.update(|n| *n = n.wrapping_add(1));
                                 let ticket = ai_ticket.get_untracked();
                                 analyzing.set(true);
                                 ai_analysis.set(None);
+                                let mut analyzing_guard =
+                                    crate::tabs::busy::BusyGuard::for_generation(
+                                        analyzing,
+                                        ai_ticket,
+                                        ticket,
+                                    );
                                 spawn_local(async move {
                                     let body = json!({
                                         "message": prompt,
@@ -299,10 +487,22 @@ pub(crate) fn ServiceLogsModal(
                                     let result = ApiClient
                                         .post("/api/v1/auth/ai/support", Some(&body))
                                         .await;
-                                    if ai_ticket.try_get_untracked() != Some(ticket) {
+                                    if ai_ticket.try_get_untracked() != Some(ticket)
+                                        || context.session_epoch.try_get_untracked()
+                                            != Some(session_epoch)
+                                        || context.server_epoch.try_get_untracked()
+                                            != Some(server_epoch)
+                                        || context.area_revocation_epoch_untracked(PeerArea::Services)
+                                            != services_grant
+                                        || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                                            != settings_grant
+                                        || !context.is_admin_untracked()
+                                        || !context.can_read_area_untracked(PeerArea::Services)
+                                        || !context.can_write_area_untracked(PeerArea::Settings)
+                                    {
                                         return;
                                     }
-                                    analyzing.set(false);
+                                    analyzing_guard.release();
                                     match result {
                                         Ok(data) => ai_analysis.set(Some(data)),
                                         Err(e) => context.toast(tt(context, &e.message), true),

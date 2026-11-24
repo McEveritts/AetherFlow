@@ -1,12 +1,27 @@
 use super::*;
-use af_web_core::api::api_url;
+use af_web_core::api::api_url_for_server;
 
 fn backup_download_path_encoded(encoded_filename: &str) -> String {
     format!("/api/v1/admin/backup/download/{encoded_filename}")
 }
 
+#[cfg(test)]
 fn backup_download_href(path: &str) -> String {
-    api_url(path)
+    af_web_core::api::api_url(path)
+}
+
+fn backup_download_href_for_server(server: Option<&str>, path: &str) -> String {
+    api_url_for_server(server, path)
+}
+
+fn backup_download_auth_request(is_remote: bool, password: &str) -> (Value, bool) {
+    if is_remote {
+        // Remote peers authorize backup downloads via Settings:Write peer grants,
+        // never via Server A's local password or X-Reauth-Password header.
+        (json!({}), false)
+    } else {
+        (json!({"password": password}), password.is_ascii())
+    }
 }
 
 fn backup_authorization_error(
@@ -70,25 +85,41 @@ fn parse_backup_staging_response(
 #[component]
 pub(super) fn BackupsSettings() -> impl IntoView {
     let context = app();
-    let backups = use_api("/api/v1/admin/backup/list".to_string());
-    let schedule = use_api("/api/v1/admin/ai/backup/optimal-window".to_string());
+    let can_read_settings = Signal::derive(move || context.can_read_area(PeerArea::Settings));
+    let backups = use_api_when(can_read_settings, "/api/v1/admin/backup/list".to_string());
+    let schedule = use_api_when(
+        can_read_settings,
+        "/api/v1/admin/ai/backup/optimal-window".to_string(),
+    );
     let schedule_busy = RwSignal::new(false);
+    let schedule_ticket = RwSignal::new(0u64);
     let timer = StoredValue::new_local(Some(gloo_timers::callback::Interval::new(
         30_000,
         move || {
-            if !schedule_busy.get_untracked() && !schedule.loading.get_untracked() {
+            if context.can_read_area_untracked(PeerArea::Settings)
+                && !schedule_busy.get_untracked()
+                && !schedule.loading.get_untracked()
+            {
                 schedule.refresh();
             }
         },
     )));
     on_cleanup(move || timer.set_value(None));
     let change_schedule = move |mode: &'static str| {
-        if schedule_busy.get_untracked() || !context.is_admin() {
+        if schedule_busy.get_untracked()
+            || !context.is_admin()
+            || !context.can_write_area_untracked(PeerArea::Settings)
+        {
             return;
         }
         let epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        schedule_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = schedule_ticket.get_untracked();
         schedule_busy.set(true);
-        let mut guard = crate::tabs::busy::BusyGuard::new(schedule_busy);
+        let mut guard =
+            crate::tabs::busy::BusyGuard::for_generation(schedule_busy, schedule_ticket, ticket);
         spawn_local(async move {
             let result = ApiClient
                 .post(
@@ -97,7 +128,11 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 )
                 .await;
             if schedule_busy.try_get_untracked().is_none()
+                || schedule_ticket.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
             {
                 return;
             }
@@ -111,7 +146,9 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                             }
                         }
                     });
-                    schedule.refresh();
+                    if context.can_read_area_untracked(PeerArea::Settings) {
+                        schedule.refresh();
+                    }
                     context.toast(tt(context, "Backup schedule updated"), false);
                 }
                 Err(error) => context.toast(tt(context, &error.message), true),
@@ -121,22 +158,64 @@ pub(super) fn BackupsSettings() -> impl IntoView {
     };
     let selected = RwSignal::new(Value::Null);
     let download_open = RwSignal::new(false);
+    let download_captured = crate::tabs::l10n::guard_modal_server_switch(download_open);
     let password = RwSignal::new(FormDraft::new(json!({"password":""})));
     let busy = RwSignal::new(false);
+    let backup_ticket = RwSignal::new(0u64);
     let upload = StoredValue::new_local(None::<web_sys::File>);
     let upload_name = RwSignal::new(String::new());
     let upload_open = RwSignal::new(false);
     let progress = RwSignal::new(0u32);
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Settings);
+        schedule_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        backup_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        schedule_busy.set(false);
+        busy.set(false);
+        selected.set(Value::Null);
+        download_open.set(false);
+        upload.set_value(None);
+        upload_name.set(String::new());
+        upload_open.set(false);
+        progress.set(0);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(PeerArea::Settings) {
+            schedule_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            backup_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            schedule_busy.set(false);
+            busy.set(false);
+            download_open.set(false);
+            upload_open.set(false);
+        }
+    });
     let create = move || {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        backup_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = backup_ticket.get_untracked();
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, backup_ticket, ticket);
         spawn_local(async move {
             match ApiClient.post("/api/v1/admin/backup/run", None).await {
                 Ok(value) => {
-                    if busy.try_get_untracked().is_none() {
+                    if busy.try_get_untracked().is_none()
+                        || backup_ticket.try_get_untracked() != Some(ticket)
+                        || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                            != settings_grant
+                        || !context.can_write_area_untracked(PeerArea::Settings)
+                    {
                         return;
                     }
                     context.toast(
@@ -148,35 +227,63 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     );
                     backups.refresh();
                 }
-                Err(error) => context.toast(tt(context, &error.message), true),
+                Err(error) => {
+                    if backup_ticket.try_get_untracked() == Some(ticket)
+                        && context.session_epoch.try_get_untracked() == Some(session_epoch)
+                        && context.server_epoch.try_get_untracked() == Some(server_epoch)
+                        && context.area_revocation_epoch_untracked(PeerArea::Settings)
+                            == settings_grant
+                        && context.can_write_area_untracked(PeerArea::Settings)
+                    {
+                        context.toast(tt(context, &error.message), true);
+                    }
+                }
             }
-            if busy.try_get_untracked().is_some() {
+            if busy.try_get_untracked().is_some()
+                && backup_ticket.try_get_untracked() == Some(ticket)
+                && context.session_epoch.try_get_untracked() == Some(session_epoch)
+                && context.server_epoch.try_get_untracked() == Some(server_epoch)
+            {
                 busy_guard.release();
             }
         });
     };
     let download = move || {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
+        let current_epoch = context.server_epoch.get_untracked();
+        let current_server = context.active_server_id.get_untracked();
+        if let Some(captured) = download_captured.get_untracked() {
+            if captured.server_epoch != current_epoch || captured.server_id != current_server {
+                download_open.set(false);
+                context.toast(tt(context, "PeerSwitch.staleConfirmBlocked"), true);
+                return;
+            }
+        }
+        let session_epoch = context.session_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        let is_remote = current_server.is_some();
         let value = selected.get_untracked();
         let sent = draft_value(password);
         let filename = text(&value, "filename");
         let path = backup_download_path_encoded(&encode(&filename));
+        let download_href = backup_download_href_for_server(current_server.as_deref(), &path);
+        backup_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = backup_ticket.get_untracked();
         busy.set(true);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, backup_ticket, ticket);
         spawn_local(async move {
             let result = async {
-                // Capture the browser-navigation download URL synchronously with
-                // the ApiClient authorization POST so the native anchor click
-                // targets the same server/path as the one-use ticket cookie.
-                let download_href = backup_download_href(&path);
                 let pass = text(&sent, "password");
-                let body = serde_json::to_vec(&json!({"password": pass}))
-                    .map_err(|error| error.to_string())?;
+                let (payload, send_reauth_header) = backup_download_auth_request(is_remote, &pass);
+                let body = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
                 let body: wasm_bindgen::JsValue = js_sys::Uint8Array::from(body.as_slice()).into();
                 let mut headers = vec![];
-                if pass.is_ascii() {
+                if send_reauth_header {
                     headers.push(("X-Reauth-Password", pass.as_str()));
                 }
                 let response = ApiClient
@@ -197,6 +304,14 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 // The one-use HttpOnly ticket authorizes the native download.
                 // Large archives stream in the browser instead of filling Wasm memory.
                 drop(response);
+                if backup_ticket.try_get_untracked() != Some(ticket)
+                    || context.server_epoch.try_get_untracked() != Some(current_epoch)
+                    || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                    || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                    || !context.can_write_area_untracked(PeerArea::Settings)
+                {
+                    return Err(tt(context, "PeerSwitch.staleConfirmBlocked"));
+                }
                 if download_open.try_get_untracked() == Some(true) {
                     click_download(&download_href, &filename)
                 } else {
@@ -204,7 +319,12 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 }
             }
             .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || backup_ticket.try_get_untracked() != Some(ticket)
+                || context.server_epoch.try_get_untracked() != Some(current_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
+            {
                 return;
             }
             match result {
@@ -219,15 +339,23 @@ pub(super) fn BackupsSettings() -> impl IntoView {
         });
     };
     let stage = Callback::new(move |()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Settings)
+        {
             return;
         }
         let Some(file) = upload.get_value() else {
             return;
         };
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let settings_grant = context.area_revocation_epoch_untracked(PeerArea::Settings);
+        backup_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = backup_ticket.get_untracked();
         busy.set(true);
         progress.set(0);
-        let mut busy_guard = crate::tabs::busy::BusyGuard::new(busy);
+        let mut busy_guard =
+            crate::tabs::busy::BusyGuard::for_generation(busy, backup_ticket, ticket);
         spawn_local(async move {
             let result=async {
                 let chunk_size=4.0*1024.0*1024.0;
@@ -235,6 +363,15 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 if chunks==0{return Err("Choose a non-empty SQLite backup".to_string());}
                 let upload_id=format!("wasm-{}",crate::tabs::fileshare::upload_id()?);
                 for index in 0..chunks {
+                    if backup_ticket.try_get_untracked() != Some(ticket)
+                        || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                            != settings_grant
+                        || !context.can_write_area_untracked(PeerArea::Settings)
+                    {
+                        return Err(tt(context, "PeerSwitch.staleConfirmBlocked"));
+                    }
                     let chunk=file.slice_with_f64_and_f64(index as f64*chunk_size,((index+1)as f64*chunk_size).min(file.size()))
                         .map_err(|_|"Could not read backup chunk".to_string())?;
                     let path=format!("/api/v1/admin/backup/upload/{}?chunk={index}&total={chunks}&upload_id={upload_id}",encode(&file.name()));
@@ -248,6 +385,15 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                         )
                         .await
                         .map_err(|e| e.message)?;
+                    if backup_ticket.try_get_untracked() != Some(ticket)
+                        || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                            != settings_grant
+                        || !context.can_write_area_untracked(PeerArea::Settings)
+                    {
+                        return Err(tt(context, "PeerSwitch.staleConfirmBlocked"));
+                    }
                     let status = response.status();
                     let ok = response.ok();
                     let body = if ok {
@@ -258,6 +404,15 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     } else {
                         response.text().await.unwrap_or_default()
                     };
+                    if backup_ticket.try_get_untracked() != Some(ticket)
+                        || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                        || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                        || context.area_revocation_epoch_untracked(PeerArea::Settings)
+                            != settings_grant
+                        || !context.can_write_area_untracked(PeerArea::Settings)
+                    {
+                        return Err(tt(context, "PeerSwitch.staleConfirmBlocked"));
+                    }
                     let value = parse_backup_staging_response(context, ok, status, &body)?;
                     if index + 1 == chunks && value["complete"] != true {
                         return Err("Backup verification has not confirmed completion".into());
@@ -267,7 +422,13 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 }
                 Ok(())
             }.await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || backup_ticket.try_get_untracked() != Some(ticket)
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Settings) != settings_grant
+                || !context.can_write_area_untracked(PeerArea::Settings)
+            {
                 return;
             }
             match result {
@@ -296,6 +457,15 @@ pub(super) fn BackupsSettings() -> impl IntoView {
     });
     view! {
         <ObsCard title=Signal::derive(move || tt(context, "Settings.backupsRestore"))>
+            <Show when=move || !can_read_settings.get()>
+                <p role="status" class="text-xs text-amber-300 mb-3">
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Settings, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <p class="text-sm text-slate-400 mb-4">
                 {move || tt(
                     context,
@@ -332,7 +502,20 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                             {(!next.is_empty()).then(|| view! { <p class="text-sm text-slate-400">{move || tt_with(context, "Next backup: {time}", &[("time", &next)])}</p> })}
                         }
                     }}
-                    <button type="button" class="glass-button px-4 py-2" disabled=move || schedule_busy.get() || schedule.loading.get() || schedule.error.with(Option::is_some)
+                    <button
+                        type="button"
+                        class="glass-button px-4 py-2"
+                        disabled=move || {
+                            schedule_busy.get()
+                                || schedule.loading.get()
+                                || schedule.error.with(Option::is_some)
+                                || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Settings, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| {
                             let mode = if schedule.data.with_untracked(|data| data["mode"] == "smart") { "manual" } else { "smart" };
                             change_schedule(mode);
@@ -345,7 +528,14 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button-primary px-4 py-2"
-                    disabled=move || busy.get()
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Settings, true)
+                            .unwrap_or_default()
+                    }
                     on:click=move |_| create()
                 >
                     {move || tt(context, "Create database snapshot")}
@@ -353,18 +543,37 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 <button
                     type="button"
                     class="glass-button px-4 py-2"
-                    on:click=move |_| backups.refresh()
+                    disabled=move || !can_read_settings.get()
+                    title=move || {
+                        context
+                            .area_block_reason(PeerArea::Settings, false)
+                            .unwrap_or_default()
+                    }
+                    on:click=move |_| {
+                        if can_read_settings.get_untracked() {
+                            backups.refresh();
+                        }
+                    }
                     aria-label=move || tt(context, "Refresh manifests")
                 >
                     {move || tt(context, "Common.refresh")}
                 </button>
-                <label class="glass-button px-4 py-2 cursor-pointer">
+                <label
+                    class="glass-button px-4 py-2 cursor-pointer"
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Settings, true)
+                            .unwrap_or_default()
+                    }
+                >
                     {move || tt(context, "Stage backup")}
                     <input
                         type="file"
                         accept=".sqlite"
                         class="block mt-2 max-w-full"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                        }
                         on:change=move |event| {
                             let input = event_target::<web_sys::HtmlInputElement>(&event);
                             if let Some(file) = input.files().and_then(|files| files.get(0)) {
@@ -388,6 +597,15 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 ]
                 rows=Signal::derive(move || json_rows(&backups.data.get()))
                 on_select=Callback::new(move |row: Value| {
+                    if !context.can_write_area(crate::state::PeerArea::Settings) {
+                        if let Some(reason) = context.area_block_reason(
+                            crate::state::PeerArea::Settings,
+                            true,
+                        ) {
+                            context.toast(reason, true);
+                        }
+                        return;
+                    }
                     selected.set(row);
                     download_open.set(true);
                 })
@@ -400,7 +618,20 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 <p role="status">{move || tt_with(context, "Staging: {pct}%", &[("pct", &(progress.get()).to_string())])}</p>
             </Show>
         </ObsCard>
-        <Modal open=download_open title="Download verified backup">
+        <Modal
+            open=download_open
+            title=Signal::derive(move || {
+                let server = download_captured
+                    .get()
+                    .and_then(|c| c.server_name)
+                    .or_else(|| context.active_server_name());
+                crate::tabs::l10n::confirm_dialog_title(
+                    context,
+                    "Download verified backup",
+                    server.as_deref(),
+                )
+            })
+        >
             <p class="text-sm break-all mb-4">{move || selected.with(|v| text(v, "filename"))}</p>
             <form
                 class="space-y-4"
@@ -409,17 +640,45 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     download();
                 }
             >
-                <DraftInput
-                    draft=password
-                    field="password"
-                    label="Current password"
-                    kind="password"
-                    required=true
-                />
+                <Show
+                    when=move || !context.is_remote()
+                    fallback=move || {
+                        view! {
+                            <p
+                                data-testid="remote-backup-stepup-note"
+                                class="text-sm text-cyan-200 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2"
+                            >
+                                {move || {
+                                    let server = context.active_server_name().unwrap_or_default();
+                                    tt_with(
+                                        context,
+                                        "PeerSwitch.remoteBackupAuthorized",
+                                        &[("server", &server)],
+                                    )
+                                }}
+                            </p>
+                        }
+                    }
+                >
+                    <DraftInput
+                        draft=password
+                        field="password"
+                        label="Current password"
+                        kind="password"
+                        required=true
+                    />
+                </Show>
                 <button
                     type="submit"
                     class="glass-button-primary px-4 py-2"
-                    disabled=move || busy.get()
+                    disabled=move || {
+                        busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
+                    }
+                    title=move || {
+                        context
+                            .area_block_reason(crate::state::PeerArea::Settings, true)
+                            .unwrap_or_default()
+                    }
                 >
                     {move || tt(context, "Download archive")}
                 </button>
@@ -550,5 +809,20 @@ mod tests {
             "/api/v1/peers/media-2/admin/backup/download/snap%202026.sqlite"
         );
         assert_eq!(backup_download_href(&peer_href), peer_href);
+
+        // Remote step-up sends empty JSON body and never attaches Server A's local password header.
+        let (remote_body, remote_header) = backup_download_auth_request(true, "local-secret");
+        assert_eq!(remote_body, json!({}));
+        assert!(!remote_header);
+
+        let (local_body, local_header) = backup_download_auth_request(false, "local-secret");
+        assert_eq!(local_body, json!({"password": "local-secret"}));
+        assert!(local_header);
+
+        assert_eq!(
+            backup_download_href_for_server(Some("media-2"), &api_path),
+            "/api/v1/peers/media-2/admin/backup/download/snap%202026.sqlite"
+        );
+        assert_eq!(backup_download_href_for_server(None, &api_path), api_path);
     }
 }

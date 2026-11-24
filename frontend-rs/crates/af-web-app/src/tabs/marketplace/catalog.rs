@@ -214,10 +214,6 @@ pub(super) fn domain(value: &Value) -> &'static str {
         "Productivity & Desktop"
     }
 }
-pub(super) fn app_url(value: &Value, settings: &Value) -> Option<String> {
-    let host = web_sys::window().and_then(|w| w.location().hostname().ok());
-    crate::tabs::services::launch_url_with_host(value, settings, host.as_deref())
-}
 
 #[component]
 pub(super) fn PackageIcon(package: Signal<Value>) -> impl IntoView {
@@ -302,10 +298,27 @@ pub(super) fn PackageCard(
         }
     });
     let link = Signal::derive(move || {
-        package.with(|p| context.settings.with(|settings| app_url(p, settings)))
+        let is_remote = context.is_remote();
+        let can_read_settings =
+            !is_remote || context.can_read_area(crate::state::PeerArea::Settings);
+        package.with(|p| {
+            if can_read_settings {
+                context.settings.with(|settings| {
+                    crate::tabs::services::launch_url_for_server(p, settings, is_remote)
+                })
+            } else {
+                crate::tabs::services::launch_url_for_server(p, &Value::Null, is_remote)
+            }
+        })
     });
+    let can_write_marketplace = move || context.can_write_area(crate::state::PeerArea::Marketplace);
+    let marketplace_write_reason = move || {
+        context
+            .area_block_reason(crate::state::PeerArea::Marketplace, true)
+            .unwrap_or_default()
+    };
     let choose = move |action: &'static str| {
-        if context.is_admin() && !busy.get_untracked() {
+        if context.is_admin() && can_write_marketplace() && !busy.get_untracked() {
             pending.set(Some((package.get_untracked(), action.into())));
             confirm.set(true);
         }
@@ -461,8 +474,12 @@ pub(super) fn PackageCard(
                         <button
                             type="button"
                             class="glass-button-primary px-4 py-2 min-h-11 text-xs"
-                            disabled=move || busy.get()
+                            disabled=move || busy.get() || !can_write_marketplace()
+                            title=marketplace_write_reason
                             on:click=move |_| {
+                                if !can_write_marketplace() {
+                                    return;
+                                }
                                 let p = package.get_untracked();
                                 if p["config_schema"].is_object()
                                     || p["requires_confirmation"] == true
@@ -494,7 +511,8 @@ pub(super) fn PackageCard(
                         <button
                             type="button"
                             class="glass-button px-3 py-2 min-h-11 text-xs text-rose-300"
-                            disabled=move || busy.get()
+                            disabled=move || busy.get() || !can_write_marketplace()
+                            title=marketplace_write_reason
                             on:click=move |_| choose("purge")
                         >
                             {move || tt(context, "Purge retained data")}
@@ -507,9 +525,11 @@ pub(super) fn PackageCard(
                                 class="glass-button-primary px-3 py-2 min-h-11 text-xs"
                                 disabled=move || {
                                     busy.get()
+                                        || !can_write_marketplace()
                                         || package
                                             .with(|p| field(p, &["latest_version"]).is_empty())
                                 }
+                                title=marketplace_write_reason
                                 on:click=move |_| ops.start(package.get_untracked(), "update")
                             >
                                 {move || tt(context, "Update")}
@@ -522,8 +542,11 @@ pub(super) fn PackageCard(
                                 tt_with(context, "Check updates for {name}", &[("name", &(package.with(|p| field(p, &["name", "id"]))).to_string())])
                             }
                             disabled=move || {
-                                busy.get() || ops.checking.with(|set| set.contains(&id.get_value()))
+                                busy.get()
+                                    || !can_write_marketplace()
+                                    || ops.checking.with(|set| set.contains(&id.get_value()))
                             }
+                            title=marketplace_write_reason
                             on:click=move |_| ops.check_updates(Some(package.get_untracked()))
                         >
                             {move || tt(context, if ops.checking.with(|set| set.contains(&id.get_value())) {
@@ -535,7 +558,8 @@ pub(super) fn PackageCard(
                         <button
                             type="button"
                             class="glass-button px-3 py-2 min-h-11 text-xs"
-                            disabled=move || busy.get()
+                            disabled=move || busy.get() || !can_write_marketplace()
+                            title=marketplace_write_reason
                             on:click=move |_| choose("reinstall")
                         >
                             {move || tt(context, "Repair")}
@@ -543,7 +567,8 @@ pub(super) fn PackageCard(
                         <button
                             type="button"
                             class="glass-button px-3 py-2 min-h-11 text-xs text-rose-300"
-                            disabled=move || busy.get()
+                            disabled=move || busy.get() || !can_write_marketplace()
+                            title=marketplace_write_reason
                             on:click=move |_| choose("uninstall")
                         >
                             {move || tt(context, "Remove")}
@@ -579,11 +604,19 @@ pub(super) fn PackageCard(
                         <button
                             type="button"
                             class="glass-button px-3 py-2 min-h-11 text-xs inline-flex items-center"
+                            disabled=move || !context.can_read_area(crate::state::PeerArea::Network)
                             title=move || {
-                                let name = package.with(|p| field(p, &["name", "id"]));
-                                tt_with(context, "Configure external access for {name}", &[("name", &name)])
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Network, false)
+                                    .unwrap_or_else(|| {
+                                        let name = package.with(|p| field(p, &["name", "id"]));
+                                        tt_with(context, "Configure external access for {name}", &[("name", &name)])
+                                    })
                             }
                             on:click=move |_| {
+                                if !context.can_read_area(crate::state::PeerArea::Network) {
+                                    return;
+                                }
                                 if let Some(target) = package.with_untracked(crate::tabs::services::external_access_target) {
                                     context.navigate_to_subtab(crate::state::TabId::Network, target);
                                 }

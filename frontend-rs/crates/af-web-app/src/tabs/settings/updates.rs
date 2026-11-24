@@ -8,8 +8,13 @@ fn update_status_auto_allowed(
     runner_available == Some(true) || has_saved_job || explicit_requests > 0
 }
 
+#[cfg(test)]
 fn runner_probe_path(is_admin: bool) -> Option<&'static str> {
     is_admin.then_some("/api/v1/admin/network/status")
+}
+
+fn runner_probe_path_for_access(is_admin: bool, can_read_network: bool) -> Option<&'static str> {
+    (is_admin && can_read_network).then_some("/api/v1/admin/network/status")
 }
 
 fn update_status_auto_allowed_for_role(
@@ -19,6 +24,44 @@ fn update_status_auto_allowed_for_role(
     explicit_requests: u64,
 ) -> bool {
     !is_admin || update_status_auto_allowed(runner_available, has_saved_job, explicit_requests)
+}
+
+fn update_status_auto_allowed_for_access(
+    is_admin: bool,
+    is_remote: bool,
+    can_read_network: bool,
+    can_read_updates: bool,
+    runner_available: Option<bool>,
+    has_saved_job: bool,
+    explicit_requests: u64,
+) -> bool {
+    if !can_read_updates {
+        return false;
+    }
+    if is_remote && !can_read_network {
+        return true;
+    }
+    update_status_auto_allowed_for_role(
+        is_admin,
+        runner_available,
+        has_saved_job,
+        explicit_requests,
+    )
+}
+
+pub(super) fn update_operation_storage_key(server_id: Option<&str>) -> String {
+    match server_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => format!("af-update-operation:{id}"),
+        None => "af-update-operation".to_string(),
+    }
+}
+
+pub(super) fn update_readiness_endpoint(is_remote: bool) -> &'static str {
+    if is_remote {
+        "/api/v1/auth/ready"
+    } else {
+        "/health/ready"
+    }
 }
 
 pub(super) fn update_status(value: &Value) -> Value {
@@ -42,26 +85,53 @@ pub(super) fn update_status(value: &Value) -> Value {
     normalized
 }
 
-pub(super) async fn api_is_ready() -> bool {
-    let request = Box::pin(ApiClient.public_request("/health/ready", "GET", None));
+pub(super) async fn api_is_ready_for_server(is_remote: bool) -> bool {
     let deadline = Box::pin(gloo_timers::future::TimeoutFuture::new(8000));
-    match select(request, deadline).await {
-        Either::Left((result, _)) => {
-            result.is_ok_and(|value| value["status"] == "ready" && value["database"] == "ok")
+    if is_remote {
+        let request = Box::pin(ApiClient.get(update_readiness_endpoint(true)));
+        match select(request, deadline).await {
+            Either::Left((result, _)) => {
+                result.is_ok_and(|value| value["status"] == "ready" && value["database"] == "ok")
+            }
+            Either::Right(_) => false,
         }
-        Either::Right(_) => false,
+    } else {
+        let request =
+            Box::pin(ApiClient.public_request(update_readiness_endpoint(false), "GET", None));
+        match select(request, deadline).await {
+            Either::Left((result, _)) => {
+                result.is_ok_and(|value| value["status"] == "ready" && value["database"] == "ok")
+            }
+            Either::Right(_) => false,
+        }
     }
 }
 #[component]
 pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> impl IntoView {
     let context = app();
-    let check = use_api("/api/v1/auth/system/update/check".to_string());
-    let job = RwSignal::new(storage_get("af-update-operation").unwrap_or_default());
+    let can_read_updates = Signal::derive(move || context.can_read_area(PeerArea::Updates));
+    let check = use_api_when(
+        can_read_updates,
+        "/api/v1/auth/system/update/check".to_string(),
+    );
+    let job = RwSignal::new(if context.can_read_area_untracked(PeerArea::Updates) {
+        storage_get(&update_operation_storage_key(
+            context.active_server_id.get_untracked().as_deref(),
+        ))
+        .unwrap_or_default()
+    } else {
+        String::new()
+    });
     let runner_probe_data = RwSignal::new(Value::Null);
     let runner_probe_generation = RwSignal::new(0u64);
     Effect::new(move |_| {
         let auth = context.session_epoch.get();
-        let path = runner_probe_path(context.is_admin());
+        let server_epoch = context.server_epoch.get();
+        let network_grant = context.area_revocation_epoch(PeerArea::Network);
+        let path = runner_probe_path_for_access(
+            context.is_admin() && can_read_updates.get(),
+            context.can_read_area(PeerArea::Network),
+        );
         runner_probe_generation.update(|ticket| *ticket += 1);
         let ticket = runner_probe_generation.get_untracked();
         let Some(path) = path else {
@@ -72,6 +142,11 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
             let result = ApiClient.get(path).await;
             if runner_probe_generation.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Network) != network_grant
+                || !context.is_admin_untracked()
+                || !context.can_read_area_untracked(PeerArea::Network)
+                || !context.can_read_area_untracked(PeerArea::Updates)
             {
                 return;
             }
@@ -96,13 +171,32 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
     let generation = RwSignal::new(0u64);
     Effect::new(move |_| {
         let is_admin = context.is_admin();
+        let is_remote = context.is_remote();
+        let can_read_network = context.can_read_area(PeerArea::Network);
+        let can_read_updates_now = can_read_updates.get();
+        let updates_grant = context.area_revocation_epoch(PeerArea::Updates);
         let available = runner_available.get();
         let unit = job.get();
         let requests = status.revision.get();
         let auth = context.session_epoch.get();
+        let server_epoch = context.server_epoch.get();
         generation.update(|ticket| *ticket += 1);
         let ticket = generation.get_untracked();
-        if !update_status_auto_allowed_for_role(is_admin, available, !unit.is_empty(), requests) {
+        if !can_read_updates_now {
+            status.data.set(Value::Null);
+            status.loading.set(false);
+            status.error.set(None);
+            return;
+        }
+        if !update_status_auto_allowed_for_access(
+            is_admin,
+            is_remote,
+            can_read_network,
+            can_read_updates_now,
+            available,
+            !unit.is_empty(),
+            requests,
+        ) {
             status.loading.set(false);
             status.error.set(None);
             return;
@@ -122,6 +216,10 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
             let result = ApiClient.get(&path).await;
             if generation.try_get_untracked() != Some(ticket)
                 || context.session_epoch.try_get_untracked() != Some(auth)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Updates) != updates_grant
+                || !context.is_admin_untracked()
+                || !context.can_read_area_untracked(PeerArea::Updates)
             {
                 return;
             }
@@ -150,10 +248,36 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
     let observed_terminal = RwSignal::new(String::new());
     let tick = StoredValue::new_local(None::<gloo_timers::callback::Interval>);
     Effect::new(move |_| {
-        let active = launching.get()
-            || uncertain.get()
-            || status_value
-                .with(|value| matches!(value["state"].as_str(), Some("running" | "queued")));
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(PeerArea::Updates);
+        let allowed = can_read_updates.get();
+        let key = update_operation_storage_key(context.active_server_id.get_untracked().as_deref());
+        job.set(if allowed {
+            storage_get(&key).unwrap_or_default()
+        } else {
+            String::new()
+        });
+        status.data.set(Value::Null);
+        status.error.set(None);
+        status.loading.set(false);
+        confirm.set(false);
+        launching.set(false);
+        uncertain.set(false);
+        previous.set(String::new());
+        last_check.set(0.0);
+        last_status.set(0.0);
+        ready.set(false);
+        ready_busy.set(false);
+        observed_terminal.set(String::new());
+        tick.set_value(None);
+    });
+    Effect::new(move |_| {
+        let active = can_read_updates.get()
+            && (launching.get()
+                || uncertain.get()
+                || status_value
+                    .with(|value| matches!(value["state"].as_str(), Some("running" | "queued"))));
         if !active {
             tick.set_value(None);
             return;
@@ -164,6 +288,9 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
         tick.set_value(Some(gloo_timers::callback::Interval::new(
             2_000,
             move || {
+                if !context.can_read_area_untracked(PeerArea::Updates) {
+                    return;
+                }
                 let now = js_sys::Date::now();
                 clock.set(now);
                 if !status.loading.get_untracked() || now - last_retry.get_untracked() > 10_000.0 {
@@ -171,12 +298,22 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                     status.refresh();
                 }
                 if !ready_busy.get_untracked() {
+                    let server_epoch = context.server_epoch.get_untracked();
+                    let updates_grant = context.area_revocation_epoch_untracked(PeerArea::Updates);
+                    let is_remote = context.is_remote_untracked();
                     ready_busy.set(true);
                     let mut busy_guard = crate::tabs::busy::BusyGuard::new(ready_busy);
                     spawn_local(async move {
-                        let result = api_is_ready().await;
-                        if ready.try_get_untracked().is_some() {
+                        let result = api_is_ready_for_server(is_remote).await;
+                        if ready.try_get_untracked().is_some()
+                            && context.server_epoch.try_get_untracked() == Some(server_epoch)
+                            && context.area_revocation_epoch_untracked(PeerArea::Updates)
+                                == updates_grant
+                            && context.can_read_area_untracked(PeerArea::Updates)
+                        {
                             ready.set(result);
+                        }
+                        if ready_busy.try_get_untracked().is_some() {
                             busy_guard.release();
                         }
                     });
@@ -194,6 +331,8 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
     Effect::new(move |_| {
         let value = status_value.get();
         if value.is_object() && status.error.get().is_none() {
+            let storage_key =
+                update_operation_storage_key(context.active_server_id.get_untracked().as_deref());
             last_status.set(js_sys::Date::now());
             last_retry.set(js_sys::Date::now());
             let operation = text(&value, "operationId");
@@ -206,14 +345,14 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                 && !operation.is_empty()
             {
                 job.set(operation.clone());
-                storage_set("af-update-operation", &operation);
+                storage_set(&storage_key, &operation);
             }
             if uncertain.get_untracked()
                 && !operation.is_empty()
                 && operation != previous.get_untracked()
             {
                 job.set(operation.clone());
-                storage_set("af-update-operation", &operation);
+                storage_set(&storage_key, &operation);
                 uncertain.set(false);
             }
         }
@@ -245,7 +384,9 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                     ),
                     false,
                 );
-                context.refresh_session();
+                if !context.is_remote_untracked() {
+                    context.refresh_session();
+                }
             } else {
                 context.toast(
                     tt(
@@ -264,6 +405,7 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
         let release = check.data.get();
         let now = js_sys::Date::now();
         context.is_admin()
+            && context.can_write_area(crate::state::PeerArea::Updates)
             && !launching.get()
             && !uncertain.get()
             && !settings_busy.get()
@@ -292,20 +434,31 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
         if !can_launch.get_untracked() {
             return;
         }
+        let session_epoch = context.session_epoch.get_untracked();
+        let server_epoch = context.server_epoch.get_untracked();
+        let updates_grant = context.area_revocation_epoch_untracked(PeerArea::Updates);
+        let storage_key =
+            update_operation_storage_key(context.active_server_id.get_untracked().as_deref());
         launching.set(true);
         uncertain.set(true);
         previous.set(status_value.with_untracked(|v| text(v, "operationId")));
         // An uncertain launch must observe the global journal, not a prior
         // completed receipt left over from an earlier update.
         job.set(String::new());
-        storage_set("af-update-operation", "");
+        storage_set(&storage_key, "");
         launch_at.set(js_sys::Date::now());
         ready.set(false);
         spawn_local(async move {
             let result = ApiClient
                 .post("/api/v1/admin/system/update/run", None)
                 .await;
-            if launching.try_get_untracked().is_none() {
+            if launching.try_get_untracked().is_none()
+                || context.session_epoch.try_get_untracked() != Some(session_epoch)
+                || context.server_epoch.try_get_untracked() != Some(server_epoch)
+                || context.area_revocation_epoch_untracked(PeerArea::Updates) != updates_grant
+                || !context.is_admin_untracked()
+                || !context.can_read_area_untracked(PeerArea::Updates)
+            {
                 return;
             }
             match result {
@@ -313,7 +466,7 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                     let unit = text(&value, "job_unit");
                     if unit.starts_with("aetherflow-self-update-deploy-") {
                         job.set(unit.clone());
-                        storage_set("af-update-operation", &unit);
+                        storage_set(&storage_key, &unit);
                         uncertain.set(false);
                         confirm.set(false);
                         context.toast(
@@ -343,6 +496,15 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
             <h2 class="text-lg font-semibold mb-4">
                 {move || tt(context, "Settings.systemUpdates")}
             </h2>
+            <Show when=move || !can_read_updates.get()>
+                <p role="status" class="text-xs text-amber-300 mb-4">
+                    {move || {
+                        context
+                            .area_block_reason(PeerArea::Updates, false)
+                            .unwrap_or_default()
+                    }}
+                </p>
+            </Show>
             <div class="grid sm:grid-cols-2 gap-5">
                 <div class="space-y-2 text-sm">
                     <p>
@@ -441,10 +603,20 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                         <button
                             type="button"
                             class="glass-button px-4 py-2"
-                            disabled=move || check.loading.get()
+                            disabled=move || {
+                                check.loading.get()
+                                    || !context.can_read_area(crate::state::PeerArea::Updates)
+                            }
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Updates, false)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| {
-                                check.refresh();
-                                status.refresh();
+                                if context.can_read_area_untracked(PeerArea::Updates) {
+                                    check.refresh();
+                                    status.refresh();
+                                }
                             }
                         >
                             {move || {
@@ -459,6 +631,11 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                             type="button"
                             class="glass-button-primary px-4 py-2"
                             disabled=move || !can_launch.get()
+                            title=move || {
+                                context
+                                    .area_block_reason(crate::state::PeerArea::Updates, true)
+                                    .unwrap_or_default()
+                            }
                             on:click=move |_| confirm.set(true)
                         >
                             {move || tt(context, "Apply Self-Update")}
@@ -542,6 +719,24 @@ mod tests {
             Some(true),
             false,
             0
+        ));
+    }
+
+    #[test]
+    fn remote_updates_use_authenticated_ready_endpoint_and_server_scoped_storage_key() {
+        assert_eq!(update_readiness_endpoint(false), "/health/ready");
+        assert_eq!(update_readiness_endpoint(true), "/api/v1/auth/ready");
+        assert_eq!(update_operation_storage_key(None), "af-update-operation");
+        assert_eq!(
+            update_operation_storage_key(Some("media-2")),
+            "af-update-operation:media-2"
+        );
+        assert_eq!(runner_probe_path_for_access(true, false), None);
+        assert!(update_status_auto_allowed_for_access(
+            true, true, false, true, None, false, 0
+        ));
+        assert!(!update_status_auto_allowed_for_access(
+            true, true, false, false, None, false, 0
         ));
     }
 }

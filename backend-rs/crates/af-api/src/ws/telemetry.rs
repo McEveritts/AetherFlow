@@ -171,6 +171,18 @@ impl Telemetry {
         }
     }
 
+    pub(super) fn cached_snapshot(&self) -> Option<serde_json::Value> {
+        self.metrics
+            .borrow()
+            .clone()
+            .map(|cached| self.metrics_message(cached))
+    }
+
+    pub(super) fn subscribe_metrics(&self) -> watch::Receiver<Option<serde_json::Value>> {
+        self.metrics.subscribe()
+    }
+
+    #[cfg(test)]
     pub(super) async fn initial_snapshot(&self) -> serde_json::Value {
         let mut metrics = self.metrics.subscribe();
         loop {
@@ -376,6 +388,46 @@ pub(super) fn websocket_message_for_session(
     }
     sanitize_diagnostic_text_fields(&mut payload);
     serde_json::to_string(&payload).ok()
+}
+
+/// Filters and sanitizes telemetry broadcast frames according to a verified peer grant's
+/// `AccessMap` so peers without `services: read` or `marketplace: read` do not receive
+/// unauthorized service inventory or package job progress frames.
+pub(super) fn websocket_message_for_peer_session(
+    message: String,
+    access: &af_db::peers::AccessMap,
+) -> Option<String> {
+    if !access.has_any_access() {
+        return None;
+    }
+    let mut payload: serde_json::Value = serde_json::from_str(&message).ok()?;
+    match payload.get("type").and_then(serde_json::Value::as_str) {
+        Some("package:progress") => {
+            if !access.marketplace.allows_read() {
+                return None;
+            }
+            sanitize_diagnostic_text_fields(&mut payload);
+            serde_json::to_string(&payload).ok()
+        }
+        Some("METRICS_UPDATE") => {
+            if let Some(services) = payload
+                .get_mut("data")
+                .and_then(|data| data.get_mut("services"))
+            {
+                if !access.services.allows_read() {
+                    *services = serde_json::Value::Null;
+                } else if !access.marketplace.allows_read() {
+                    sanitize_services_for_viewer(services);
+                }
+            }
+            sanitize_diagnostic_text_fields(&mut payload);
+            serde_json::to_string(&payload).ok()
+        }
+        _ => websocket_message_for_session(
+            message,
+            access.services.allows_read() && access.marketplace.allows_read(),
+        ),
+    }
 }
 
 pub fn start_metrics_broadcast_loop() {

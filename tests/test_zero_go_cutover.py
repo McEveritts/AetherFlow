@@ -256,10 +256,13 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         add("", blocks["compat_routes"] + blocks["ingress_compat_routes"])
         peer_admin_routes = peer_routes("tracked_admin_routes_with_runtime")
         peer_public_routes = peer_routes("tracked_public_routes_with_runtime")
+        peer_proxy_routes = peer_routes("tracked_proxy_routes_with_runtime")
         self.assertIn('.nest("/peers", crate::peers::tracked_admin_routes())', v1_sec)
-        self.assertIn('router.merge(crate::peers::tracked_public_routes())', v1_sec)
+        self.assertIn('.merge(crate::peers::tracked_public_routes())', v1_sec)
+        self.assertIn('.nest("/peers", crate::peers::tracked_proxy_routes())', v1_sec)
         add("/admin/peers", peer_admin_routes)
         add("", peer_public_routes)
+        add("/peers", peer_proxy_routes)
 
         spec = yaml.safe_load((ROOT / "config/openapi-v1.yaml").read_text(encoding="utf-8"))
         documented: dict[str, set[str]] = {}
@@ -271,7 +274,7 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
 
         self.assertEqual(documented, expected)
         for path in documented:
-            if path.startswith(("/admin/peers", "/peer-pairing/")):
+            if path.startswith(("/admin/peers", "/peer-pairing/", "/peers/")):
                 self.assertEqual(spec["paths"][path]["servers"], [{"url": "/api/v1"}])
 
         backup_item = spec["paths"]["/admin/backup/download/{filename}"]

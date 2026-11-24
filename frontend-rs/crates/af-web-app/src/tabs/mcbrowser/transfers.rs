@@ -44,6 +44,10 @@ pub(super) struct TransferRow {
 }
 pub(super) struct UploadJob {
     pub(super) epoch: u64,
+    pub(super) server_epoch: u64,
+    pub(super) grant_epoch: u64,
+    pub(super) write_epoch: u64,
+    pub(super) server_id: Option<String>,
     pub(super) file: web_sys::File,
     pub(super) row: TransferRow,
     pub(super) session: String,
@@ -63,6 +67,9 @@ impl UploadJob {
 }
 pub(super) struct QueueInner {
     pub(super) epoch: u64,
+    pub(super) server_epoch: u64,
+    pub(super) grant_epoch: u64,
+    pub(super) write_epoch: u64,
     pub(super) jobs: Vec<Rc<RefCell<UploadJob>>>,
     pub(super) next_id: u64,
     pub(super) disposed: bool,
@@ -86,6 +93,9 @@ impl TransferQueue {
         let queue = Self {
             inner: StoredValue::new_local(QueueInner {
                 epoch: context.session_epoch.get_untracked(),
+                server_epoch: context.server_epoch.get_untracked(),
+                grant_epoch: context.area_revocation_epoch_untracked(PeerArea::Files),
+                write_epoch: 0,
                 jobs: vec![],
                 next_id: 1,
                 disposed: false,
@@ -97,11 +107,28 @@ impl TransferQueue {
         };
         Effect::new(move |_| {
             let epoch = context.session_epoch.get();
-            if queue.inner.with_value(|inner| inner.epoch != epoch) {
+            let server_epoch = context.server_epoch.get();
+            let grant_epoch = context.area_revocation_epoch(PeerArea::Files);
+            if queue.inner.with_value(|inner| {
+                inner.epoch != epoch
+                    || inner.server_epoch != server_epoch
+                    || inner.grant_epoch != grant_epoch
+            }) {
                 queue.clear();
-                queue.inner.update_value(|inner| inner.epoch = epoch);
+                queue.inner.update_value(|inner| {
+                    inner.epoch = epoch;
+                    inner.server_epoch = server_epoch;
+                    inner.grant_epoch = grant_epoch;
+                    inner.write_epoch = inner.write_epoch.wrapping_add(1);
+                });
             }
             queue.publish();
+        });
+        Effect::new(move |_| {
+            if !context.can_write_area(PeerArea::Files) {
+                queue.cancel_all_for_write_loss();
+                queue.publish();
+            }
         });
         on_cleanup(move || {
             queue.clear();
@@ -114,15 +141,31 @@ impl TransferQueue {
             .try_with_value(|inner| {
                 !inner.disposed
                     && self.context.session_epoch.try_get_untracked() == Some(inner.epoch)
+                    && self.context.server_epoch.try_get_untracked() == Some(inner.server_epoch)
+                    && self
+                        .context
+                        .area_revocation_epoch_untracked(PeerArea::Files)
+                        == inner.grant_epoch
+                    && self.context.can_write_area_untracked(PeerArea::Files)
             })
             .unwrap_or(false)
     }
-    fn job_current(self, job: &Rc<RefCell<UploadJob>>) -> bool {
+    pub(super) fn job_current(self, job: &Rc<RefCell<UploadJob>>) -> bool {
+        let (job_epoch, job_server_epoch, job_grant_epoch, job_write_epoch) = {
+            let j = job.borrow();
+            (j.epoch, j.server_epoch, j.grant_epoch, j.write_epoch)
+        };
         let current = self
             .inner
-            .try_with_value(|inner| !inner.disposed)
+            .try_with_value(|inner| !inner.disposed && inner.write_epoch == job_write_epoch)
             .unwrap_or(false)
-            && self.context.session_epoch.try_get_untracked() == Some(job.borrow().epoch);
+            && self.context.session_epoch.try_get_untracked() == Some(job_epoch)
+            && self.context.server_epoch.try_get_untracked() == Some(job_server_epoch)
+            && self
+                .context
+                .area_revocation_epoch_untracked(PeerArea::Files)
+                == job_grant_epoch
+            && self.context.can_write_area_untracked(PeerArea::Files);
         if !current {
             Self::cancel_stale(job);
         }
@@ -135,6 +178,16 @@ impl TransferQueue {
         job.cancel = true;
         job.row.status = TransferStatus::Cancelled;
         job.row.message.clear();
+    }
+    pub(super) fn cancel_all_for_write_loss(self) {
+        self.inner.try_update_value(|inner| {
+            inner.write_epoch = inner.write_epoch.wrapping_add(1);
+            for job in &inner.jobs {
+                if !job.borrow().row.status.terminal() {
+                    Self::cancel_stale(job);
+                }
+            }
+        });
     }
     pub(super) fn job(self, id: u64) -> Option<Rc<RefCell<UploadJob>>> {
         self.inner
@@ -155,7 +208,7 @@ impl TransferQueue {
             inner.jobs.clear();
         });
     }
-    fn request_signal(
+    pub(super) fn request_signal(
         self,
         job: &Rc<RefCell<UploadJob>>,
     ) -> Result<web_sys::AbortSignal, ApiError> {
@@ -178,12 +231,27 @@ impl TransferQueue {
             return;
         }
         let epoch = self.context.session_epoch.try_get_untracked();
+        let server_epoch = self.context.server_epoch.try_get_untracked();
+        let grant_epoch = self
+            .context
+            .area_revocation_epoch_untracked(PeerArea::Files);
+        let can_write = self.context.can_write_area_untracked(PeerArea::Files);
         let rows: Vec<TransferRow> = self.inner.with_value(|inner| {
+            let active_write_epoch = inner.write_epoch;
             inner
                 .jobs
                 .iter()
                 .map(|job| {
-                    if epoch != Some(job.borrow().epoch) && !job.borrow().row.status.terminal() {
+                    let stale = {
+                        let j = job.borrow();
+                        (epoch != Some(j.epoch)
+                            || server_epoch != Some(j.server_epoch)
+                            || grant_epoch != j.grant_epoch
+                            || active_write_epoch != j.write_epoch
+                            || !can_write)
+                            && !j.row.status.terminal()
+                    };
+                    if stale {
                         Self::cancel_stale(job);
                     }
                     job.borrow().row.clone()
@@ -205,25 +273,41 @@ impl TransferQueue {
         let _ = self.context.transfers.try_set(summaries);
     }
     pub(super) fn add(self, files: web_sys::FileList, directory: &str, conflict: &str) {
+        if !self.context.can_write_area_untracked(PeerArea::Files) {
+            return;
+        }
         let Some(epoch) = self.context.session_epoch.try_get_untracked() else {
             return;
         };
+        let Some(server_epoch) = self.context.server_epoch.try_get_untracked() else {
+            return;
+        };
+        let grant_epoch = self
+            .context
+            .area_revocation_epoch_untracked(PeerArea::Files);
+        let server_id = self.context.active_server_id.get_untracked();
         let ready = self.inner.try_update_value(|inner| {
             if inner.disposed {
-                return false;
+                return None;
             }
-            if inner.epoch != epoch {
+            if inner.epoch != epoch
+                || inner.server_epoch != server_epoch
+                || inner.grant_epoch != grant_epoch
+            {
                 for job in &inner.jobs {
                     Self::cancel_stale(job);
                 }
                 inner.jobs.clear();
                 inner.epoch = epoch;
+                inner.server_epoch = server_epoch;
+                inner.grant_epoch = grant_epoch;
+                inner.write_epoch = inner.write_epoch.wrapping_add(1);
             }
-            true
+            Some(inner.write_epoch)
         });
-        if ready != Some(true) {
+        let Some(Some(write_epoch)) = ready else {
             return;
-        }
+        };
         for index in 0..files.length() {
             let Some(file) = files.item(index) else {
                 continue;
@@ -262,6 +346,10 @@ impl TransferQueue {
                 inner.next_id += 1;
                 inner.jobs.push(Rc::new(RefCell::new(UploadJob {
                     epoch,
+                    server_epoch,
+                    grant_epoch,
+                    write_epoch,
+                    server_id: server_id.clone(),
                     file,
                     row: TransferRow {
                         id,
@@ -453,6 +541,12 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                                                 <button
                                                     type="button"
                                                     class="glass-button px-3 py-2"
+                                                    disabled=move || !context.can_write_area(PeerArea::Files)
+                                                    title=move || {
+                                                        context
+                                                            .area_block_reason(PeerArea::Files, true)
+                                                            .unwrap_or_default()
+                                                    }
                                                     on:click=move |_| queue.control(id, "pause")
                                                 >
                                                     {move || tt(context, "Pause")}
@@ -470,6 +564,12 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                                                 <button
                                                     type="button"
                                                     class="glass-button-primary px-3 py-2"
+                                                    disabled=move || !context.can_write_area(PeerArea::Files)
+                                                    title=move || {
+                                                        context
+                                                            .area_block_reason(PeerArea::Files, true)
+                                                            .unwrap_or_default()
+                                                    }
                                                     on:click=move |_| queue.control(id, "resume")
                                                 >
                                                     {move || tt(
@@ -489,6 +589,12 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                                                 <button
                                                     type="button"
                                                     class="glass-button px-3 py-2 text-rose-300"
+                                                    disabled=move || !context.can_write_area(PeerArea::Files)
+                                                    title=move || {
+                                                        context
+                                                            .area_block_reason(PeerArea::Files, true)
+                                                            .unwrap_or_default()
+                                                    }
                                                     on:click=move |_| queue.control(id, "cancel")
                                                 >
                                                     {move || tt(context, "Cancel")}

@@ -215,13 +215,14 @@ pub(super) fn HistoryEventImport(
     let checkpoint = RwSignal::new(String::new());
     let prepared = RwSignal::new(None::<ImportBatch>);
     let busy = RwSignal::new(false);
+    let op_ticket = RwSignal::new(0u64);
     let confirm = RwSignal::new(false);
     let result = RwSignal::new(None::<String>);
     let revision = RwSignal::new(0u64);
     let invalidate = Callback::new(move |(): ()| {
         prepared.set(None);
         confirm.set(false);
-        revision.update(|n| *n += 1);
+        revision.update(|n| *n = n.wrapping_add(1));
     });
     let validate = Callback::new(move |(): ()| {
         invalidate.run(());
@@ -345,56 +346,103 @@ pub(super) fn HistoryEventImport(
             Err(e) => result.set(Some(e)),
         }
     });
+    Effect::new(move |_| {
+        context.session_epoch.track();
+        context.server_epoch.track();
+        context.area_revocation_epoch(crate::state::PeerArea::Services);
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        busy.set(false);
+        invalidate.run(());
+        result.set(None);
+    });
+    Effect::new(move |_| {
+        if !context.can_write_area(crate::state::PeerArea::Services) {
+            op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+            busy.set(false);
+            invalidate.run(());
+        }
+    });
     let import = Callback::new(move |(): ()| {
-        if busy.get_untracked() || !context.is_admin() || prepared.with_untracked(Option::is_none) {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
+            || prepared.with_untracked(Option::is_none)
+        {
             return;
         }
         let Some(body) = prepared.get_untracked() else {
             return;
         };
         let body = serde_json::to_value(body).unwrap_or_default();
-        let ticket = revision.get_untracked();
+        let draft_ticket = revision.get_untracked();
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .post("/api/v1/admin/streaming/imports/events", Some(&body))
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none()
+                || revision.try_get_untracked() != Some(draft_ticket)
+                || !fence.is_valid()
+            {
                 return;
             }
-            if revision.get_untracked() == ticket {
-                match response {
-                    Ok(data) => {
-                        result.set(Some(
-                            serde_json::to_string_pretty(&data).unwrap_or_default(),
-                        ));
-                        prepared.set(None);
-                        on_changed.run(());
-                        context.toast(tt(context, "Canonical source events imported; inspect duplicate and overlap outcomes."),false);
-                    }
-                    Err(e) => {
-                        result.set(Some(e.message.clone()));
-                        context.toast(tt(context, &e.message), true);
-                        prepared.set(None);
-                    }
+            busy_guard.release();
+            match response {
+                Ok(data) => {
+                    result.set(Some(
+                        serde_json::to_string_pretty(&data).unwrap_or_default(),
+                    ));
+                    prepared.set(None);
+                    on_changed.run(());
+                    context.toast(tt(context, "Canonical source events imported; inspect duplicate and overlap outcomes."),false);
+                }
+                Err(e) => {
+                    result.set(Some(e.message.clone()));
+                    context.toast(tt(context, &e.message), true);
+                    prepared.set(None);
                 }
             }
-            busy.set(false);
             confirm.set(false);
         });
     });
     let sync = Callback::new(move |(): ()| {
-        if busy.get_untracked() {
+        if busy.get_untracked()
+            || !context.is_admin_untracked()
+            || !context.can_write_area_untracked(crate::state::PeerArea::Services)
+        {
             return;
         }
+        op_ticket.update(|ticket| *ticket = ticket.wrapping_add(1));
+        let ticket = op_ticket.get_untracked();
+        let fence = crate::tabs::busy::AreaFence::capture(
+            context,
+            crate::state::PeerArea::Services,
+            true,
+            true,
+            op_ticket,
+            ticket,
+        );
         busy.set(true);
+        let mut busy_guard = crate::tabs::busy::BusyGuard::for_generation(busy, op_ticket, ticket);
         spawn_local(async move {
             let response = ApiClient
                 .post("/api/v1/admin/streaming/servers/jellyfin/sync", None)
                 .await;
-            if busy.try_get_untracked().is_none() {
+            if busy.try_get_untracked().is_none() || !fence.is_valid() {
                 return;
             }
+            busy_guard.release();
             match response {
                 Ok(data) => {
                     result.set(Some(format_summary_sync_feedback(
@@ -405,7 +453,6 @@ pub(super) fn HistoryEventImport(
                 }
                 Err(e) => result.set(Some(e.message)),
             }
-            busy.set(false);
         });
     });
     view! {
@@ -571,7 +618,14 @@ pub(super) fn HistoryEventImport(
                     </pre>
                     <button
                         class="glass-button-primary px-4 py-2"
-                        disabled=move || busy.get()
+                        disabled=move || {
+                            busy.get() || !context.can_write_area(crate::state::PeerArea::Services)
+                        }
+                        title=move || {
+                            context
+                                .area_block_reason(crate::state::PeerArea::Services, true)
+                                .unwrap_or_default()
+                        }
                         on:click=move |_| confirm.set(true)
                     >
                         {move || tt(context, "Import reviewed events")}
@@ -602,7 +656,14 @@ pub(super) fn HistoryEventImport(
             </details>
             <button
                 class="glass-button px-4 py-2"
-                disabled=move || busy.get()
+                disabled=move || {
+                    busy.get() || !context.can_write_area(crate::state::PeerArea::Services)
+                }
+                title=move || {
+                    context
+                        .area_block_reason(crate::state::PeerArea::Services, true)
+                        .unwrap_or_default()
+                }
                 on:click=move |_| sync.run(())
             >
                 {move || tt(context, "Sync Jellyfin item summaries & metadata")}
