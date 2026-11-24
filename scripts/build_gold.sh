@@ -143,10 +143,24 @@ stage_companion_binary() {
 }
 
 configure_rust_linker() {
-  if command -v mold >/dev/null 2>&1 || [[ -v CARGO_ENCODED_RUSTFLAGS || -v RUSTFLAGS ]]; then
+  local rust_target="$1"
+  local arch="${2:-}"
+  local host_arch="${3:-}"
+  if [[ -v CARGO_ENCODED_RUSTFLAGS || -v RUSTFLAGS ]]; then
     return 0
   fi
-  local target_flags_name="${1^^}"
+  local use_bfd=0
+  if ! command -v mold >/dev/null 2>&1; then
+    use_bfd=1
+  elif [[ -n "${arch}" && -n "${host_arch}" && "${arch}" != "${host_arch}" ]]; then
+    # Cross GCC toolchains (e.g. aarch64-linux-gnu-gcc on x86_64) look for
+    # <triplet>-ld.mold and fail with "collect2: fatal error: cannot find 'ld'".
+    use_bfd=1
+  fi
+  if [[ "${use_bfd}" != "1" ]]; then
+    return 0
+  fi
+  local target_flags_name="${rust_target^^}"
   target_flags_name="CARGO_TARGET_${target_flags_name//-/_}_RUSTFLAGS"
   local target_flags="${!target_flags_name:-}"
   # Cargo merges target flags from the environment and .cargo/config.toml.
@@ -192,7 +206,6 @@ build_target() {
     export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
     export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
     export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
-    configure_rust_linker "${rust_target}"
     if [[ "${arch}" != "${host_arch}" ]]; then
       case "${rust_target}" in
         aarch64-unknown-linux-gnu)
@@ -215,6 +228,7 @@ build_target() {
           ;;
       esac
     fi
+    configure_rust_linker "${rust_target}" "${arch}" "${host_arch}"
     cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" "${cargo_bin_args[@]}"
   )
 
