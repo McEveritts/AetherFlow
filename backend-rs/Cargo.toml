@@ -12,6 +12,7 @@ members = [
     "crates/af-services",
     "crates/af-api",
     "crates/af-librespeed",
+    "crates/af-transcode",
 ]
 
 [workspace.package]
@@ -30,6 +31,7 @@ af-runner = { path = "crates/af-runner", version = "=4.0.0" }
 af-release = { path = "crates/af-release", version = "=4.0.0" }
 af-host = { path = "crates/af-host", version = "=4.0.0" }
 af-services = { path = "crates/af-services", version = "=4.0.0" }
+af-transcode = { path = "crates/af-transcode", version = "=4.0.0" }
 
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.7", features = ["ws", "multipart", "macros"] }
@@ -70,6 +72,8 @@ mime_guess = "2.0"
 sysinfo = "0.33"
 libloading = "0.8"
 libc = "0.2"
+nix = { version = "0.31.3", default-features = false, features = ["signal", "process"] }
+wincode = { version = "0.6.3", features = ["derive"] }
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"

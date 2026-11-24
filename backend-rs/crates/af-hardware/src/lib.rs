@@ -173,8 +173,91 @@ impl NvmlRuntime {
 static NVML_RUNTIME: Lazy<Option<NvmlRuntime>> = Lazy::new(NvmlRuntime::try_load);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GPU Transcode Flags
+// GPU Render Nodes & Transcode Flags
 // ─────────────────────────────────────────────────────────────────────────────
+
+const SYS_CLASS_DRM_DIR: &str = "/sys/class/drm";
+const DEV_DRI_DIR: &str = "/dev/dri";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderNode {
+    pub path: PathBuf,
+    pub vendor_id: Option<String>,
+}
+
+fn is_render_node_name(name: &str) -> bool {
+    name.strip_prefix("renderD")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn render_node_sort_key(node: &RenderNode) -> (bool, u64, &str) {
+    let name = node
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let is_not_primary = name != "renderD128";
+    let index = name
+        .strip_prefix("renderD")
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    (is_not_primary, index, name)
+}
+
+fn scan_render_nodes(drm_root: &Path) -> Vec<RenderNode> {
+    let mut entries_list: Vec<(String, PathBuf)> = Vec::new();
+    match fs::read_dir(drm_root) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                if is_render_node_name(&name) {
+                    entries_list.push((name, entry.path()));
+                }
+            }
+        }
+        Err(_) => {
+            let primary = drm_root.join("renderD128");
+            if primary.exists() {
+                entries_list.push(("renderD128".to_string(), primary));
+            }
+        }
+    }
+
+    if let Some(primary) = entries_list
+        .iter()
+        .position(|(name, _)| name == "renderD128")
+    {
+        entries_list[..=primary].rotate_right(1);
+    }
+
+    entries_list
+        .into_iter()
+        .map(|(node_name, node_sysfs)| {
+            let vendor_id = fs::read_to_string(node_sysfs.join("device/vendor"))
+                .ok()
+                .map(|raw| raw.trim().to_string())
+                .filter(|trimmed| !trimmed.is_empty());
+            RenderNode {
+                path: Path::new(DEV_DRI_DIR).join(node_name),
+                vendor_id,
+            }
+        })
+        .collect()
+}
+
+fn detect_render_nodes_in(drm_root: &Path) -> Vec<RenderNode> {
+    let mut nodes = scan_render_nodes(drm_root);
+    nodes.sort_by(|left, right| render_node_sort_key(left).cmp(&render_node_sort_key(right)));
+    nodes
+}
+
+/// Scans `/sys/class/drm/renderD*` and returns detected `/dev/dri/renderD*` nodes
+/// with `renderD128` prioritized first and trimmed sysfs vendor IDs when available.
+pub fn detect_render_nodes() -> Vec<RenderNode> {
+    detect_render_nodes_in(Path::new(SYS_CLASS_DRM_DIR))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct GpuFlags {
@@ -184,70 +267,48 @@ pub struct GpuFlags {
     pub video_codec: String,
 }
 
-/// Scans `/sys/class/drm/renderD*/device/vendor` and NVML to determine optimal
-/// hardware transcode acceleration flags (NVENC, VAAPI for AMD, QSV for Intel, or libx265).
-pub fn get_gpu_transcode_flags() -> GpuFlags {
-    // Check NVML first for NVIDIA NVENC support
-    if let Some(ref nvml) = *NVML_RUNTIME {
-        if !nvml.query_devices().is_empty() {
-            return GpuFlags {
-                hw_accel: "cuda".to_string(),
-                hw_accel_device: "0".to_string(),
-                output_format: "cuda".to_string(),
-                video_codec: "hevc_nvenc".to_string(),
-            };
-        }
+fn gpu_transcode_flags_from_nodes(nvml_has_devices: bool, render_nodes: &[RenderNode]) -> GpuFlags {
+    if nvml_has_devices {
+        return GpuFlags {
+            hw_accel: "cuda".to_string(),
+            hw_accel_device: "0".to_string(),
+            output_format: "cuda".to_string(),
+            video_codec: "hevc_nvenc".to_string(),
+        };
     }
 
-    // Check `/sys/class/drm/renderD128/device/vendor` first for exact parity with Go,
-    // then scan additional render nodes (`/dev/dri/renderD*`).
-    let mut render_nodes = vec![PathBuf::from("/sys/class/drm/renderD128")];
-    if let Ok(entries) = fs::read_dir("/sys/class/drm") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("renderD") && name != "renderD128" {
-                render_nodes.push(entry.path());
-            }
-        }
-    }
+    for node in render_nodes {
+        let Some(vendor_id) = node.vendor_id.as_deref() else {
+            continue;
+        };
+        let dev_path = node.path.to_string_lossy().into_owned();
 
-    for node_sysfs in render_nodes {
-        let vendor_path = node_sysfs.join("device/vendor");
-        if let Ok(raw) = fs::read_to_string(&vendor_path) {
-            let vendor_id = raw.trim();
-            let node_name = node_sysfs
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "renderD128".to_string());
-            let dev_path = format!("/dev/dri/{}", node_name);
-
-            match vendor_id {
-                "0x1002" => {
-                    return GpuFlags {
-                        hw_accel: "vaapi".to_string(),
-                        hw_accel_device: dev_path,
-                        output_format: "vaapi".to_string(),
-                        video_codec: "hevc_vaapi".to_string(),
-                    };
-                }
-                "0x8086" => {
-                    return GpuFlags {
-                        hw_accel: "qsv".to_string(),
-                        hw_accel_device: dev_path,
-                        output_format: String::new(),
-                        video_codec: "hevc_qsv".to_string(),
-                    };
-                }
-                "0x10de" => {
-                    return GpuFlags {
-                        hw_accel: "cuda".to_string(),
-                        hw_accel_device: dev_path,
-                        output_format: "cuda".to_string(),
-                        video_codec: "hevc_nvenc".to_string(),
-                    };
-                }
-                _ => {}
+        match vendor_id {
+            "0x1002" => {
+                return GpuFlags {
+                    hw_accel: "vaapi".to_string(),
+                    hw_accel_device: dev_path,
+                    output_format: "vaapi".to_string(),
+                    video_codec: "hevc_vaapi".to_string(),
+                };
             }
+            "0x8086" => {
+                return GpuFlags {
+                    hw_accel: "qsv".to_string(),
+                    hw_accel_device: dev_path,
+                    output_format: String::new(),
+                    video_codec: "hevc_qsv".to_string(),
+                };
+            }
+            "0x10de" => {
+                return GpuFlags {
+                    hw_accel: "cuda".to_string(),
+                    hw_accel_device: dev_path,
+                    output_format: "cuda".to_string(),
+                    video_codec: "hevc_nvenc".to_string(),
+                };
+            }
+            _ => {}
         }
     }
 
@@ -257,6 +318,22 @@ pub fn get_gpu_transcode_flags() -> GpuFlags {
         output_format: String::new(),
         video_codec: "libx265".to_string(),
     }
+}
+
+/// Scans `/sys/class/drm/renderD*/device/vendor` and NVML to determine optimal
+/// hardware transcode acceleration flags (NVENC, VAAPI for AMD, QSV for Intel, or libx265).
+pub fn get_gpu_transcode_flags() -> GpuFlags {
+    // Check NVML first for NVIDIA NVENC support
+    let nvml_has_devices = NVML_RUNTIME
+        .as_ref()
+        .is_some_and(|nvml| !nvml.query_devices().is_empty());
+    if nvml_has_devices {
+        return gpu_transcode_flags_from_nodes(true, &[]);
+    }
+
+    // Preserve the original renderD128 priority and sysfs order for other devices.
+    let render_nodes = scan_render_nodes(Path::new(SYS_CLASS_DRM_DIR));
+    gpu_transcode_flags_from_nodes(false, &render_nodes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1448,5 +1525,287 @@ mod tests {
             read_proc_diskstats_from_content(virtual_only, |_| false, |_| false),
             (0, 0)
         );
+    }
+
+    struct DisposableSysfs {
+        root: PathBuf,
+    }
+
+    impl DisposableSysfs {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "af-hardware-drm-{label}-{}-{seq}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("create disposable sysfs root");
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+
+        fn add_render_node(&self, name: &str, vendor: Option<&str>) {
+            let node_dir = self.root.join(name);
+            fs::create_dir_all(&node_dir).expect("create render node dir");
+            if let Some(vendor_text) = vendor {
+                let device_dir = node_dir.join("device");
+                fs::create_dir_all(&device_dir).expect("create device dir");
+                fs::write(device_dir.join("vendor"), vendor_text).expect("write vendor file");
+            }
+        }
+    }
+
+    impl Drop for DisposableSysfs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn detect_render_nodes_handles_absent_empty_and_non_render_roots() {
+        let fixture = DisposableSysfs::new("absent-and-empty");
+        let missing = fixture.path().join("does-not-exist");
+        assert!(detect_render_nodes_in(&missing).is_empty());
+        assert!(detect_render_nodes_in(fixture.path()).is_empty());
+
+        fs::create_dir_all(fixture.path().join("card0/device")).unwrap();
+        fs::write(fixture.path().join("card0/device/vendor"), "0x8086\n").unwrap();
+        fs::create_dir_all(fixture.path().join("card0-DP-1")).unwrap();
+        fs::write(fixture.path().join("version"), "drm 1.1.0\n").unwrap();
+        fs::create_dir_all(fixture.path().join("renderD")).unwrap();
+        fs::create_dir_all(fixture.path().join("renderDfoo")).unwrap();
+
+        assert!(detect_render_nodes_in(fixture.path()).is_empty());
+    }
+
+    #[test]
+    fn detect_render_nodes_reads_known_unknown_and_missing_vendors() {
+        let fixture = DisposableSysfs::new("vendors");
+        fixture.add_render_node("renderD128", Some("  0x8086\n"));
+        fixture.add_render_node("renderD129", Some("0x1002\r\n"));
+        fixture.add_render_node("renderD130", Some("0x10de"));
+        fixture.add_render_node("renderD131", Some(" 0x1af4 \n"));
+        fixture.add_render_node("renderD132", None);
+        fixture.add_render_node("renderD133", Some("   \t\n "));
+
+        let nodes = detect_render_nodes_in(fixture.path());
+        assert_eq!(
+            nodes,
+            vec![
+                RenderNode {
+                    path: PathBuf::from("/dev/dri/renderD128"),
+                    vendor_id: Some("0x8086".to_string()),
+                },
+                RenderNode {
+                    path: PathBuf::from("/dev/dri/renderD129"),
+                    vendor_id: Some("0x1002".to_string()),
+                },
+                RenderNode {
+                    path: PathBuf::from("/dev/dri/renderD130"),
+                    vendor_id: Some("0x10de".to_string()),
+                },
+                RenderNode {
+                    path: PathBuf::from("/dev/dri/renderD131"),
+                    vendor_id: Some("0x1af4".to_string()),
+                },
+                RenderNode {
+                    path: PathBuf::from("/dev/dri/renderD132"),
+                    vendor_id: None,
+                },
+                RenderNode {
+                    path: PathBuf::from("/dev/dri/renderD133"),
+                    vendor_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_render_nodes_prioritizes_render_d128_and_orders_others_deterministically() {
+        let fixture = DisposableSysfs::new("ordering");
+        fixture.add_render_node("renderD1000", Some("0x1af4\n"));
+        fixture.add_render_node("renderD130", Some("0x10de\n"));
+        fixture.add_render_node("renderD129", Some("0x1002\n"));
+        fixture.add_render_node("renderD127", Some("0x1234\n"));
+        fixture.add_render_node("renderD128", Some("0x8086\n"));
+        fs::create_dir_all(fixture.path().join("card0")).unwrap();
+
+        let paths: Vec<PathBuf> = detect_render_nodes_in(fixture.path())
+            .into_iter()
+            .map(|n| n.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/dev/dri/renderD128"),
+                PathBuf::from("/dev/dri/renderD127"),
+                PathBuf::from("/dev/dri/renderD129"),
+                PathBuf::from("/dev/dri/renderD130"),
+                PathBuf::from("/dev/dri/renderD1000"),
+            ]
+        );
+
+        let no_primary = DisposableSysfs::new("ordering-no-primary");
+        no_primary.add_render_node("renderD131", Some("0x10de\n"));
+        no_primary.add_render_node("renderD129", Some("0x1002\n"));
+        let secondary_paths: Vec<PathBuf> = detect_render_nodes_in(no_primary.path())
+            .into_iter()
+            .map(|n| n.path)
+            .collect();
+        assert_eq!(
+            secondary_paths,
+            vec![
+                PathBuf::from("/dev/dri/renderD129"),
+                PathBuf::from("/dev/dri/renderD131"),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_gpu_flags_preserve_secondary_sysfs_order() {
+        let fixture = DisposableSysfs::new("legacy-order");
+        fixture.add_render_node("renderD130", Some("0x1002"));
+        fixture.add_render_node("renderD129", Some("0x8086"));
+        fixture.add_render_node("renderD128", Some("unknown"));
+        let first_supported = fs::read_dir(fixture.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .find(|name| name != "renderD128")
+            .unwrap();
+
+        let flags = gpu_transcode_flags_from_nodes(false, &scan_render_nodes(fixture.path()));
+        assert_eq!(
+            Path::new(&flags.hw_accel_device),
+            Path::new(DEV_DRI_DIR).join(first_supported)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_render_nodes_follows_sysfs_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = DisposableSysfs::new("symlinks");
+        let backing = fixture.path().join("pci-device/drm/renderD128");
+        fs::create_dir_all(backing.join("device")).unwrap();
+        fs::write(backing.join("device/vendor"), "0x1002\n").unwrap();
+
+        let drm_dir = fixture.path().join("drm");
+        fs::create_dir_all(&drm_dir).unwrap();
+        symlink(&backing, drm_dir.join("renderD128")).unwrap();
+
+        let nodes = detect_render_nodes_in(&drm_dir);
+        assert_eq!(
+            nodes,
+            vec![RenderNode {
+                path: PathBuf::from("/dev/dri/renderD128"),
+                vendor_id: Some("0x1002".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn gpu_transcode_flags_preserves_nvml_first_primary_priority_and_fallbacks() {
+        let fixture = DisposableSysfs::new("flags-priority");
+        fixture.add_render_node("renderD129", Some("0x1002\n"));
+        fixture.add_render_node("renderD128", Some("0x8086\n"));
+        let nodes = detect_render_nodes_in(fixture.path());
+
+        // NVML always takes precedence over sysfs render nodes.
+        assert_eq!(
+            gpu_transcode_flags_from_nodes(true, &nodes),
+            GpuFlags {
+                hw_accel: "cuda".to_string(),
+                hw_accel_device: "0".to_string(),
+                output_format: "cuda".to_string(),
+                video_codec: "hevc_nvenc".to_string(),
+            }
+        );
+
+        // Without NVML, renderD128 takes precedence over renderD129.
+        assert_eq!(
+            gpu_transcode_flags_from_nodes(false, &nodes),
+            GpuFlags {
+                hw_accel: "qsv".to_string(),
+                hw_accel_device: "/dev/dri/renderD128".to_string(),
+                output_format: String::new(),
+                video_codec: "hevc_qsv".to_string(),
+            }
+        );
+
+        // Unknown or missing vendor on renderD128 falls through to the next known node.
+        let fallthrough = DisposableSysfs::new("flags-fallthrough");
+        fallthrough.add_render_node("renderD128", Some("0x1af4\n"));
+        fallthrough.add_render_node("renderD129", None);
+        fallthrough.add_render_node("renderD130", Some("0x1002\n"));
+        assert_eq!(
+            gpu_transcode_flags_from_nodes(false, &detect_render_nodes_in(fallthrough.path())),
+            GpuFlags {
+                hw_accel: "vaapi".to_string(),
+                hw_accel_device: "/dev/dri/renderD130".to_string(),
+                output_format: "vaapi".to_string(),
+                video_codec: "hevc_vaapi".to_string(),
+            }
+        );
+
+        // Sysfs NVIDIA vendor preserves device path when NVML is absent.
+        let sysfs_nv = DisposableSysfs::new("flags-sysfs-nv");
+        sysfs_nv.add_render_node("renderD129", Some("0x10de\n"));
+        assert_eq!(
+            gpu_transcode_flags_from_nodes(false, &detect_render_nodes_in(sysfs_nv.path())),
+            GpuFlags {
+                hw_accel: "cuda".to_string(),
+                hw_accel_device: "/dev/dri/renderD129".to_string(),
+                output_format: "cuda".to_string(),
+                video_codec: "hevc_nvenc".to_string(),
+            }
+        );
+
+        // Unknown vendors only or absent root fall back to libx265.
+        let unknown_only = DisposableSysfs::new("flags-unknown-only");
+        unknown_only.add_render_node("renderD128", Some("0x1af4\n"));
+        unknown_only.add_render_node("renderD129", None);
+        let software = GpuFlags {
+            hw_accel: String::new(),
+            hw_accel_device: String::new(),
+            output_format: String::new(),
+            video_codec: "libx265".to_string(),
+        };
+        assert_eq!(
+            gpu_transcode_flags_from_nodes(false, &detect_render_nodes_in(unknown_only.path())),
+            software
+        );
+        assert_eq!(
+            gpu_transcode_flags_from_nodes(
+                false,
+                &detect_render_nodes_in(&unknown_only.path().join("missing")),
+            ),
+            software
+        );
+    }
+
+    #[test]
+    fn detect_render_nodes_public_entry_returns_valid_dev_dri_paths() {
+        for node in detect_render_nodes() {
+            assert!(
+                node.path.starts_with(DEV_DRI_DIR),
+                "unexpected render node path: {}",
+                node.path.display()
+            );
+            let file_name = node
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("render node filename");
+            assert!(is_render_node_name(file_name));
+            if let Some(vendor) = node.vendor_id {
+                assert!(!vendor.is_empty());
+                assert_eq!(vendor, vendor.trim());
+            }
+        }
     }
 }

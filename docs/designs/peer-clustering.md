@@ -70,7 +70,7 @@ Use Jellyfin 12.4 on both servers with matching apt package versions. Verify the
 | **Jellyfin stop sequence** | Jellyfin stops a transcode by writing `q` to ffmpeg's stdin. If ffmpeg hasn't exited when the timeout runs out, Jellyfin kills the **whole process tree**. | stdin is relayed, which covers `q`. A process-tree kill is SIGKILL, which the shim can't catch, so the **dispatcher** notices the shim's socket closing without an `Exit` frame and sends `Signal(Kill)` to the worker. The worker also kills ffmpeg if its stream drops. |
 | **Jellyfin temp folder** | rffmpeg-style setups need Jellyfin 10.10+ to point `TMPDIR` at storage the worker can also reach, because ffmpeg writes auxiliary files there. | The same drop-in sets `Environment=TMPDIR=/var/cache/jellyfin/af-tmp`, and that folder is exported to workers together with the transcode folder. |
 | **Jellyfin paths under AetherFlow** | AetherFlow installs Jellyfin from apt (`config/package_automation.json:20-38`). It keeps data and config in `/var/lib/jellyfin` (config under `/var/lib/jellyfin/config`, per `backend-rs/crates/af-runner/src/app_metadata.rs:602-621`) and the cache in `/var/cache/jellyfin`. The real ffmpeg comes from the `jellyfin-ffmpeg` package at `/usr/lib/jellyfin-ffmpeg/ffmpeg`. | The transcode folder is read from `TranscodingTempPath` in `/var/lib/jellyfin/config/encoding.xml`, defaulting to `/var/cache/jellyfin/transcodes`. Paths are never hardcoded without that read. |
-| **Jellyfin sandbox** | AetherFlow runs `jellyfin.service` under its `dotnet` sandbox profile. Writable paths are limited to `/var/lib/jellyfin`, `/var/cache/jellyfin`, `/var/log/jellyfin`, `/etc/jellyfin`, plus the optional `/mnt`, `/media`, `/srv`, `/downloads` (`config/package_automation.json:24-38`, writable paths at L25-34). | The shim's dispatcher socket must be reachable from inside the sandbox. Add `-/run/aetherflow/transcode.sock` to the Jellyfin `sandbox_rw_paths` (file 52). Peer mounts under `/mnt/af-peers` are already covered by `-/mnt`. |
+| **Jellyfin sandbox** | AetherFlow runs `jellyfin.service` under its `dotnet` sandbox profile. Writable paths are limited to `/var/lib/jellyfin`, `/var/cache/jellyfin`, `/var/log/jellyfin`, `/etc/jellyfin`, plus the optional `/mnt`, `/media`, `/srv`, `/downloads` (`config/package_automation.json:24-38`, writable paths at L25-34). | The shim's dispatcher socket must be reachable from inside the sandbox. Add `-/run/aetherflow-transcode/transcode.sock` to the Jellyfin `sandbox_rw_paths` (file 52). Peer mounts under `/mnt/af-peers` are already covered by `-/mnt`. |
 | **NFS on Debian 13** | trixie ships nfs-utils 2.8.x, which reads drop-ins from `/etc/nfs.conf.d/` and supports `[nfsd] host=` to bind `nfsd` to one address. | Use `/etc/nfs.conf.d/aetherflow-peers.conf` and `/etc/exports.d/`. No edits to `/etc/nfs.conf`. |
 | **WireGuard on Debian 13** | The trixie kernel (6.12) has WireGuard built in. `wireguard-tools` provides `wg` and `wg-quick@.service`. | `EnsurePackages` installs `wireguard-tools`, `nfs-kernel-server` and `nfs-common` from trixie main. No DKMS needed. |
 | **AetherFlow installer** | The setup scripts already detect trixie as Debian 13 (`setup/modules/00-core.sh:117-129`). | No installer changes for OS detection. |
@@ -291,7 +291,7 @@ Existing handlers that need a real user then work unchanged: WebSocket tickets a
 | Mode | Invoked as | Runs where | Role |
 | :--- | :--- | :--- | :--- |
 | **shim** | `/usr/lib/aetherflow/transcode/ffmpeg <args…>` (the binary, installed under the name `ffmpeg`) | Jellyfin server, as the Jellyfin user | Takes the place of ffmpeg for Jellyfin. |
-| **worker** | `af-transcode worker`, as `af-transcode-worker.service` (`User=jellyfin`, `SupplementaryGroups=render video`) | Worker server | Listens on `/run/aetherflow/transcode-worker.sock` and runs the real ffmpeg. |
+| **worker** | `af-transcode worker`, as `af-transcode-worker.service` (`User=jellyfin`, `SupplementaryGroups=render video`) | Worker server | Listens on `/run/aetherflow-transcode-worker/worker.sock` and runs the real ffmpeg. |
 | **probe** | `af-transcode capabilities` | Any server | Prints the real ffmpeg's version, encoders and render nodes as JSON for `/health`. |
 
 The shim folder also has an `ffprobe` symlink pointing at the real `ffprobe`. The real binaries' paths come from `AF_TRANSCODE_REAL_FFMPEG`, default `/usr/lib/jellyfin-ffmpeg/ffmpeg`.
@@ -299,7 +299,7 @@ The shim folder also has an `ffprobe` symlink pointing at the real `ffprobe`. Th
 **Job flow.**
 
 1.  **Probe calls run locally.** If the arguments are a probe (`-version`, `-encoders`, `-decoders`, `-hwaccels`, `-filters`, `-h`, `-buildconf`, or no input), the shim `exec`s the real ffmpeg, so Jellyfin's feature detection is unchanged.
-2.  **Real jobs ask the dispatcher.** The shim connects to the dispatcher socket `/run/aetherflow/transcode.sock`, owned by root with group `jellyfin` and mode 0660. It sends `Start { args, cwd, env_subset }`. If the socket is missing or doesn't answer within 2 s, the shim `exec`s the real ffmpeg locally.
+2.  **Real jobs ask the dispatcher.** The shim connects to the dispatcher socket `/run/aetherflow-transcode/transcode.sock`, owned by `aetherflow:jellyfin` with mode 0660. It sends `Start { args, cwd, env_subset }` within a two-second handshake budget. The shim runs the real ffmpeg locally after a definite failure before full submission or an explicit `RunLocal` reply.
 3.  **The dispatcher (in A's af-api, `peers::transcode`) picks a target.**
     1.  `argv::required_capability(args)` reads the encoder needs: `-hwaccel`, `-hwaccel_output_format`, `-init_hw_device`, the `-c:v` encoder name, and the `vaapi`, `qsv` or `cuda` filters.
     2.  Eligible workers have:
@@ -991,14 +991,14 @@ Expose the shared protocol and argv code through the library target. P9 adds the
 
 *   **Proposed Changes**:
     *   If `is_probe`, `exec` the real ffmpeg.
-    *   Otherwise connect to `/run/aetherflow/transcode.sock` with a 2 s timeout. On any error, `exec` the real ffmpeg.
+    *   Otherwise connect to `/run/aetherflow-transcode/transcode.sock` within a two-second handshake budget. A definite failure before full submission permits local `exec`. A lost acknowledgment after a complete `Start` fails the current job.
     *   Send `Start` and `exec` on `RunLocal`. Once the worker confirms `Started`, a dropped stream fails the current job and Jellyfin may retry.
     *   Otherwise pump stdin into `Stdin`, `Stdout`/`Stderr` into its own stdio, and SIGTERM/SIGINT into `Signal`, then exit with the `Exit` code.
 
 #### 46. `backend-rs/crates/af-transcode/src/worker.rs` and `src/capabilities.rs` (Create)
 
 *   **Proposed Changes**:
-    *   The worker listens on `/run/aetherflow/transcode-worker.sock`. Each connection spawns the real ffmpeg with the rewritten device path, pumps frames, forwards signals, and returns `Exit`.
+    *   The worker listens on `/run/aetherflow-transcode-worker/worker.sock`. Each connection spawns the real ffmpeg with the rewritten device path, pumps frames, forwards signals, and returns `Exit`.
     *   `capabilities` runs the real ffmpeg with `-version` and `-encoders`, and lists `/dev/dri/renderD*`. It prints JSON.
 
 Use disposable local ffmpeg fixtures in P8. P9 installs and enables the worker service.
@@ -1014,7 +1014,7 @@ Apply the P9 slice of file 22 and wire the dispatcher into the API and Cluster m
 #### 48. `backend-rs/crates/af-api/src/peers/transcode.rs` (Create)
 
 *   **Proposed Changes**:
-    *   **Dispatcher.** A unix socket server at `/run/aetherflow/transcode.sock`, mode 0660, group `jellyfin`. It does worker selection and relays frames to `/peer/v1/transcode/jobs` over the peer link.
+    *   **Dispatcher.** A unix socket server at `/run/aetherflow-transcode/transcode.sock`, mode 0660, owned by `aetherflow:jellyfin`. It does worker selection and relays frames to `/peer/v1/transcode/jobs` over the peer link.
     *   **Worker side.** The `/peer/v1/transcode/jobs` WebSocket handler requires `transcoding: write` and relays to the local worker socket.
     *   **Settings.** `GET` and `PUT /api/v1/admin/peers/transcode` cover the enable flag, weights, caps and the parity test trigger.
     *   **Records.** Job records and pruning.
@@ -1029,12 +1029,12 @@ Own API startup, listener and health wiring. The worker route requires both cred
     *   `PeerTranscodeRequest` actions:
         *   `InstallShim`: copies `af-transcode` to `/usr/lib/aetherflow/transcode/ffmpeg` and symlinks `ffprobe`
         *   `EnableJellyfin` and `DisableJellyfin`: write or remove `/etc/systemd/system/jellyfin.service.d/20-aetherflow-transcode.conf` (`JELLYFIN_FFMPEG` and `TMPDIR`), create `/var/cache/jellyfin/af-tmp`, then run `daemon-reload` and restart `jellyfin.service`
-        *   `InstallWorkerUnit`: `af-transcode-worker.service` with `User=jellyfin`, `SupplementaryGroups=render video`, `RuntimeDirectory=aetherflow`
+        *   `InstallWorkerUnit`: `af-transcode-worker.service` with `User=jellyfin`, `SupplementaryGroups=render video`, `RuntimeDirectory=aetherflow-transcode-worker`
         *   `ExportTranscodeDirs{tunnel_ip, uid, gid}`
         *   `MountTranscodeDirs`
         *   `BindMedia{from, to}`
 
-Source the shim and worker from the verified release bundle. Apply the P9 runner wiring and unit policy from file 22.
+Source the shim and worker from the verified release bundle. Apply the P9 runner wiring and unit policy from file 22. Use the separate Jellyfin-owned worker directory and a dedicated API-owned dispatcher directory with group `jellyfin`. Give the API access to the worker socket through its supplementary Jellyfin group. Keep Jellyfin outside the privileged `aetherflow` group.
 
 #### 50. `frontend-rs/crates/af-web-app/src/tabs/cluster/transcode.rs` (Create)
 
@@ -1055,7 +1055,7 @@ The ops lane owns staging `bin/af-transcode` in `scripts/build_gold.sh` for each
 #### 52. `config/package_automation.json` (Modify)
 
 *   **Type / Scope**: Package sandbox config.
-*   **Proposed Changes**: In the `jellyfin` entry's `sandbox_rw_paths` (L25-34), add `"-/run/aetherflow/transcode.sock"` so the sandboxed Jellyfin process can connect to the dispatcher socket. Keep the leading `-`, which marks the path optional and keeps the unit starting when transcoding is off.
+*   **Proposed Changes**: In the `jellyfin` entry's `sandbox_rw_paths` (L25-34), add `"-/run/aetherflow-transcode/transcode.sock"` so the sandboxed Jellyfin process can connect to the dispatcher socket. Keep the leading `-`, which marks the path optional and keeps the unit starting when transcoding is off.
 *   **Rationale**: Jellyfin runs under AetherFlow's `dotnet` sandbox profile. Without this, the shim falls back to local ffmpeg every time.
 
 ### Verification Plan

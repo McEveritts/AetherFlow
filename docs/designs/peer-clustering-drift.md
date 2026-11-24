@@ -104,6 +104,13 @@ File 12 advertises `["links"]` on `/health` once the linking implementation is a
 - The runner derives the mount unit, NFS source, and fixed options from validated fields. Its NFS units add `nosuid` and `nodev`, and writable exports specify `no_subtree_check`. The runner uses its managed-file header to protect existing host files at the same paths.
 - Runner requests include a bounded sentinel probe, mount state, and explicit export cleanup. Sentinel creation returns the folder owner so the API can derive the writable export's UID and GID mapping.
 
+## P8 integration decisions
+
+- The codec uses `wincode` for the bincode v1 wire layout. The Rust advisory policy rejects the unmaintained `bincode` dependency under RUSTSEC-2025-0141. The frame bound applies before deserialization, and the decoder rejects trailing bytes. The wire schema includes an explicit stdin EOF frame and records mixed hardware requirements for eligibility checks.
+- A probe or a definite failure before full `Start` submission runs the original FFmpeg command locally. After full submission, only `RunLocal` authorizes fallback. A lost acknowledgment closes the stream and fails the current job so the worker can clean up. P9 must return an explicit pre-start result within the shim's two-second deadline.
+- The shim preserves local arguments as Unix bytes. Arguments that require non-UTF-8 bytes run locally because the remote protocol uses UTF-8. The render-node scan exposes deterministic capability ordering and preserves the legacy GPU selection order for existing callers.
+- The dispatcher defaults to `/run/aetherflow-transcode/transcode.sock`, and the worker defaults to `/run/aetherflow-transcode-worker/worker.sock`. The existing `/run/aetherflow` directory belongs to the privileged runner. In P9, give the API write access to its dispatcher directory and give Jellyfin access to the dispatcher socket. Place the worker in its own Jellyfin-owned runtime directory and grant the API access through the Jellyfin group. Keep Jellyfin outside the privileged `aetherflow` group. Apply the sandbox exceptions to the dedicated sockets.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.
