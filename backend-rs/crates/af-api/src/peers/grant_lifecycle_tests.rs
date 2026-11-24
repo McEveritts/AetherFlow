@@ -172,6 +172,8 @@ fn build_runtime_with_mgmt_override(
     Arc::new(PeerRuntime {
         db: PeerDb::Isolated(db_conn),
         runner,
+        storage_runner: Arc::new(crate::peers::storage_tests::FakePeerStorageRunner::new()),
+        mount_health: crate::peers::storage::MountHealthTracker::new(),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: crate::peers::pairing::PairingRateLimiter::new(
@@ -201,6 +203,7 @@ fn build_runtime_with_mgmt_override(
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: bind_listener,
         management_router_override: mgmt_router,
+        allowed_fs_roots_override: None,
     })
 }
 

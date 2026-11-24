@@ -97,6 +97,13 @@ File 12 advertises `["links"]` on `/health` once the linking implementation is a
 - The receiving listener uses the verified grant for WebSocket tickets and checks the active grant during upgrade and revocation. General telemetry requires read access to at least one area and filters fields by that grant. Live logs require Services read access.
 - The proxy scopes the one-use backup ticket cookie to the selected peer and its backup download route. The receiving server validates any presented ticket against the active grant and requested backup. A link-authenticated grant with Settings write access can still authorize a direct backup download.
 
+## P7 integration decisions
+
+- Keep the design's versioned export and mount collection routes. Delete requests identify the owned row in JSON. Create-mount requests identify a remote export by ID and take an explicit optional writable flag. The receiving server obtains the export and peer destination through its stored link and authenticated catalog.
+- The local mount listing includes available remote exports when the catalog responds. A catalog failure preserves the local mount rows and can report a typed lookup error. The `storage` capability gates catalog discovery while older peers retain their existing management capabilities.
+- The runner derives the mount unit, NFS source, and fixed options from validated fields. Its NFS units add `nosuid` and `nodev`, and writable exports specify `no_subtree_check`. The runner uses its managed-file header to protect existing host files at the same paths.
+- Runner requests include a bounded sentinel probe, mount state, and explicit export cleanup. Sentinel creation returns the folder owner so the API can derive the writable export's UID and GID mapping.
+
 ## Line citations
 
 A cited location beyond the current file length is marked **Past EOF**. The corrected targets identify the current implementation or, for unchanged citations, the verified original target.

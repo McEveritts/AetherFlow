@@ -637,6 +637,14 @@ async fn cleanup_revoked_link_resources_locked(
         return Ok(false);
     };
 
+    let storage_res = super::storage::cleanup_revoked_link_storage_locked(
+        runtime,
+        link_id,
+        &link.tunnel_ip,
+        peer_name,
+        step,
+    )
+    .await;
     super::grants::delete_revoked_link_staged_grant_credentials_locked(
         runtime, link_id, peer_name, step,
     )
@@ -644,6 +652,7 @@ async fn cleanup_revoked_link_resources_locked(
     delete_link_credentials_verified(runtime, link_id, peer_name, step).await?;
     delete_pending_issuer_credential_verified(runtime, link_id, peer_name, step).await?;
     remove_owned_wg_peer_locked(runtime, &link, step).await?;
+    storage_res?;
     Ok(true)
 }
 
@@ -754,6 +763,13 @@ pub(crate) async fn apply_remote_revocation(
             }
             let grant_revocation = super::grants::revoke_all_grants_for_link_revocation_in_tx(
                 &tx, &link_id_c, &now_rfc, &server_c, step,
+            )?;
+            super::storage::mark_link_mounts_stopped_for_revocation_in_tx(
+                &tx,
+                &link_id_c,
+                &peer_name,
+                &server_c,
+                step,
             )?;
             tx.commit().map_err(|err| {
                 PeerError::internal(
@@ -1183,6 +1199,9 @@ async fn delete_peer_inner(
                 }
                 let grant_revocation = super::grants::revoke_all_grants_for_link_revocation_in_tx(
                     &tx, &link.id, &now_rfc, &server_c, step,
+                )?;
+                super::storage::mark_link_mounts_stopped_for_revocation_in_tx(
+                    &tx, &link.id, &link.name, &server_c, step,
                 )?;
                 tx.commit().map_err(|err| {
                     PeerError::internal(

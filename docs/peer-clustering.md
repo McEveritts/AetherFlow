@@ -1,6 +1,6 @@
 # Peer clustering
 
-Use **Cluster** on each server to establish a WireGuard link, check peer health, edit the remote endpoint, and manage access between linked servers. The dashboard URL is `/?tab=cluster`. Migration 26 removes legacy master/worker enrollment and command tables. Pair previously enrolled servers again through the Cluster tab.
+Use **Cluster** on each server to establish a WireGuard link, check peer health, edit the remote endpoint, manage access, and share media folders with linked servers. The dashboard URL is `/?tab=cluster`. Migration 26 removes legacy master/worker enrollment and command tables. Pair previously enrolled servers again through the Cluster tab.
 
 ## Before pairing
 
@@ -41,10 +41,19 @@ Sign-in, session management, pairing, and grant administration stay on the local
 
 Revoking the grant blocks remote management on the receiving server and closes its peer management WebSockets. Link health remains available.
 
-## Planned storage and transcoding controls
+## Share a media folder through a peer link
 
-- **Exports and mounts (P7).** Select the folder and peer tunnel address for each NFS export. Read-only is the default. Select read-write only for folders where the remote server must make changes. Configure media libraries to use a subfolder inside the peer mount. AetherFlow checks the WireGuard handshake and the mount's sentinel to decide when to stop or restore the mount.
-- **Jellyfin transcoding (P8 and P9).** Install matching Jellyfin 12.4 and `jellyfin-ffmpeg` packages on the controller and worker. Enable the worker and run the parity test before trying remote jobs. Worker eligibility checks the grant, link health, FFmpeg version, encoder support, and available job slots. The shim uses the local FFmpeg binary for probes and when remote work cannot start.
+1. On the server that holds the media, open **Cluster**, select the peer, and export the folder containing the library subfolder. AetherFlow limits the export to that peer's tunnel address. Read-only is the default. With read-write enabled, remote writes run as the folder owner.
+2. On the server that will read the media, open the same link's storage controls and choose the export to mount. Request a writable mount only when the export permits writes and the receiving app needs them.
+3. Configure the media app with a folder **inside** the mount, such as `/mnt/af-peers/<link>/<export>/library`. Use the path shown in Cluster. The interior folder disappears when the mount stops, so the app can distinguish a missing library from an empty one.
+
+Cluster shows the mount state, the last error, and a latency warning when link RTT exceeds the configured threshold. AetherFlow checks both the WireGuard peer and a sentinel file on the mount. It stops the mount after two consecutive sentinel failures or on the first health check that detects the WireGuard peer has been removed. Health checks restore the mount when the link becomes usable again.
+
+For a Plex library on a peer mount, turn off automatic trash emptying after scans. For Emby and the *arr apps, turn off automatic removal of missing items for peer-backed libraries. Jellyfin 12.4 uses the missing library path as the safeguard. The live Jellyfin scan and recovery check requires both servers.
+
+## Planned transcoding controls
+
+Install matching Jellyfin 12.4 and `jellyfin-ffmpeg` packages on the controller and worker. Enable the worker and run the parity test before trying remote jobs. Worker eligibility checks the grant, link health, FFmpeg version, encoder support, and available job slots. The shim uses the local FFmpeg binary for probes and when remote work cannot start.
 
 ## Troubleshooting
 

@@ -211,25 +211,15 @@ pub(crate) async fn check_single_link(
     if let Some(status) = wg_status {
         match status.peers.iter().find(|p| p.public_key == link.wg_pubkey) {
             None => {
-                commit_link_down(
-                    runtime,
-                    &link,
-                    None,
-                    "WireGuard peer is missing from afpeer0",
-                    &now_rfc,
-                )
-                .await;
+                let reason = "WireGuard peer is missing from afpeer0";
+                commit_link_down(runtime, &link, None, reason, &now_rfc).await;
+                super::storage::gate_mounts_for_link_down_immediate(runtime, &link, reason).await;
                 return;
             }
             Some(peer) if !peer.present_live => {
-                commit_link_down(
-                    runtime,
-                    &link,
-                    None,
-                    "WireGuard peer was removed from live afpeer0 runtime",
-                    &now_rfc,
-                )
-                .await;
+                let reason = "WireGuard peer was removed from live afpeer0 runtime";
+                commit_link_down(runtime, &link, None, reason, &now_rfc).await;
+                super::storage::gate_mounts_for_link_down_immediate(runtime, &link, reason).await;
                 return;
             }
             Some(peer) => {
@@ -238,14 +228,12 @@ pub(crate) async fn check_single_link(
                 // configured peer awaiting its first handshake, so proceed to tunnel `/health`.
                 if let Some(age) = peer.handshake_age_secs {
                     if age > WG_HANDSHAKE_STALE_SECS {
-                        commit_link_down(
-                            runtime,
-                            &link,
-                            None,
-                            &format!(
-                                "WireGuard handshake is stale ({age}s > {WG_HANDSHAKE_STALE_SECS}s)"
-                            ),
-                            &now_rfc,
+                        let reason = format!(
+                            "WireGuard handshake is stale ({age}s > {WG_HANDSHAKE_STALE_SECS}s)"
+                        );
+                        commit_link_down(runtime, &link, None, &reason, &now_rfc).await;
+                        super::storage::gate_mounts_for_link_down_immediate(
+                            runtime, &link, &reason,
                         )
                         .await;
                         return;
@@ -267,26 +255,16 @@ pub(crate) async fn check_single_link(
         Ok(read_resp) => match read_resp.into_secret() {
             Some(secret) => secret,
             None => {
-                commit_link_down(
-                    runtime,
-                    &link,
-                    None,
-                    "Held outbound link credential is missing",
-                    &now_rfc,
-                )
-                .await;
+                let reason = "Held outbound link credential is missing";
+                commit_link_down(runtime, &link, None, reason, &now_rfc).await;
+                super::storage::probe_mounts_while_link_degraded(runtime, &link, reason).await;
                 return;
             }
         },
         Err(err) => {
-            commit_link_down(
-                runtime,
-                &link,
-                None,
-                &format!("Could not read outbound link credential: {err}"),
-                &now_rfc,
-            )
-            .await;
+            let reason = format!("Could not read outbound link credential: {err}");
+            commit_link_down(runtime, &link, None, &reason, &now_rfc).await;
+            super::storage::probe_mounts_while_link_degraded(runtime, &link, &reason).await;
             return;
         }
     };
@@ -307,17 +285,13 @@ pub(crate) async fn check_single_link(
     match health_res {
         Ok((StatusCode::OK, body, rtt_ms)) => {
             let Ok(parsed) = serde_json::from_slice::<RemoteHealthPayload>(&body) else {
-                commit_link_down(
-                    runtime,
-                    &link,
-                    None,
-                    "Peer tunnel /health returned unreadable JSON",
-                    &commit_now_rfc,
-                )
-                .await;
+                let reason = "Peer tunnel /health returned unreadable JSON";
+                commit_link_down(runtime, &link, None, reason, &commit_now_rfc).await;
+                super::storage::probe_mounts_while_link_degraded(runtime, &link, reason).await;
                 return;
             };
             commit_link_healthy(runtime, &link, parsed, rtt_ms, &commit_now_rfc).await;
+            super::storage::reconcile_mounts_for_healthy_link(runtime, &link).await;
         }
         Ok((status, body, _rtt_ms)) => {
             if let Ok(err_body) = serde_json::from_slice::<PeerErrorBody>(&body) {
@@ -347,16 +321,12 @@ pub(crate) async fn check_single_link(
                 )
             };
             commit_link_down(runtime, &link, protocol_override, &reason, &commit_now_rfc).await;
+            super::storage::probe_mounts_while_link_degraded(runtime, &link, &reason).await;
         }
         Err(err) => {
-            commit_link_down(
-                runtime,
-                &link,
-                None,
-                &format!("Peer tunnel /health failed: {}", err.message()),
-                &commit_now_rfc,
-            )
-            .await;
+            let reason = format!("Peer tunnel /health failed: {}", err.message());
+            commit_link_down(runtime, &link, None, &reason, &commit_now_rfc).await;
+            super::storage::probe_mounts_while_link_degraded(runtime, &link, &reason).await;
         }
     }
 }

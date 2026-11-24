@@ -73,6 +73,8 @@ fn build_proxy_test_runtime(
     let rt = Arc::new(PeerRuntime {
         db: PeerDb::Isolated(Arc::clone(&db_conn)),
         runner,
+        storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
+        mount_health: super::storage::MountHealthTracker::new(),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -102,6 +104,7 @@ fn build_proxy_test_runtime(
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: true,
         management_router_override: None,
+        allowed_fs_roots_override: None,
     });
     (rt, db_conn)
 }
@@ -1381,6 +1384,8 @@ async fn peer_proxy_real_router_backup_download_isolated_ticket_and_auth_csrf_ma
     let rt_b = Arc::new(PeerRuntime {
         db: PeerDb::Production,
         runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
+        mount_health: super::storage::MountHealthTracker::new(),
         public_transport: Arc::new(UnreachablePublicTransport),
         revocation_tx: rev_tx_b,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -1410,6 +1415,7 @@ async fn peer_proxy_real_router_backup_download_isolated_ticket_and_auth_csrf_ma
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: true,
         management_router_override: None,
+        allowed_fs_roots_override: None,
     });
     let (rt_a, _db_a) = build_proxy_test_runtime(
         "manager-a",
@@ -1872,6 +1878,8 @@ while True:
     let rt_b = Arc::new(PeerRuntime {
         db: PeerDb::Production,
         runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
+        mount_health: super::storage::MountHealthTracker::new(),
         public_transport: Arc::new(UnreachablePublicTransport),
         revocation_tx: rev_tx_b,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -1901,6 +1909,7 @@ while True:
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: true,
         management_router_override: None,
+        allowed_fs_roots_override: None,
     });
     let (rt_a, _) = build_proxy_test_runtime(
         "manager-a",

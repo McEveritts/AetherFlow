@@ -684,7 +684,7 @@ async fn health_endpoint_reports_peer_protocol_and_links_capability() {
     assert_eq!(payload["peer_protocol"].as_i64(), Some(1));
     assert_eq!(
         payload["capabilities"],
-        serde_json::json!(["links", "grants"])
+        serde_json::json!(["links", "grants", "storage"])
     );
 
     let live_resp = app

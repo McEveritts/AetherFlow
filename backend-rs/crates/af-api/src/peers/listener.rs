@@ -803,6 +803,10 @@ pub(crate) fn build_listener_router(runtime: Arc<PeerRuntime>) -> Router {
             "/peer/v1/grant-offer",
             post(grants::handle_tunnel_grant_offer),
         )
+        .route(
+            "/peer/v1/exports",
+            get(super::storage::handle_tunnel_list_exports),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(
             TUNNEL_INTERNAL_BODY_LIMIT_BYTES,
         ))

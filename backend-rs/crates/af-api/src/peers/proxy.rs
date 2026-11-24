@@ -583,13 +583,12 @@ pub(crate) async fn handle_peer_proxy(
         }
     };
 
-    // Never allow peer-hop recursion from the managing proxy.
-    let canonical_lower = canonical.as_str().to_ascii_lowercase();
-    if canonical_lower == "/api/v1/peers" || canonical_lower.starts_with("/api/v1/peers/") {
+    // Never allow peer-hop recursion or peer administration endpoints through the managing proxy.
+    if is_peer_hop_or_admin_peer_path(canonical.as_str()) {
         return PeerError::peer_scope_denied(
             &local_server,
             step,
-            "Chaining peer management proxies across multiple hops is forbidden",
+            "Peer administration routes and multi-hop peer proxies are never reachable through the peer proxy",
         )
         .into_response();
     }

@@ -2,7 +2,10 @@ use super::*;
 
 pub(crate) fn normalize_systemd_unit(unit: &str) -> String {
     let trimmed = unit.trim();
-    if trimmed.ends_with(".service") || trimmed.ends_with(".timer") || trimmed.ends_with(".socket")
+    if trimmed.ends_with(".service")
+        || trimmed.ends_with(".timer")
+        || trimmed.ends_with(".socket")
+        || trimmed.ends_with(".mount")
     {
         trimmed.to_string()
     } else {
@@ -27,6 +30,8 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
                 | "apache2.service"
                 | "mariadb.service"
                 | "mysql.service"
+                | "nfs-server"
+                | "nfs-server.service"
                 | "tailscale"
                 | "tailscaled"
                 | "tailscale.service"
@@ -34,6 +39,7 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
         )
         || unit.starts_with("wg-quick@")
         || unit.starts_with("wireguard")
+        || unit.starts_with(r"mnt-af\x2dpeers-")
         || unit.starts_with("tailscale")
         || unit.starts_with("tailscaled")
         || unit.starts_with("mergerfs")

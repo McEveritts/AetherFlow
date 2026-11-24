@@ -1137,8 +1137,7 @@ test('grant editor retains form draft on typed PeerError and blocks all-none sav
   }));
 });
 
-test('grant editor fences stale fetches and mutations across close and peer switch', async ({ page }) => {
-  test.setTimeout(60_000);
+async function mountGrantRace(page: Page, scenario: 'fetch' | 'save' | 'revoke') {
   let grantAIn: ReturnType<typeof makeGrantSummary> | null = makeGrantSummary(
     'g-a-initial',
     makeAccessMap('write'),
@@ -1146,7 +1145,7 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   );
   let grantBIn: ReturnType<typeof makeGrantSummary> | null = makeGrantSummary(
     'g-b-initial',
-    makeAccessMap('none', { services: 'read' }),
+    makeAccessMap('none', { services: 'read', files: scenario === 'revoke' ? 'write' : 'none' }),
     'admin',
   );
   let listReads = 0;
@@ -1183,12 +1182,12 @@ test('grant editor fences stale fetches and mutations across close and peer swit
     const method = route.request().method();
     if (method === 'GET') {
       getACalls += 1;
-      if (getACalls === 1) {
+      if (scenario === 'fetch' && getACalls === 1) {
         await getA1Gate.promise;
         await route.fulfill({ json: { inbound: grantAIn, outbound: null } });
         return;
       }
-      if (getACalls === 2) {
+      if (scenario === 'fetch' && getACalls === 2) {
         await getA2ErrorGate.promise;
         await route.fulfill({
           status: 502,
@@ -1240,7 +1239,7 @@ test('grant editor fences stale fetches and mutations across close and peer swit
     const method = route.request().method();
     if (method === 'GET') {
       getBCalls += 1;
-      if (getBCalls === 1) {
+      if (scenario === 'fetch' && getBCalls === 1) {
         await getB1Gate.promise;
       }
       await route.fulfill({ json: { inbound: grantBIn, outbound: null } });
@@ -1273,7 +1272,17 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   const openB = page.getByRole('button', { name: 'Manage access grants for Backup server' });
   const dialog = page.getByRole('dialog');
 
-  // 1) Stale GET success for Media server must never populate Backup server while Backup is loading.
+  return {
+    openA, openB, dialog, listReads: () => listReads,
+    getA1Gate, getA2ErrorGate, getB1Gate, putAGate, putAErrorGate, putBGate, delAGate, offerBGate, offerAGate,
+  };
+}
+
+test('grant editor fences stale fetches across close and peer switch', async ({ page }) => {
+  test.setTimeout(60_000);
+  const { openA, openB, dialog, getA1Gate, getA2ErrorGate, getB1Gate } = await mountGrantRace(page, 'fetch');
+
+  // Stale GET success for Media server must never populate Backup server while Backup is loading.
   await openA.click();
   await expect(dialog.getByText('Loading access grants…')).toBeVisible();
   await page.keyboard.press('Escape');
@@ -1296,7 +1305,7 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
   await expect(dialog).toHaveCount(0);
 
-  // 2) Stale GET error for Media server dismissed via X never leaks into Backup server.
+  // Stale GET error for Media server dismissed via X never leaks into Backup server.
   await openA.click();
   await expect(dialog.getByText('Loading access grants…')).toBeVisible();
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
@@ -1314,8 +1323,13 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('read');
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
+});
 
-  // 3) Stale PUT success for Media server refreshes peer list without unlocking or clobbering Backup server's PUT.
+test('grant editor fences stale saves across close and peer switch', async ({ page }) => {
+  test.setTimeout(60_000);
+  const { openA, openB, dialog, listReads, putAGate, putAErrorGate, putBGate } = await mountGrantRace(page, 'save');
+
+  // Stale PUT success for Media server refreshes peer list without unlocking or clobbering Backup server's PUT.
   await openA.click();
   await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('write');
   await dialog.locator('#cluster-grant-preset-ro').click();
@@ -1329,9 +1343,9 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await dialog.locator('#cluster-grant-save').click();
   await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
 
-  const readsBeforeStalePut = listReads;
+  const readsBeforeStalePut = listReads();
   putAGate.resolve();
-  await expect.poll(() => listReads).toBeGreaterThan(readsBeforeStalePut);
+  await expect.poll(listReads).toBeGreaterThan(readsBeforeStalePut);
   await expect(dialog.getByRole('button', { name: 'Saving…' })).toBeDisabled();
   await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
   await expect(dialog.getByText('Saved access grant for Media server on this server.')).toHaveCount(0);
@@ -1341,7 +1355,7 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 
-  // 3b) Stale PUT error for Media server dismissed via X never leaks into Backup server.
+  // Stale PUT error for Media server dismissed via X never leaks into Backup server.
   await openA.click();
   await dialog.locator('#cluster-grant-area-updates').selectOption('write');
   await dialog.locator('#cluster-grant-save').click();
@@ -1362,8 +1376,13 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await expect(dialog.getByText('Stale PUT error for Media server.')).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
+});
 
-  // 4) Stale DELETE for Media server never wipes Backup server's inbound grant or unlocks Backup's offer call.
+test('grant editor fences stale revocations and offers across close and peer switch', async ({ page }) => {
+  test.setTimeout(60_000);
+  const { openA, openB, dialog, listReads, delAGate, offerBGate, offerAGate } = await mountGrantRace(page, 'revoke');
+
+  // Stale DELETE for Media server never wipes Backup server's inbound grant or unlocks Backup's offer call.
   await openA.click();
   await dialog.locator('#cluster-grant-revoke-open').click();
   await dialog.locator('#cluster-grant-revoke-confirm').click();
@@ -1375,9 +1394,9 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await dialog.locator('#cluster-grant-offer').click();
   await expect(dialog.getByRole('button', { name: 'Sending offer…' })).toBeDisabled();
 
-  const readsBeforeStaleDelete = listReads;
+  const readsBeforeStaleDelete = listReads();
   delAGate.resolve();
-  await expect.poll(() => listReads).toBeGreaterThan(readsBeforeStaleDelete);
+  await expect.poll(listReads).toBeGreaterThan(readsBeforeStaleDelete);
   await expect(dialog.getByRole('button', { name: 'Sending offer…' })).toBeDisabled();
   await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
   await expect(dialog.getByText("Revoked Media server's access to this server. The WireGuard link stays configured.")).toHaveCount(0);
@@ -1387,7 +1406,7 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
   await expect(dialog).toHaveCount(0);
 
-  // 5) Stale POST /grant-offer for Media server never leaks confirmation banner into Backup server.
+  // Stale POST /grant-offer for Media server never leaks confirmation banner into Backup server.
   await openA.click();
   await dialog.locator('#cluster-grant-offer').click();
   await expect(dialog.getByRole('button', { name: 'Sending offer…' })).toBeDisabled();
@@ -1403,4 +1422,745 @@ test('grant editor fences stale fetches and mutations across close and peer swit
   await staleOfferResp;
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
   await expect(dialog.getByText(/Informational notice sent to Media server/i)).toHaveCount(0);
+});
+
+function makePeerExport(
+  id: string,
+  linkId: string,
+  path: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    link_id: linkId,
+    path,
+    writable: false,
+    squash_uid: null as number | null,
+    squash_gid: null as number | null,
+    created_at: '2026-11-24T00:10:00Z',
+    ...overrides,
+  };
+}
+
+function makePeerMount(
+  id: string,
+  linkId: string,
+  remotePath: string,
+  mountPath: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    link_id: linkId,
+    remote_path: remotePath,
+    mount_path: mountPath,
+    unit_name: `mnt-af\\x2dpeers-${linkId}-${id}.mount`,
+    writable: false,
+    purpose: 'media',
+    state: 'mounted',
+    last_error: null as string | null,
+    ...overrides,
+  };
+}
+
+async function mountStorageControls(
+  page: Page,
+  existing: {
+    exports?: ReturnType<typeof makePeerExport>[];
+    mounts?: ReturnType<typeof makePeerMount>[];
+  } = {},
+) {
+  const activeExports = existing.exports ?? [];
+  const activeMounts = existing.mounts ?? [];
+  const remoteCatalog = [
+    makePeerExport('rem-ro', 'peer-active', '/srv/media/movies', { writable: false }),
+    makePeerExport('rem-rw', 'peer-active', '/srv/media/incoming', { writable: true }),
+  ];
+  const p6StoredExport = makePeerExport('p6-exp-1', 'peer-p6-stored', '/srv/legacy/shows');
+  const p6StoredMount = makePeerMount(
+    'p6-mnt-1',
+    'peer-p6-stored',
+    '/srv/remote/shows',
+    '/mnt/af-peers/p6-stored/shows',
+    { state: 'mounted' },
+  );
+  const downStoredMount = makePeerMount(
+    'down-mnt-1',
+    'peer-down-stored',
+    '/srv/remote/archive',
+    '/mnt/af-peers/offline-stored/archive',
+    { state: 'stopped_link_down', last_error: 'WireGuard peer handshake expired' },
+  );
+
+  const exportPostPayloads: unknown[] = [];
+  const exportDeletePayloads: unknown[] = [];
+  const mountPostPayloads: unknown[] = [];
+  const mountDeletePayloads: unknown[] = [];
+
+  const peers = [
+    makePeer('peer-active', 'Media server', '192.0.2.21', {
+      state: 'active',
+      capabilities: ['links', 'grants', 'storage'],
+      compatibility: 'compatible',
+    }),
+    makePeer('peer-pending', 'Pending node', '192.0.2.22', {
+      state: 'pending',
+      pending_attempt_id: 'att-pending',
+      pending_expires_at: Math.floor(Date.now() / 1000) + 600,
+    }),
+    makePeer('peer-revoked', 'Revoked node', '192.0.2.23', {
+      state: 'revoked',
+      last_error: 'Link revoked by Revoked node',
+    }),
+    makePeer('peer-incompat', 'Legacy node', '192.0.2.24', {
+      state: 'active',
+      compatibility: 'incompatible',
+    }),
+    makePeer('peer-no-storage', 'P6 node', '192.0.2.25', {
+      state: 'active',
+      capabilities: ['links', 'grants'],
+      compatibility: 'limited',
+      missing_capabilities: ['storage'],
+    }),
+    makePeer('peer-p6-stored', 'P6 stored node', '192.0.2.26', {
+      state: 'active',
+      capabilities: ['links', 'grants'],
+      compatibility: 'limited',
+      missing_capabilities: ['storage'],
+      exports: [p6StoredExport],
+      mounts: [p6StoredMount],
+    }),
+    makePeer('peer-down-empty', 'Offline empty', '192.0.2.27', {
+      state: 'down',
+    }),
+    makePeer('peer-down-stored', 'Offline stored', '192.0.2.28', {
+      state: 'down',
+      mounts: [downStoredMount],
+    }),
+  ];
+
+  await mountCluster(page, () => ({
+    ...peerList(),
+    capabilities: ['links', 'grants', 'storage'],
+    rtt_warn_ms: 25,
+    peers: peers.map(p => (p.id === 'peer-active'
+      ? { ...p, exports: [...activeExports], mounts: [...activeMounts] }
+      : { ...p })),
+  }));
+
+  await page.route('**/api/v1/auth/fs?*', async route => {
+    const dir = new URL(route.request().url()).searchParams.get('path') ?? '/srv';
+    if (dir === '/srv') {
+      await route.fulfill({ json: { current_path: '/srv', parent_path: '', directories: ['media'] } });
+      return;
+    }
+    if (dir === '/srv/media') {
+      await route.fulfill({ json: { current_path: '/srv/media', parent_path: '/srv', directories: ['movies', 'uploads'] } });
+      return;
+    }
+    await route.fulfill({ json: { current_path: dir, parent_path: '/srv/media', directories: [] } });
+  });
+
+  await page.route(`**${peerApi}/peer-active/exports`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ json: { exports: [...activeExports] } });
+      return;
+    }
+    if (method === 'POST') {
+      const body = route.request().postDataJSON() as { path: string; writable: boolean };
+      exportPostPayloads.push(body);
+      const created = makePeerExport('exp-created-1', 'peer-active', body.path, {
+        writable: body.writable,
+        squash_uid: body.writable ? 1000 : null,
+        squash_gid: body.writable ? 1000 : null,
+      });
+      activeExports.push(created);
+      await route.fulfill({ status: 201, json: { export: created } });
+      return;
+    }
+    if (method === 'DELETE') {
+      const body = route.request().postDataJSON() as { export_id: string };
+      exportDeletePayloads.push(body);
+      const idx = activeExports.findIndex(e => e.id === body.export_id);
+      if (idx >= 0) activeExports.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    throw new Error(`Unexpected method on /exports: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-active/mounts`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ json: { mounts: [...activeMounts], available_exports: remoteCatalog } });
+      return;
+    }
+    if (method === 'POST') {
+      const body = route.request().postDataJSON() as { export_id: string; writable: boolean };
+      mountPostPayloads.push(body);
+      const chosen = remoteCatalog.find(e => e.id === body.export_id)!;
+      const slug = chosen.path.split('/').at(-1) ?? 'share';
+      const created = makePeerMount(
+        `mnt-${chosen.id}`,
+        'peer-active',
+        chosen.path,
+        `/mnt/af-peers/media-server/${slug}`,
+        { writable: body.writable, state: 'mounted' },
+      );
+      activeMounts.push(created);
+      await route.fulfill({ status: 201, json: { mount: created } });
+      return;
+    }
+    if (method === 'DELETE') {
+      const body = route.request().postDataJSON() as { mount_id: string };
+      mountDeletePayloads.push(body);
+      const idx = activeMounts.findIndex(m => m.id === body.mount_id);
+      if (idx >= 0) activeMounts.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    throw new Error(`Unexpected method on /mounts: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-p6-stored/exports`, route =>
+    route.fulfill({ json: { exports: [p6StoredExport] } }));
+  await page.route(`**${peerApi}/peer-p6-stored/mounts`, route =>
+    route.fulfill({ json: { mounts: [p6StoredMount], available_exports: [] } }));
+
+  await page.goto('/?tab=cluster');
+
+  const storageTrigger = page.getByRole('button', { name: 'Manage media storage for Media server' });
+  const dialog = page.getByRole('dialog', { name: 'Media storage for Media server' });
+  return { storageTrigger, dialog, exportPostPayloads, exportDeletePayloads, mountPostPayloads, mountDeletePayloads };
+}
+
+test('storage controls enforce link capability gates and show media safety guidance', async ({ page }) => {
+  const { storageTrigger, dialog } = await mountStorageControls(page);
+  await expect(storageTrigger).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Manage media storage for P6 stored node' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Manage media storage for Offline stored' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Manage media storage for Pending node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage media storage for Revoked node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage media storage for Legacy node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage media storage for P6 node' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Manage media storage for Offline empty' })).toHaveCount(0);
+
+  // Open via keyboard and confirm initial focus + media safety guidance.
+  await storageTrigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('#cluster-storage-export-path')).toBeFocused();
+  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
+
+  const safety = dialog.getByTestId('cluster-storage-media-safety');
+  await expect(safety).toContainText('Jellyfin 12.4');
+  await expect(safety).toContainText('Plex');
+  await expect(safety).toContainText('Emby');
+  await expect(safety).toContainText('interior subfolder');
+
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(storageTrigger).toBeFocused();
+
+  // Older peers can manage existing storage even when creation is unavailable.
+  await page.getByRole('button', { name: 'Manage media storage for P6 stored node' }).click();
+  const p6Dialog = page.getByRole('dialog', { name: 'Media storage for P6 stored node' });
+  await expect(p6Dialog.getByTestId('cluster-storage-compat-warning')).toContainText('storage');
+  await expect(p6Dialog.locator('#cluster-storage-export-submit')).toBeDisabled();
+  await expect(p6Dialog.locator('#cluster-storage-export-remove-p6-exp-1')).toBeEnabled();
+  await expect(p6Dialog.locator('#cluster-storage-mount-remove-p6-mnt-1')).toBeEnabled();
+});
+
+test('storage folder picker and explicit write opt-in create an export', async ({ page }) => {
+  const { storageTrigger, dialog, exportPostPayloads } = await mountStorageControls(page);
+  await storageTrigger.click();
+
+  // Local folder browser picks a folder without auto-submitting; write opt-in defaults false and shows warning when checked.
+  await dialog.locator('#cluster-storage-browse-toggle').click();
+  const browser = dialog.getByTestId('cluster-storage-folder-browser');
+  await expect(browser).toBeVisible();
+  await browser.getByRole('button', { name: 'media', exact: true }).click();
+  await browser.getByRole('button', { name: 'uploads', exact: true }).click();
+  await dialog.locator('#cluster-storage-browser-use').click();
+  await expect(dialog.locator('#cluster-storage-export-path')).toHaveValue('/srv/media/uploads');
+  expect(exportPostPayloads).toHaveLength(0);
+
+  const exportWriteToggle = dialog.locator('#cluster-storage-export-writable');
+  await expect(exportWriteToggle).not.toBeChecked();
+  await expect(dialog.getByTestId('cluster-export-write-warning')).toHaveCount(0);
+  await exportWriteToggle.check();
+  await expect(dialog.getByTestId('cluster-export-write-warning')).toBeVisible();
+
+  await dialog.locator('#cluster-storage-export-submit').click();
+  await expect(dialog.getByText('Exported /srv/media/uploads to Media server.')).toBeVisible();
+  expect(exportPostPayloads).toEqual([{ path: '/srv/media/uploads', writable: true }]);
+  await expect(dialog.locator('#cluster-storage-export-path')).toHaveValue('');
+  await expect(exportWriteToggle).not.toBeChecked();
+  await expect(dialog.getByText('Remote writes mapped to UID 1000, GID 1000')).toBeVisible();
+});
+
+test('storage export removal requires confirmation and preserves focus on cancel', async ({ page }) => {
+  const { storageTrigger, dialog, exportDeletePayloads } = await mountStorageControls(page, {
+    exports: [makePeerExport('exp-created-1', 'peer-active', '/srv/media/uploads')],
+  });
+  await storageTrigger.click();
+
+  // Two-step export removal keeps focus and sends DELETE { export_id }.
+  await dialog.locator('#cluster-storage-export-remove-exp-created-1').click();
+  await expect(dialog.locator('#cluster-storage-export-keep-exp-created-1')).toBeFocused();
+  await dialog.locator('#cluster-storage-export-keep-exp-created-1').click();
+  await expect(dialog.locator('#cluster-storage-export-remove-exp-created-1')).toBeFocused();
+  expect(exportDeletePayloads).toHaveLength(0);
+
+  await dialog.locator('#cluster-storage-export-remove-exp-created-1').click();
+  await dialog.locator('#cluster-storage-export-confirm-exp-created-1').click();
+  await expect(dialog.getByText('Removed export /srv/media/uploads for Media server.')).toBeVisible();
+  expect(exportDeletePayloads).toEqual([{ export_id: 'exp-created-1' }]);
+});
+
+test('storage uses catalog mount IDs, explicit write opt-in, and interior library paths', async ({ page }) => {
+  const { storageTrigger, dialog, mountPostPayloads } = await mountStorageControls(page);
+  await storageTrigger.click();
+
+  // Remote export catalog: read-only export disables write opt-in; writable export shows warning and resets on switch.
+  const mountSelect = dialog.locator('#cluster-storage-mount-export');
+  const mountWriteToggle = dialog.locator('#cluster-storage-mount-writable');
+  await expect(mountSelect).toHaveValue('rem-ro');
+  await expect(mountWriteToggle).toBeDisabled();
+  await expect(dialog.getByTestId('cluster-mount-readonly-hint')).toBeVisible();
+
+  await mountSelect.selectOption('rem-rw');
+  await expect(mountWriteToggle).toBeEnabled();
+  await expect(mountWriteToggle).not.toBeChecked();
+  await mountWriteToggle.check();
+  await expect(dialog.getByTestId('cluster-mount-write-warning')).toBeVisible();
+
+  await mountSelect.selectOption('rem-ro');
+  await expect(mountWriteToggle).toBeDisabled();
+  await expect(mountWriteToggle).not.toBeChecked();
+
+  // Create mount sends ONLY { export_id, writable } (no remote path, host, or mount options).
+  await dialog.locator('#cluster-storage-mount-submit').click();
+  await expect(dialog.getByText('Mounted /srv/media/movies from Media server.')).toBeVisible();
+  expect(mountPostPayloads).toEqual([{ export_id: 'rem-ro', writable: false }]);
+  expect(Object.keys(mountPostPayloads[0] as Record<string, unknown>).sort()).toEqual(['export_id', 'writable']);
+
+  // Only expose the interior library path (/library), never the bare mount root.
+  const modalLibraryPath = dialog.getByTestId('storage-mount-library-path');
+  await expect(modalLibraryPath).toHaveText('/mnt/af-peers/media-server/movies/library');
+  const dialogText = await dialog.innerText();
+  const mountPathsInDialog = dialogText.match(/\/mnt\/af-peers\/[^\s)·,]+/g) ?? [];
+  expect(mountPathsInDialog.length).toBeGreaterThan(0);
+  for (const pathMatch of mountPathsInDialog) {
+    expect(pathMatch.endsWith('/library')).toBe(true);
+  }
+});
+
+test('storage mount removal requires confirmation and preserves focus on cancel', async ({ page }) => {
+  const { storageTrigger, dialog, mountDeletePayloads } = await mountStorageControls(page, {
+    mounts: [makePeerMount('mnt-rem-ro', 'peer-active', '/srv/media/movies', '/mnt/af-peers/media-server/movies')],
+  });
+  await storageTrigger.click();
+
+  // Two-step mount removal sends DELETE { mount_id }.
+  await dialog.locator('#cluster-storage-mount-remove-mnt-rem-ro').click();
+  await expect(dialog.locator('#cluster-storage-mount-keep-mnt-rem-ro')).toBeFocused();
+  await dialog.locator('#cluster-storage-mount-keep-mnt-rem-ro').click();
+  await expect(dialog.locator('#cluster-storage-mount-remove-mnt-rem-ro')).toBeFocused();
+  expect(mountDeletePayloads).toHaveLength(0);
+
+  await dialog.locator('#cluster-storage-mount-remove-mnt-rem-ro').click();
+  await dialog.locator('#cluster-storage-mount-confirm-mnt-rem-ro').click();
+  await expect(dialog.getByText('Removed mount for /srv/media/movies from Media server.')).toBeVisible();
+  expect(mountDeletePayloads).toEqual([{ mount_id: 'mnt-rem-ro' }]);
+});
+
+test('storage keeps stored exports and mounts manageable when remote catalog is down and updates mount state and RTT warnings live', async ({ page }) => {
+  await page.clock.install();
+  const storedExports = [makePeerExport('exp-local-1', 'peer-a', '/srv/media/local-tv')];
+  const storedMounts = [
+    makePeerMount('mnt-1', 'peer-a', '/srv/media/movies', '/mnt/af-peers/media-server/movies', {
+      state: 'mounted',
+      last_error: null,
+    }),
+  ];
+  const peer = makePeer('peer-a', 'Media server', '192.0.2.21', {
+    state: 'active',
+    capabilities: ['links', 'grants', 'storage'],
+    rtt_ms: 6.4,
+    high_latency: false,
+  });
+  let listReads = 0;
+  let exportPostCalls = 0;
+  let catalogRetryCount = 0;
+
+  await mountCluster(page, () => {
+    listReads += 1;
+    return {
+      ...peerList(),
+      capabilities: ['links', 'grants', 'storage'],
+      rtt_warn_ms: 25,
+      peers: [{ ...peer, exports: [...storedExports], mounts: [...storedMounts] }],
+    };
+  });
+
+  await page.route(`**${peerApi}/peer-a/exports`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ json: { exports: [...storedExports] } });
+      return;
+    }
+    if (method === 'POST') {
+      exportPostCalls += 1;
+      await route.fulfill({
+        status: 400,
+        json: {
+          code: 'INVALID_REQUEST',
+          server: 'local',
+          step: 'create_export',
+          message: 'Export path does not exist on disk.',
+          action: 'Create the folder or pick an existing directory, then retry.',
+        },
+      });
+      return;
+    }
+    if (method === 'DELETE') {
+      const body = route.request().postDataJSON() as { export_id: string };
+      const idx = storedExports.findIndex(e => e.id === body.export_id);
+      if (idx >= 0) storedExports.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    throw new Error(`Unexpected method on /exports: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-a/mounts`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      catalogRetryCount += 1;
+      await route.fulfill({
+        json: {
+          mounts: [...storedMounts],
+          available_exports: [],
+          exports_error: {
+            code: 'LINK_DOWN',
+            server: 'Media server',
+            step: 'list_remote_exports',
+            message: 'Remote export catalog is unreachable.',
+            action: 'Verify WireGuard connectivity on UDP 51821 and retry.',
+          },
+        },
+      });
+      return;
+    }
+    if (method === 'DELETE') {
+      const body = route.request().postDataJSON() as { mount_id: string };
+      const idx = storedMounts.findIndex(m => m.id === body.mount_id);
+      if (idx >= 0) storedMounts.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    throw new Error(`Unexpected method on /mounts: ${method}`);
+  });
+
+  await page.goto('/?tab=cluster');
+
+  // Peer row initially shows live Mounted summary with interior library path only.
+  const rowSummary = page.getByTestId('peer-storage-summary-peer-a');
+  await expect(rowSummary).toBeVisible();
+  await expect(rowSummary.getByText('Mounted', { exact: true })).toBeVisible();
+  await expect(rowSummary.getByTestId('peer-mount-library-path')).toHaveText('/mnt/af-peers/media-server/movies/library');
+  await expect(rowSummary.getByTestId('peer-storage-latency-warning')).toHaveCount(0);
+
+  // Live 10s poll transitions peer to high latency + stopped mount (backend state "stopped" while link is down).
+  peer.state = 'down';
+  peer.rtt_ms = 68.5;
+  peer.high_latency = true;
+  storedMounts[0] = {
+    ...storedMounts[0],
+    state: 'stopped',
+    last_error: 'Sentinel probe timed out twice',
+  };
+  const readsBefore = listReads;
+  await page.clock.fastForward('00:11');
+  await expect.poll(() => listReads).toBeGreaterThan(readsBefore);
+
+  await expect(rowSummary.getByText('Stopped: link down', { exact: true })).toBeVisible();
+  await expect(rowSummary.getByText('Sentinel probe timed out twice')).toBeVisible();
+  await expect(rowSummary.getByTestId('peer-storage-latency-warning')).toContainText('68.5 ms');
+  await expect(rowSummary.getByTestId('peer-storage-latency-warning')).toContainText('NFS');
+
+  // Open Storage modal: remote catalog error displays typed recovery action while stored exports & mounts stay manageable.
+  await page.getByRole('button', { name: 'Manage media storage for Media server' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Media storage for Media server' });
+  await expect(dialog.getByTestId('cluster-storage-down-warning')).toBeVisible();
+  await expect(dialog.getByTestId('cluster-storage-latency-warning')).toContainText('68.5 ms');
+  await expect(dialog.getByTestId('cluster-storage-catalog-error')).toContainText('Remote export catalog is unreachable.');
+  await expect(dialog.getByTestId('cluster-storage-catalog-error')).toContainText('Verify WireGuard connectivity on UDP 51821 and retry.');
+
+  // Retrying remote catalog re-fetches /mounts without losing stored mounts.
+  const retriesBefore = catalogRetryCount;
+  await dialog.locator('#cluster-storage-retry-catalog').click();
+  await expect.poll(() => catalogRetryCount).toBeGreaterThan(retriesBefore);
+  await expect(dialog.getByTestId('cluster-storage-mounts-list')).toContainText('/srv/media/movies');
+
+  // Typed PeerError on export create retains draft path & write checkbox so operator can correct and retry.
+  await dialog.locator('#cluster-storage-export-path').fill('/srv/missing-folder');
+  await dialog.locator('#cluster-storage-export-writable').check();
+  await dialog.locator('#cluster-storage-export-submit').click();
+  await expect(dialog.getByText('Export path does not exist on disk.')).toBeVisible();
+  await expect(dialog.getByText('Create the folder or pick an existing directory, then retry.')).toBeVisible();
+  await expect(dialog.locator('#cluster-storage-export-path')).toHaveValue('/srv/missing-folder');
+  await expect(dialog.locator('#cluster-storage-export-writable')).toBeChecked();
+  expect(exportPostCalls).toBe(1);
+
+  // Stored local export and stored local mount remain removable even while remote catalog is down.
+  await dialog.locator('#cluster-storage-export-remove-exp-local-1').click();
+  await dialog.locator('#cluster-storage-export-confirm-exp-local-1').click();
+  await expect(dialog.getByText('Removed export /srv/media/local-tv for Media server.')).toBeVisible();
+
+  await dialog.locator('#cluster-storage-mount-remove-mnt-1').click();
+  await dialog.locator('#cluster-storage-mount-confirm-mnt-1').click();
+  await expect(dialog.getByText('Removed mount for /srv/media/movies from Media server.')).toBeVisible();
+});
+
+test('storage requests and local folder browsing stay same-origin local while managing a remote peer server', async ({ page }) => {
+  const outboundGrant = makeGrantSummary('grant-out-b', makeAccessMap('write'), 'remote-admin');
+  const peers = [
+    makePeer('peer-a', 'Media server', '192.0.2.21', {
+      state: 'active',
+      capabilities: ['links', 'grants', 'storage'],
+    }),
+    makePeer('peer-b', 'Remote target', '192.0.2.31', {
+      state: 'active',
+      capabilities: ['links', 'grants', 'storage'],
+      grants: { inbound: null, outbound: outboundGrant },
+    }),
+  ];
+  const localHits: string[] = [];
+  const leakedRemoteHits: string[] = [];
+
+  await mountCluster(page, () => ({
+    ...peerList(),
+    capabilities: ['links', 'grants', 'storage'],
+    peers: peers.map(p => ({ ...p })),
+  }));
+
+  await page.route('**/api/v1/peers/peer-b/**', async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.includes('/admin/peers') || pathname.includes('/auth/fs')) {
+      leakedRemoteHits.push(pathname);
+    }
+    await route.fulfill({ json: {} });
+  });
+
+  await page.route('**/api/v1/auth/fs?*', async route => {
+    const url = new URL(route.request().url());
+    localHits.push(`GET ${url.pathname}${url.search}`);
+    await route.fulfill({ json: { current_path: '/srv', parent_path: '', directories: ['media'] } });
+  });
+
+  await page.route(`**${peerApi}/peer-a/exports`, async route => {
+    const url = new URL(route.request().url());
+    localHits.push(`${route.request().method()} ${url.pathname}`);
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { exports: [] } });
+      return;
+    }
+    const body = route.request().postDataJSON() as { path: string; writable: boolean };
+    await route.fulfill({
+      status: 201,
+      json: { export: makePeerExport('exp-local', 'peer-a', body.path, { writable: body.writable }) },
+    });
+  });
+
+  await page.route(`**${peerApi}/peer-a/mounts`, async route => {
+    const url = new URL(route.request().url());
+    localHits.push(`${route.request().method()} ${url.pathname}`);
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        json: {
+          mounts: [],
+          available_exports: [makePeerExport('rem-1', 'peer-a', '/srv/media/films')],
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      json: {
+        mount: makePeerMount('mnt-local', 'peer-a', '/srv/media/films', '/mnt/af-peers/media-server/films'),
+      },
+    });
+  });
+
+  await page.goto('/?tab=cluster');
+  await page.getByTestId('peer-manage-peer-b').click();
+  await expect(page.getByTestId('cluster-local-scope-note')).toBeVisible();
+  await expect(page.getByTestId('peer-manage-peer-b')).toHaveAttribute('data-active', 'true');
+
+  await page.getByRole('button', { name: 'Manage media storage for Media server' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Media storage for Media server' });
+  await expect(dialog).toBeVisible();
+
+  await dialog.locator('#cluster-storage-browse-toggle').click();
+  await expect(dialog.getByTestId('cluster-storage-folder-browser')).toContainText('/srv');
+  await dialog.locator('#cluster-storage-browser-use').click();
+  await dialog.locator('#cluster-storage-export-submit').click();
+  await expect(dialog.getByText('Exported /srv to Media server.')).toBeVisible();
+
+  await dialog.locator('#cluster-storage-mount-submit').click();
+  await expect(dialog.getByText('Mounted /srv/media/films from Media server.')).toBeVisible();
+
+  // Active selected remote server remained intact and zero storage/fs calls leaked onto the peer proxy.
+  expect(leakedRemoteHits).toEqual([]);
+  expect(localHits).toContain('GET /api/v1/auth/fs?path=%2Fsrv');
+  expect(localHits).toContain('GET /api/v1/admin/peers/peer-a/exports');
+  expect(localHits).toContain('POST /api/v1/admin/peers/peer-a/exports');
+  expect(localHits).toContain('GET /api/v1/admin/peers/peer-a/mounts');
+  expect(localHits).toContain('POST /api/v1/admin/peers/peer-a/mounts');
+  await expect(page.getByTestId('cluster-local-scope-note')).toBeVisible();
+  await expect(page.getByTestId('peer-manage-peer-b')).toHaveAttribute('data-active', 'true');
+});
+
+test('storage modal fences stale fetches and mutations across close and peer switch', async ({ page }) => {
+  test.setTimeout(60_000);
+  const peers = [
+    makePeer('peer-a', 'Media server', '192.0.2.21', {
+      state: 'active',
+      capabilities: ['links', 'grants', 'storage'],
+    }),
+    makePeer('peer-b', 'Backup server', '192.0.2.31', {
+      state: 'active',
+      capabilities: ['links', 'grants', 'storage'],
+    }),
+  ];
+  let listReads = 0;
+
+  await mountCluster(page, () => {
+    listReads += 1;
+    return {
+      ...peerList(),
+      capabilities: ['links', 'grants', 'storage'],
+      peers: peers.map(p => ({ ...p })),
+    };
+  });
+
+  const getAExportsGate = deferred();
+  const getBExportsGate = deferred();
+  const postAExportErrGate = deferred();
+  const postBExportGate = deferred();
+  let getAExportsCalls = 0;
+
+  await page.route(`**${peerApi}/peer-a/exports`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      getAExportsCalls += 1;
+      if (getAExportsCalls === 1) {
+        await getAExportsGate.promise;
+        await route.fulfill({
+          json: { exports: [makePeerExport('stale-exp-a', 'peer-a', '/srv/stale-from-a')] },
+        });
+        return;
+      }
+      await route.fulfill({ json: { exports: [] } });
+      return;
+    }
+    if (method === 'POST') {
+      await postAExportErrGate.promise;
+      await route.fulfill({
+        status: 502,
+        json: {
+          code: 'PEER_INTERNAL_ERROR',
+          server: 'Media server',
+          step: 'create_export',
+          message: 'Stale export error for Media server.',
+          action: 'Check nfs-server status.',
+        },
+      });
+      return;
+    }
+    throw new Error(`Unexpected method on peer-a/exports: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-a/mounts`, route =>
+    route.fulfill({ json: { mounts: [], available_exports: [] } }));
+
+  await page.route(`**${peerApi}/peer-b/exports`, async route => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await getBExportsGate.promise;
+      await route.fulfill({
+        json: { exports: [makePeerExport('exp-b-1', 'peer-b', '/srv/backup-b')] },
+      });
+      return;
+    }
+    if (method === 'POST') {
+      await postBExportGate.promise;
+      const body = route.request().postDataJSON() as { path: string; writable: boolean };
+      await route.fulfill({
+        status: 201,
+        json: { export: makePeerExport('exp-b-2', 'peer-b', body.path, { writable: body.writable }) },
+      });
+      return;
+    }
+    throw new Error(`Unexpected method on peer-b/exports: ${method}`);
+  });
+
+  await page.route(`**${peerApi}/peer-b/mounts`, route =>
+    route.fulfill({ json: { mounts: [], available_exports: [] } }));
+
+  await page.goto('/?tab=cluster');
+  const openA = page.getByRole('button', { name: 'Manage media storage for Media server' });
+  const openB = page.getByRole('button', { name: 'Manage media storage for Backup server' });
+  const dialog = page.getByRole('dialog');
+
+  // 1) Stale GET /exports for Media server must never populate Backup server while Backup is loading.
+  await openA.click();
+  await expect(dialog.getByText('Loading local exports…')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await expect(dialog.getByText('Loading local exports…')).toBeVisible();
+  const staleGetResp = page.waitForResponse(
+    resp => new URL(resp.url()).pathname === `${peerApi}/peer-a/exports` && resp.request().method() === 'GET',
+  );
+  getAExportsGate.resolve();
+  await staleGetResp;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+  await expect(dialog.getByText('/srv/stale-from-a')).toHaveCount(0);
+
+  getBExportsGate.resolve();
+  await expect(dialog.getByText('/srv/backup-b')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // 2) Stale POST /exports error for Media server dismissed via X never leaks into Backup server or unlocks Backup's POST.
+  await openA.click();
+  await dialog.locator('#cluster-storage-export-path').fill('/srv/fail-a');
+  await dialog.locator('#cluster-storage-export-submit').click();
+  await expect(dialog.getByRole('button', { name: 'Exporting…' })).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await openB.click();
+  await dialog.locator('#cluster-storage-export-path').fill('/srv/new-b');
+  await dialog.locator('#cluster-storage-export-submit').click();
+  await expect(dialog.getByRole('button', { name: 'Exporting…' })).toBeDisabled();
+
+  const stalePostErrResp = page.waitForResponse(
+    resp => new URL(resp.url()).pathname === `${peerApi}/peer-a/exports` && resp.status() === 502,
+  );
+  postAExportErrGate.resolve();
+  await stalePostErrResp;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+  await expect(dialog.getByText('Stale export error for Media server.')).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Exporting…' })).toBeDisabled();
+
+  const readsBefore = listReads;
+  postBExportGate.resolve();
+  await expect.poll(() => listReads).toBeGreaterThan(readsBefore);
+  await expect(dialog.getByText('Exported /srv/new-b to Backup server.')).toBeVisible();
 });

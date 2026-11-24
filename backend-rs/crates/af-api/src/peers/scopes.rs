@@ -1648,6 +1648,19 @@ mod tests {
         assert!(routes
             .iter()
             .any(|r| r.method == Method::POST && r.path == "/api/v1/admin/peers/:id/grant-offer"));
+        for (method, path) in [
+            (Method::GET, "/api/v1/admin/peers/:id/exports"),
+            (Method::POST, "/api/v1/admin/peers/:id/exports"),
+            (Method::DELETE, "/api/v1/admin/peers/:id/exports"),
+            (Method::GET, "/api/v1/admin/peers/:id/mounts"),
+            (Method::POST, "/api/v1/admin/peers/:id/mounts"),
+            (Method::DELETE, "/api/v1/admin/peers/:id/mounts"),
+        ] {
+            assert!(
+                routes.iter().any(|r| r.method == method && r.path == path),
+                "expected peer storage registration for {method} {path}"
+            );
+        }
         for method in [
             Method::GET,
             Method::HEAD,
@@ -1848,6 +1861,12 @@ mod tests {
             (Method::GET, "/api/v1/admin/peers/"),
             (Method::PUT, "/api/v1/admin/peers/link-1/grant"),
             (Method::POST, "/api/v1/admin/PEERS/link-1/grant-offer"),
+            (Method::GET, "/api/v1/admin/peers/link-1/exports"),
+            (Method::POST, "/api/v1/admin/peers/link-1/exports"),
+            (Method::DELETE, "/api/v1/admin/PEERS/link-1/exports"),
+            (Method::GET, "/api/v1/admin/peers/link-1/mounts"),
+            (Method::POST, "/api/v1/admin/peers/link-1/mounts"),
+            (Method::DELETE, "/api/v1/admin/PEERS/link-1/mounts"),
             (Method::GET, "/api/v1/peers/link-1/admin/services"),
             (Method::POST, "/api/v1/peer-pairing/request"),
             (Method::GET, "/api/v1/auth/session"),

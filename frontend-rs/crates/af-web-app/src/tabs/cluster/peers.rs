@@ -1,6 +1,10 @@
 //! Peer list projection, direction/access formatting, endpoint editing, and revocation consent.
 
 use super::grants::GrantEditorModal;
+use super::storage::{
+    format_drawer_exports_summary, format_drawer_mounts_summary, PeerExportView, PeerMountView,
+    PeerRowStorageSummary, StorageManagerModal,
+};
 use super::{
     copy_text_to_clipboard, format_countdown, peer_api_request, peer_endpoint_path,
     peer_revoke_path, CompletionScope, DialogGate, PeerApiError, PeerErrorAlert,
@@ -154,6 +158,8 @@ pub struct PeerLinkView {
     pub created_at: String,
     pub updated_at: String,
     pub grants: LinkGrantsView,
+    pub exports: Vec<PeerExportView>,
+    pub mounts: Vec<PeerMountView>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -433,6 +439,23 @@ pub fn can_manage_grants(peer: &PeerLinkView) -> bool {
     }
 }
 
+pub(super) fn supports_storage_catalog(peer: &PeerLinkView) -> bool {
+    peer.compatibility != "incompatible"
+        && !peer
+            .missing_capabilities
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case("storage"))
+}
+
+pub fn can_manage_storage(peer: &PeerLinkView) -> bool {
+    let has_storage = !peer.exports.is_empty() || !peer.mounts.is_empty();
+    match peer.state.as_str() {
+        "active" => supports_storage_catalog(peer) || has_storage,
+        "down" => has_storage,
+        _ => false,
+    }
+}
+
 pub fn revoke_dialog_mode(state: &str) -> RevokeMode {
     match state {
         "pending" => RevokeMode::Pending,
@@ -502,6 +525,8 @@ pub fn PeerListSection(
     let edit_open = RwSignal::new(false);
     let grant_target = RwSignal::new(None::<PeerLinkView>);
     let grant_open = RwSignal::new(false);
+    let storage_target = RwSignal::new(None::<PeerLinkView>);
+    let storage_open = RwSignal::new(false);
     let revoke_target = RwSignal::new(None::<PeerLinkView>);
     let revoke_open = RwSignal::new(false);
     let detail_target = RwSignal::new(None::<PeerLinkView>);
@@ -518,13 +543,28 @@ pub fn PeerListSection(
             }
         }
         if let Some(selected) = grant_target.get_untracked() {
-            let updated = latest.into_iter().find(|peer| {
-                peer.id == selected.id && matches!(peer.state.as_str(), "active" | "down")
-            });
+            let updated = latest
+                .iter()
+                .find(|peer| {
+                    peer.id == selected.id && matches!(peer.state.as_str(), "active" | "down")
+                })
+                .cloned();
             if updated.is_none() {
                 grant_open.set(false);
             }
             grant_target.set(updated);
+        }
+        if let Some(selected) = storage_target.get_untracked() {
+            let updated = latest
+                .iter()
+                .find(|peer| {
+                    peer.id == selected.id && matches!(peer.state.as_str(), "active" | "down")
+                })
+                .cloned();
+            if updated.is_none() {
+                storage_open.set(false);
+            }
+            storage_target.set(updated);
         }
     });
 
@@ -538,6 +578,10 @@ pub fn PeerListSection(
     let on_manage_grants = Callback::new(move |peer: PeerLinkView| {
         grant_target.set(Some(peer));
         grant_open.set(true);
+    });
+    let on_manage_storage = Callback::new(move |peer: PeerLinkView| {
+        storage_target.set(Some(peer));
+        storage_open.set(true);
     });
     let on_edit = Callback::new(move |peer: PeerLinkView| {
         edit_target.set(Some(peer));
@@ -580,6 +624,7 @@ pub fn PeerListSection(
                                     now_secs=now_secs
                                     on_inspect=on_inspect
                                     on_manage_grants=on_manage_grants
+                                    on_manage_storage=on_manage_storage
                                     on_edit=on_edit
                                     on_revoke=on_revoke
                                 />
@@ -592,6 +637,12 @@ pub fn PeerListSection(
             <GrantEditorModal
                 open=grant_open
                 target=grant_target
+                on_refresh=on_refresh
+            />
+            <StorageManagerModal
+                open=storage_open
+                target=storage_target
+                rtt_warn_ms=rtt_warn_ms
                 on_refresh=on_refresh
             />
             <EditEndpointModal
@@ -621,6 +672,7 @@ fn PeerRowCard(
     now_secs: RwSignal<i64>,
     on_inspect: Callback<PeerLinkView>,
     on_manage_grants: Callback<PeerLinkView>,
+    on_manage_storage: Callback<PeerLinkView>,
     on_edit: Callback<PeerLinkView>,
     on_revoke: Callback<PeerLinkView>,
 ) -> impl IntoView {
@@ -645,6 +697,8 @@ fn PeerRowCard(
     });
     let grants_manageable =
         Memo::new(move |_| peer.with(|p| p.as_ref().is_some_and(can_manage_grants)));
+    let storage_manageable =
+        Memo::new(move |_| peer.with(|p| p.as_ref().is_some_and(can_manage_storage)));
     let editable =
         Memo::new(move |_| peer.with(|p| p.as_ref().is_some_and(|p| can_edit_endpoint(&p.state))));
     let revoke_mode = Memo::new(move |_| {
@@ -734,6 +788,25 @@ fn PeerRowCard(
                             }
                         >
                             {move || tt(context, "Cluster.manageGrantsAction")}
+                        </button>
+                    </Show>
+                    <Show when=move || storage_manageable.get()>
+                        <button
+                            type="button"
+                            class="glass-button px-3 py-1.5 text-sm"
+                            aria-label=move || {
+                                let name = peer.with(|p| {
+                                    p.as_ref().map(|p| p.name.clone()).unwrap_or_default()
+                                });
+                                tt_with(context, "Cluster.manageStorageAria", &[("peer", &name)])
+                            }
+                            on:click=move |_| {
+                                if let Some(current) = peer.get_untracked() {
+                                    on_manage_storage.run(current);
+                                }
+                            }
+                        >
+                            {move || tt(context, "Cluster.manageStorageAction")}
                         </button>
                     </Show>
                     {move || {
@@ -956,6 +1029,8 @@ fn PeerRowCard(
                     </dd>
                 </div>
             </dl>
+
+            <PeerRowStorageSummary peer=peer rtt_warn_ms=rtt_warn_ms />
 
             {move || {
                 peer.with(|p| {
@@ -1385,6 +1460,9 @@ pub fn PeerDetailsDrawer(
                         .clone()
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or_else(|| translate(&locale, "Not reported"));
+                    let exports_summary = format_drawer_exports_summary(&locale, &peer.exports);
+                    let mounts_summary =
+                        format_drawer_mounts_summary(&locale, &peer.mounts, &peer.state);
                     let pending_exp = peer.pending_expires_at;
 
                     view! {
@@ -1426,6 +1504,18 @@ pub fn PeerDetailsDrawer(
                                         {move || tt(context, "Cluster.detailCapabilities")}
                                     </dt>
                                     <dd class="font-mono text-xs break-words">{caps}</dd>
+                                </div>
+                                <div>
+                                    <dt class="text-xs text-slate-400">
+                                        {move || tt(context, "Cluster.detailExports")}
+                                    </dt>
+                                    <dd class="font-mono text-xs break-words">{exports_summary}</dd>
+                                </div>
+                                <div>
+                                    <dt class="text-xs text-slate-400">
+                                        {move || tt(context, "Cluster.detailMounts")}
+                                    </dt>
+                                    <dd class="font-mono text-xs break-words">{mounts_summary}</dd>
                                 </div>
                                 <div>
                                     <dt class="text-xs text-slate-400">
@@ -1876,5 +1966,74 @@ mod tests {
             ..Default::default()
         };
         assert!(can_manage_grants(&down_with_inbound));
+    }
+
+    #[test]
+    fn storage_controls_gate_by_link_state_capability_and_existing_rows() {
+        let active_compatible = PeerLinkView {
+            state: "active".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(can_manage_storage(&active_compatible));
+        assert!(supports_storage_catalog(&active_compatible));
+
+        let mut active_missing_storage = PeerLinkView {
+            state: "active".into(),
+            compatibility: "limited".into(),
+            missing_capabilities: vec!["storage".into()],
+            ..Default::default()
+        };
+        assert!(!supports_storage_catalog(&active_missing_storage));
+        assert!(!can_manage_storage(&active_missing_storage));
+        active_missing_storage.exports.push(PeerExportView {
+            id: "exp-1".into(),
+            path: "/srv/media/movies".into(),
+            ..Default::default()
+        });
+        assert!(can_manage_storage(&active_missing_storage));
+
+        let mut incompatible = PeerLinkView {
+            state: "active".into(),
+            compatibility: "incompatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_storage(&incompatible));
+        incompatible.mounts.push(PeerMountView {
+            id: "mnt-1".into(),
+            remote_path: "/srv/media/movies".into(),
+            mount_path: "/mnt/af-peers/media-2/movies".into(),
+            ..Default::default()
+        });
+        assert!(can_manage_storage(&incompatible));
+
+        let pending = PeerLinkView {
+            state: "pending".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_storage(&pending));
+
+        let revoked = PeerLinkView {
+            state: "revoked".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_storage(&revoked));
+
+        let mut down = PeerLinkView {
+            state: "down".into(),
+            compatibility: "compatible".into(),
+            ..Default::default()
+        };
+        assert!(!can_manage_storage(&down));
+        down.mounts.push(PeerMountView {
+            id: "mnt-down".into(),
+            remote_path: "/srv/media/movies".into(),
+            mount_path: "/mnt/af-peers/media-2/movies".into(),
+            state: "stopped_link_down".into(),
+            ..Default::default()
+        });
+        assert!(can_manage_storage(&down));
     }
 }

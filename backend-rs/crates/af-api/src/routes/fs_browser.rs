@@ -14,7 +14,7 @@ pub(super) struct FsQuery {
     path: String,
 }
 
-pub(super) fn get_allowed_fs_roots() -> Vec<PathBuf> {
+pub(crate) fn get_allowed_fs_roots() -> Vec<PathBuf> {
     let env_override = env::var("AF_ALLOWED_FS_ROOTS").ok();
     get_allowed_fs_roots_with(env_override.as_deref())
 }
@@ -67,7 +67,7 @@ fn get_allowed_fs_roots_with(env_override: Option<&str>) -> Vec<PathBuf> {
     resolved
 }
 
-pub(super) fn is_fs_path_allowed(target: &std::path::Path, allowed_roots: &[PathBuf]) -> bool {
+pub(crate) fn is_fs_path_allowed(target: &std::path::Path, allowed_roots: &[PathBuf]) -> bool {
     for root in allowed_roots {
         if target == root || target.starts_with(root) {
             return true;

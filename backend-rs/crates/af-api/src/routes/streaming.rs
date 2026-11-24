@@ -150,6 +150,10 @@ pub(crate) async fn update_streaming_server(
         ua,
     );
 
+    if norm_provider == "plex" && req.enabled {
+        crate::peers::storage::apply_plex_safety_on_streaming_save_if_peer_mounts_exist().await;
+    }
+
     let dash = crate::streaming_ext::build_streaming_dashboard("30", "all", "all", true).await;
     let server = dash
         .servers

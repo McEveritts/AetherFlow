@@ -298,7 +298,7 @@ impl FakePeerRunner {
         })
     }
 
-    fn call_count(&self) -> usize {
+    pub(super) fn call_count(&self) -> usize {
         self.state.lock().unwrap().calls.len()
     }
 
@@ -343,7 +343,7 @@ impl FakePeerRunner {
             .count()
     }
 
-    fn has_peer(&self, pubkey: &str) -> bool {
+    pub(super) fn has_peer(&self, pubkey: &str) -> bool {
         self.state.lock().unwrap().peers.contains_key(pubkey)
     }
 
@@ -360,7 +360,7 @@ impl FakePeerRunner {
         );
     }
 
-    fn credential(&self, slot: PeerCredentialSlot, id: &str) -> Option<String> {
+    pub(super) fn credential(&self, slot: PeerCredentialSlot, id: &str) -> Option<String> {
         self.state
             .lock()
             .unwrap()
@@ -369,7 +369,7 @@ impl FakePeerRunner {
             .cloned()
     }
 
-    fn set_peer_live_state(
+    pub(super) fn set_peer_live_state(
         &self,
         pubkey: &str,
         present_live: bool,
@@ -751,6 +751,8 @@ fn build_test_runtime_with_db_and_timeout(
     Arc::new(PeerRuntime {
         db: PeerDb::Isolated(db_conn),
         runner,
+        storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
+        mount_health: super::storage::MountHealthTracker::new(),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -780,6 +782,7 @@ fn build_test_runtime_with_db_and_timeout(
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: bind_listener,
         management_router_override: None,
+        allowed_fs_roots_override: None,
     })
 }
 
@@ -1612,7 +1615,7 @@ async fn end_to_end_pairing_health_listener_isolation_endpoint_edit_and_revocati
     assert!(a_link_after_health.rtt_ms.is_some());
     assert_eq!(
         a_link_after_health.capabilities.as_deref(),
-        Some(r#"["links","grants"]"#)
+        Some(r#"["links","grants","storage"]"#)
     );
 
     // `present_live == false` (explicitly removed from live afpeer0) marks link down on first tick!
@@ -2166,17 +2169,36 @@ fn compatibility_matrix_reports_compatible_limited_incompatible_and_unknown() {
     assert_eq!(limited.status, CompatibilityStatus::Limited);
     assert_eq!(
         limited.missing_capabilities,
-        vec!["links".to_string(), "grants".to_string()]
+        vec![
+            "links".to_string(),
+            "grants".to_string(),
+            "storage".to_string()
+        ]
     );
 
     let p3_link_only = evaluate_compatibility(Some(1), &["links".to_string()]);
     assert_eq!(p3_link_only.status, CompatibilityStatus::Limited);
     assert_eq!(
         p3_link_only.missing_capabilities,
-        vec!["grants".to_string()]
+        vec!["grants".to_string(), "storage".to_string()]
     );
 
-    let compat = evaluate_compatibility(Some(1), &["links".to_string(), "grants".to_string()]);
+    let p6_no_storage =
+        evaluate_compatibility(Some(1), &["links".to_string(), "grants".to_string()]);
+    assert_eq!(p6_no_storage.status, CompatibilityStatus::Limited);
+    assert_eq!(
+        p6_no_storage.missing_capabilities,
+        vec!["storage".to_string()]
+    );
+
+    let compat = evaluate_compatibility(
+        Some(1),
+        &[
+            "links".to_string(),
+            "grants".to_string(),
+            "storage".to_string(),
+        ],
+    );
     assert_eq!(compat.status, CompatibilityStatus::Compatible);
     assert!(compat.missing_capabilities.is_empty());
 }
@@ -2269,7 +2291,10 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_r
     let health_json: Value =
         serde_json::from_slice(&to_bytes(health_resp.into_body(), 16_384).await.unwrap()).unwrap();
     assert_eq!(health_json["peer_protocol"], 1);
-    assert_eq!(health_json["capabilities"], json!(["links", "grants"]));
+    assert_eq!(
+        health_json["capabilities"],
+        json!(["links", "grants", "storage"])
+    );
 
     // 2. Unauthenticated request to /api/v1/admin/peers -> 401.
     let unauth = app
@@ -2321,7 +2346,10 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_r
             .unwrap();
     assert!(admin_json["identity"].is_null());
     assert_eq!(admin_json["peers"], json!([]));
-    assert_eq!(admin_json["capabilities"], json!(["links", "grants"]));
+    assert_eq!(
+        admin_json["capabilities"],
+        json!(["links", "grants", "storage"])
+    );
 
     // 5. Cookie-authenticated POST to /api/v1/admin/peers/pairing-window WITHOUT CSRF token -> 403!
     let no_csrf = app
@@ -8910,7 +8938,7 @@ async fn p5_grant_delivery_failure_concurrency_p3_interop_and_link_revocation_cl
     assert_eq!(list_p3["peers"][0]["compatibility"], "limited");
     assert_eq!(
         list_p3["peers"][0]["missing_capabilities"],
-        json!(["grants"])
+        json!(["grants", "storage"])
     );
 
     // PUT /grant against P3 link-only server returns 422 VERSION_INCOMPATIBLE and does not activate.
@@ -9121,6 +9149,8 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
     let rt_b = Arc::new(PeerRuntime {
         db: PeerDb::Production,
         runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
+        mount_health: super::storage::MountHealthTracker::new(),
         public_transport: Arc::new(UnreachablePublicTransport),
         revocation_tx: rev_tx_b,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -9150,6 +9180,7 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
         tunnel_port_overrides: RwLock::new(HashMap::new()),
         bind_listener_in_handlers: true,
         management_router_override: None,
+        allowed_fs_roots_override: None,
     });
     let (rt_a, _db_a) = build_test_runtime(
         "manager-a",

@@ -8,9 +8,12 @@ pub mod listener;
 pub mod pairing;
 pub mod proxy;
 pub mod scopes;
+pub mod storage;
 
 #[cfg(test)]
 mod proxy_tests;
+#[cfg(test)]
+mod storage_tests;
 #[cfg(test)]
 mod tests;
 
@@ -127,10 +130,10 @@ pub(crate) fn public_link_state(state: &str) -> &str {
 
 /// Capabilities advertised on `/health` and tunnel `/health`.
 ///
-/// P5 advertises `["links", "grants"]` once scoped grant issuance, revocation, reciprocal grant
-/// offers, and scoped tunnel management dispatch are enabled.
+/// P7 advertises `["links", "grants", "storage"]` once scoped grant management and peer NFS
+/// storage export/mount endpoints and authenticated `/peer/v1/exports` catalog are enabled.
 pub fn capabilities() -> Vec<&'static str> {
-    vec!["links", "grants"]
+    vec!["links", "grants", "storage"]
 }
 
 /// Broadcast events published whenever a link or grant is revoked.
@@ -569,6 +572,8 @@ impl PeerWsPermit {
 pub struct PeerRuntime {
     pub(crate) db: PeerDb,
     pub(crate) runner: Arc<dyn PeerRunner>,
+    pub(crate) storage_runner: Arc<dyn storage::PeerStorageRunner>,
+    pub(crate) mount_health: storage::MountHealthTracker,
     pub(crate) public_transport: Arc<dyn PublicPairingTransport>,
     pub(crate) revocation_tx: broadcast::Sender<RevocationEvent>,
     pub(crate) pairing_rate_limiter: pairing::PairingRateLimiter,
@@ -603,6 +608,8 @@ pub struct PeerRuntime {
     pub(crate) bind_listener_in_handlers: bool,
     #[cfg(test)]
     pub(crate) management_router_override: Option<Router>,
+    #[cfg(test)]
+    pub(crate) allowed_fs_roots_override: Option<Vec<std::path::PathBuf>>,
 }
 
 static GLOBAL_RUNTIME: Lazy<Arc<PeerRuntime>> = Lazy::new(|| Arc::new(PeerRuntime::production()));
@@ -618,6 +625,8 @@ impl PeerRuntime {
         Self {
             db: PeerDb::Production,
             runner: Arc::new(ProductionPeerRunner),
+            storage_runner: Arc::new(storage::ProductionPeerStorageRunner),
+            mount_health: storage::MountHealthTracker::new(),
             public_transport: Arc::new(ProductionPublicPairingTransport::new()),
             revocation_tx,
             pairing_rate_limiter: pairing::PairingRateLimiter::new(
@@ -652,6 +661,8 @@ impl PeerRuntime {
             bind_listener_in_handlers: true,
             #[cfg(test)]
             management_router_override: None,
+            #[cfg(test)]
+            allowed_fs_roots_override: None,
         }
     }
 
@@ -1312,6 +1323,18 @@ pub(crate) fn tracked_admin_routes_with_runtime(
                 .delete(grants::delete_peer_grant),
         )
         .route("/:id/grant-offer", post(grants::send_grant_offer))
+        .route(
+            "/:id/exports",
+            get(storage::list_peer_exports)
+                .post(storage::create_peer_export)
+                .delete(storage::delete_peer_export),
+        )
+        .route(
+            "/:id/mounts",
+            get(storage::list_peer_mounts)
+                .post(storage::create_peer_mount)
+                .delete(storage::delete_peer_mount),
+        )
         .layer(middleware::from_fn(reject_peer_principal_middleware))
         .with_state(runtime)
 }

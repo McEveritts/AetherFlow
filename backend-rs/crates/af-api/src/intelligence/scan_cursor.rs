@@ -46,6 +46,9 @@ pub(super) fn validate_mediaflow_directory(
             "Directory is outside configured library roots".to_string(),
         ));
     }
+    if let Err(err) = crate::peers::storage::validate_media_library_path(&resolved) {
+        return Err((StatusCode::BAD_REQUEST, err.to_string()));
+    }
     Ok(resolved)
 }
 

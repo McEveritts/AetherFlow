@@ -67,6 +67,20 @@ pub use peer_network::{
     PeerMutationResponse, PeerNetworkError, PeerNetworkManager, PeerNetworkRequest,
     PeerNetworkResponse, PeerStatusPeer, PeerStatusResponse,
 };
+pub mod peer_storage;
+pub use peer_storage::{
+    derive_peer_export_file_name, derive_peer_mount_path, execute_peer_storage_local,
+    is_managed_peer_mount_unit, peer_sentinel_path, probe_sentinel_file, systemd_escape_mount_unit,
+    systemd_escape_path, validate_export_path_syntax, validate_peer_mount_path,
+    validate_peer_mount_segment, validate_peer_storage_link_id, PeerExportsWriteResponse,
+    PeerMountRemoveResponse, PeerMountStateResponse, PeerMountWriteResponse,
+    PeerNfsdConfigResponse, PeerSentinelProbeResponse, PeerSentinelResponse, PeerStorageError,
+    PeerStorageExportSpec, PeerStorageManager, PeerStoragePackagesResponse, PeerStorageRequest,
+    PeerStorageResponse, DEFAULT_PEER_EXPORTS_DIR, DEFAULT_PEER_MOUNTS_ROOT,
+    DEFAULT_PEER_NFS_CONF_DIR, DEFAULT_PEER_SYSTEMD_DIR, DEFAULT_SENTINEL_PROBE_TIMEOUT_MS,
+    PEER_MANAGED_HEADER, PEER_NFSD_CONF_NAME, PEER_NFSD_SERVICE_UNIT, PEER_SENTINEL_FILE_NAME,
+    PEER_STORAGE_PACKAGES,
+};
 pub mod package_executor;
 pub use package_executor::check_domain_tls_ready;
 pub mod package_lifecycle;
@@ -368,6 +382,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/blueprint/apply", post(handle_blueprint_apply))
         .route("/v1/network", post(handle_network))
         .route("/v1/peer-network", post(peer_network::handle_peer_network))
+        .route("/v1/peer-storage", post(peer_storage::handle_peer_storage))
         .route("/v1/quota", post(handle_quota))
         .route("/v1/quota/usage", post(quota::handle))
         .route("/v1/app-meta", post(handle_app_meta))
@@ -675,7 +690,7 @@ pub use runner_client::{
     dispatch_package_lifecycle_snapshot_capture, dispatch_package_lifecycle_snapshot_discard,
     dispatch_package_lifecycle_snapshot_discard_for_job,
     dispatch_package_lifecycle_snapshot_restore, dispatch_package_stream, dispatch_peer_network,
-    dispatch_plugin_start, dispatch_plugin_status, dispatch_plugin_stop,
+    dispatch_peer_storage, dispatch_plugin_start, dispatch_plugin_status, dispatch_plugin_stop,
     dispatch_plugin_token_rotate, dispatch_quota_set, dispatch_sandbox, dispatch_sandbox_apply,
     dispatch_self_update, dispatch_self_update_request, dispatch_self_update_status_request,
     dispatch_set_quota, dispatch_systemctl, execute_package_local, is_lifecycle_busy,

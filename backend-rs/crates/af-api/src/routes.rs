@@ -134,6 +134,7 @@ use blueprints_ingress::{
     resolve_patched_ingress_config, sync_ingress_vhost, upsert_app_ingress_config, UpdateIngressReq,
 };
 use fs_browser::browse_directories;
+pub(crate) use fs_browser::{get_allowed_fs_roots, is_fs_path_allowed};
 pub(crate) use health::database_is_ready;
 use health::{
     authenticated_ready, get_hardware_info, get_openapi_spec, get_system_metrics, health_check,

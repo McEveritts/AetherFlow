@@ -1,9 +1,11 @@
 //! Peer Clustering tab (`/?tab=cluster`): link list, pairing window, pairing flow,
-//! comparison-code confirmation, endpoint editing, access grants, and link revocation.
+//! comparison-code confirmation, endpoint editing, access grants, media storage, and link
+//! revocation.
 
 pub mod grants;
 pub mod pairing;
 pub mod peers;
+pub mod storage;
 
 use crate::state::{app, owned_resource_reads, run_resource_read, AppContext, ResourceReads};
 use crate::tabs::busy::BusyGuard;
@@ -74,6 +76,27 @@ pub fn peer_grant_offer_path(link_id: &str) -> String {
     )
 }
 
+pub fn peer_exports_path(link_id: &str) -> String {
+    format!(
+        "/api/v1/admin/peers/{}/exports",
+        percent_encode_header_component(link_id)
+    )
+}
+
+pub fn peer_mounts_path(link_id: &str) -> String {
+    format!(
+        "/api/v1/admin/peers/{}/mounts",
+        percent_encode_header_component(link_id)
+    )
+}
+
+pub fn local_fs_browse_path(dir: &str) -> String {
+    format!(
+        "/api/v1/auth/fs?path={}",
+        percent_encode_header_component(dir)
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct PeerApiErrorDetail {
     status: u16,
@@ -110,6 +133,17 @@ impl PeerApiError {
 
     pub fn client(message: impl Into<String>) -> Self {
         Self::from_parts(0, None, None, None, message.into(), None)
+    }
+
+    pub(super) fn from_envelope(
+        status: u16,
+        code: Option<String>,
+        server: Option<String>,
+        step: Option<String>,
+        message: String,
+        action: Option<String>,
+    ) -> Self {
+        Self::from_parts(status, code, server, step, message, action)
     }
 
     #[cfg(test)]
@@ -249,6 +283,35 @@ pub async fn peer_api_request<T: DeserializeOwned>(
     let status = response.status();
     let ok = response.ok();
     let text = response.text().await.map_err(PeerApiError::from)?;
+    parse_peer_api_response(status, ok, &text)
+}
+
+/// Sends a strictly local same-origin GET request (bypassing peer proxy rewriting even while a
+/// remote server is selected in the dashboard switcher) for browsing local export directories.
+/// If the access cookie needs rotation (HTTP 401), refreshes once via local `/api/v1/admin/peers`.
+pub async fn local_same_origin_get<T: DeserializeOwned>(path: &str) -> Result<T, PeerApiError> {
+    let response = ApiClient
+        .public_fetch(path, "GET", None)
+        .await
+        .map_err(PeerApiError::from)?;
+    let status = response.status();
+    let ok = response.ok();
+    let text = response.text().await.map_err(PeerApiError::from)?;
+    if status == 401
+        && ApiClient
+            .fetch(PEERS_LIST_PATH, "GET", None)
+            .await
+            .is_ok_and(|res| res.ok())
+    {
+        let retried = ApiClient
+            .public_fetch(path, "GET", None)
+            .await
+            .map_err(PeerApiError::from)?;
+        let retry_status = retried.status();
+        let retry_ok = retried.ok();
+        let retry_text = retried.text().await.map_err(PeerApiError::from)?;
+        return parse_peer_api_response(retry_status, retry_ok, &retry_text);
+    }
     parse_peer_api_response(status, ok, &text)
 }
 
@@ -823,6 +886,11 @@ mod tests {
         let peer_grant = peer_grant_path("link-42");
         let peer_grant_encoded = peer_grant_path("link 42/a");
         let peer_grant_offer = peer_grant_offer_path("link-42");
+        let peer_exports = peer_exports_path("link-42");
+        let peer_exports_encoded = peer_exports_path("link 42/a");
+        let peer_mounts = peer_mounts_path("link-42");
+        let peer_mounts_encoded = peer_mounts_path("link 42/a");
+        let fs_browse = local_fs_browse_path("/srv/media/movies");
 
         assert_eq!(list, "/api/v1/admin/peers");
         assert_eq!(open_window, "/api/v1/admin/peers/pairing-window");
@@ -844,6 +912,17 @@ mod tests {
             "/api/v1/admin/peers/link%2042%2Fa/grant"
         );
         assert_eq!(peer_grant_offer, "/api/v1/admin/peers/link-42/grant-offer");
+        assert_eq!(peer_exports, "/api/v1/admin/peers/link-42/exports");
+        assert_eq!(
+            peer_exports_encoded,
+            "/api/v1/admin/peers/link%2042%2Fa/exports"
+        );
+        assert_eq!(peer_mounts, "/api/v1/admin/peers/link-42/mounts");
+        assert_eq!(
+            peer_mounts_encoded,
+            "/api/v1/admin/peers/link%2042%2Fa/mounts"
+        );
+        assert_eq!(fs_browse, "/api/v1/auth/fs?path=%2Fsrv%2Fmedia%2Fmovies");
 
         // Even while a remote peer server is active, all peer-clustering management controls
         // MUST remain on the local managing origin and never get prefixed with `/api/v1/peers/{id}`.
@@ -858,6 +937,8 @@ mod tests {
             &revoke_link,
             &peer_grant,
             &peer_grant_offer,
+            &peer_exports,
+            &peer_mounts,
         ] {
             assert_eq!(
                 api_url(route),
@@ -869,6 +950,8 @@ mod tests {
         // Read does not attach CSRF; all state-changing admin peer routes do.
         assert!(!should_attach_csrf("GET", &list, None));
         assert!(!should_attach_csrf("GET", &peer_grant, None));
+        assert!(!should_attach_csrf("GET", &peer_exports, None));
+        assert!(!should_attach_csrf("GET", &peer_mounts, None));
         assert!(should_attach_csrf("POST", &open_window, None));
         assert!(should_attach_csrf("DELETE", &open_window, None));
         assert!(should_attach_csrf("DELETE", &close_window, None));
@@ -880,6 +963,16 @@ mod tests {
         assert!(should_attach_csrf("PUT", &peer_grant, None));
         assert!(should_attach_csrf("DELETE", &peer_grant, None));
         assert!(should_attach_csrf("POST", &peer_grant_offer, None));
+        assert!(should_attach_csrf("POST", &peer_exports, None));
+        assert!(should_attach_csrf("DELETE", &peer_exports, None));
+        assert!(should_attach_csrf("POST", &peer_mounts, None));
+        assert!(should_attach_csrf("DELETE", &peer_mounts, None));
+
+        // 204 No Content empty responses parse cleanly as Value::Null for DELETE mutations.
+        assert_eq!(
+            parse_peer_api_response::<Value>(204, true, "").unwrap(),
+            Value::Null
+        );
 
         set_active_server(None);
     }

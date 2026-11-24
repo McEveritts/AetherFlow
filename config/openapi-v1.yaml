@@ -1208,6 +1208,196 @@ paths:
           $ref: '#/components/responses/PeerError'
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
+  /admin/peers/{id}/exports:
+    servers:
+      - url: /api/v1
+    description: Manage folders this server exports to the selected peer.
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        description: Peer link identifier
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: List peer NFS exports
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: NFS export status for this link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerExportList'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Create a peer NFS export
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePeerExport'
+      responses:
+        '201':
+          description: Created peer NFS export
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - export
+                properties:
+                  export:
+                    $ref: '#/components/schemas/PeerExport'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Remove a peer NFS export
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - export_id
+              properties:
+                export_id:
+                  type: string
+                  description: Identifier of the NFS export owned by the selected link
+              additionalProperties: false
+      responses:
+        '204':
+          description: Peer NFS export removed
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+  /admin/peers/{id}/mounts:
+    servers:
+      - url: /api/v1
+    description: Manage mounts on this server using the selected peer's authenticated export catalog.
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        description: Peer link identifier
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: List peer NFS mounts
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: NFS mount status for this link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerMountList'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Create a peer NFS mount
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePeerMount'
+      responses:
+        '201':
+          description: Created peer NFS mount
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - mount
+                properties:
+                  mount:
+                    $ref: '#/components/schemas/PeerMount'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Remove a peer NFS mount
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - mount_id
+              properties:
+                mount_id:
+                  type: string
+                  description: Identifier of the NFS mount owned by the selected link
+              additionalProperties: false
+      responses:
+        '204':
+          description: Peer NFS mount removed
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
   /admin/peers/{id}/endpoint:
     servers:
       - url: /api/v1
@@ -6738,6 +6928,123 @@ components:
           oneOf:
             - $ref: '#/components/schemas/PeerGrantSummary'
             - type: 'null'
+    PeerExport:
+      type: object
+      required:
+        - id
+        - link_id
+        - path
+        - writable
+        - squash_uid
+        - squash_gid
+        - created_at
+      properties:
+        id:
+          type: string
+        link_id:
+          type: string
+        path:
+          type: string
+          description: Exported folder on the exporting server
+        writable:
+          type: boolean
+        squash_uid:
+          type:
+            - integer
+            - 'null'
+        squash_gid:
+          type:
+            - integer
+            - 'null'
+        created_at:
+          type: string
+    PeerMount:
+      type: object
+      required:
+        - id
+        - link_id
+        - remote_path
+        - mount_path
+        - unit_name
+        - writable
+        - purpose
+        - state
+        - last_error
+      properties:
+        id:
+          type: string
+        link_id:
+          type: string
+        remote_path:
+          type: string
+          description: Exported folder on the peer
+        mount_path:
+          type: string
+          description: Managed mount location on the local server
+        unit_name:
+          type: string
+        writable:
+          type: boolean
+        purpose:
+          type: string
+        state:
+          type: string
+        last_error:
+          type:
+            - string
+            - 'null'
+    PeerExportList:
+      type: object
+      required:
+        - exports
+      properties:
+        exports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerExport'
+    PeerMountList:
+      type: object
+      required:
+        - mounts
+        - available_exports
+      properties:
+        mounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerMount'
+        available_exports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerExport'
+        exports_error:
+          description: Peer error when the authenticated export catalog could not be loaded
+          $ref: '#/components/schemas/PeerErrorResponse'
+    CreatePeerExport:
+      type: object
+      required:
+        - path
+      properties:
+        path:
+          type: string
+          description: Absolute folder path on the exporting server
+        writable:
+          type: boolean
+          default: false
+          description: Opt in to writes mapped to the exported folder's owner
+      additionalProperties: false
+    CreatePeerMount:
+      type: object
+      required:
+        - export_id
+      properties:
+        export_id:
+          type: string
+          description: Export identifier from the selected peer's catalog
+        writable:
+          type: boolean
+          default: false
+          description: Request write access when the selected export permits it
+      additionalProperties: false
     PeerLink:
       type: object
       required:
@@ -6800,6 +7107,14 @@ components:
           description: Pending deadline as Unix seconds
         grants:
           $ref: '#/components/schemas/PeerGrants'
+        exports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerExport'
+        mounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerMount'
     ErrorResponse:
       type: object
       required:
