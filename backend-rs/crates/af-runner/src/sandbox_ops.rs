@@ -23,6 +23,8 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
                 | "aetherflow-runner"
                 | "aetherflow-api.service"
                 | "aetherflow-runner.service"
+                | "af-transcode-worker"
+                | "af-transcode-worker.service"
                 | "fail2ban.service"
                 | "pihole-FTL.service"
                 | "netdata.service"

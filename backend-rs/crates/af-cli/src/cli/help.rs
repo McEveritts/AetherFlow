@@ -36,6 +36,7 @@ ADMINISTRATIVE DOMAINS:
   provision   Resumable bare-metal provisioning foundation & safe config overlay (STATE_VERSION=2)
   maintenance Host maintenance utilities: tune, sentinel, clean-logs, showspace (af-host)
   hosts       Runner-mediated /etc/hosts and local DNS reconciliation (/v1/hosts)
+  cluster     Read-only Peer Clustering diagnostics (link health, WG, grants, storage, transcode, audit)
   health      Verify connectivity to the privileged runner Unix socket (/v1/health)
 
 NOTE ON UNSUPPORTED INTERACTIVE / DESTRUCTIVE FLOWS:
@@ -169,6 +170,24 @@ Manage local /etc/hosts, dnsmasq, and Pi-hole DNS mappings.
   update <ip> <domains...>      Map domains to IP in managed block
   remove <domains...>           Remove domains from hosts
   reconcile [ip] [domains...]   Reconcile /etc/hosts to authoritative domain set (defaults to 127.0.0.1)
+"
+        .to_string(),
+        HelpTopic::Cluster => "\
+USAGE:
+  af cluster diagnose <link> [--db <path>]
+
+Inspect read-only Peer Clustering diagnostics for a peer link (matched by exact id, exact name,
+or case-insensitive name):
+  - Link health summary (state, tunnel IP, endpoint, version, capabilities, RTT, error history)
+  - Live WireGuard afpeer0 handshake and traffic counters via af-runner (/v1/peer-network)
+  - Outgoing and incoming grant access summaries (all token hashes and secrets redacted)
+  - Configured NFS exports and mounts with live systemd state and sentinel probe (/v1/peer-storage)
+  - Transcode worker capabilities, parity state, and up to 10 recent transcode jobs
+  - Last 20 redacted audit trail entries related to the peer link
+
+OPTIONS:
+  --db <path>    Override SQLite database path (defaults to AF_DB_PATH, DB_PATH,
+                 AETHERFLOW_DB_PATH, or /var/lib/aetherflow/aetherflow.sqlite|.db under --root)
 "
         .to_string(),
     }

@@ -53,6 +53,7 @@ dependencies = [
  "af-models",
  "af-runner",
  "af-services",
+ "af-transcode",
  "anyhow",
  "async-stream",
  "axum",
@@ -107,6 +108,7 @@ dependencies = [
 name = "af-cli"
 version = "4.0.0"
 dependencies = [
+ "af-db",
  "af-host",
  "af-models",
  "af-release",

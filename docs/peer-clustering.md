@@ -51,9 +51,40 @@ Cluster shows the mount state, the last error, and a latency warning when link R
 
 For a Plex library on a peer mount, turn off automatic trash emptying after scans. For Emby and the *arr apps, turn off automatic removal of missing items for peer-backed libraries. Jellyfin 12.4 uses the missing library path as the safeguard. The live Jellyfin scan and recovery check requires both servers.
 
-## Planned transcoding controls
+## Distributed Jellyfin transcoding
 
-Install matching Jellyfin 12.4 and `jellyfin-ffmpeg` packages on the controller and worker. Enable the worker and run the parity test before trying remote jobs. Worker eligibility checks the grant, link health, FFmpeg version, encoder support, and available job slots. The shim uses the local FFmpeg binary for probes and when remote work cannot start.
+AetherFlow offloads Jellyfin `ffmpeg` jobs across linked peers over the WireGuard tunnel without SSH keys or external wrappers, while falling back locally whenever no remote worker is eligible or reachable.
+
+### Socket & user isolation
+
+- **Jellyfin server (dispatcher)**: `aetherflow-api` binds `/run/aetherflow-transcode/transcode.sock` (`0660`, `aetherflow:jellyfin`) inside `/run/aetherflow-transcode` (`0750`, provisioned via `/etc/tmpfiles.d/aetherflow-transcode.conf`). Jellyfin's sandbox includes `-/run/aetherflow-transcode/transcode.sock` in `ReadWritePaths`.
+- **Worker server**: `af-transcode-worker.service` runs as `User=jellyfin`, `Group=jellyfin`, `SupplementaryGroups=render video` and binds `/run/aetherflow-transcode-worker/worker.sock` (`0660`) inside `/run/aetherflow-transcode-worker` (`0750`).
+- **API access without privilege escalation**: `/etc/systemd/system/aetherflow-api.service.d/20-aetherflow-transcode.conf` adds `SupplementaryGroups=jellyfin` and `ReadWritePaths=-/run/aetherflow-transcode -/run/aetherflow-transcode-worker` to `aetherflow-api.service`. `jellyfin` is never added to the privileged `aetherflow` group.
+
+### Enable distributed transcoding
+
+1. Install matching Jellyfin 12.4 and `jellyfin-ffmpeg` packages on both the Jellyfin server and each worker server.
+2. On the **worker server**, grant the Jellyfin server `transcoding: write` (and optionally `updates: write` to allow one-click `jellyfin-ffmpeg` version alignment). Open **Cluster → Transcoding** and enable the local **Transcode worker service** (`af-transcode-worker.service`).
+3. Ensure shared media and Jellyfin's transcode/temp/cache folders (`/var/cache/jellyfin/transcodes`, `/var/cache/jellyfin/af-tmp`, `/var/cache/jellyfin`) are visible at identical paths on the worker.
+4. On the **Jellyfin server**, open **Cluster → Transcoding** and enable **Use paired servers for Jellyfin transcoding**. AetherFlow installs `/usr/lib/aetherflow/transcode/ffmpeg` (and symlinks `ffprobe` to `/usr/lib/jellyfin-ffmpeg/ffprobe`), writes `/etc/systemd/system/jellyfin.service.d/20-aetherflow-transcode.conf` (never editing the sandbox drop-in), restarts Jellyfin, verifies Jellyfin reports the shim path (rolling back automatically if not), and starts the dispatcher socket.
+5. Enable each worker with its weight (`1..=100`) and max concurrent jobs (`1..=64`), and run the **2-second parity test**. The test encodes a generated test pattern on the worker into the shared transcode folder and reads it back locally before marking `parity_ok = true`.
+
+### Eligibility, version alignment, and failure behavior
+
+- **Eligibility**: A worker receives jobs only when it is enabled, its link is active with the `transcode` capability, its held grant includes `transcoding: write`, `parity_ok` is true, it is not in a 60-second unhealthy cooldown, its `jellyfin-ffmpeg` version matches the Jellyfin server, it advertises the required encoder and compatible DRM render node (rewritten automatically on the worker), and `active_jobs < max_jobs`.
+- **Keeping `jellyfin-ffmpeg` aligned**: Both `/health` and tunnel `/health` report cached non-blocking `jellyfin-ffmpeg` package and encoder capabilities. When versions differ (including after automatic package updates), the worker becomes ineligible, jobs fall back locally, a notification is sent, and **Update to match** updates whichever server is older.
+- **No duplicate encodes & hard-kill cleanup**: Probes (`-version`, `-encoders`, `-hwaccels`, etc.) always `exec` local `ffmpeg` directly. Before a complete `Start` frame reaches a worker, failures mark that worker unhealthy for 60 seconds and try another worker or return `RunLocal`. After a complete `Start` is sent, timeouts or mid-job drops exit non-zero without starting a duplicate local encode. Closing the shim socket without `Exit` (such as Jellyfin `SIGKILL`) or revoking the link/grant immediately sends `Signal(Kill)` and terminates the worker's `ffmpeg` process group. Job records are pruned automatically after 7 days.
+
+## CLI diagnostics (`af cluster diagnose`)
+
+Run `af cluster diagnose <link>` (matching link ID or name; add `--json` for structured output) to inspect a single peer end-to-end without exposing tokens or keys:
+
+```bash
+af cluster diagnose media-2
+af cluster diagnose media-2 --json
+```
+
+The report prints link health and compatibility, live `afpeer0` WireGuard handshake age and byte counters, inbound and outbound grant summaries, NFS exports, NFS mounts with live unit status and `.af-peer-sentinel` probe results, transcode worker configuration and recent jobs, and the last 20 redacted audit entries for the link.
 
 ## Troubleshooting
 
@@ -69,10 +100,10 @@ Use the reported recovery action alongside the code. JSON API logs can include t
 | `VERSION_INCOMPATIBLE` | Verify that both servers support a common peer protocol and upgrade the older server as needed. |
 | `RATE_LIMITED` | Wait for the `Retry-After` interval before submitting another request. |
 | `PEER_BUSY` | Wait for the current peer operation to finish, then retry. |
-| `PEER_SCOPE_DENIED` | Check the grant on the server receiving the request. A change requires write access to its area. |
+| `PEER_SCOPE_DENIED` | Check the grant on the server receiving the request. A change requires write access to its area (for example, `transcoding: write` for remote transcode jobs and `updates: write` or `marketplace: write` to align `jellyfin-ffmpeg`). |
 | `PEER_ROUTE_UNCLASSIFIED` | Use a supported peer management operation or perform the task on the server directly. |
 | `LINK_DOWN`, `LINK_REVOKED` | Check the selected endpoint and the other server's Cluster page. Revoke any stale link before pairing again. |
 
-If the receiving server reports an expired confirmation while the initiating server already shows an active or down link, revoke that link on the initiating server before opening a new window. If the runner reports an uncertain WireGuard outcome, use the request ID to inspect the logs and reconcile `afpeer0` before re-pairing.
+If the receiving server reports an expired confirmation while the initiating server already shows an active or down link, revoke that link on the initiating server before opening a new window. If the runner reports an uncertain WireGuard outcome, use the request ID to inspect the logs and reconcile `afpeer0` before re-pairing. If transcode parity tests fail or remote jobs fall back locally, run `af cluster diagnose <link>`, verify `af-transcode-worker.service` is active on `/run/aetherflow-transcode-worker/worker.sock`, confirm `/run/aetherflow-transcode/transcode.sock` is reachable by `jellyfin`, and verify both servers run the exact same `jellyfin-ffmpeg` package version.
 
 [Peer API reference](API.md#8-peer-clustering) · [Configuration settings](configuration.md)

@@ -14,7 +14,7 @@ mod requests;
 mod tests;
 
 pub use help::render_help_text;
-pub use parse::{parse_cli_args, parse_hosts_subcommand};
+pub use parse::{parse_cli_args, parse_cluster_subcommand, parse_hosts_subcommand};
 pub use parse_ops::parse_byte_size_arg;
 pub use requests::{
     build_hosts_runner_request, build_package_runner_request,
@@ -82,6 +82,7 @@ pub enum HelpTopic {
     Provision,
     Maintenance,
     Hosts,
+    Cluster,
 }
 
 /// Typed administrative command AST for the `af` CLI.
@@ -112,6 +113,8 @@ pub enum AfCommand {
     Maintenance(MaintenanceCliCommand),
     /// Local DNS and /etc/hosts reconciliation mediated by `af-runner` (`/v1/hosts`).
     Hosts(HostsCliCommand),
+    /// Read-only Peer Clustering diagnostic commands (`af cluster diagnose <link>`).
+    Cluster(ClusterCliCommand),
 }
 
 impl AfCommand {
@@ -129,6 +132,7 @@ impl AfCommand {
             AfCommand::Provision(_) => "provision",
             AfCommand::Maintenance(_) => "maintenance",
             AfCommand::Hosts(_) => "hosts",
+            AfCommand::Cluster(_) => "cluster",
         }
     }
 
@@ -146,6 +150,7 @@ impl AfCommand {
             AfCommand::Provision(cmd) => cmd.action_name(),
             AfCommand::Maintenance(cmd) => cmd.action_name(),
             AfCommand::Hosts(cmd) => cmd.action_name(),
+            AfCommand::Cluster(cmd) => cmd.action_name(),
         }
     }
 }
@@ -569,6 +574,26 @@ impl HostsCliCommand {
             HostsCliCommand::Update { .. } => "update",
             HostsCliCommand::Remove { .. } => "remove",
             HostsCliCommand::Reconcile { .. } => "reconcile",
+        }
+    }
+}
+
+/// Read-only Peer Clustering diagnostic commands (`af cluster ...`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ClusterCliCommand {
+    /// Inspect peer link health, WireGuard handshake, grants, exports, mounts, transcode worker, and audit trail.
+    Diagnose {
+        link: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        db_path: Option<PathBuf>,
+    },
+}
+
+impl ClusterCliCommand {
+    pub const fn action_name(&self) -> &'static str {
+        match self {
+            ClusterCliCommand::Diagnose { .. } => "diagnose",
         }
     }
 }

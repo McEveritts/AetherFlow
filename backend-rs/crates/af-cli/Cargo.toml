@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 af-models.workspace = true
+af-db.workspace = true
 af-runner.workspace = true
 af-release.workspace = true
 af-host.workspace = true

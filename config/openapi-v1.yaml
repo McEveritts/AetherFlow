@@ -796,6 +796,58 @@ paths:
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/PeerError'
+  /admin/peers/transcode:
+    servers:
+      - url: /api/v1
+    description: Configure distributed Jellyfin transcoding dispatcher, local worker service, per-worker weights and job caps, and 2-second path-parity checks.
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: Read distributed Jellyfin transcoding status, worker capabilities, and recent jobs
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Current distributed transcoding configuration, worker eligibility, and recent jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerTranscodeConfig'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
+    put:
+      tags:
+        - Cluster
+        - Operator
+      summary: Update distributed Jellyfin transcoding settings, worker configuration, or run a worker parity test
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePeerTranscodeConfig'
+      responses:
+        '200':
+          description: Updated distributed transcoding configuration and optional parity test result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerTranscodeConfig'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/PeerError'
   /admin/peers/pairing-window:
     servers:
       - url: /api/v1
@@ -7115,6 +7167,303 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PeerMount'
+    PeerTranscodeRenderNode:
+      type: object
+      required:
+        - path
+      properties:
+        path:
+          type: string
+        vendor_id:
+          type:
+            - string
+            - 'null'
+        vendor:
+          type:
+            - string
+            - 'null'
+    PeerTranscodeLocalInfo:
+      type: object
+      required:
+        - server_name
+        - ffmpeg_version
+        - package_name
+        - package_version
+        - encoders
+        - render_nodes
+        - primary_render_node
+        - transcoding_temp_path
+        - tmp_dir
+      properties:
+        server_name:
+          type: string
+        ffmpeg_version:
+          type:
+            - string
+            - 'null'
+        package_name:
+          type:
+            - string
+            - 'null'
+        package_version:
+          type:
+            - string
+            - 'null'
+        encoders:
+          type: array
+          items:
+            type: string
+        render_nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerTranscodeRenderNode'
+        primary_render_node:
+          type:
+            - string
+            - 'null'
+        transcoding_temp_path:
+          type: string
+        tmp_dir:
+          type: string
+    PeerTranscodeWorker:
+      type: object
+      required:
+        - link_id
+        - peer_name
+        - link_state
+        - compatibility
+        - supports_transcode
+        - has_transcode_write_grant
+        - has_updates_write_grant
+        - enabled
+        - eligible
+        - ineligible_reason
+        - weight
+        - max_jobs
+        - active_jobs
+        - unhealthy_until
+        - ffmpeg_version
+        - package_version
+        - ffmpeg_mismatch
+        - ffmpeg_mismatch_message
+        - align_target
+        - encoders
+        - render_node
+        - parity_ok
+        - parity_error
+      properties:
+        link_id:
+          type: string
+        peer_name:
+          type: string
+        link_state:
+          type: string
+        compatibility:
+          type: string
+        supports_transcode:
+          type: boolean
+        has_transcode_write_grant:
+          type: boolean
+        has_updates_write_grant:
+          type: boolean
+        enabled:
+          type: boolean
+        eligible:
+          type: boolean
+        ineligible_reason:
+          type:
+            - string
+            - 'null'
+        weight:
+          type: integer
+          minimum: 1
+          maximum: 100
+        max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 64
+        active_jobs:
+          type: integer
+          minimum: 0
+        unhealthy_until:
+          type:
+            - string
+            - 'null'
+        ffmpeg_version:
+          type:
+            - string
+            - 'null'
+        package_version:
+          type:
+            - string
+            - 'null'
+        ffmpeg_mismatch:
+          type: boolean
+        ffmpeg_mismatch_message:
+          type:
+            - string
+            - 'null'
+        align_target:
+          type:
+            - string
+            - 'null'
+        encoders:
+          type: array
+          items:
+            type: string
+        render_node:
+          type:
+            - string
+            - 'null'
+        parity_ok:
+          type: boolean
+        parity_error:
+          type:
+            - string
+            - 'null'
+    PeerTranscodeJob:
+      type: object
+      required:
+        - id
+        - link_id
+        - peer_name
+        - started_at
+        - ended_at
+        - exit_code
+        - request_id
+        - ran_locally
+      properties:
+        id:
+          type: string
+        link_id:
+          type:
+            - string
+            - 'null'
+        peer_name:
+          type:
+            - string
+            - 'null'
+        started_at:
+          type: string
+        ended_at:
+          type:
+            - string
+            - 'null'
+        exit_code:
+          type:
+            - integer
+            - 'null'
+        request_id:
+          type:
+            - string
+            - 'null'
+        ran_locally:
+          type: boolean
+    PeerTranscodeParityResult:
+      type: object
+      required:
+        - link_id
+        - ok
+        - elapsed_ms
+        - error
+      properties:
+        link_id:
+          type: string
+        ok:
+          type: boolean
+        elapsed_ms:
+          type: integer
+          minimum: 0
+        error:
+          type:
+            - string
+            - 'null'
+    PeerTranscodeConfig:
+      type: object
+      required:
+        - enabled
+        - worker_service_enabled
+        - worker_service_active
+        - dispatcher_active
+        - dispatcher_socket
+        - shim_installed
+        - shim_path
+        - jellyfin_dropin_enabled
+        - jellyfin_reported_ffmpeg
+        - api_restart_scheduled
+        - local
+        - workers
+        - recent_jobs
+      properties:
+        enabled:
+          type: boolean
+        worker_service_enabled:
+          type: boolean
+        worker_service_active:
+          type: boolean
+        dispatcher_active:
+          type: boolean
+        dispatcher_socket:
+          type: string
+        shim_installed:
+          type: boolean
+        shim_path:
+          type: string
+        jellyfin_dropin_enabled:
+          type: boolean
+        jellyfin_reported_ffmpeg:
+          type:
+            - string
+            - 'null'
+        api_restart_scheduled:
+          type: boolean
+        local:
+          $ref: '#/components/schemas/PeerTranscodeLocalInfo'
+        workers:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerTranscodeWorker'
+        recent_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerTranscodeJob'
+        parity_result:
+          $ref: '#/components/schemas/PeerTranscodeParityResult'
+    UpdatePeerTranscodeWorker:
+      type: object
+      required:
+        - link_id
+        - enabled
+        - weight
+        - max_jobs
+      properties:
+        link_id:
+          type: string
+        enabled:
+          type: boolean
+        weight:
+          type: integer
+          minimum: 1
+          maximum: 100
+        max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 64
+      additionalProperties: false
+    UpdatePeerTranscodeConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        worker_service_enabled:
+          type: boolean
+        workers:
+          type: array
+          items:
+            $ref: '#/components/schemas/UpdatePeerTranscodeWorker'
+        run_parity_test_link_id:
+          type: string
+      additionalProperties: false
     ErrorResponse:
       type: object
       required:

@@ -154,10 +154,15 @@ test -s backend-rs/Cargo.lock
 CARGO_LOCKED=1 CARGO_NET_OFFLINE=true CARGO_BUILD_JOBS={jobs} BUILD_FRONTEND=0 RUN_TESTS=0 OUTPUT_DIR=/var/tmp/af-build/out \\
     nice -n 10 ionice -c 2 -n 7 bash scripts/build_gold.sh
 
-readelf --version-info \\
-    /var/tmp/af-build/out/linux-amd64/aetherflow-api \\
-    /var/tmp/af-build/out/linux-amd64/bin/af \\
-    /var/tmp/af-build/out/linux-amd64/bin/speedtest-backend \\
+readelf_bins=(
+    /var/tmp/af-build/out/linux-amd64/aetherflow-api
+    /var/tmp/af-build/out/linux-amd64/bin/af
+    /var/tmp/af-build/out/linux-amd64/bin/speedtest-backend
+)
+if [[ -f /var/tmp/af-build/out/linux-amd64/bin/af-transcode ]]; then
+    readelf_bins+=(/var/tmp/af-build/out/linux-amd64/bin/af-transcode)
+fi
+readelf --version-info "${{readelf_bins[@]}}" \\
     | grep -oE 'GLIBC_[0-9]+\\.[0-9]+(\\.[0-9]+)?' | sort -V | tail -n 1 > /var/tmp/af-build/out/MAX_GLIBC.txt || true
 """
 

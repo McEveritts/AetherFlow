@@ -174,6 +174,8 @@ fn build_runtime_with_mgmt_override(
         runner,
         storage_runner: Arc::new(crate::peers::storage_tests::FakePeerStorageRunner::new()),
         mount_health: crate::peers::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(crate::peers::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(crate::peers::transcode::TranscodeRuntimeState::new()),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: crate::peers::pairing::PairingRateLimiter::new(

@@ -502,6 +502,8 @@ fn build_storage_runtime(
         runner,
         storage_runner,
         mount_health: MountHealthTracker::new(),
+        transcode_runner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -2233,13 +2235,13 @@ async fn p6_historical_compatibility_when_peer_lacks_storage_capability() {
         )
         .unwrap();
 
-    // GET /admin/peers reports limited compatibility with missing_capabilities=["storage"].
+    // GET /admin/peers reports limited compatibility with missing_capabilities=["storage", "transcode"].
     let (st, peers_list) = call_admin(&rt_a, Method::GET, "/", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(peers_list["peers"][0]["compatibility"], "limited");
     assert_eq!(
         peers_list["peers"][0]["missing_capabilities"],
-        json!(["storage"])
+        json!(["storage", "transcode"])
     );
 
     // GET /mounts degrades cleanly with exports_error.code == VERSION_INCOMPATIBLE.

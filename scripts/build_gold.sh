@@ -23,6 +23,9 @@ BUILD_CLI="${BUILD_CLI:-1}"
 SPEEDTEST_BINARY_NAME="${SPEEDTEST_BINARY_NAME:-speedtest-backend}"
 CARGO_SPEEDTEST_BIN_NAME="${CARGO_SPEEDTEST_BIN_NAME:-speedtest-backend}"
 BUILD_SPEEDTEST="${BUILD_SPEEDTEST:-1}"
+TRANSCODE_BINARY_NAME="${TRANSCODE_BINARY_NAME:-af-transcode}"
+CARGO_TRANSCODE_BIN_NAME="${CARGO_TRANSCODE_BIN_NAME:-af-transcode}"
+BUILD_TRANSCODE="${BUILD_TRANSCODE:-1}"
 PACKAGE_SPEEDTEST_STANDALONE="${PACKAGE_SPEEDTEST_STANDALONE:-0}"
 CARGO_LOCKED="${CARGO_LOCKED:-1}"
 CARGO_ALLOW_UNLOCKED_DEV="${CARGO_ALLOW_UNLOCKED_DEV:-0}"
@@ -183,6 +186,9 @@ build_target() {
   if [[ "${BUILD_SPEEDTEST}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-librespeed/Cargo.toml" ]]; then
     cargo_bin_args+=(--bin "${CARGO_SPEEDTEST_BIN_NAME}")
   fi
+  if [[ "${BUILD_TRANSCODE}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-transcode/Cargo.toml" ]]; then
+    cargo_bin_args+=(--bin "${CARGO_TRANSCODE_BIN_NAME}")
+  fi
 
   echo "==> Building ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
   (
@@ -242,6 +248,10 @@ build_target() {
   if [[ "${BUILD_SPEEDTEST}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-librespeed/Cargo.toml" ]]; then
     compiled_speedtest="${cargo_target_dir}/${rust_target}/release/${CARGO_SPEEDTEST_BIN_NAME}"
     stage_companion_binary "${compiled_speedtest}" "${target_dir}" "${SPEEDTEST_BINARY_NAME}"
+  fi
+
+  if [[ "${BUILD_TRANSCODE}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-transcode/Cargo.toml" ]]; then
+    stage_companion_binary "${cargo_target_dir}/${rust_target}/release/${CARGO_TRANSCODE_BIN_NAME}" "${target_dir}" "${TRANSCODE_BINARY_NAME}"
   fi
 
   local -a runtime_excludes=(--exclude='node_modules' --exclude='__pycache__' \

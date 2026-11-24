@@ -24,6 +24,8 @@ class RustBuildToolsTests(unittest.TestCase):
         (self.root / "backend-rs/crates/af-cli/Cargo.toml").write_text('[package]\nname = "af-cli"\n')
         (self.root / "backend-rs/crates/af-librespeed").mkdir(parents=True)
         (self.root / "backend-rs/crates/af-librespeed/Cargo.toml").write_text('[package]\nname = "af-librespeed"\n')
+        (self.root / "backend-rs/crates/af-transcode").mkdir(parents=True)
+        (self.root / "backend-rs/crates/af-transcode/Cargo.toml").write_text('[package]\nname = "af-transcode"\n')
         (self.root / "config").mkdir(parents=True)
         (self.root / "config/packages.json").write_text("[]")
         (self.root / "packages").mkdir()
@@ -124,11 +126,14 @@ for binary in bins:
             artifact = self.root / "output" / ("linux-" + label) / "aetherflow-api"
             cli_artifact = self.root / "output" / ("linux-" + label) / "bin" / "af"
             speedtest_artifact = self.root / "output" / ("linux-" + label) / "bin" / "speedtest-backend"
+            transcode_artifact = self.root / "output" / ("linux-" + label) / "bin" / "af-transcode"
             self.assertEqual(artifact.read_text(), triple)
             self.assertEqual(cli_artifact.read_text(), triple)
             self.assertEqual(speedtest_artifact.read_text(), triple)
+            self.assertEqual(transcode_artifact.read_text(), triple)
             self.assertFalse((self.root / "output" / ("linux-" + label) / "af").exists())
             self.assertFalse((self.root / "output" / ("linux-" + label) / "speedtest-backend").exists())
+            self.assertFalse((self.root / "output" / ("linux-" + label) / "af-transcode").exists())
             archive = self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")
             with tarfile.open(archive) as bundle:
                 self.assertEqual(bundle.extractfile("./web/dist/index.html").read(),
@@ -155,6 +160,7 @@ for binary in bins:
                 for name in ("./packages/package/example/install", "./packages/system/af-tune",
                              "./deploy/verify-provenance.py", "./deploy/log-retention.py",
                              "./aetherflow-api", "./bin/af", "./bin/speedtest-backend",
+                             "./bin/af-transcode",
                              "./plugins/telemetry-inspector/backend/hooks/start.sh",
                              "./plugins/telemetry-inspector/plugin.manifest.json",
                              "./plugins/telemetry-inspector/backend/runtime.py",
@@ -165,6 +171,7 @@ for binary in bins:
                     self.assertEqual(bundle.getmember(name).mode & 0o111, expected_exec, name)
                 self.assertNotIn("./af", members)
                 self.assertNotIn("./speedtest-backend", members)
+                self.assertNotIn("./af-transcode", members)
                 self.assertNotIn("./plugins/README.md", members)
                 self.assertFalse(any(name.startswith("./plugins/sdk-template-rust") for name in members))
                 for member in bundle.getmembers():

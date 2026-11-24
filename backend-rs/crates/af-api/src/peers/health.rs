@@ -97,6 +97,8 @@ struct RemoteHealthPayload {
     peer_protocol: Option<i64>,
     #[serde(default)]
     capabilities: Vec<String>,
+    #[serde(default)]
+    transcode: Option<af_transcode::TranscodeCapabilities>,
 }
 
 /// Spawns the 15-second peer health and pending-expiry background loop.
@@ -156,10 +158,11 @@ pub(crate) async fn run_health_tick(runtime: &Arc<PeerRuntime>) {
         }
     }
 
-    // Always clean up expired pending attempts/links and retry any durable revoked-grant
-    // credential deletions (independent of outbound credentials for link health & notifications).
+    // Always clean up expired pending attempts/links, retry any durable revoked-grant
+    // credential deletions, and prune transcode job history older than 7 days.
     pairing::cleanup_expired_pending(runtime).await;
     super::grants::cleanup_pending_received_grant_credentials(runtime).await;
+    let _ = super::transcode::prune_old_transcode_jobs(runtime).await;
 
     // Reload links after pending/revocation cleanup and filter to checkable active/down links.
     let checkable_links: Vec<PeerLink> = runtime
@@ -177,6 +180,10 @@ pub(crate) async fn run_health_tick(runtime: &Arc<PeerRuntime>) {
     if checkable_links.is_empty() {
         return;
     }
+
+    // Warm local FFmpeg/GPU capability cache asynchronously whenever peers are active so
+    // the first transcode dispatch never falls back locally solely due to a cold cache.
+    let _ = super::transcode::cached_local_capabilities_nonblocking(runtime);
 
     let wg_status = match runtime
         .runner
@@ -290,7 +297,19 @@ pub(crate) async fn check_single_link(
                 super::storage::probe_mounts_while_link_degraded(runtime, &link, reason).await;
                 return;
             };
-            commit_link_healthy(runtime, &link, parsed, rtt_ms, &commit_now_rfc).await;
+            let remote_transcode = parsed.transcode.clone();
+            let committed_healthy =
+                commit_link_healthy(runtime, &link, parsed, rtt_ms, &commit_now_rfc).await;
+            if committed_healthy {
+                if let Some(transcode_caps) = remote_transcode {
+                    super::transcode::handle_remote_health_transcode_caps(
+                        runtime,
+                        &link,
+                        transcode_caps,
+                    )
+                    .await;
+                }
+            }
             super::storage::reconcile_mounts_for_healthy_link(runtime, &link).await;
         }
         Ok((status, body, _rtt_ms)) => {
@@ -337,7 +356,7 @@ async fn commit_link_healthy(
     parsed: RemoteHealthPayload,
     rtt_ms: f64,
     now_rfc: &str,
-) {
+) -> bool {
     let server = runtime.local_server_name();
     let link_id = link.id.clone();
     let wg_pubkey = link.wg_pubkey.clone();
@@ -426,6 +445,9 @@ async fn commit_link_healthy(
                 )
                 .await;
         }
+        true
+    } else {
+        false
     }
 }
 

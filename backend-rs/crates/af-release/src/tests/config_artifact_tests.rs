@@ -599,6 +599,8 @@ fn test_prepare_release_permissions_normalizes_modes_and_verifies_binaries() {
         b"#!/bin/sh\nexit 0\n",
     )
     .unwrap();
+    fs::write(release_dir.join("af-transcode"), b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(release_dir.join("bin/af-transcode"), b"#!/bin/sh\nexit 0\n").unwrap();
     fs::write(release_dir.join(".version"), b"v4.0.0\n").unwrap();
     fs::write(release_dir.join("config/app.json"), b"{}").unwrap();
 
@@ -631,6 +633,16 @@ fn test_prepare_release_permissions_normalizes_modes_and_verifies_binaries() {
     )
     .unwrap();
     fs::set_permissions(
+        release_dir.join("af-transcode"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    fs::set_permissions(
+        release_dir.join("bin/af-transcode"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    fs::set_permissions(
         release_dir.join(".version"),
         fs::Permissions::from_mode(0o666),
     )
@@ -644,6 +656,8 @@ fn test_prepare_release_permissions_normalizes_modes_and_verifies_binaries() {
         "bin/af",
         "speedtest-backend",
         "bin/speedtest-backend",
+        "af-transcode",
+        "bin/af-transcode",
     ] {
         assert_eq!(
             fs::symlink_metadata(release_dir.join(exec_rel))
@@ -778,4 +792,95 @@ fn verify_deployed_frontend_assets_validates_web_dist_and_allows_binary_only_fix
     fs::write(empty_wasm.join("web/dist/index.html"), b"<html></html>").unwrap();
     fs::write(empty_wasm.join("web/dist/app.wasm"), b"").unwrap();
     assert!(verify_deployed_frontend_assets(&empty_wasm).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn release_archive_supports_af_transcode_and_preserves_legacy_bundle_compatibility() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = TempSandbox::new("transcode-bundle-compat");
+    let cfg = ReleaseConfig::for_root(sb.path());
+
+    // 1. Modern release bundle containing bin/af-transcode gets 0755 permissions.
+    let modern_archive = sb.path().join("modern-with-transcode.tar.gz");
+    let (_, modern_manifest) = build_synthetic_release_tarball(
+        &modern_archive,
+        &cfg.artifact_name,
+        &[
+            ("aetherflow-api", b"synthetic api", EntryType::Regular),
+            ("bin/af", b"synthetic cli", EntryType::Regular),
+            (
+                "bin/speedtest-backend",
+                b"synthetic speedtest",
+                EntryType::Regular,
+            ),
+            (
+                "bin/af-transcode",
+                b"synthetic transcode",
+                EntryType::Regular,
+            ),
+            (".version", b"v4.0.0\n", EntryType::Regular),
+            (
+                "web/dist/index.html",
+                b"<html>app</html>",
+                EntryType::Regular,
+            ),
+            ("web/dist/app.wasm", b"\0asm\x01\0\0\0", EntryType::Regular),
+        ],
+    );
+    verify_artifact_checksum(&modern_archive, &modern_manifest, &cfg.artifact_name).unwrap();
+    let modern_dir = sb.path().join("extract-modern");
+    extract_and_validate_release_archive(&modern_archive, &modern_dir, "v4.0.0", &cfg).unwrap();
+    let transcode_meta = fs::symlink_metadata(modern_dir.join("bin/af-transcode")).unwrap();
+    assert_eq!(transcode_meta.permissions().mode() & 0o777, 0o755);
+    assert!(!modern_dir.join("af-transcode").exists());
+
+    // 2. Older legacy bundle omitting bin/af-transcode remains cleanly installable.
+    let legacy_archive = sb.path().join("legacy-without-transcode.tar.gz");
+    let (_, legacy_manifest) = build_synthetic_release_tarball(
+        &legacy_archive,
+        &cfg.artifact_name,
+        &[
+            ("aetherflow-api", b"synthetic api", EntryType::Regular),
+            ("bin/af", b"synthetic cli", EntryType::Regular),
+            (
+                "bin/speedtest-backend",
+                b"synthetic speedtest",
+                EntryType::Regular,
+            ),
+            (".version", b"v4.0.0\n", EntryType::Regular),
+            (
+                "web/dist/index.html",
+                b"<html>app</html>",
+                EntryType::Regular,
+            ),
+            ("web/dist/app.wasm", b"\0asm\x01\0\0\0", EntryType::Regular),
+        ],
+    );
+    verify_artifact_checksum(&legacy_archive, &legacy_manifest, &cfg.artifact_name).unwrap();
+    let legacy_dir = sb.path().join("extract-legacy");
+    extract_and_validate_release_archive(&legacy_archive, &legacy_dir, "v4.0.0", &cfg).unwrap();
+    assert!(!legacy_dir.join("bin/af-transcode").exists());
+    assert_eq!(
+        fs::symlink_metadata(legacy_dir.join("aetherflow-api"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+
+    // 3. Offline simulation includes executable bin/af-transcode without a root duplicate.
+    let offline_dir = sb.path().join("offline-sim");
+    simulate_offline_artifact(&offline_dir, &cfg).unwrap();
+    assert_eq!(
+        fs::symlink_metadata(offline_dir.join("bin/af-transcode"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert!(!offline_dir.join("af-transcode").exists());
 }

@@ -1117,6 +1117,126 @@ pub async fn dispatch_peer_storage(
     post_runner_peer_storage_json(req, timeout).await
 }
 
+#[cfg(unix)]
+async fn post_runner_peer_transcode_json(
+    req: &PeerTranscodeRequest,
+    timeout: Duration,
+) -> Result<PeerTranscodeResponse, PeerTranscodeError> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper_util::rt::TokioIo;
+
+    const ENDPOINT: &str = "/v1/peer-transcode";
+    let sock_path = resolve_runner_socket_path();
+    let body_bytes = serde_json::to_vec(req).map_err(|_| {
+        PeerTranscodeError::InvalidInput("Failed to serialize peer-transcode request".to_string())
+    })?;
+
+    let fut = async {
+        let stream = tokio::net::UnixStream::connect(&sock_path)
+            .await
+            .map_err(|err| {
+                PeerTranscodeError::Runtime(format!(
+                    "Cannot connect to aetherflow-runner socket '{sock_path}': {err}"
+                ))
+            })?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(io)
+                .await
+                .map_err(|err| {
+                    PeerTranscodeError::Runtime(format!(
+                        "Runner IPC handshake failed on '{sock_path}': {err}"
+                    ))
+                })?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let http_req = hyper::Request::builder()
+            .method(hyper::Method::POST)
+            .uri(ENDPOINT)
+            .header("Host", "unix")
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|err| {
+                PeerTranscodeError::Runtime(format!(
+                    "Failed to build peer-transcode request: {err}"
+                ))
+            })?;
+
+        let resp = sender.send_request(http_req).await.map_err(|err| {
+            PeerTranscodeError::Runtime(format!("Runner peer-transcode request failed: {err}"))
+        })?;
+        let status = resp.status();
+        let error_code = resp
+            .headers()
+            .get(peer_network::PEER_ERROR_CODE_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        let mut body = resp.into_body();
+        let mut raw_body = Vec::new();
+        while let Some(frame_res) = body.frame().await {
+            let frame = frame_res.map_err(|err| {
+                PeerTranscodeError::Runtime(format!(
+                    "Failed reading peer-transcode response: {err}"
+                ))
+            })?;
+            if let Some(data) = frame.data_ref() {
+                if data.len() > MAX_PEER_RUNNER_RESPONSE_BYTES.saturating_sub(raw_body.len()) {
+                    return Err(PeerTranscodeError::Runtime(
+                        "Runner peer-transcode response exceeded maximum size".to_string(),
+                    ));
+                }
+                raw_body.extend_from_slice(data);
+            }
+        }
+
+        let decoded: RunnerResponse = serde_json::from_slice(&raw_body).map_err(|_| {
+            PeerTranscodeError::Runtime(format!(
+                "Invalid JSON response from runner ({ENDPOINT}, HTTP {})",
+                status.as_u16()
+            ))
+        })?;
+
+        if status != StatusCode::OK || !decoded.success {
+            return Err(PeerTranscodeError::from_http_response(
+                status,
+                error_code.as_deref(),
+                decoded.error,
+            ));
+        }
+
+        peer_transcode::decode_peer_transcode_response(req, &decoded.output)
+    };
+
+    tokio::time::timeout(timeout, fut).await.map_err(|_| {
+        PeerTranscodeError::Runtime(format!(
+            "Runner peer-transcode request timed out after {}s ({ENDPOINT})",
+            timeout.as_secs()
+        ))
+    })?
+}
+
+#[cfg(not(unix))]
+async fn post_runner_peer_transcode_json(
+    _req: &PeerTranscodeRequest,
+    _timeout: Duration,
+) -> Result<PeerTranscodeResponse, PeerTranscodeError> {
+    Err(PeerTranscodeError::Runtime(
+        "UNIX domain socket runner client is only supported on Unix hosts (/v1/peer-transcode)"
+            .to_string(),
+    ))
+}
+
+pub async fn dispatch_peer_transcode(
+    req: &PeerTranscodeRequest,
+) -> Result<PeerTranscodeResponse, PeerTranscodeError> {
+    let timeout = peer_transcode::client_timeout_for_request(req);
+    post_runner_peer_transcode_json(req, timeout).await
+}
+
 pub async fn dispatch_quota_set(username: &str, size: &str) -> anyhow::Result<()> {
     let req = QuotaRunnerRequest {
         username: username.to_string(),

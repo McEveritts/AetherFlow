@@ -302,6 +302,89 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                 any("bin/speedtest-backend requires GLIBC_2.38" in e for e in glibc_report["errors"])
             )
 
+    def test_af_transcode_optional_contract_enforces_exec_match_and_glibc_while_preserving_legacy_bundles(self) -> None:
+        namespace = {"__name__": "transcode_contract_unit"}
+        exec(vm_matrix.build_remote_driver_script(), namespace)
+        contract_dict = vm_matrix.asdict(vm_matrix.DEFAULT_ARTIFACT_CONTRACT)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "aetherflow-linux-amd64.tar.gz"
+            sums = Path(directory) / "SHA256SUMS"
+
+            # 1. Legacy bundle omitting bin/af-transcode remains valid locally and remotely.
+            legacy_digest = self._build_tarball(archive, self.portable_entries())
+            sums.write_text(f"{legacy_digest}  {archive.name}\n", encoding="utf-8")
+            legacy_local = vm_matrix.verify_release_artifact_contract(
+                archive, sums, readelf_symbol_Inspector=lambda _: "2.34"
+            )
+            with mock.patch.dict(namespace, {"run_bounded": lambda *a, **kw: (0, "Name: GLIBC_2.34\n", "", {})}):
+                legacy_remote = namespace["inspect_artifact_bundle"](archive, sums, contract_dict)
+            self.assertTrue(legacy_local["valid"], legacy_local["errors"])
+            self.assertTrue(legacy_remote["valid"], legacy_remote["errors"])
+
+            # 2. Modern bundle with executable bin/af-transcode passes locally and remotely.
+            modern_entries = self.portable_entries()
+            modern_entries["bin/af-transcode"] = (b"\x7fELF-transcode", 0o755)
+            modern_digest = self._build_tarball(archive, modern_entries)
+            sums.write_text(f"{modern_digest}  {archive.name}\n", encoding="utf-8")
+            modern_local = vm_matrix.verify_release_artifact_contract(
+                archive, sums, readelf_symbol_Inspector=lambda _: "2.34"
+            )
+            with mock.patch.dict(namespace, {"run_bounded": lambda *a, **kw: (0, "Name: GLIBC_2.34\n", "", {})}):
+                modern_remote = namespace["inspect_artifact_bundle"](archive, sums, contract_dict)
+            self.assertTrue(modern_local["valid"], modern_local["errors"])
+            self.assertTrue(modern_remote["valid"], modern_remote["errors"])
+            self.assertEqual(modern_local["details"]["binary_glibc_versions"]["bin/af-transcode"], "2.34")
+            self.assertEqual(modern_remote["details"]["binary_glibc_versions"]["bin/af-transcode"], "2.34")
+
+            # 3. Non-executable bin/af-transcode fails closed.
+            non_exec = self.portable_entries()
+            non_exec["bin/af-transcode"] = (b"\x7fELF-transcode", 0o644)
+            non_exec_digest = self._build_tarball(archive, non_exec)
+            sums.write_text(f"{non_exec_digest}  {archive.name}\n", encoding="utf-8")
+            non_exec_local = vm_matrix.verify_release_artifact_contract(
+                archive, sums, readelf_symbol_Inspector=lambda _: "2.34"
+            )
+            with mock.patch.dict(namespace, {"run_bounded": lambda *a, **kw: (0, "Name: GLIBC_2.34\n", "", {})}):
+                non_exec_remote = namespace["inspect_artifact_bundle"](archive, sums, contract_dict)
+            for report in (non_exec_local, non_exec_remote):
+                self.assertFalse(report["valid"])
+                self.assertIn("bin/af-transcode", report["details"]["non_executable_entries"])
+
+            # 4. Incompatible GLIBC in bin/af-transcode is rejected.
+            sums.write_text(f"{modern_digest}  {archive.name}\n", encoding="utf-8")
+            self._build_tarball(archive, modern_entries)
+            glibc_local = vm_matrix.verify_release_artifact_contract(
+                archive,
+                sums,
+                readelf_symbol_Inspector=lambda b: "2.38" if b"transcode" in b else "2.34",
+            )
+            self.assertFalse(glibc_local["valid"])
+            self.assertTrue(
+                any("bin/af-transcode requires GLIBC_2.38" in e for e in glibc_local["errors"])
+            )
+
+            # 5. Mismatched root af-transcode and bin/af-transcode bytes are rejected.
+            mismatch = self.portable_entries()
+            mismatch["af-transcode"] = (b"\x7fELF-transcode-a", 0o755)
+            mismatch["bin/af-transcode"] = (b"\x7fELF-transcode-b", 0o755)
+            mismatch_digest = self._build_tarball(archive, mismatch)
+            sums.write_text(f"{mismatch_digest}  {archive.name}\n", encoding="utf-8")
+            mismatch_local = vm_matrix.verify_release_artifact_contract(
+                archive, sums, readelf_symbol_Inspector=lambda _: "2.34"
+            )
+            with mock.patch.dict(namespace, {"run_bounded": lambda *a, **kw: (0, "Name: GLIBC_2.34\n", "", {})}):
+                mismatch_remote = namespace["inspect_artifact_bundle"](archive, sums, contract_dict)
+            for report in (mismatch_local, mismatch_remote):
+                self.assertFalse(report["valid"])
+                self.assertIn(
+                    "af-transcode and bin/af-transcode must contain identical binary bytes",
+                    report["errors"],
+                )
+
+        # Baseline build script audits bin/af-transcode when built.
+        script = vm_matrix.render_baseline_guest_build_script(jobs=2)
+        self.assertIn("/var/tmp/af-build/out/linux-amd64/bin/af-transcode", script)
+
     def test_remote_contract_rejects_incompatible_cli_and_failed_readelf(self) -> None:
         namespace = {"__name__": "portability_contract_unit"}
         exec(vm_matrix.build_remote_driver_script(), namespace)

@@ -495,6 +495,13 @@ class PackagedSystemdUnitPortabilityTests(unittest.TestCase):
         for unit_path in (RETIRED_QBIT_UNIT, RETIRED_RTORRENT_UNIT):
             self.assertFalse(unit_path.exists(), f"Retired template {unit_path} should not exist")
 
+    def test_finalize_harden_permissions_restores_af_transcode_exec_bits(self):
+        """setup/modules/05-finalize.sh must preserve execute bits on af-transcode in current and releases."""
+        finalize = (REPO_ROOT / "setup" / "modules" / "05-finalize.sh").read_text(encoding="utf-8")
+        self.assertIn('${af_root}/current/af-transcode', finalize)
+        self.assertIn('${af_root}/current/bin/af-transcode', finalize)
+        self.assertIn('-name "af-transcode"', finalize)
+
 
 if __name__ == "__main__":
     unittest.main()

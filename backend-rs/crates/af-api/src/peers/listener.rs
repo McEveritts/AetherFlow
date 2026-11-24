@@ -69,6 +69,16 @@ pub(crate) async fn authenticate_active_link(
     authenticate_active_link_for_kind(runtime, connect_info, headers, route_label, false).await
 }
 
+/// Same as [`authenticate_active_link`], acquiring a per-link WebSocket permit instead of HTTP.
+pub(crate) async fn authenticate_active_link_ws(
+    runtime: &PeerRuntime,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
+    route_label: &str,
+) -> Result<(AuthenticatedPeerLink, tokio::sync::OwnedSemaphorePermit), PeerError> {
+    authenticate_active_link_for_kind(runtime, connect_info, headers, route_label, true).await
+}
+
 async fn authenticate_active_link_for_kind(
     runtime: &PeerRuntime,
     connect_info: Option<ConnectInfo<SocketAddr>>,
@@ -215,7 +225,7 @@ fn sanitize_origin_operator(headers: &HeaderMap) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn extract_or_generate_request_id(headers: &HeaderMap) -> String {
+pub(crate) fn extract_or_generate_request_id(headers: &HeaderMap) -> String {
     if let Some(raw) = headers.get("x-request-id").and_then(|v| v.to_str().ok()) {
         let trimmed = raw.trim();
         if !trimmed.is_empty()
@@ -275,6 +285,8 @@ async fn tunnel_health(
             Err(err) => return err.into_response(),
         };
 
+    let transcode_caps = super::transcode::cached_local_capabilities_nonblocking(&runtime);
+
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -283,6 +295,7 @@ async fn tunnel_health(
             "version": runtime.local_version(),
             "peer_protocol": PEER_PROTOCOL_VERSION,
             "capabilities": capabilities(),
+            "transcode": transcode_caps,
         })),
     )
         .into_response()
@@ -807,9 +820,20 @@ pub(crate) fn build_listener_router(runtime: Arc<PeerRuntime>) -> Router {
             "/peer/v1/exports",
             get(super::storage::handle_tunnel_list_exports),
         )
+        .route(
+            "/peer/v1/transcode/mounts",
+            post(super::transcode::handle_tunnel_transcode_mounts),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(
             TUNNEL_INTERNAL_BODY_LIMIT_BYTES,
         ))
+        .with_state(Arc::clone(&runtime));
+
+    let transcode_ws_routes = Router::new()
+        .route(
+            "/peer/v1/transcode/jobs",
+            get(super::transcode::handle_tunnel_transcode_jobs),
+        )
         .with_state(Arc::clone(&runtime));
 
     let listener_state = ListenerState {
@@ -819,6 +843,7 @@ pub(crate) fn build_listener_router(runtime: Arc<PeerRuntime>) -> Router {
 
     Router::new()
         .merge(internal_routes)
+        .merge(transcode_ws_routes)
         .fallback(tunnel_management_or_deny_fallback)
         .method_not_allowed_fallback(tunnel_management_or_deny_fallback)
         .with_state(listener_state)

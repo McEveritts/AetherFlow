@@ -645,6 +645,7 @@ async fn cleanup_revoked_link_resources_locked(
         step,
     )
     .await;
+    super::transcode::cleanup_revoked_link_transcode_best_effort(runtime, link_id).await;
     super::grants::delete_revoked_link_staged_grant_credentials_locked(
         runtime, link_id, peer_name, step,
     )

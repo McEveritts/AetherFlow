@@ -22,7 +22,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source"
             executable_names = {
-                "./aetherflow-api", "./bin/af",
+                "./aetherflow-api", "./bin/af", "./bin/af-transcode",
                 "./deploy/release-manager.sh", "./deploy/verify-provenance.py",
                 "./deploy/log-retention.py", "./packages/example/install.sh",
                 "./plugins/telemetry-inspector/backend/hooks/start.sh",
@@ -32,6 +32,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 "backend-rs/Cargo.toml": b"[workspace]\n",
                 "backend-rs/Cargo.lock": b"# fixed fixture lock\n",
                 "backend-rs/crates/af-cli/Cargo.toml": b"[package]\n",
+                "backend-rs/crates/af-transcode/Cargo.toml": b"[package]\n",
                 ".version": b"v4.0.0\n",
                 "web/dist/index.html": b"<!doctype html><title>Fixture</title>\n",
                 "web/dist/app.wasm": b"\x00asm\x01\x00\x00\x00",
@@ -50,8 +51,10 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 "plugins/telemetry-inspector/frontend/dist/index.html": b"<!doctype html><title>Plugin</title>\n",
                 "backend-rs/target/release/aetherflow-api": b"fixed api fixture\n",
                 "backend-rs/target/release/af": b"fixed cli fixture\n",
+                "backend-rs/target/release/af-transcode": b"fixed transcode fixture\n",
                 "backend-rs/target/x86_64-unknown-linux-gnu/release/aetherflow-api": b"fixed api fixture\n",
                 "backend-rs/target/x86_64-unknown-linux-gnu/release/af": b"fixed cli fixture\n",
+                "backend-rs/target/x86_64-unknown-linux-gnu/release/af-transcode": b"fixed transcode fixture\n",
             }
             for name, content in fixture_files.items():
                 path = source / name
@@ -77,12 +80,13 @@ class ReleaseArchiveModesTests(unittest.TestCase):
                 "FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "BACKEND_RS_DIR", "BACKEND_DIR",
                 "CONFIG_DIR", "PLUGINS_DIR", "CARGO_BUILD_TARGET", "BUILD_DATE", "BINARY_NAME",
                 "CLI_BINARY_NAME", "CARGO_BIN_NAME", "CARGO_CLI_BIN_NAME", "VERSION_FILE",
+                "TRANSCODE_BINARY_NAME", "CARGO_TRANSCODE_BIN_NAME", "BUILD_TRANSCODE",
                 "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
             }}
             env.update({
                 "PATH": str(tool_bin) + os.pathsep + os.environ["PATH"],
                 "BUILD_FRONTEND": "0", "RUN_TESTS": "0", "PACKAGE_RELEASE": "1",
-                "BUILD_CLI": "1", "CARGO_LOCKED": "1", "TARGETS": "amd64",
+                "BUILD_CLI": "1", "BUILD_TRANSCODE": "1", "CARGO_LOCKED": "1", "TARGETS": "amd64",
                 "CARGO_TARGET_DIR": str(source / "backend-rs/target"),
                 "SOURCE_DATE_EPOCH": "1700000000", "GIT_COMMIT": "fixed",
                 "VERSION": "v4.0.0", "VERSION_STAMP": "v4.0.0",
@@ -96,7 +100,7 @@ class ReleaseArchiveModesTests(unittest.TestCase):
             ):
                 for path in sorted(source.rglob("*")):
                     relative = "./" + path.relative_to(source).as_posix()
-                    is_executable = relative in executable_names or path.name in {"aetherflow-api", "af"}
+                    is_executable = relative in executable_names or path.name in {"aetherflow-api", "af", "af-transcode"}
                     path.chmod(executable_mode if path.is_dir() or is_executable else regular_mode)
                     os.utime(path, (1700000001 + regular_mode, 1700000001 + regular_mode))
                 source.chmod(executable_mode)

@@ -1533,13 +1533,17 @@ async fn list_peer_mounts_inner(
             let link = db_peers::get_peer_link(conn, &id_c)
                 .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?
                 .ok_or_else(|| PeerError::not_found(&server_c, step, "Peer link was not found"))?;
-            let mounts = db_peers::list_peer_mounts_for_link(conn, &id_c).map_err(|err| {
-                PeerError::internal(
-                    &server_c,
-                    step,
-                    format!("Failed loading local peer mounts: {err}"),
-                )
-            })?;
+            let mounts = db_peers::list_peer_mounts_for_link(conn, &id_c)
+                .map_err(|err| {
+                    PeerError::internal(
+                        &server_c,
+                        step,
+                        format!("Failed loading local peer mounts: {err}"),
+                    )
+                })?
+                .into_iter()
+                .filter(|m| m.purpose == MOUNT_PURPOSE_MEDIA)
+                .collect();
             Ok((link, mounts))
         })
         .await?;
@@ -2061,7 +2065,7 @@ async fn delete_peer_mount_inner(
             }
             let mount = db_peers::get_peer_mount(conn, &mount_id_c)
                 .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?
-                .filter(|m| m.link_id == id_c)
+                .filter(|m| m.link_id == id_c && m.purpose == MOUNT_PURPOSE_MEDIA)
                 .ok_or_else(|| {
                     PeerError::not_found(&server_c, step, "Peer mount was not found for this link")
                 })?;
@@ -2205,7 +2209,11 @@ async fn load_live_mounts_for_link(runtime: &PeerRuntime, link_id: &str) -> Vec<
     runtime
         .db
         .read(&server, "health_mount_load", move |conn| {
-            Ok(db_peers::list_peer_mounts_for_link(conn, &lid).unwrap_or_default())
+            Ok(db_peers::list_peer_mounts_for_link(conn, &lid)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.purpose == MOUNT_PURPOSE_MEDIA)
+                .collect())
         })
         .await
         .unwrap_or_default()
@@ -2659,7 +2667,11 @@ pub(crate) async fn cleanup_revoked_link_storage_locked(
     let (mounts, exports) = runtime
         .db
         .read(&server, step, move |conn| {
-            let mounts = db_peers::list_peer_mounts_for_link(conn, &lid).unwrap_or_default();
+            let mounts = db_peers::list_peer_mounts_for_link(conn, &lid)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.purpose == MOUNT_PURPOSE_MEDIA)
+                .collect::<Vec<_>>();
             let exports = db_peers::list_peer_exports_for_link(conn, &lid).unwrap_or_default();
             Ok((mounts, exports))
         })

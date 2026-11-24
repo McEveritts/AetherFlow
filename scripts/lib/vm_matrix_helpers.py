@@ -125,6 +125,9 @@ class PendingArtifactContract:
         "deploy/release-manager.sh",
         "plugins/telemetry-inspector/backend/hooks/start.sh",
     )
+    optional_executable_entries: Tuple[str, ...] = (
+        "bin/af-transcode",
+    )
     max_glibc_version: str = "2.35"
     lowest_glibc_target: str = "ubuntu-22.04"
     health_ready_endpoint: str = "http://127.0.0.1:8080/health/ready"
@@ -751,6 +754,8 @@ def verify_release_artifact_contract(
                         "bin/af",
                         "speedtest-backend",
                         "bin/speedtest-backend",
+                        "af-transcode",
+                        "bin/af-transcode",
                     ):
                         if member.size == 0:
                             errors.append(f"{norm_name} binary in archive is 0 bytes")
@@ -778,7 +783,7 @@ def verify_release_artifact_contract(
     if not details["frontend_wasm_entries"]:
         errors.append("missing non-empty .wasm file under web/dist")
 
-    for exe in contract.required_executable_entries:
+    for exe in contract.required_executable_entries + contract.optional_executable_entries:
         if exe in entry_modes and (entry_modes[exe] & 0o111) == 0:
             details["non_executable_entries"].append(exe)
             errors.append(f"archive entry {exe!r} is not marked executable (mode={oct(entry_modes[exe])})")
@@ -799,6 +804,12 @@ def verify_release_artifact_contract(
         and release_binary_bytes["speedtest-backend"] != release_binary_bytes["bin/speedtest-backend"]
     ):
         errors.append("speedtest-backend and bin/speedtest-backend must contain identical binary bytes")
+    if (
+        "af-transcode" in release_binary_bytes
+        and "bin/af-transcode" in release_binary_bytes
+        and release_binary_bytes["af-transcode"] != release_binary_bytes["bin/af-transcode"]
+    ):
+        errors.append("af-transcode and bin/af-transcode must contain identical binary bytes")
     if readelf_symbol_Inspector is not None:
         compatibility = []
         for binary_name, binary_bytes in release_binary_bytes.items():

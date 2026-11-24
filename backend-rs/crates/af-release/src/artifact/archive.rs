@@ -272,7 +272,7 @@ pub(super) fn validate_external_frontend_assets(release_dir: &Path) -> ReleaseRe
 /// - `0755` on all directories
 /// - `a+r,go-w` (`(mode | 0o444) & !0o022`) on all regular files
 /// - `0755` on `aetherflow-api`, companion binaries (`af`, `bin/af`, `speedtest-backend`,
-///   `bin/speedtest-backend`), and deploy helper scripts (if present)
+///   `bin/speedtest-backend`, `af-transcode`, `bin/af-transcode`), and deploy helper scripts (if present)
 /// - Verifies `.version` is readable and `./aetherflow-api` is executable.
 pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
@@ -286,6 +286,8 @@ pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
         "bin/af",
         "speedtest-backend",
         "bin/speedtest-backend",
+        "af-transcode",
+        "bin/af-transcode",
         "deploy/release-manager.sh",
         "deploy/verify-provenance.py",
         "deploy/log-retention.py",
@@ -709,6 +711,7 @@ pub fn simulate_offline_artifact(
         "aetherflow-api",
         "bin/af",
         "bin/speedtest-backend",
+        "bin/af-transcode",
         "plugins/telemetry-inspector/backend/hooks/start.sh",
     ] {
         let bin_path = release_dir.join(binary);

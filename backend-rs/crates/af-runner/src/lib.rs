@@ -81,6 +81,19 @@ pub use peer_storage::{
     PEER_MANAGED_HEADER, PEER_NFSD_CONF_NAME, PEER_NFSD_SERVICE_UNIT, PEER_SENTINEL_FILE_NAME,
     PEER_STORAGE_PACKAGES,
 };
+pub mod peer_transcode;
+pub use peer_transcode::{
+    client_timeout_for_request, decode_peer_transcode_response,
+    derive_peer_transcode_export_file_name, execute_peer_transcode_local, handle_peer_transcode,
+    parse_jellyfin_transcoding_temp_path, JellyfinTranscodePaths, ParityFileCleanupReport,
+    PeerTranscodeError, PeerTranscodeManager, PeerTranscodePathsConfig, PeerTranscodeRequest,
+    PeerTranscodeResponse, TranscodeMutationReport, API_SERVICE_UNIT, API_TRANSCODE_DROPIN_NAME,
+    DEFAULT_DISPATCHER_RUNTIME_DIR, DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_JELLYFIN_ENCODING_XML,
+    DEFAULT_JELLYFIN_TMP_DIR, DEFAULT_JELLYFIN_TRANSCODE_DIR, DEFAULT_REAL_FFPROBE_PATH,
+    DEFAULT_TMPFILES_DIR, DEFAULT_TRANSCODE_FFPROBE_SYMLINK, DEFAULT_TRANSCODE_SHIM_DIR,
+    DEFAULT_TRANSCODE_SHIM_PATH, DEFAULT_WORKER_RUNTIME_DIR, JELLYFIN_SERVICE_UNIT,
+    JELLYFIN_TRANSCODE_DROPIN_NAME, PEER_TRANSCODE_WORKER_UNIT, TRANSCODE_TMPFILES_CONF_NAME,
+};
 pub mod package_executor;
 pub use package_executor::check_domain_tls_ready;
 pub mod package_lifecycle;
@@ -363,6 +376,31 @@ pub fn resolve_af_cli_binary() -> Option<PathBuf> {
     candidates.into_iter().find(|cand| cand.is_file())
 }
 
+pub fn resolve_af_transcode_binary() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("AETHERFLOW_TRANSCODE_BIN") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            let candidate_path = PathBuf::from(trimmed);
+            if peer_transcode::is_valid_transcode_binary(&candidate_path) {
+                return Some(candidate_path);
+            }
+        }
+    }
+    let mut candidates = vec![
+        PathBuf::from("/opt/AetherFlow/current/bin/af-transcode"),
+        PathBuf::from("/opt/AetherFlow/current/af-transcode"),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("bin/af-transcode"));
+            candidates.push(exe_dir.join("af-transcode"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|cand| peer_transcode::is_valid_transcode_binary(cand))
+}
+
 /// Builds the Axum router for the Privileged Root Socket Daemon (`aetherflow-api runner`).
 pub fn build_runner_router() -> Router {
     Router::new()
@@ -383,6 +421,10 @@ pub fn build_runner_router() -> Router {
         .route("/v1/network", post(handle_network))
         .route("/v1/peer-network", post(peer_network::handle_peer_network))
         .route("/v1/peer-storage", post(peer_storage::handle_peer_storage))
+        .route(
+            "/v1/peer-transcode",
+            post(peer_transcode::handle_peer_transcode),
+        )
         .route("/v1/quota", post(handle_quota))
         .route("/v1/quota/usage", post(quota::handle))
         .route("/v1/app-meta", post(handle_app_meta))
@@ -690,12 +732,13 @@ pub use runner_client::{
     dispatch_package_lifecycle_snapshot_capture, dispatch_package_lifecycle_snapshot_discard,
     dispatch_package_lifecycle_snapshot_discard_for_job,
     dispatch_package_lifecycle_snapshot_restore, dispatch_package_stream, dispatch_peer_network,
-    dispatch_peer_storage, dispatch_plugin_start, dispatch_plugin_status, dispatch_plugin_stop,
-    dispatch_plugin_token_rotate, dispatch_quota_set, dispatch_sandbox, dispatch_sandbox_apply,
-    dispatch_self_update, dispatch_self_update_request, dispatch_self_update_status_request,
-    dispatch_set_quota, dispatch_systemctl, execute_package_local, is_lifecycle_busy,
-    reconcile_hosts_file_via_runner, remove_hosts_file_via_runner, runner_is_ready,
-    start_self_update, update_hosts_file_via_runner, LifecycleBusy,
+    dispatch_peer_storage, dispatch_peer_transcode, dispatch_plugin_start, dispatch_plugin_status,
+    dispatch_plugin_stop, dispatch_plugin_token_rotate, dispatch_quota_set, dispatch_sandbox,
+    dispatch_sandbox_apply, dispatch_self_update, dispatch_self_update_request,
+    dispatch_self_update_status_request, dispatch_set_quota, dispatch_systemctl,
+    execute_package_local, is_lifecycle_busy, reconcile_hosts_file_via_runner,
+    remove_hosts_file_via_runner, runner_is_ready, start_self_update, update_hosts_file_via_runner,
+    LifecycleBusy,
 };
 
 mod sandbox_ops;

@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 mod cli_and_transport_tests;
+mod cluster_tests;
 mod package_purge_tests;
 mod package_update_tests;
 mod provision_maintenance_tests;

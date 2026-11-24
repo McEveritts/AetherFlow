@@ -35,11 +35,12 @@ pub use cli::{
     build_hosts_runner_request, build_package_runner_request,
     build_package_runner_request_with_target, build_quota_runner_request,
     build_release_engine_options, build_sandbox_runner_request, build_self_update_runner_request,
-    parse_byte_size_arg, parse_cli_args, render_help_text, resolve_package_lock_name,
-    validate_service_request, AfCommand, BackupCliCommand, BackupCreateKind, GlobalOptions,
-    HelpTopic, HostsCliCommand, MaintenanceCliCommand, PackageCommand, ParsedInvocation,
-    ProvisionCliCommand, QuotaCommand, ReleaseCliCommand, ReleaseDispatchMode, SandboxCommand,
-    ServiceCommand, ALLOWED_SYSTEMCTL_ACTIONS,
+    parse_byte_size_arg, parse_cli_args, parse_cluster_subcommand, render_help_text,
+    resolve_package_lock_name, validate_service_request, AfCommand, BackupCliCommand,
+    BackupCreateKind, ClusterCliCommand, GlobalOptions, HelpTopic, HostsCliCommand,
+    MaintenanceCliCommand, PackageCommand, ParsedInvocation, ProvisionCliCommand, QuotaCommand,
+    ReleaseCliCommand, ReleaseDispatchMode, SandboxCommand, ServiceCommand,
+    ALLOWED_SYSTEMCTL_ACTIONS,
 };
 pub use client::{
     format_human_progress_line, parse_package_stream_body, parse_package_stream_line,
@@ -71,6 +72,7 @@ pub use af_host::{
 };
 
 use commands::backup::execute_backup_command;
+use commands::cluster::execute_cluster_command;
 use commands::ops::{
     execute_hosts_command, execute_maintenance_command, execute_quota_command,
     execute_sandbox_command, execute_service_command,
@@ -208,6 +210,7 @@ fn execute_command_inner(
         AfCommand::Provision(prov_cmd) => execute_provision_command(global, prov_cmd),
         AfCommand::Maintenance(maint_cmd) => execute_maintenance_command(global, maint_cmd),
         AfCommand::Hosts(hosts_cmd) => execute_hosts_command(global, hosts_cmd, transport),
+        AfCommand::Cluster(cluster_cmd) => execute_cluster_command(global, cluster_cmd, transport),
     }
 }
 

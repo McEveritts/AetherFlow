@@ -15,6 +15,7 @@ af-db.workspace = true
 af-hardware.workspace = true
 af-runner.workspace = true
 af-services.workspace = true
+af-transcode.workspace = true
 
 tokio.workspace = true
 axum.workspace = true

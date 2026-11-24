@@ -271,13 +271,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('--static-dir "${RELEASE_E2E_DIR}/web/dist"', gate)
         self.assertIn("--port 18080 --playwright", gate)
         self.assertIn("sha256sum --strict --check SHA256SUMS", gate)
-        self.assertIn("aetherflow-api bin/af bin/speedtest-backend", gate)
+        self.assertIn("aetherflow-api bin/af bin/speedtest-backend bin/af-transcode", gate)
+        self.assertIn("for duplicate in af speedtest-backend af-transcode; do", gate)
+        self.assertIn('timeout 30s "${RELEASE_E2E_DIR}/bin/af-transcode" --version', gate)
         self.assertIn("plugins/telemetry-inspector/${plugin_asset}", gate)
         self.assertIn("for asset in packages.json package_automation.json; do", gate)
         self.assertIn('test ! -e "${RELEASE_E2E_DIR}/config/openapi-v1.yaml"', gate)
         self.assertIn('test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"', gate)
         package = "Package Release Tarball & SHA-256 Manifest"
         self.assertIn("BUILD_FRONTEND=0", step_script(package))
+        self.assertIn("BUILD_TRANSCODE=1", step_script(package))
         self.assertIn("bash scripts/build_gold.sh", step_script(package))
         self.assertIn("npx playwright install --with-deps chromium firefox webkit", step_script(install))
         ordered = (
@@ -300,14 +303,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("sha256sum --strict --check SHA256SUMS", gate)
         self.assertIn("aetherflow-linux-arm64.tar.gz", gate)
         self.assertIn("linux_arm64.tar.gz", gate)
+        self.assertIn('test ! -e "${release_root}/bundle/af-transcode"', gate)
         self.assertIn('cmp "${release_root}/bundle/bin/speedtest-backend" "${release_root}/standalone/speedtest-backend"', gate)
-        for executable in ("bundle/bin/af", "bundle/bin/speedtest-backend", "standalone/speedtest-backend"):
+        for executable in (
+            "bundle/bin/af",
+            "bundle/bin/speedtest-backend",
+            "bundle/bin/af-transcode",
+            "standalone/speedtest-backend",
+        ):
             self.assertIn('${release_root}/' + executable + '" --version', gate)
         self.assertIn('scripts/run_embedded_e2e.sh --binary "${release_root}/bundle/aetherflow-api"', gate)
         self.assertIn('--static-dir "${release_root}/bundle/web/dist"', gate)
 
     def test_release_package_step_archives_the_external_frontend(self):
         for path in ("scripts", "backend-rs/crates/af-cli", "backend-rs/crates/af-librespeed",
+                     "backend-rs/crates/af-transcode",
                      "web/dist/locales", "config", "packages", "deploy",
                      "plugins/telemetry-inspector/backend/hooks",
                      "plugins/telemetry-inspector/frontend/dist",
@@ -316,7 +326,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         shutil.copyfile(WORKFLOW.parents[2] / "scripts/build_gold.sh", self.root / "scripts/build_gold.sh")
         (self.root / "backend-rs/Cargo.toml").write_text("[workspace]\n")
         (self.root / "backend-rs/Cargo.lock").write_text("# fixture lock\n")
-        for crate in ("af-cli", "af-librespeed"):
+        for crate in ("af-cli", "af-librespeed", "af-transcode"):
             (self.root / "backend-rs/crates" / crate / "Cargo.toml").write_text("[package]\n")
         for name in ("release-manager.sh", "verify-provenance.py", "log-retention.py"):
             (self.root / "deploy" / name).write_text("fixture")
@@ -346,7 +356,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         index.write_bytes(b"<html>app</html>")
         (self.root / "web/dist/locales/en.json.gz").write_bytes(b"compressed")
         (self.root / "config/packages.json").write_bytes(b"{}\n")
-        binaries = {"aetherflow-api": b"api", "af": b"cli", "speedtest-backend": b"speedtest"}
+        binaries = {
+            "aetherflow-api": b"api",
+            "af": b"cli",
+            "speedtest-backend": b"speedtest",
+            "af-transcode": b"transcode",
+        }
         compiled = self.root / "backend-rs/target/x86_64-unknown-linux-gnu/release"
         compiled.mkdir(parents=True)
         for name, contents in binaries.items():
@@ -376,6 +391,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         with tarfile.open(archive_path) as archive:
             expected = {
                 "aetherflow-api": b"api", "bin/af": b"cli", "bin/speedtest-backend": b"speedtest",
+                "bin/af-transcode": b"transcode",
                 ".version": b"v4.0.0-nightly.123.1\n", "config/packages.json": b"{}\n",
                 "web/dist/index.html": b"<html>app</html>", "web/dist/app.wasm": b"wasm",
                 "web/dist/locales/en.json.gz": b"compressed",
@@ -387,13 +403,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertEqual(names, sorted(names))
             self.assertNotIn("./af", names)
             self.assertNotIn("./speedtest-backend", names)
+            self.assertNotIn("./af-transcode", names)
             self.assertFalse(any(name.startswith("./plugins/sdk-template-rust")
                                  or name == "./plugins/README.md" or "__pycache__" in name
                                  or ".pytest_cache" in name or ".mypy_cache" in name
                                  or "node_modules" in name or name.endswith(".tsbuildinfo") for name in names))
             for member in archive.getmembers():
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 1794706390))
-            for name in ("aetherflow-api", "bin/af", "bin/speedtest-backend", "deploy/release-manager.sh",
+            for name in ("aetherflow-api", "bin/af", "bin/speedtest-backend", "bin/af-transcode",
+                         "deploy/release-manager.sh",
                          "deploy/verify-provenance.py", "deploy/log-retention.py",
                          "plugins/telemetry-inspector/backend/hooks/start.sh"):
                 self.assertEqual(archive.getmember("./" + name).mode, 0o755)

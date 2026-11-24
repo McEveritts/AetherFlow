@@ -447,6 +447,19 @@ pub(super) fn supports_storage_catalog(peer: &PeerLinkView) -> bool {
             .any(|cap| cap.eq_ignore_ascii_case("storage"))
 }
 
+pub(super) fn supports_transcode(peer: &PeerLinkView) -> bool {
+    peer.compatibility != "incompatible"
+        && !peer
+            .missing_capabilities
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case("transcode"))
+        && (peer.capabilities.is_empty()
+            || peer
+                .capabilities
+                .iter()
+                .any(|cap| cap.eq_ignore_ascii_case("transcode")))
+}
+
 pub fn can_manage_storage(peer: &PeerLinkView) -> bool {
     let has_storage = !peer.exports.is_empty() || !peer.mounts.is_empty();
     match peer.state.as_str() {
@@ -2035,5 +2048,42 @@ mod tests {
             ..Default::default()
         });
         assert!(can_manage_storage(&down));
+    }
+
+    #[test]
+    fn supports_transcode_respects_compatibility_and_capability_lists() {
+        let compatible = PeerLinkView {
+            compatibility: "compatible".into(),
+            capabilities: vec![
+                "links".into(),
+                "grants".into(),
+                "storage".into(),
+                "transcode".into(),
+            ],
+            ..Default::default()
+        };
+        assert!(supports_transcode(&compatible));
+
+        let missing_cap = PeerLinkView {
+            compatibility: "limited".into(),
+            capabilities: vec!["links".into(), "grants".into(), "storage".into()],
+            missing_capabilities: vec!["transcode".into()],
+            ..Default::default()
+        };
+        assert!(!supports_transcode(&missing_cap));
+
+        let explicit_without_transcode = PeerLinkView {
+            compatibility: "limited".into(),
+            capabilities: vec!["links".into(), "grants".into()],
+            ..Default::default()
+        };
+        assert!(!supports_transcode(&explicit_without_transcode));
+
+        let incompatible = PeerLinkView {
+            compatibility: "incompatible".into(),
+            capabilities: vec!["transcode".into()],
+            ..Default::default()
+        };
+        assert!(!supports_transcode(&incompatible));
     }
 }

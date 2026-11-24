@@ -60,6 +60,16 @@ check_speedtest_companion() {
     grep -qF "speedtest-backend ${version}" "${current}/bin/speedtest-backend" || fail "Wrong LibreSpeed companion version in current (expected ${version})"
 }
 
+check_transcode_companion() {
+    local current="$1" version="$2" require_exec="${3:-1}"
+    [[ -f "${current}/bin/af-transcode" ]] || fail "Missing transcode companion for ${version}"
+    if [[ "${require_exec}" == "1" ]]; then
+        [[ -x "${current}/bin/af-transcode" ]] || fail "Missing executable transcode companion for ${version}"
+    fi
+    [[ ! -e "${current}/af-transcode" ]] || fail "Unexpected duplicate root af-transcode for ${version}"
+    grep -qF "af-transcode ${version}" "${current}/bin/af-transcode" || fail "Wrong transcode companion version in current (expected ${version})"
+}
+
 check_managed_plugin_bundle() {
     local current="$1"
     [[ -s "${current}/plugins/telemetry-inspector/plugin.manifest.json" ]] || fail "Missing plugins/telemetry-inspector/plugin.manifest.json in ${current}"
@@ -120,9 +130,13 @@ EOF
 #!/bin/bash
 echo "speedtest-backend ${version_tag}"
 EOF
+    cat > "${stage}/bin/af-transcode" <<EOF
+#!/bin/bash
+echo "af-transcode ${version_tag}"
+EOF
     printf '%s\n' "${version_tag}" > "${stage}/.version"
 
-    chmod 0755 "${stage}/aetherflow-api" "${stage}/bin/af" "${stage}/bin/speedtest-backend" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py" "${stage}/plugins/telemetry-inspector/backend/hooks/start.sh"
+    chmod 0755 "${stage}/aetherflow-api" "${stage}/bin/af" "${stage}/bin/speedtest-backend" "${stage}/bin/af-transcode" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py" "${stage}/plugins/telemetry-inspector/backend/hooks/start.sh"
     find "${stage}" -type d -exec chmod 0755 {} +
 
     local archive="${out_dir}/aetherflow-linux-amd64.tar.gz"
@@ -298,6 +312,7 @@ grep -q 'AetherFlow v4.0.0' "${FRESH_ROOT}/opt/AetherFlow/current/web/dist/index
 grep -q "DB_PATH=${FRESH_ROOT}/var/lib/aetherflow/aetherflow.sqlite" "${FRESH_ROOT}/etc/aetherflow/aetherflow.env" || fail "aetherflow.env missing FHS DB_PATH"
 grep -q "ExecStart=/opt/AetherFlow/current/aetherflow-api" "${FRESH_ROOT}/etc/systemd/system/aetherflow-api.service" || fail "aetherflow-api.service not pointing to /opt/AetherFlow/current/aetherflow-api"
 check_speedtest_companion "${FRESH_ROOT}/opt/AetherFlow/current" "v4.0.0"
+check_transcode_companion "${FRESH_ROOT}/opt/AetherFlow/current" "v4.0.0" "1"
 check_managed_plugin_bundle "${FRESH_ROOT}/opt/AetherFlow/current"
 pass "Fresh installer staged verified v4.0.0 native binaries and external WASM"
 
@@ -473,6 +488,7 @@ AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Initial deploy did not activate v4.0.0"
 grep -q 'AetherFlow v4.0.0' "${RM_ROOT}/current/web/dist/index.html" || fail "Initial deploy missing matching external UI"
 check_speedtest_companion "${RM_ROOT}/current" "v4.0.0"
+check_transcode_companion "${RM_ROOT}/current" "v4.0.0"
 check_managed_plugin_bundle "${RM_ROOT}/current"
 [[ -x "${RM_ROOT}/current/bin/af" ]] || fail "Initial deploy missing bin/af binary"
 [[ ! -e "${RM_ROOT}/current/af" ]] || fail "Initial deploy should not duplicate root af binary"
@@ -485,6 +501,7 @@ AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.1" ]] || fail "Upgrade did not activate v4.0.1"
 grep -q 'AetherFlow v4.0.1' "${RM_ROOT}/current/web/dist/index.html" || fail "Upgrade did not activate matching external UI"
 check_speedtest_companion "${RM_ROOT}/current" "v4.0.1"
+check_transcode_companion "${RM_ROOT}/current" "v4.0.1"
 [[ -f "${RM_ROOT}/current/data-snapshot/aetherflow.sqlite.bak" ]] || fail "Upgrade did not capture SQLite online backup"
 [[ -f "${RM_ROOT}/current/data-snapshot/MANIFEST.sha256" ]] || fail "Upgrade did not write MANIFEST.sha256"
 pass "Atomic upgrade v4.0.0 -> v4.0.1 succeeded with verified WAL-safe SQLite snapshot"
@@ -498,6 +515,7 @@ AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.1" ]] || fail "Auto-rollback did not revert symlink to v4.0.1"
 grep -q 'AetherFlow v4.0.1' "${RM_ROOT}/current/web/dist/index.html" || fail "Auto-rollback did not restore matching external UI"
 check_speedtest_companion "${RM_ROOT}/current" "v4.0.1"
+check_transcode_companion "${RM_ROOT}/current" "v4.0.1"
 RESTORED_USER="$(sqlite3 "${SMOKE_DB_PATH}" "SELECT username FROM users WHERE username='admin_sentinel';" 2>/dev/null || true)"
 [[ "${RESTORED_USER}" == "admin_sentinel" ]] || fail "Stage 4 rollback did not restore corrupted SQLite database from pre-swap snapshot"
 pass "Broken v4.0.2 release triggered automatic Stage 4 symlink rollback to v4.0.1 and restored corrupted SQLite DB"
@@ -510,6 +528,7 @@ AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Manual rollback did not revert to v4.0.0"
 grep -q 'AetherFlow v4.0.0' "${RM_ROOT}/current/web/dist/index.html" || fail "Manual rollback did not restore matching external UI"
 check_speedtest_companion "${RM_ROOT}/current" "v4.0.0"
+check_transcode_companion "${RM_ROOT}/current" "v4.0.0"
 pass "Manual rollback to v4.0.0 verified"
 
 echo "[SMOKE-ALL-PASS] All v4 release, bootstrap, OS matrix, upgrade, auto-rollback, and DB recovery checks passed."

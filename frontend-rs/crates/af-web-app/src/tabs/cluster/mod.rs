@@ -1,16 +1,21 @@
 //! Peer Clustering tab (`/?tab=cluster`): link list, pairing window, pairing flow,
-//! comparison-code confirmation, endpoint editing, access grants, media storage, and link
-//! revocation.
+//! comparison-code confirmation, endpoint editing, access grants, media storage, distributed
+//! Jellyfin transcoding, and link revocation.
 
 pub mod grants;
 pub mod pairing;
 pub mod peers;
 pub mod storage;
+pub mod transcode;
 
 use crate::state::{app, owned_resource_reads, run_resource_read, AppContext, ResourceReads};
 use crate::tabs::busy::BusyGuard;
 use crate::tabs::l10n::{tt, tt_with, EmptyState, ObsCard};
-use af_web_core::api::{percent_encode_header_component, ApiClient, ApiError};
+use af_web_core::api::{
+    api_url_for_server, clear_csrf_token, cookie_value, current_auth_epoch, ensure_same_auth_epoch,
+    is_csrf_rejection, percent_encode_header_component, ApiClient, ApiError, API_ACCEPT,
+    API_VERSION,
+};
 use af_web_core::i18n::{translate, translate_with};
 use leptos::prelude::*;
 use pairing::{
@@ -21,11 +26,15 @@ use pairing::{
 use peers::{is_unlinked_empty_state, PeerListSection, PeersSnapshot};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use transcode::TranscodeSection;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
 pub const PEERS_LIST_PATH: &str = "/api/v1/admin/peers";
 pub const PAIRING_WINDOW_PATH: &str = "/api/v1/admin/peers/pairing-window";
 pub const PAIR_START_PATH: &str = "/api/v1/admin/peers/pair";
+pub const PEER_TRANSCODE_PATH: &str = "/api/v1/admin/peers/transcode";
+pub const LOCAL_JELLYFIN_PACKAGE_UPDATE_PATH: &str = "/api/v1/admin/packages/jellyfin/update";
 
 pub fn pairing_window_close_path(window_id: &str) -> String {
     format!(
@@ -95,6 +104,19 @@ pub fn local_fs_browse_path(dir: &str) -> String {
         "/api/v1/auth/fs?path={}",
         percent_encode_header_component(dir)
     )
+}
+
+/// Builds the Jellyfin package update endpoint for `Update to match`:
+/// - `None`: local server `POST /api/v1/admin/packages/jellyfin/update`
+/// - `Some(link_id)`: proxied peer `POST /api/v1/peers/{encoded_link_id}/admin/packages/jellyfin/update`
+pub fn peer_package_update_path(link_id: Option<&str>) -> String {
+    match link_id {
+        Some(id) => format!(
+            "/api/v1/peers/{}/admin/packages/jellyfin/update",
+            percent_encode_header_component(id.trim())
+        ),
+        None => LOCAL_JELLYFIN_PACKAGE_UPDATE_PATH.to_string(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +334,152 @@ pub async fn local_same_origin_get<T: DeserializeOwned>(path: &str) -> Result<T,
         let retry_text = retried.text().await.map_err(PeerApiError::from)?;
         return parse_peer_api_response(retry_status, retry_ok, &retry_text);
     }
+    parse_peer_api_response(status, ok, &text)
+}
+
+fn read_local_csrf_cookie() -> Option<String> {
+    let cookies = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.dyn_into::<web_sys::HtmlDocument>().ok())
+        .and_then(|d| d.cookie().ok())
+        .unwrap_or_default();
+    cookie_value(&cookies, "csrf_token").filter(|s| !s.is_empty())
+}
+
+async fn fetch_local_csrf_token(force_refresh: bool) -> Result<String, PeerApiError> {
+    if !force_refresh {
+        if let Some(token) = read_local_csrf_cookie() {
+            return Ok(token);
+        }
+    }
+    let response = ApiClient
+        .public_fetch("/api/v1/public/csrf-token", "GET", None)
+        .await
+        .map_err(PeerApiError::from)?;
+    let text = response.text().await.map_err(PeerApiError::from)?;
+    if let Ok(json) = serde_json::from_str::<Value>(text.trim()) {
+        if let Some(token) = json["csrf_token"].as_str().filter(|s| !s.is_empty()) {
+            return Ok(token.to_string());
+        }
+    }
+    read_local_csrf_cookie().ok_or_else(|| PeerApiError::client("CSRF token unavailable"))
+}
+
+async fn send_local_post_once(
+    path: &str,
+    body_json: Option<&str>,
+    csrf: &str,
+) -> Result<(u16, bool, String), PeerApiError> {
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_credentials(web_sys::RequestCredentials::Include);
+    init.set_cache(web_sys::RequestCache::NoStore);
+    let headers = web_sys::Headers::new()
+        .map_err(|_| PeerApiError::client("Failed to prepare request headers"))?;
+    for (key, value) in [
+        ("X-API-Version", API_VERSION),
+        ("Accept", API_ACCEPT),
+        ("X-Requested-With", "XMLHttpRequest"),
+        ("Cache-Control", "no-store"),
+        ("X-CSRF-Token", csrf),
+    ] {
+        headers
+            .set(key, value)
+            .map_err(|_| PeerApiError::client("Failed to set request header"))?;
+    }
+    if let Some(payload) = body_json {
+        headers
+            .set("Content-Type", "application/json")
+            .map_err(|_| PeerApiError::client("Failed to set Content-Type header"))?;
+        init.set_body(&JsValue::from_str(payload));
+    }
+    init.set_headers(&headers);
+    let window =
+        web_sys::window().ok_or_else(|| PeerApiError::client("Browser window unavailable"))?;
+    let response_js = JsFuture::from(window.fetch_with_str_and_init(path, &init))
+        .await
+        .map_err(|err| {
+            PeerApiError::client(
+                err.as_string()
+                    .unwrap_or_else(|| "Network request failed".to_string()),
+            )
+        })?;
+    let response: web_sys::Response = response_js
+        .dyn_into()
+        .map_err(|_| PeerApiError::client("Invalid browser response"))?;
+    let status = response.status();
+    let ok = response.ok();
+    let text_promise = response
+        .text()
+        .map_err(|_| PeerApiError::client("Failed to read response body"))?;
+    let text = JsFuture::from(text_promise)
+        .await
+        .map_err(|_| PeerApiError::client("Failed to decode response body"))?
+        .as_string()
+        .unwrap_or_default();
+    Ok((status, ok, text))
+}
+
+/// Sends a strictly local same-origin authenticated POST with `X-CSRF-Token` attached
+/// (bypassing peer proxy rewriting even while a remote peer is selected in the dashboard
+/// switcher), supporting single session refresh on 401 and CSRF retry on 403.
+pub async fn local_same_origin_post<T: DeserializeOwned>(
+    path: &str,
+    body: Option<&Value>,
+) -> Result<T, PeerApiError> {
+    if api_url_for_server(None, path) != path {
+        return Err(PeerApiError::client("API path must be local"));
+    }
+    let origin_epoch = current_auth_epoch();
+    let body_json = body.map(Value::to_string);
+    let mut csrf = fetch_local_csrf_token(false).await?;
+    ensure_same_auth_epoch(origin_epoch, current_auth_epoch()).map_err(PeerApiError::from)?;
+
+    let mut refreshed = false;
+    let mut csrf_retried = false;
+    let (mut status, mut ok, mut text) =
+        send_local_post_once(path, body_json.as_deref(), &csrf).await?;
+    ensure_same_auth_epoch(origin_epoch, current_auth_epoch()).map_err(PeerApiError::from)?;
+
+    loop {
+        if status == 401 && !refreshed {
+            refreshed = true;
+            if !ApiClient
+                .fetch(PEERS_LIST_PATH, "GET", None)
+                .await
+                .is_ok_and(|res| res.ok())
+            {
+                break;
+            }
+            ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
+                .map_err(PeerApiError::from)?;
+            clear_csrf_token();
+            csrf = fetch_local_csrf_token(true).await?;
+            ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
+                .map_err(PeerApiError::from)?;
+            (status, ok, text) = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
+            ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
+                .map_err(PeerApiError::from)?;
+            continue;
+        }
+        if status == 403
+            && !csrf_retried
+            && serde_json::from_str::<Value>(text.trim())
+                .is_ok_and(|json| is_csrf_rejection(403, &json))
+        {
+            csrf_retried = true;
+            clear_csrf_token();
+            csrf = fetch_local_csrf_token(true).await?;
+            ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
+                .map_err(PeerApiError::from)?;
+            (status, ok, text) = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
+            ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
+                .map_err(PeerApiError::from)?;
+            continue;
+        }
+        break;
+    }
+
     parse_peer_api_response(status, ok, &text)
 }
 
@@ -839,6 +1007,12 @@ fn ClusterAdminContent() -> impl IntoView {
                 on_refresh=trigger_refresh
             />
 
+            <TranscodeSection
+                peers=peers_list.into()
+                parent_revision=revision
+                on_refresh_peers=trigger_refresh
+            />
+
             <OpenPairingWindowModal
                 open=allow_modal_open
                 detected_endpoints=detected_endpoints.into()
@@ -891,6 +1065,10 @@ mod tests {
         let peer_mounts = peer_mounts_path("link-42");
         let peer_mounts_encoded = peer_mounts_path("link 42/a");
         let fs_browse = local_fs_browse_path("/srv/media/movies");
+        let peer_transcode = PEER_TRANSCODE_PATH.to_string();
+        let pkg_update_local = peer_package_update_path(None);
+        let pkg_update_peer = peer_package_update_path(Some("link-42"));
+        let pkg_update_peer_encoded = peer_package_update_path(Some("link 42/a"));
 
         assert_eq!(list, "/api/v1/admin/peers");
         assert_eq!(open_window, "/api/v1/admin/peers/pairing-window");
@@ -923,9 +1101,19 @@ mod tests {
             "/api/v1/admin/peers/link%2042%2Fa/mounts"
         );
         assert_eq!(fs_browse, "/api/v1/auth/fs?path=%2Fsrv%2Fmedia%2Fmovies");
+        assert_eq!(peer_transcode, "/api/v1/admin/peers/transcode");
+        assert_eq!(pkg_update_local, "/api/v1/admin/packages/jellyfin/update");
+        assert_eq!(
+            pkg_update_peer,
+            "/api/v1/peers/link-42/admin/packages/jellyfin/update"
+        );
+        assert_eq!(
+            pkg_update_peer_encoded,
+            "/api/v1/peers/link%2042%2Fa/admin/packages/jellyfin/update"
+        );
 
         // Even while a remote peer server is active, all peer-clustering management controls
-        // MUST remain on the local managing origin and never get prefixed with `/api/v1/peers/{id}`.
+        // and explicit peer-prefixed package alignment paths MUST keep their exact target.
         for route in [
             &list,
             &open_window,
@@ -939,19 +1127,28 @@ mod tests {
             &peer_grant_offer,
             &peer_exports,
             &peer_mounts,
+            &peer_transcode,
+            &pkg_update_peer,
+            &pkg_update_peer_encoded,
         ] {
             assert_eq!(
                 api_url(route),
                 *route,
-                "route drifted off local origin: {route}"
+                "route drifted off expected target: {route}"
             );
         }
+        // Local package alignment validates strictly on local origin without peer prefixing.
+        assert_eq!(
+            api_url_for_server(None, &pkg_update_local),
+            pkg_update_local
+        );
 
-        // Read does not attach CSRF; all state-changing admin peer routes do.
+        // Read does not attach CSRF; all state-changing admin peer and package align routes do.
         assert!(!should_attach_csrf("GET", &list, None));
         assert!(!should_attach_csrf("GET", &peer_grant, None));
         assert!(!should_attach_csrf("GET", &peer_exports, None));
         assert!(!should_attach_csrf("GET", &peer_mounts, None));
+        assert!(!should_attach_csrf("GET", &peer_transcode, None));
         assert!(should_attach_csrf("POST", &open_window, None));
         assert!(should_attach_csrf("DELETE", &open_window, None));
         assert!(should_attach_csrf("DELETE", &close_window, None));
@@ -967,6 +1164,10 @@ mod tests {
         assert!(should_attach_csrf("DELETE", &peer_exports, None));
         assert!(should_attach_csrf("POST", &peer_mounts, None));
         assert!(should_attach_csrf("DELETE", &peer_mounts, None));
+        assert!(should_attach_csrf("PUT", &peer_transcode, None));
+        assert!(should_attach_csrf("POST", &pkg_update_local, None));
+        assert!(should_attach_csrf("POST", &pkg_update_peer, None));
+        assert!(should_attach_csrf("POST", &pkg_update_peer_encoded, None));
 
         // 204 No Content empty responses parse cleanly as Value::Null for DELETE mutations.
         assert_eq!(

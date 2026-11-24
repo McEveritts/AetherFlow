@@ -8,8 +8,9 @@ use super::requests::{
     build_sandbox_runner_request, build_self_update_runner_request, validate_service_request,
 };
 use super::{
-    AfCommand, GlobalOptions, HelpTopic, HostsCliCommand, PackageCommand, ParsedInvocation,
-    QuotaCommand, ReleaseCliCommand, ReleaseDispatchMode, SandboxCommand, ServiceCommand,
+    AfCommand, ClusterCliCommand, GlobalOptions, HelpTopic, HostsCliCommand, PackageCommand,
+    ParsedInvocation, QuotaCommand, ReleaseCliCommand, ReleaseDispatchMode, SandboxCommand,
+    ServiceCommand,
 };
 use crate::error::{CliError, CliResult};
 use af_release::ReleaseChannel;
@@ -177,6 +178,7 @@ where
         "clean-log" | "clean-logs" => AfCommand::Maintenance(parse_clean_log_args(rest)?),
         "showspace" => AfCommand::Maintenance(parse_showspace_args(rest)?),
         "hosts" | "dns" => AfCommand::Hosts(parse_hosts_subcommand(rest)?),
+        "cluster" => AfCommand::Cluster(parse_cluster_subcommand(rest)?),
 
         unknown => {
             return Err(CliError::Usage(format!(
@@ -203,7 +205,76 @@ pub(super) fn parse_help_topic(raw: &str) -> HelpTopic {
             HelpTopic::Maintenance
         }
         "hosts" | "dns" => HelpTopic::Hosts,
+        "cluster" | "peer" | "peers" => HelpTopic::Cluster,
         _ => HelpTopic::General,
+    }
+}
+
+pub fn parse_cluster_subcommand(args: &[String]) -> CliResult<ClusterCliCommand> {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        return Err(CliError::Usage(
+            "missing cluster subcommand (expected: diagnose)".to_string(),
+        ));
+    };
+    let tail = &args[1..];
+    match sub {
+        "diagnose" => {
+            let mut link: Option<String> = None;
+            let mut db_path: Option<PathBuf> = None;
+            let mut i = 0usize;
+            while i < tail.len() {
+                match tail[i].as_str() {
+                    "--db" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--db requires a SQLite database path".to_string())
+                        })?;
+                        if val.trim().is_empty() {
+                            return Err(CliError::Usage("--db path must not be empty".to_string()));
+                        }
+                        db_path = Some(PathBuf::from(val));
+                        i += 2;
+                    }
+                    s if s.starts_with("--db=") => {
+                        let val = s.trim_start_matches("--db=");
+                        if val.trim().is_empty() {
+                            return Err(CliError::Usage("--db path must not be empty".to_string()));
+                        }
+                        db_path = Some(PathBuf::from(val));
+                        i += 1;
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(CliError::Usage(format!(
+                            "unknown flag for 'af cluster diagnose': {}",
+                            other
+                        )));
+                    }
+                    positional => {
+                        let trimmed = positional.trim();
+                        if trimmed.is_empty() {
+                            return Err(CliError::Validation(
+                                "peer link name or id must not be empty".to_string(),
+                            ));
+                        }
+                        if link.is_some() {
+                            return Err(CliError::Usage(
+                                "usage: af cluster diagnose <link> [--db <path>]".to_string(),
+                            ));
+                        }
+                        link = Some(trimmed.to_string());
+                        i += 1;
+                    }
+                }
+            }
+
+            let link = link.ok_or_else(|| {
+                CliError::Usage("usage: af cluster diagnose <link> [--db <path>]".to_string())
+            })?;
+            Ok(ClusterCliCommand::Diagnose { link, db_path })
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown cluster subcommand {:?} (expected: diagnose)",
+            other
+        ))),
     }
 }
 

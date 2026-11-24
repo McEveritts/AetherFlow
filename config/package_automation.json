@@ -31,7 +31,8 @@
       "-/media",
       "-/srv",
       "-/downloads",
-      "-/mnt/unionfs"
+      "-/mnt/unionfs",
+      "-/run/aetherflow-transcode/transcode.sock"
     ],
     "sandbox_service_units": [
       "jellyfin.service"

@@ -1482,7 +1482,7 @@ pull_prebuilt_artifact() {
     fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
     local companion_bin
-    for companion_bin in af speedtest-backend; do
+    for companion_bin in af speedtest-backend af-transcode; do
         if [[ -f "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
             chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
         fi
@@ -1591,6 +1591,9 @@ build_from_source() {
     if [[ -f "${RELEASE_DIR}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
         companion_bins+=(speedtest-backend)
     fi
+    if [[ -f "${RELEASE_DIR}/backend-rs/crates/af-transcode/Cargo.toml" ]]; then
+        companion_bins+=(af-transcode)
+    fi
     local -a cargo_bin_args=(--bin aetherflow-api)
     local built_bin
     for built_bin in "${companion_bins[@]}"; do
@@ -1651,6 +1654,7 @@ simulate_offline_artifact() {
     echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
     echo "#!/bin/bash" > "${RELEASE_DIR}/bin/af"
     echo "#!/bin/bash" > "${RELEASE_DIR}/bin/speedtest-backend"
+    echo "#!/bin/bash" > "${RELEASE_DIR}/bin/af-transcode"
     printf '{"id":"telemetry-inspector","name":"Telemetry Inspector","version":"1.0.0","runtime_status":"managed"}\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/plugin.manifest.json"
     echo "#!/usr/bin/env bash" > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
     echo "# Offline dry-run placeholder" > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/runtime.py"
@@ -1659,6 +1663,7 @@ simulate_offline_artifact() {
         "${RELEASE_DIR}/aetherflow-api" \
         "${RELEASE_DIR}/bin/af" \
         "${RELEASE_DIR}/bin/speedtest-backend" \
+        "${RELEASE_DIR}/bin/af-transcode" \
         "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
     echo "v4.0.0-dryrun" > "${RELEASE_DIR}/.version"
     stage_running_release_manager
@@ -1762,7 +1767,7 @@ prepare_release_permissions() {
     find "${RELEASE_DIR}" -type f -exec chmod a+r,go-w {} + || return 1
     chmod 0755 "${RELEASE_DIR}/aetherflow-api" || return 1
     local companion_chmod
-    for companion_chmod in af speedtest-backend; do
+    for companion_chmod in af speedtest-backend af-transcode; do
         if [[ -f "${RELEASE_DIR}/${companion_chmod}" && ! -L "${RELEASE_DIR}/${companion_chmod}" ]]; then
             chmod 0755 "${RELEASE_DIR}/${companion_chmod}" || return 1
         fi

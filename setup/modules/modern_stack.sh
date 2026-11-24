@@ -177,7 +177,7 @@ _stage_prebuilt_release_archive() {
 
     chmod 0755 "${release_dir}/aetherflow-api"
     local companion_bin
-    for companion_bin in af speedtest-backend; do
+    for companion_bin in af speedtest-backend af-transcode; do
         if [[ -f "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
             chmod 0755 "${release_dir}/bin/${companion_bin}"
         fi
@@ -238,7 +238,7 @@ _stage_prebuilt_release_archive() {
     find "${release_dir}" -type f -exec chmod a+r,go-w {} +
     chmod 0755 "${release_dir}/aetherflow-api"
     local companion_chmod
-    for companion_chmod in af speedtest-backend; do
+    for companion_chmod in af speedtest-backend af-transcode; do
         [[ -f "${release_dir}/${companion_chmod}" && ! -L "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
         [[ -f "${release_dir}/bin/${companion_chmod}" && ! -L "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
     done
@@ -567,6 +567,9 @@ _build_modern_stack_from_source() {
         local -a companion_bins=(af)
         if [[ -f "${af_root}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
             companion_bins+=(speedtest-backend)
+        fi
+        if [[ -f "${af_root}/backend-rs/crates/af-transcode/Cargo.toml" ]]; then
+            companion_bins+=(af-transcode)
         fi
         local -a bin_args=(--bin aetherflow-api)
         local built_bin

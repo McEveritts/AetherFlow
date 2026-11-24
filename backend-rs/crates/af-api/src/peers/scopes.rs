@@ -75,6 +75,8 @@ pub enum ScopeRequirement {
     Area(Area, Mode),
     /// Requires every listed area at its specified access level.
     All(&'static [(Area, Mode)]),
+    /// Requires at least one listed area at its specified access level.
+    Any(&'static [(Area, Mode)]),
     /// Read-only overview endpoint requiring at least one area in the grant to have `read` or `write`.
     /// All-`none` grants are denied.
     AnyReadAccess,
@@ -89,6 +91,11 @@ impl ScopeRequirement {
                 .map(|(area, mode)| format!("{}:{}", area.as_str(), mode.as_str()))
                 .collect::<Vec<_>>()
                 .join(" + "),
+            Self::Any(areas) => areas
+                .iter()
+                .map(|(area, mode)| format!("{}:{}", area.as_str(), mode.as_str()))
+                .collect::<Vec<_>>()
+                .join(" | "),
             Self::AnyReadAccess => "overview:any_read".to_string(),
         }
     }
@@ -281,6 +288,9 @@ pub fn access_allows(access: &AccessMap, requirement: ScopeRequirement) -> bool 
         ScopeRequirement::All(areas) => areas
             .iter()
             .all(|&(area, mode)| area_allows(access, area, mode)),
+        ScopeRequirement::Any(areas) => areas
+            .iter()
+            .any(|&(area, mode)| area_allows(access, area, mode)),
     }
 }
 
@@ -733,7 +743,10 @@ const ALLOWED_RULES: &[AllowedRule] = &[
     AllowedRule {
         method: "POST",
         pattern: "/api/v1/admin/packages/:id/update",
-        requirement: ScopeRequirement::Area(Area::Marketplace, Mode::Write),
+        requirement: ScopeRequirement::Any(&[
+            (Area::Marketplace, Mode::Write),
+            (Area::Updates, Mode::Write),
+        ]),
     },
     AllowedRule {
         method: "POST",
@@ -1655,10 +1668,12 @@ mod tests {
             (Method::GET, "/api/v1/admin/peers/:id/mounts"),
             (Method::POST, "/api/v1/admin/peers/:id/mounts"),
             (Method::DELETE, "/api/v1/admin/peers/:id/mounts"),
+            (Method::GET, "/api/v1/admin/peers/transcode"),
+            (Method::PUT, "/api/v1/admin/peers/transcode"),
         ] {
             assert!(
                 routes.iter().any(|r| r.method == method && r.path == path),
-                "expected peer storage registration for {method} {path}"
+                "expected peer storage/transcode registration for {method} {path}"
             );
         }
         for method in [
@@ -1867,6 +1882,9 @@ mod tests {
             (Method::GET, "/api/v1/admin/peers/link-1/mounts"),
             (Method::POST, "/api/v1/admin/peers/link-1/mounts"),
             (Method::DELETE, "/api/v1/admin/PEERS/link-1/mounts"),
+            (Method::GET, "/api/v1/admin/peers/transcode"),
+            (Method::PUT, "/api/v1/admin/peers/transcode"),
+            (Method::PUT, "/api/v1/admin/PEERS/transcode"),
             (Method::GET, "/api/v1/peers/link-1/admin/services"),
             (Method::POST, "/api/v1/peer-pairing/request"),
             (Method::GET, "/api/v1/auth/session"),
@@ -1982,5 +2000,33 @@ mod tests {
             &partial,
             ScopeRequirement::Area(Area::Services, Mode::Read)
         ));
+    }
+
+    #[test]
+    fn package_update_route_accepts_marketplace_write_or_updates_write_only() {
+        let canonical = canonicalize("/api/v1/admin/packages/jellyfin/update").unwrap();
+        let RouteDecision::Allowed(req) = classify(&Method::POST, &canonical) else {
+            panic!("expected Allowed classification for POST /api/v1/admin/packages/:id/update");
+        };
+        assert_eq!(req.label(), "marketplace:write | updates:write");
+
+        let mut updates_write = AccessMap::none();
+        updates_write.updates = AccessLevel::Write;
+        assert!(access_allows(&updates_write, req));
+
+        let mut marketplace_write = AccessMap::none();
+        marketplace_write.marketplace = AccessLevel::Write;
+        assert!(access_allows(&marketplace_write, req));
+
+        let mut updates_read = AccessMap::none();
+        updates_read.updates = AccessLevel::Read;
+        assert!(!access_allows(&updates_read, req));
+
+        let mut marketplace_read = AccessMap::none();
+        marketplace_read.marketplace = AccessLevel::Read;
+        assert!(!access_allows(&marketplace_read, req));
+
+        assert!(!access_allows(&AccessMap::read_only_all(), req));
+        assert!(!access_allows(&AccessMap::none(), req));
     }
 }

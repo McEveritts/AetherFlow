@@ -753,6 +753,8 @@ fn build_test_runtime_with_db_and_timeout(
         runner,
         storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
         mount_health: super::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -1615,7 +1617,7 @@ async fn end_to_end_pairing_health_listener_isolation_endpoint_edit_and_revocati
     assert!(a_link_after_health.rtt_ms.is_some());
     assert_eq!(
         a_link_after_health.capabilities.as_deref(),
-        Some(r#"["links","grants","storage"]"#)
+        Some(r#"["links","grants","storage","transcode"]"#)
     );
 
     // `present_live == false` (explicitly removed from live afpeer0) marks link down on first tick!
@@ -2172,7 +2174,8 @@ fn compatibility_matrix_reports_compatible_limited_incompatible_and_unknown() {
         vec![
             "links".to_string(),
             "grants".to_string(),
-            "storage".to_string()
+            "storage".to_string(),
+            "transcode".to_string(),
         ]
     );
 
@@ -2180,7 +2183,11 @@ fn compatibility_matrix_reports_compatible_limited_incompatible_and_unknown() {
     assert_eq!(p3_link_only.status, CompatibilityStatus::Limited);
     assert_eq!(
         p3_link_only.missing_capabilities,
-        vec!["grants".to_string(), "storage".to_string()]
+        vec![
+            "grants".to_string(),
+            "storage".to_string(),
+            "transcode".to_string(),
+        ]
     );
 
     let p6_no_storage =
@@ -2188,7 +2195,7 @@ fn compatibility_matrix_reports_compatible_limited_incompatible_and_unknown() {
     assert_eq!(p6_no_storage.status, CompatibilityStatus::Limited);
     assert_eq!(
         p6_no_storage.missing_capabilities,
-        vec!["storage".to_string()]
+        vec!["storage".to_string(), "transcode".to_string()]
     );
 
     let compat = evaluate_compatibility(
@@ -2197,6 +2204,7 @@ fn compatibility_matrix_reports_compatible_limited_incompatible_and_unknown() {
             "links".to_string(),
             "grants".to_string(),
             "storage".to_string(),
+            "transcode".to_string(),
         ],
     );
     assert_eq!(compat.status, CompatibilityStatus::Compatible);
@@ -2293,7 +2301,7 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_r
     assert_eq!(health_json["peer_protocol"], 1);
     assert_eq!(
         health_json["capabilities"],
-        json!(["links", "grants", "storage"])
+        json!(["links", "grants", "storage", "transcode"])
     );
 
     // 2. Unauthenticated request to /api/v1/admin/peers -> 401.
@@ -2348,7 +2356,7 @@ async fn versioned_router_enforces_admin_csrf_guards_excludes_legacy_alias_and_r
     assert_eq!(admin_json["peers"], json!([]));
     assert_eq!(
         admin_json["capabilities"],
-        json!(["links", "grants", "storage"])
+        json!(["links", "grants", "storage", "transcode"])
     );
 
     // 5. Cookie-authenticated POST to /api/v1/admin/peers/pairing-window WITHOUT CSRF token -> 403!
@@ -8938,7 +8946,7 @@ async fn p5_grant_delivery_failure_concurrency_p3_interop_and_link_revocation_cl
     assert_eq!(list_p3["peers"][0]["compatibility"], "limited");
     assert_eq!(
         list_p3["peers"][0]["missing_capabilities"],
-        json!(["grants", "storage"])
+        json!(["grants", "storage", "transcode"])
     );
 
     // PUT /grant against P3 link-only server returns 422 VERSION_INCOMPATIBLE and does not activate.
@@ -9151,6 +9159,8 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
         runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
         storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
         mount_health: super::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
         public_transport: Arc::new(UnreachablePublicTransport),
         revocation_tx: rev_tx_b,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(

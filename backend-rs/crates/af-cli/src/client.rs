@@ -9,7 +9,10 @@ use af_models::{
     PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse, SandboxRunnerRequest,
     SelfUpdateRequest, SystemctlRequest,
 };
-use af_runner::HostsUpdateRequest;
+use af_runner::{
+    HostsUpdateRequest, PeerMountStateResponse, PeerNetworkRequest, PeerSentinelProbeResponse,
+    PeerStatusResponse, PeerStorageRequest,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -349,6 +352,38 @@ pub trait RunnerClientTransport: Send + Sync {
     /// Probes the installed runtime version via `POST /v1/package/probe-version`.
     fn probe_package_version(&self, _package_id: &str) -> CliResult<Option<String>> {
         Ok(None)
+    }
+
+    /// Queries live WireGuard peer network status via `POST /v1/peer-network`.
+    fn query_peer_network_status(&self) -> CliResult<PeerStatusResponse> {
+        Err(CliError::RunnerIpc {
+            endpoint: "/v1/peer-network".to_string(),
+            message: "peer-network status query is not supported by this transport".to_string(),
+        })
+    }
+
+    /// Queries live peer mount unit status via `POST /v1/peer-storage` (`MountStatus`).
+    fn query_peer_mount_status(&self, mount_path: &str) -> CliResult<PeerMountStateResponse> {
+        let _ = mount_path;
+        Err(CliError::RunnerIpc {
+            endpoint: "/v1/peer-storage".to_string(),
+            message: "peer-storage mount_status query is not supported by this transport"
+                .to_string(),
+        })
+    }
+
+    /// Probes a mounted peer export sentinel via `POST /v1/peer-storage` (`ProbeSentinel`).
+    fn probe_peer_mount_sentinel(
+        &self,
+        mount_path: &str,
+        timeout_ms: Option<u64>,
+    ) -> CliResult<PeerSentinelProbeResponse> {
+        let _ = (mount_path, timeout_ms);
+        Err(CliError::RunnerIpc {
+            endpoint: "/v1/peer-storage".to_string(),
+            message: "peer-storage probe_sentinel query is not supported by this transport"
+                .to_string(),
+        })
     }
 }
 
@@ -704,5 +739,52 @@ impl RunnerClientTransport for UnixSocketRunnerClient {
             Ok(_) | Err(CliError::RunnerIpc { .. }) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    fn query_peer_network_status(&self) -> CliResult<PeerStatusResponse> {
+        let resp = Self::run_async(self.post_json_async(
+            "/v1/peer-network",
+            &PeerNetworkRequest::Status,
+            Duration::from_secs(15),
+        ))?;
+        serde_json::from_str(&resp.output).map_err(|err| CliError::RunnerIpc {
+            endpoint: "/v1/peer-network".to_string(),
+            message: format!("malformed peer-network status payload: {err}"),
+        })
+    }
+
+    fn query_peer_mount_status(&self, mount_path: &str) -> CliResult<PeerMountStateResponse> {
+        let req = PeerStorageRequest::MountStatus {
+            mount_path: mount_path.to_string(),
+        };
+        let resp = Self::run_async(self.post_json_async(
+            "/v1/peer-storage",
+            &req,
+            Duration::from_secs(15),
+        ))?;
+        serde_json::from_str(&resp.output).map_err(|err| CliError::RunnerIpc {
+            endpoint: "/v1/peer-storage".to_string(),
+            message: format!("malformed peer-storage mount_status payload: {err}"),
+        })
+    }
+
+    fn probe_peer_mount_sentinel(
+        &self,
+        mount_path: &str,
+        timeout_ms: Option<u64>,
+    ) -> CliResult<PeerSentinelProbeResponse> {
+        let req = PeerStorageRequest::ProbeSentinel {
+            mount_path: mount_path.to_string(),
+            timeout_ms,
+        };
+        let resp = Self::run_async(self.post_json_async(
+            "/v1/peer-storage",
+            &req,
+            Duration::from_secs(20),
+        ))?;
+        serde_json::from_str(&resp.output).map_err(|err| CliError::RunnerIpc {
+            endpoint: "/v1/peer-storage".to_string(),
+            message: format!("malformed peer-storage probe_sentinel payload: {err}"),
+        })
     }
 }

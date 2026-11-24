@@ -75,6 +75,8 @@ fn build_proxy_test_runtime(
         runner,
         storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
         mount_health: super::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
         public_transport,
         revocation_tx,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -1386,6 +1388,8 @@ async fn peer_proxy_real_router_backup_download_isolated_ticket_and_auth_csrf_ma
         runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
         storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
         mount_health: super::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
         public_transport: Arc::new(UnreachablePublicTransport),
         revocation_tx: rev_tx_b,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
@@ -1880,6 +1884,8 @@ while True:
         runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
         storage_runner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
         mount_health: super::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
         public_transport: Arc::new(UnreachablePublicTransport),
         revocation_tx: rev_tx_b,
         pairing_rate_limiter: super::pairing::PairingRateLimiter::new(

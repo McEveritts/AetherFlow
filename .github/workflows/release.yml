@@ -312,13 +312,13 @@ jobs:
 
       - name: Package Release Tarball & SHA-256 Manifest
         run: |
-          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 \
+          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
             TARGETS=amd64 OUTPUT_DIR="${PWD}/release-dist" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
 
       - name: Package ARM64 Release Tarball
         run: |
-          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 \
+          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
             TARGETS=arm64 OUTPUT_DIR="${PWD}/release-dist-arm64" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
           cp -f release-dist-arm64/aetherflow-linux-arm64.tar.gz release-dist/aetherflow-linux-arm64.tar.gz
@@ -384,13 +384,14 @@ jobs:
           trap 'rm -rf "${RELEASE_E2E_DIR}"' EXIT
           (cd release-dist && sha256sum --strict --check SHA256SUMS)
           tar -xzf release-dist/aetherflow-linux-amd64.tar.gz -C "${RELEASE_E2E_DIR}"
-          for binary in aetherflow-api bin/af bin/speedtest-backend; do
+          for binary in aetherflow-api bin/af bin/speedtest-backend bin/af-transcode; do
             test -f "${RELEASE_E2E_DIR}/${binary}"
             test -x "${RELEASE_E2E_DIR}/${binary}"
           done
-          for duplicate in af speedtest-backend; do
+          for duplicate in af speedtest-backend af-transcode; do
             test ! -e "${RELEASE_E2E_DIR}/${duplicate}"
           done
+          timeout 30s "${RELEASE_E2E_DIR}/bin/af-transcode" --version
           for asset in packages.json package_automation.json; do
             test -f "${RELEASE_E2E_DIR}/config/${asset}"
             test -s "${RELEASE_E2E_DIR}/config/${asset}"
@@ -450,11 +451,13 @@ jobs:
           test "$(cat "${release_root}/bundle/.version")" = "${VERSION_STAMP}"
           test ! -e "${release_root}/bundle/af"
           test ! -e "${release_root}/bundle/speedtest-backend"
+          test ! -e "${release_root}/bundle/af-transcode"
           test -s "${release_root}/bundle/plugins/telemetry-inspector/plugin.manifest.json"
           test -x "${release_root}/bundle/plugins/telemetry-inspector/backend/hooks/start.sh"
           cmp "${release_root}/bundle/bin/speedtest-backend" "${release_root}/standalone/speedtest-backend"
           timeout 30s "${release_root}/bundle/bin/af" --version | grep -F '(linux/aarch64)'
           timeout 30s "${release_root}/bundle/bin/speedtest-backend" --version
+          timeout 30s "${release_root}/bundle/bin/af-transcode" --version
           timeout 30s "${release_root}/standalone/speedtest-backend" --version
           bash scripts/run_embedded_e2e.sh --binary "${release_root}/bundle/aetherflow-api" --static-dir "${release_root}/bundle/web/dist" --port 18080
 

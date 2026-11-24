@@ -964,6 +964,11 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
 
     af_services::clear_service_status_cache();
     af_services::mutators::clear_app_runtime_meta_cache();
+    if matches!(clean_id.as_str(), "jellyfin" | "jellyfin-ffmpeg") {
+        crate::peers::PeerRuntime::global()
+            .transcode_state
+            .invalidate_local_capabilities_cache();
+    }
 
     finish_package_lifecycle_with_recovery_and_retention(
         &clean_id,

@@ -205,10 +205,26 @@ os.execvp(inner[0], inner)
         )
         return result.stdout.strip()
 
-    def write_artifact(self, version=b"v4.0.0\n", index=b"<html>app</html>", wasm=b"wasm"):
+    def write_artifact(self, version=b"v4.0.0\n", index=b"<html>app</html>", wasm=b"wasm", include_transcode=True):
         binary = b"#!/bin/bash\necho aetherflow-api\n"
         unit = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nFrom=artifact\n"
         runner = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\nFrom=artifact\n"
+        entries = [
+            ("aetherflow-api", binary, 0o755),
+            (".version", version, 0o644),
+            ("web/dist/index.html", index, 0o600),
+            ("bin/af", b"cli-fixture", 0o600),
+            ("bin/speedtest-backend", b"speedtest-fixture", 0o600),
+            ("plugins/telemetry-inspector/plugin.manifest.json", b'{"id":"telemetry-inspector"}\n', 0o600),
+            ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n", 0o600),
+            ("plugins/telemetry-inspector/backend/runtime.py", b"print('ok')\n", 0o600),
+            ("plugins/telemetry-inspector/frontend/dist/index.html", b"<!doctype html>\n", 0o600),
+            ("web/dist/app.wasm", wasm, 0o644),
+            ("deploy/systemd/aetherflow-api.service", unit, 0o644),
+            ("deploy/systemd/aetherflow-runner.service", runner, 0o644),
+        ]
+        if include_transcode:
+            entries.insert(5, ("bin/af-transcode", b"transcode-fixture", 0o600))
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             directory = tarfile.TarInfo(".")
@@ -216,20 +232,7 @@ os.execvp(inner[0], inner)
             directory.mode = 0o700
             directory.uid = directory.gid = 1001
             archive.addfile(directory)
-            for name, payload, mode in (
-                ("aetherflow-api", binary, 0o755),
-                (".version", version, 0o644),
-                ("web/dist/index.html", index, 0o600),
-                ("bin/af", b"cli-fixture", 0o600),
-                ("bin/speedtest-backend", b"speedtest-fixture", 0o600),
-                ("plugins/telemetry-inspector/plugin.manifest.json", b'{"id":"telemetry-inspector"}\n', 0o600),
-                ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n", 0o600),
-                ("plugins/telemetry-inspector/backend/runtime.py", b"print('ok')\n", 0o600),
-                ("plugins/telemetry-inspector/frontend/dist/index.html", b"<!doctype html>\n", 0o600),
-                ("web/dist/app.wasm", wasm, 0o644),
-                ("deploy/systemd/aetherflow-api.service", unit, 0o644),
-                ("deploy/systemd/aetherflow-runner.service", runner, 0o644),
-            ):
+            for name, payload, mode in entries:
                 info = tarfile.TarInfo(name)
                 info.size = len(payload)
                 info.mode = mode
@@ -495,8 +498,11 @@ os.execvp(inner[0], inner)
         self.assertTrue((self.dry / "current").is_symlink())
         self.assertFalse((self.dry / "current" / "af").exists())
         self.assertFalse((self.dry / "current" / "speedtest-backend").exists())
+        self.assertFalse((self.dry / "current" / "af-transcode").exists())
         self.assertTrue((self.dry / "current" / "bin" / "af").is_file())
         self.assertTrue((self.dry / "current" / "bin" / "speedtest-backend").is_file())
+        self.assertTrue((self.dry / "current" / "bin" / "af-transcode").is_file())
+        self.assertEqual((self.dry / "current" / "bin" / "af-transcode").stat().st_mode & 0o777, 0o755)
         self.assertTrue((self.dry / "current" / "plugins" / "telemetry-inspector" / "plugin.manifest.json").is_file())
 
     def test_env_file_aetherflow_db_path_when_db_path_missing(self):
@@ -541,9 +547,11 @@ os.execvp(inner[0], inner)
         self.assertEqual((self.current / "web/dist/index.html").stat().st_mode & 0o777, 0o644)
         self.assertFalse((self.current / "af").exists())
         self.assertFalse((self.current / "speedtest-backend").exists())
+        self.assertFalse((self.current / "af-transcode").exists())
         for relpath, expected_bytes in (
             ("bin/af", b"cli-fixture"),
             ("bin/speedtest-backend", b"speedtest-fixture"),
+            ("bin/af-transcode", b"transcode-fixture"),
             ("plugins/telemetry-inspector/backend/hooks/start.sh", b"#!/usr/bin/env bash\nexit 0\n"),
         ):
             companion = self.current / relpath
@@ -1316,6 +1324,21 @@ os.execvp(inner[0], inner)
         self.assertIn("LogsDirectory=aetherflow\n", runner_hardening)
         self.assertNotIn("LogsDirectoryPreserve=", runner_hardening)
 
+    def test_legacy_bundle_without_af_transcode_remains_installable(self):
+        live_db = self.root / "live" / "from-env.sqlite"
+        self.write_db(live_db, "env")
+        self.env_file.write_text(f"DB_PATH={live_db}\n")
+        self.prepare_live_units()
+        self.write_artifact(include_transcode=False)
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Health probe PASSED", result.stdout)
+        self.assertTrue(self.current.is_symlink())
+        self.assertFalse((self.current / "bin" / "af-transcode").exists())
+        self.assertFalse((self.current / "af-transcode").exists())
+        self.assertEqual((self.current / "bin" / "af").stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.current / "bin" / "speedtest-backend").stat().st_mode & 0o777, 0o755)
+
 
 class SourceReleaseFrontendTests(unittest.TestCase):
     def test_source_build_keeps_runtime_ui_after_cleanup(self):
@@ -1327,6 +1350,7 @@ class SourceReleaseFrontendTests(unittest.TestCase):
                 repo / "scripts",
                 repo / "frontend",
                 repo / "backend-rs/crates/af-librespeed",
+                repo / "backend-rs/crates/af-transcode",
                 repo / "config",
                 repo / "plugins/telemetry-inspector/backend/hooks",
                 repo / "plugins/telemetry-inspector/frontend/dist",
@@ -1336,6 +1360,7 @@ class SourceReleaseFrontendTests(unittest.TestCase):
             (repo / "frontend/source.ts").write_text("legacy source")
             (repo / "backend-rs/Cargo.lock").write_text("# lock\n")
             (repo / "backend-rs/crates/af-librespeed/Cargo.toml").touch()
+            (repo / "backend-rs/crates/af-transcode/Cargo.toml").touch()
             (repo / "config/packages.json").write_text("[]\n")
             (repo / "plugins/telemetry-inspector/plugin.manifest.json").write_text('{"id":"telemetry-inspector"}\n')
             (repo / "plugins/telemetry-inspector/backend/hooks/start.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -1356,13 +1381,16 @@ log_error() { printf '%s\\n' "$*" >&2; }
 log_fatal() { log_error "$*"; exit 1; }
 git() { if [[ "$1" == rev-parse ]]; then printf abcdef0; fi; }
 rsync() { cp -a "$REPO_DIR/." "$RELEASE_DIR/"; }
-rustc() { printf 'rustc 1.99.1\n'; }
+rustc() { printf 'rustc 1.99.1\\n'; }
 cargo() {
   mkdir -p "$CARGO_TARGET_DIR/release"
   printf api > "$CARGO_TARGET_DIR/release/aetherflow-api"
   printf cli > "$CARGO_TARGET_DIR/release/af"
   case " $* " in
     *" --bin speedtest-backend "*) printf speedtest > "$CARGO_TARGET_DIR/release/speedtest-backend";;
+  esac
+  case " $* " in
+    *" --bin af-transcode "*) printf transcode > "$CARGO_TARGET_DIR/release/af-transcode";;
   esac
 }
 ''' + "build_from_source() {" + function + "\nbuild_from_source\n"
@@ -1381,6 +1409,10 @@ cargo() {
             self.assertEqual(companion.read_text(), "speedtest")
             self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
             self.assertFalse((release / "speedtest-backend").exists())
+            transcode = release / "bin/af-transcode"
+            self.assertEqual(transcode.read_text(), "transcode")
+            self.assertEqual(transcode.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((release / "af-transcode").exists())
             self.assertEqual(
                 (release / "plugins/telemetry-inspector/plugin.manifest.json").read_text(),
                 '{"id":"telemetry-inspector"}\n',

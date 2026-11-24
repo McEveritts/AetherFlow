@@ -254,6 +254,8 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
                             "bin/af",
                             "speedtest-backend",
                             "bin/speedtest-backend",
+                            "af-transcode",
+                            "bin/af-transcode",
                         ):
                             if member.size == 0:
                                 errors.append(f"{norm_name} binary in archive is 0 bytes")
@@ -290,6 +292,12 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
         and binary_hashes["speedtest-backend"] != binary_hashes["bin/speedtest-backend"]
     ):
         errors.append("speedtest-backend and bin/speedtest-backend must contain identical binary bytes")
+    if (
+        "af-transcode" in binary_hashes
+        and "bin/af-transcode" in binary_hashes
+        and binary_hashes["af-transcode"] != binary_hashes["bin/af-transcode"]
+    ):
+        errors.append("af-transcode and bin/af-transcode must contain identical binary bytes")
     versions = details["binary_glibc_versions"]
     known_versions = [version for version in versions.values() if version is not None]
     version_key = lambda version: tuple(int(part) for part in version.split("."))
@@ -313,7 +321,9 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
     )
     if not details["frontend_wasm_entries"]:
         errors.append("missing non-empty .wasm file under web/dist")
-    for exe in contract.get("required_executable_entries", ()):
+    for exe in tuple(contract.get("required_executable_entries", ())) + tuple(
+        contract.get("optional_executable_entries", ())
+    ):
         if exe in entry_modes and (entry_modes[exe] & 0o111) == 0:
             details["non_executable_entries"].append(exe)
             errors.append(f"archive entry {exe!r} is not marked executable")
@@ -911,6 +921,10 @@ wasm_file="$(find /opt/AetherFlow/current/web/dist -type f -name '*.wasm' -size 
 test -n "${wasm_file}"
 test -x /opt/AetherFlow/current/bin/af
 test -x /opt/AetherFlow/current/bin/speedtest-backend
+if [[ -e /opt/AetherFlow/current/bin/af-transcode ]]; then
+    test -x /opt/AetherFlow/current/bin/af-transcode
+    /opt/AetherFlow/current/bin/af-transcode --version
+fi
 test -s /opt/AetherFlow/current/plugins/telemetry-inspector/plugin.manifest.json
 test -x /opt/AetherFlow/current/plugins/telemetry-inspector/backend/hooks/start.sh
 curl -fsS --max-time 10 "http://127.0.0.1:8080/${wasm_file#/opt/AetherFlow/current/web/dist/}" -o /tmp/af-ui.wasm

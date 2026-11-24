@@ -9,6 +9,7 @@ pub mod pairing;
 pub mod proxy;
 pub mod scopes;
 pub mod storage;
+pub mod transcode;
 
 #[cfg(test)]
 mod proxy_tests;
@@ -16,6 +17,8 @@ mod proxy_tests;
 mod storage_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transcode_tests;
 
 use af_runner::{PeerCredentialSecret, PeerNetworkError, PeerNetworkRequest, PeerNetworkResponse};
 use axum::extract::Request;
@@ -130,10 +133,10 @@ pub(crate) fn public_link_state(state: &str) -> &str {
 
 /// Capabilities advertised on `/health` and tunnel `/health`.
 ///
-/// P7 advertises `["links", "grants", "storage"]` once scoped grant management and peer NFS
-/// storage export/mount endpoints and authenticated `/peer/v1/exports` catalog are enabled.
+/// P9 advertises `["links", "grants", "storage", "transcode"]` once scoped grant management,
+/// peer NFS storage, and distributed Jellyfin transcoding endpoints are enabled.
 pub fn capabilities() -> Vec<&'static str> {
-    vec!["links", "grants", "storage"]
+    vec!["links", "grants", "storage", "transcode"]
 }
 
 /// Broadcast events published whenever a link or grant is revoked.
@@ -574,6 +577,8 @@ pub struct PeerRuntime {
     pub(crate) runner: Arc<dyn PeerRunner>,
     pub(crate) storage_runner: Arc<dyn storage::PeerStorageRunner>,
     pub(crate) mount_health: storage::MountHealthTracker,
+    pub(crate) transcode_runner: Arc<dyn transcode::PeerTranscodeRunner>,
+    pub(crate) transcode_state: Arc<transcode::TranscodeRuntimeState>,
     pub(crate) public_transport: Arc<dyn PublicPairingTransport>,
     pub(crate) revocation_tx: broadcast::Sender<RevocationEvent>,
     pub(crate) pairing_rate_limiter: pairing::PairingRateLimiter,
@@ -627,6 +632,8 @@ impl PeerRuntime {
             runner: Arc::new(ProductionPeerRunner),
             storage_runner: Arc::new(storage::ProductionPeerStorageRunner),
             mount_health: storage::MountHealthTracker::new(),
+            transcode_runner: Arc::new(transcode::ProductionPeerTranscodeRunner),
+            transcode_state: Arc::new(transcode::TranscodeRuntimeState::new()),
             public_transport: Arc::new(ProductionPublicPairingTransport::new()),
             revocation_tx,
             pairing_rate_limiter: pairing::PairingRateLimiter::new(
@@ -1264,6 +1271,7 @@ impl PeerRuntime {
     }
 
     pub(crate) async fn shutdown_all(&self) {
+        transcode::stop_dispatcher(self).await;
         if let Some(tx) = self.health_shutdown.lock().await.take() {
             let _ = tx.send(true);
         }
@@ -1334,6 +1342,10 @@ pub(crate) fn tracked_admin_routes_with_runtime(
             get(storage::list_peer_mounts)
                 .post(storage::create_peer_mount)
                 .delete(storage::delete_peer_mount),
+        )
+        .route(
+            "/transcode",
+            get(transcode::get_transcode_settings).put(transcode::put_transcode_settings),
         )
         .layer(middleware::from_fn(reject_peer_principal_middleware))
         .with_state(runtime)
@@ -1441,6 +1453,10 @@ pub(crate) async fn start_with_runtime(runtime: Arc<PeerRuntime>) {
     // Recover any durable pending revoked-grant credential deletions left behind across restarts
     // (dormant no-op with zero runner calls when no cleanup markers exist).
     grants::cleanup_pending_received_grant_credentials(&runtime).await;
+
+    // Start the Jellyfin transcode dispatcher only if peer identity exists and Jellyfin
+    // transcoding drop-in + shim are already enabled (completely dormant otherwise).
+    transcode::start_dispatcher_if_configured(&runtime).await;
 
     let mut health_guard = runtime.health_shutdown.lock().await;
     if health_guard.is_none() {
