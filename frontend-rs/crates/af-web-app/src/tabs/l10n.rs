@@ -98,6 +98,7 @@ pub fn ConfirmDialog(
     #[prop(into)] message: TextProp,
     #[prop(optional, into)] confirm_label: Option<TextProp>,
     #[prop(optional, into)] busy: Signal<bool>,
+    #[prop(optional)] danger: bool,
     on_confirm: Callback<()>,
 ) -> impl IntoView {
     let context = app();
@@ -160,7 +161,12 @@ pub fn ConfirmDialog(
                 </button>
                 <button
                     type="button"
-                    class="af-btn-primary px-4 py-2"
+                    class=if danger {
+                        "af-btn px-4 py-2"
+                    } else {
+                        "af-btn-primary px-4 py-2"
+                    }
+                    data-tone=danger.then_some("danger")
                     disabled=move || busy.get()
                     on:click=move |_| {
                         let valid = captured
