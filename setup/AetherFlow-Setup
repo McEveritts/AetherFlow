@@ -2168,6 +2168,9 @@ _apply_seed_config
 if [[ -f "${CONFIG_FILE}" ]]; then
     _load_config_into_vars
 fi
+if [[ -z "${FQDN:-}" ]]; then
+    FQDN="${domain:-${hostname_value:-}}"
+fi
 if af_truthy "${build_from_source:-}"; then
     BUILD_FROM_SOURCE=true
     export AETHERFLOW_BUILD_FROM_SOURCE=1
@@ -2240,7 +2243,8 @@ genpass=$(_string)
 HTPASSWD="/etc/htpasswd"
 REALM="Welcome to AetherFlow"
 # shellcheck disable=2312
-ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
+ip="$(_af_primary_ipv4)"
+[[ -n "${ip}" ]] || ip="127.0.0.1"
 export DEBIAN_FRONTEND=noninteractive
 cd
 
@@ -2292,7 +2296,7 @@ _run_step "syscommands" "Setting up system executables" _syscommands
 _run_step "skel" "Building required user directories" _skel
 
 if [[ ${ffmpeg} == "yes" ]]; then
-	_run_step "ffmpeg" "Building ffmpeg from source for screenshots" _ffmpeg
+	_run_step "ffmpeg" "Installing ffmpeg package for screenshots" _ffmpeg
 fi
 
 _run_step_fg "apachesudo" "Purging legacy sudoers grants" _apachesudo

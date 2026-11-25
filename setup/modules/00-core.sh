@@ -273,20 +273,21 @@ function _checkkernel() {
 			exit 0
 		fi
 		if [[ ${kernel} == yes ]]; then
+			local outto="${OUTTO:-/dev/null}"
 			if [[ ${DISTRO} == Ubuntu ]]; then
-				apt-get install -q -y linux-image-generic >>"${OUTTO}" 2>&1
+				apt-get install -q -y linux-image-generic >>"${outto}" 2>&1
 			elif [[ ${DISTRO} == Debian ]]; then
 				arch=$(uname -m)
 				if [[ ${arch} =~ ("i686"|"i386") ]]; then
-					apt-get install -q -y linux-image-686 >>"${OUTTO}" 2>&1
+					apt-get install -q -y linux-image-686 >>"${outto}" 2>&1
 				elif [[ ${arch} == x86_64 ]]; then
-					apt-get install -q -y linux-image-amd64 >>"${OUTTO}" 2>&1
+					apt-get install -q -y linux-image-amd64 >>"${outto}" 2>&1
 				elif [[ ${arch} == aarch64 || ${arch} == arm64 ]]; then
-					apt-get install -q -y linux-image-arm64 >>"${OUTTO}" 2>&1
+					apt-get install -q -y linux-image-arm64 >>"${outto}" 2>&1
 				fi
 			fi
 			mv /etc/grub.d/06_OVHkernel /etc/grub.d/25_OVHkernel
-			update-grub >>"${OUTTO}" 2>&1
+			update-grub >>"${outto}" 2>&1
 		fi
 	fi
 }
@@ -357,8 +358,33 @@ function _hostname() {
 	if [[ -z "${requested_hostname}" ]]; then
 		echo "   ${yellow}→ No hostname supplied, keeping current setting.${normal}"
 	else
-		hostname "${requested_hostname}"
-		echo "${requested_hostname}" >/etc/hostname
+		local etc_hostname="${AF_HOSTNAME_FILE:-/etc/hostname}"
+		local hosts_file="${AF_HOSTS_FILE:-/etc/hosts}"
+		local outto="${OUTTO:-/dev/null}"
+		if (( ${#requested_hostname} > 253 )) || [[ ! "${requested_hostname}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]; then
+			printf '[ERROR] Refusing invalid hostname value\n' >>"${outto}" 2>&1
+			return 1
+		fi
+		local etc_hostname_dir hosts_dir
+		etc_hostname_dir="$(dirname "${etc_hostname}")"
+		hosts_dir="$(dirname "${hosts_file}")"
+		if [[ -L "${etc_hostname_dir}" || -L "${etc_hostname}" || ( -e "${etc_hostname}" && ! -f "${etc_hostname}" ) ]]; then
+			echo "[ERROR] Refusing symlinked hostname file: ${etc_hostname}" >>"${outto}" 2>&1
+			return 1
+		fi
+		if [[ -L "${hosts_dir}" || -L "${hosts_file}" || ( -e "${hosts_file}" && ! -f "${hosts_file}" ) ]]; then
+			echo "[ERROR] Refusing symlinked hosts file: ${hosts_file}" >>"${outto}" 2>&1
+			return 1
+		fi
+		if [[ "${AF_SKIP_HOSTNAME_CMD:-0}" != "1" ]]; then
+			hostname -- "${requested_hostname}" || return 1
+		fi
+		local tmp_hostname
+		tmp_hostname="$(mktemp "${etc_hostname_dir}/.hostname.af.XXXXXX")" || return 1
+		if ! printf '%s\n' "${requested_hostname}" >"${tmp_hostname}" || ! chmod 0644 "${tmp_hostname}" || ! mv -fT -- "${tmp_hostname}" "${etc_hostname}"; then
+			rm -f -- "${tmp_hostname}"
+			return 1
+		fi
 		local short_host="${requested_hostname%%.*}"
 		local hosts_line
 		if [[ "${short_host}" != "${requested_hostname}" ]]; then
@@ -366,11 +392,11 @@ function _hostname() {
 		else
 			hosts_line="127.0.1.1 ${requested_hostname}"
 		fi
-		if [[ -f /etc/hosts && ! -L /etc/hosts ]]; then
-			local tmp_hosts
-			tmp_hosts="$(mktemp /etc/.hosts.af.XXXXXX)"
-			awk -v newline="${hosts_line}" '
-				BEGIN { updated = 0 }
+		local tmp_hosts
+		tmp_hosts="$(mktemp "${hosts_dir}/.hosts.af.XXXXXX")" || return 1
+		if [[ -f "${hosts_file}" ]]; then
+			if ! AF_HOSTS_LINE="${hosts_line}" awk '
+				BEGIN { updated = 0; newline = ENVIRON["AF_HOSTS_LINE"] }
 				/^[[:space:]]*127\.0\.1\.1[[:space:]]+/ {
 					if (!updated) {
 						print newline
@@ -384,14 +410,25 @@ function _hostname() {
 						print newline
 					}
 				}
-			' /etc/hosts >"${tmp_hosts}"
-			chmod 0644 "${tmp_hosts}"
-			mv -f "${tmp_hosts}" /etc/hosts
+			' "${hosts_file}" >"${tmp_hosts}"; then
+				rm -f -- "${tmp_hosts}"
+				return 1
+			fi
 		else
-			printf '127.0.0.1 localhost\n%s\n' "${hosts_line}" >/etc/hosts
-			chmod 0644 /etc/hosts
+			if ! printf '127.0.0.1 localhost\n%s\n' "${hosts_line}" >"${tmp_hosts}"; then
+				rm -f -- "${tmp_hosts}"
+				return 1
+			fi
 		fi
+		if ! chmod 0644 "${tmp_hosts}" || ! mv -fT -- "${tmp_hosts}" "${hosts_file}"; then
+			rm -f -- "${tmp_hosts}"
+			return 1
+		fi
+		hostname_value="${requested_hostname}"
+		domain="${requested_hostname}"
+		FQDN="${requested_hostname}"
 		_save_config hostname_value "${requested_hostname}"
+		_save_config domain "${requested_hostname}"
 		echo "   ${green}✓ Hostname successfully set to:${normal} ${bold}${requested_hostname}${normal}"
 	fi
 	echo ""
@@ -399,17 +436,18 @@ function _hostname() {
 
 # setting locale function
 function _locale() {
+	local outto="${OUTTO:-/dev/null}"
 	install -d -m 0755 /etc/default
 	touch /etc/default/locale
 	grep -qxF 'LANGUAGE="en_US.UTF-8"' /etc/default/locale 2>/dev/null || echo 'LANGUAGE="en_US.UTF-8"' >>/etc/default/locale
 	grep -qxF 'LC_ALL="en_US.UTF-8"' /etc/default/locale 2>/dev/null || echo 'LC_ALL="en_US.UTF-8"' >>/etc/default/locale
 	echo "en_US.UTF-8 UTF-8" >/etc/locale.gen
 	if [[ -e /usr/sbin/locale-gen ]]; then
-		locale-gen >>"${OUTTO}" 2>&1
+		locale-gen >>"${outto}" 2>&1
 	else
-		apt-get -y update >>"${OUTTO}" 2>&1
+		apt-get -y update >>"${outto}" 2>&1
 		_af_apt_install locales || return 1
-		locale-gen >>"${OUTTO}" 2>&1
+		locale-gen >>"${outto}" 2>&1
 		export LANG="en_US.UTF-8"
 		export LC_ALL="en_US.UTF-8"
 		export LANGUAGE="en_US.UTF-8"

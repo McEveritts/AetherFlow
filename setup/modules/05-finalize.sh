@@ -1,35 +1,143 @@
 #!/bin/bash
 # Module: 05-finalize.sh
 
-# Failsafe: ensure OUTTO has a default value
-OUTTO="${OUTTO:-/dev/null}"
+# Adapt vsftpd TLS version directives to match the installed vsftpd binary's parseconf table:
+# - vsftpd 3.0.5 (Debian 13 / Ubuntu 22.04+): ssl_tlsv11 / ssl_tlsv12 / ssl_tlsv13 (no underscore)
+# - alternate patched builds: ssl_tlsv1_1 / ssl_tlsv1_2 / ssl_tlsv1_3
+# - vsftpd 3.0.3 (Debian 11/12): lacks per-version TLS 1.1+ toggles (uses OpenSSL defaults with ssl_tlsv1=NO)
+function _af_vsftpd_sync_tls_directives() {
+	local conf_path="$1"
+	local vsftpd_bin="${2:-}"
 
+	if [[ -z "${vsftpd_bin}" || ! -r "${vsftpd_bin}" ]]; then
+		return 0
+	fi
+
+	if LC_ALL=C grep -aFq "ssl_tlsv11" "${vsftpd_bin}" 2>/dev/null && LC_ALL=C grep -aFq "ssl_tlsv12" "${vsftpd_bin}" 2>/dev/null; then
+		if ! LC_ALL=C grep -aFq "ssl_tlsv13" "${vsftpd_bin}" 2>/dev/null; then
+			sed -i '/^ssl_tlsv13=/d' "${conf_path}"
+		fi
+	elif LC_ALL=C grep -aFq "ssl_tlsv1_1" "${vsftpd_bin}" 2>/dev/null && LC_ALL=C grep -aFq "ssl_tlsv1_2" "${vsftpd_bin}" 2>/dev/null; then
+		sed -i \
+			-e 's/^ssl_tlsv11=/ssl_tlsv1_1=/' \
+			-e 's/^ssl_tlsv12=/ssl_tlsv1_2=/' \
+			"${conf_path}"
+		if LC_ALL=C grep -aFq "ssl_tlsv1_3" "${vsftpd_bin}" 2>/dev/null; then
+			sed -i 's/^ssl_tlsv13=/ssl_tlsv1_3=/' "${conf_path}"
+		else
+			sed -i '/^ssl_tlsv13=/d' "${conf_path}"
+		fi
+	else
+		sed -i -e '/^ssl_tlsv11=/d' -e '/^ssl_tlsv12=/d' -e '/^ssl_tlsv13=/d' "${conf_path}"
+	fi
+}
+
+# Extract primary IPv4 source address safely (handles direct-interface /32 routes and offline hosts under set -eo pipefail)
+function _af_primary_ipv4() {
+	ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {for (i=1; i<NF; i++) if ($i == "src") {print $(i+1); exit}}' || true
+}
 
 # function to configure vsftpd (explicit opt-in via AETHERFLOW_ENABLE_FTPD=yes)
 function _ftpdconfig() {
-	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
-		1|true|TRUE|yes|YES|y|Y|on|ON) ;;
+	local ftpd_flag="${AETHERFLOW_ENABLE_FTPD:-no}"
+	case "${ftpd_flag,,}" in
+		1|true|yes|y|on) ;;
 		*) return 0 ;;
 	esac
 
-	\cp -f "${local_setup}templates/openssl.cnf.template" /root/.openssl.cnf
+	local outto="${OUTTO:-/dev/null}"
+	local openssl_cnf="${AF_OPENSSL_CNF:-/root/.openssl.cnf}"
+	local vsftpd_cert="${AF_VSFTPD_CERT:-/etc/ssl/private/vsftpd.pem}"
+	local vsftpd_conf="${AF_VSFTPD_CONF:-/etc/vsftpd.conf}"
+	local vsftpd_chroot_list="${AF_VSFTPD_CHROOT_LIST:-/etc/vsftpd.chroot_list}"
+	local vsftpd_bin="${AF_VSFTPD_BIN:-}"
+	if [[ -z "${vsftpd_bin}" ]]; then
+		vsftpd_bin="$(command -v vsftpd 2>/dev/null || echo /usr/sbin/vsftpd)"
+	fi
+
+	local openssl_dir cert_dir conf_dir chroot_dir
+	openssl_dir="$(dirname "${openssl_cnf}")"
+	cert_dir="$(dirname "${vsftpd_cert}")"
+	conf_dir="$(dirname "${vsftpd_conf}")"
+	chroot_dir="$(dirname "${vsftpd_chroot_list}")"
+	local p
+	for p in "${openssl_dir}" "${cert_dir}" "${conf_dir}" "${chroot_dir}"; do
+		if [[ -L "${p}" ]]; then
+			echo "[ERROR] Refusing symlinked vsftpd directory: ${p}" >>"${outto}" 2>&1
+			return 1
+		fi
+	done
+	for p in "${openssl_cnf}" "${vsftpd_cert}" "${vsftpd_conf}" "${vsftpd_chroot_list}"; do
+		if [[ -L "${p}" || ( -e "${p}" && ! -f "${p}" ) ]]; then
+			echo "[ERROR] Refusing unsafe vsftpd file path: ${p}" >>"${outto}" 2>&1
+			return 1
+		fi
+	done
+	[[ -d "${openssl_dir}" ]] || install -d -m 0700 "${openssl_dir}"
+	[[ -d "${cert_dir}" ]] || install -d -m 0710 "${cert_dir}"
+	[[ -d "${conf_dir}" ]] || mkdir -p "${conf_dir}"
+	[[ -d "${chroot_dir}" ]] || mkdir -p "${chroot_dir}"
+	local tmp_openssl_cnf
+	tmp_openssl_cnf="$(umask 0077 && mktemp "${openssl_dir}/.openssl.cnf.af.XXXXXX")" || return 1
+	if ! \cp -f "${local_setup}templates/openssl.cnf.template" "${tmp_openssl_cnf}" || ! chmod 0600 "${tmp_openssl_cnf}" || ! mv -fT -- "${tmp_openssl_cnf}" "${openssl_cnf}"; then
+		rm -f -- "${tmp_openssl_cnf}"
+		return 1
+	fi
 
 	#openssl req -config /root/.openssl.cnf -x509 -nodes -days 365 -newkey rsa:1024 -keyout /etc/ssl/private/vsftpd.pem -out /etc/ssl/private/vsftpd.pem >/dev/null 2>&1
-	openssl req -config /root/.openssl.cnf -x509 -nodes -days 720 -newkey rsa:2048 -keyout /etc/ssl/private/vsftpd.pem -out /etc/ssl/private/vsftpd.pem >/dev/null 2>&1
-	chown root:root /etc/ssl/private/vsftpd.pem 2>/dev/null || true
-	chmod 0600 /etc/ssl/private/vsftpd.pem
+	local tmp_cert
+	tmp_cert="$(umask 0077 && mktemp "${cert_dir}/.vsftpd.pem.af.XXXXXX")" || return 1
+	if ! openssl req -config "${openssl_cnf}" -x509 -nodes -days 720 -newkey rsa:2048 -keyout "${tmp_cert}" -out "${tmp_cert}" >>"${outto}" 2>&1; then
+		rm -f -- "${tmp_cert}"
+		return 1
+	fi
+	chown root:root "${tmp_cert}" 2>/dev/null || true
+	chmod 0600 "${tmp_cert}"
+	if [[ -n "${AF_VSFTPD_CERT:-}" ]]; then
+		mv -fT -- "${tmp_cert}" "${vsftpd_cert}" || { rm -f -- "${tmp_cert}"; return 1; }
+		chmod 0600 "${vsftpd_cert}"
+	else
+		mv -fT -- "${tmp_cert}" /etc/ssl/private/vsftpd.pem || { rm -f -- "${tmp_cert}"; return 1; }
+		chmod 0600 /etc/ssl/private/vsftpd.pem
+	fi
 
-	\cp -f "${local_setup}templates/vsftpd.conf.template" /etc/vsftpd.conf
+	local tmp_conf
+	tmp_conf="$(mktemp "${conf_dir}/.vsftpd.conf.af.XXXXXX")" || return 1
+	if ! \cp -f "${local_setup}templates/vsftpd.conf.template" "${tmp_conf}" || ! chmod 0644 "${tmp_conf}" || ! mv -fT -- "${tmp_conf}" "${vsftpd_conf}"; then
+		rm -f -- "${tmp_conf}"
+		return 1
+	fi
+	_af_vsftpd_sync_tls_directives "${vsftpd_conf}" "${vsftpd_bin}"
 
-	# Enabling passive mode
-	sed -i 's/^\(pasv_min_port=\).*/\110090/' /etc/vsftpd.conf
-	sed -i 's/^\(pasv_max_port=\).*/\110100/' /etc/vsftpd.conf
-	local passive_ip
-	passive_ip="$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')"
-	echo "pasv_address=${passive_ip}" >>/etc/vsftpd.conf
-	/sbin/iptables -I INPUT -p tcp --destination-port 10090:10100 -j ACCEPT
+	# Enabling passive mode (firewall rules for 21/tcp and 10090:10100/tcp are
+	# managed centrally by _setup_firewall so UFW detection is not bypassed).
+	sed -i 's/^\(pasv_min_port=\).*/\110090/' "${vsftpd_conf}"
+	sed -i 's/^\(pasv_max_port=\).*/\110100/' "${vsftpd_conf}"
+	local passive_ip="${IP:-}"
+	if [[ -z "${passive_ip}" ]]; then
+		passive_ip="$(_af_primary_ipv4)"
+	fi
+	if [[ -n "${passive_ip}" ]]; then
+		if [[ ! "${passive_ip}" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || \
+		   (( 10#${BASH_REMATCH[1]} > 255 || 10#${BASH_REMATCH[2]} > 255 || 10#${BASH_REMATCH[3]} > 255 || 10#${BASH_REMATCH[4]} > 255 )); then
+			printf '[ERROR] Invalid IPv4 address for vsftpd pasv_address\n' >>"${outto}" 2>&1
+			return 1
+		fi
+		sed -i '/^pasv_address=/d' "${vsftpd_conf}"
+		printf 'pasv_address=%s\n' "${passive_ip}" >>"${vsftpd_conf}"
+	fi
+	chmod 0644 "${vsftpd_conf}"
 
-	echo "" >/etc/vsftpd.chroot_list
+	echo "" >"${vsftpd_chroot_list}"
+	chmod 0644 "${vsftpd_chroot_list}"
+
+	if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+		systemctl enable vsftpd >>"${outto}" 2>&1 || return 1
+		if ! systemctl restart vsftpd >>"${outto}" 2>&1; then
+			echo "[ERROR] vsftpd failed to start with ${vsftpd_conf} — check 'journalctl -u vsftpd'" >>"${outto}" 2>&1
+			return 1
+		fi
+	fi
 }
 
 # seedbox boot for first user
@@ -128,7 +236,8 @@ except Exception:
 
 # function to set permissions on first user
 function _perms() {
-	sudo -u "${username}" chmod 755 "/home/${username}/" >>"${OUTTO}" 2>&1
+	local outto="${OUTTO:-/dev/null}"
+	sudo -u "${username}" chmod 755 "/home/${username}/" >>"${outto}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	# Tightened from 777 → 770 (owner + group only, no world access)
 	sudo -u "${username}" chmod 770 "/home/${username}/.sessions" >/dev/null 2>&1
@@ -140,42 +249,44 @@ function _perms() {
 
 # Create the dedicated aetherflow system user for running services
 _ensure_aetherflow_user() {
+	local outto="${OUTTO:-/dev/null}"
 	if ! id -u aetherflow >/dev/null 2>&1; then
 		useradd --system --shell /usr/sbin/nologin \
 			--home-dir /opt/AetherFlow \
 			--comment "AetherFlow service account" \
-			aetherflow >>"${OUTTO}" 2>&1
+			aetherflow >>"${outto}" 2>&1
 		echo "[$(date '+%Y-%m-%d %H:%M:%S')] Created system user: aetherflow" >> "${INSTALL_LOG}"
 	fi
-	usermod -a -G systemd-journal,adm aetherflow >>"${OUTTO}" 2>&1 || true
+	usermod -a -G systemd-journal,adm aetherflow >>"${outto}" 2>&1 || true
 }
 
 # Comprehensive permission hardening across /opt/AetherFlow
 _harden_permissions() {
 	local af_root="/opt/AetherFlow"
+	local outto="${OUTTO:-/dev/null}"
 
 	# Ensure the service user exists
 	_ensure_aetherflow_user
 
 	# Ownership: root:aetherflow for immutable code, releases, and scripts; only mutable data dirs are writable by aetherflow
 	if [[ -d "${af_root}" ]]; then
-		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -exec chown -h root:aetherflow {} + >>"${OUTTO}" 2>&1
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -exec chown -h root:aetherflow {} + >>"${outto}" 2>&1
 
 		# Directories: 755 (rwxr-xr-x), pruning sensitive mutable/snapshot/credential directories
-		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type d -exec chmod 755 {} + >>"${outto}" 2>&1
 
 		# Regular files: 644 (rw-r--r--), pruning sensitive mutable/snapshot/credential directories
-		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f -exec chmod 644 {} + >>"${outto}" 2>&1
 
 		# Enforce root-only 0700/0600 confinement on /opt/AetherFlow/logs bootstrap credential receipts
 		if [[ -L "${af_root}/logs" ]]; then
-			echo "[ERROR] Refusing symlinked ${af_root}/logs directory" >>"${OUTTO}"
+			echo "[ERROR] Refusing symlinked ${af_root}/logs directory" >>"${outto}"
 			return 1
 		elif [[ -d "${af_root}/logs" ]]; then
-			chown -h root:root "${af_root}/logs" >>"${OUTTO}" 2>&1
-			chmod 700 "${af_root}/logs" >>"${OUTTO}" 2>&1
-			find -P "${af_root}/logs" -mindepth 1 -type d -exec chown -h root:root {} + -exec chmod 700 {} + >>"${OUTTO}" 2>&1
-			find -P "${af_root}/logs" -mindepth 1 -type f -exec chown -h root:root {} + -exec chmod 600 {} + >>"${OUTTO}" 2>&1
+			chown -h root:root "${af_root}/logs" >>"${outto}" 2>&1
+			chmod 700 "${af_root}/logs" >>"${outto}" 2>&1
+			find -P "${af_root}/logs" -mindepth 1 -type d -exec chown -h root:root {} + -exec chmod 700 {} + >>"${outto}" 2>&1
+			find -P "${af_root}/logs" -mindepth 1 -type f -exec chown -h root:root {} + -exec chmod 600 {} + >>"${outto}" 2>&1
 		fi
 
 		# Executables: restore execute permission on known binaries
@@ -410,52 +521,81 @@ EOF
 # function to show finished data
 # shellcheck disable=2312,2162,2249,2250
 function _finished() {
-	ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
-	local onboarding_host="${domain:-${hostname_value:-${ip}}}"
+	local outto="${OUTTO:-/dev/null}"
+	local info_file="${AF_INFO_FILE:-/root/information.info}"
+	ip="$(_af_primary_ipv4)"
+	[[ -n "${ip}" ]] || ip="127.0.0.1"
+	local saved_host=""
+	if type _load_config &>/dev/null; then
+		saved_host="$(_load_config hostname_value 2>/dev/null || true)"
+		if [[ -z "${saved_host}" ]]; then
+			saved_host="$(_load_config domain 2>/dev/null || true)"
+		fi
+	fi
+	local onboarding_host="${domain:-${hostname_value:-${saved_host:-${ip}}}}"
 	local onboarding_url="https://${onboarding_host}/"
 	echo
 	echo
-	echo -e " ╭──────────────────────────────────────────────────────────╮"
-	echo -e " │ ${bold}${green}    [AetherFlow] Installation Successfully Completed!    ${normal}│"
-	echo -e " │──────────────────────────────────────────────────────────│"
-	echo -e " │ ${cyan}Time elapsed:${normal} ${FIN} minutes                                  │"
-	echo -e " │                                                          │"
-	echo -e " │ ${bold}Next Steps:${normal}                                              │"
-	echo -e " │ Please complete the setup using the web onboarding UI:   │"
-	echo -e " │                                                          │"
-	echo -e " │ 👉 ${bold}${magenta}${onboarding_url}${normal}                              │"
-	echo -e " │                                                          │"
-	echo -e " │ Log in using the administrator credentials you created   │"
-	echo -e " │ during this setup process.                               │"
-	echo -e " ╰──────────────────────────────────────────────────────────╯"
+	echo -e " ╭────────────────────────────────────────────────────────────────╮"
+	echo -e " │ ${bold}${green}      [AetherFlow] Installation Successfully Completed!       ${normal}│"
+	echo -e " │────────────────────────────────────────────────────────────────│"
+	echo -e " │ ${cyan}Time elapsed:${normal} ${FIN:-0} minutes"
+	echo -e " │"
+	echo -e " │ ${bold}Next Steps:${normal}"
+	echo -e " │ Please complete setup using the web onboarding UI:"
+	echo -e " │"
+	echo -e " │ 👉 ${bold}${magenta}${onboarding_url}${normal}"
+	echo -e " │"
+	if [[ -n "${AETHERFLOW_WEB_ADMIN_PASSWORD:-}" ]]; then
+		echo -e " │ Sign in with the web administrator account seeded during setup."
+	else
+		echo -e " │ Create your first web admin account using the one-time setup"
+		echo -e " │ bootstrap token at:"
+		echo -e " │   ${bold}/var/lib/aetherflow/.setup-bootstrap-token${normal}"
+	fi
+	echo -e " ╰────────────────────────────────────────────────────────────────╯"
 	echo
-	echo -e "  Useful CLI Commands:  "
-	echo '  ----------------------'
-	echo -e "  ${green}af health${normal}          - Verify control plane & database health"
-	echo -e "  ${green}af service status${normal}  - Check status of backend & runner services"
-	echo -e "  ${green}af service restart${normal} - Restart all AetherFlow services"
+	echo -e "  Useful CLI Commands:"
+	echo '  --------------------'
+	echo -e "  ${green}af health${normal}                         - Verify privileged runner & control plane health"
+	echo -e "  ${green}af service status aetherflow-api${normal}  - Check status of the control plane API service"
+	echo -e "  ${green}af service restart aetherflow-api${normal} - Restart the control plane API service"
 	echo
-	
-	install -m 0600 /dev/null /root/information.info
-	cat >/root/information.info <<EOF
+
+	local info_dir
+	info_dir="$(dirname "${info_file}")"
+	if [[ ! -d "${info_dir}" ]]; then
+		install -d -m 0700 "${info_dir}"
+	fi
+	if [[ -L "${info_file}" ]]; then
+		echo "[ERROR] Refusing symlinked info file: ${info_file}" >>"${outto}" 2>&1
+		return 1
+	fi
+	install -m 0600 /dev/null "${info_file}"
+	cat >"${info_file}" <<EOF
 AetherFlow Seedbox Initialized successfully.
 Dashboard Onboarding: ${onboarding_url}
-Admin Username: ${username}
+Admin Username: ${username:-}
 Setup Bootstrap Token File (for remote/proxied first-admin setup): /var/lib/aetherflow/.setup-bootstrap-token
 EOF
-	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
-		rm -rf "$0" >>"${OUTTO}" 2>&1
+	if [[ "${AF_SKIP_SELF_DELETE:-0}" != "1" ]] && [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
+		rm -rf "$0" >>"${outto}" 2>&1
 	fi
-	for i in ssh apache2 fail2ban cron; do
-		systemctl restart "${i}" >>/dev/null 2>&1 || true
-		systemctl enable "${i}" >>/dev/null 2>&1 || true
-	done
-	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
-		1|true|TRUE|yes|YES|y|Y|on|ON)
-			systemctl restart vsftpd >>/dev/null 2>&1 || true
-			systemctl enable vsftpd >>/dev/null 2>&1 || true
-			;;
-	esac
+	if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+		for i in ssh apache2 fail2ban cron; do
+			systemctl restart "${i}" >>"${outto}" 2>&1 || true
+			systemctl enable "${i}" >>"${outto}" 2>&1 || true
+		done
+		local ftpd_flag="${AETHERFLOW_ENABLE_FTPD:-no}"
+		case "${ftpd_flag,,}" in
+			1|true|yes|y|on)
+				systemctl enable vsftpd >>"${outto}" 2>&1 || true
+				if ! systemctl restart vsftpd >>"${outto}" 2>&1; then
+					echo -e "[ ${yellow:-\033[33m}WARN${normal:-\033[0m} ] vsftpd failed to start; inspect /etc/vsftpd.conf and 'journalctl -u vsftpd'"
+				fi
+				;;
+		esac
+	fi
 	if [[ -n "${AF_SETUP_SCRATCH_DIR:-}" && "${AF_SETUP_SCRATCH_DIR}" == /var/tmp/aetherflow-setup.* && "${AF_SETUP_SCRATCH_DIR}" != *".."* && -d "${AF_SETUP_SCRATCH_DIR}" && ! -L "${AF_SETUP_SCRATCH_DIR}" ]]; then
 		rm -rf -- "${AF_SETUP_SCRATCH_DIR}"
 	fi

@@ -791,11 +791,15 @@ state_snapshot
         vsftpd_tpl = (ROOT / "setup/templates/vsftpd.conf.template").read_text(encoding="utf-8")
         for directive in (
             "ssl_tlsv1=NO",
-            "ssl_tlsv1_1=NO",
-            "ssl_tlsv1_2=YES",
+            "ssl_tlsv11=NO",
+            "ssl_tlsv12=YES",
+            "ssl_tlsv13=YES",
+            "listen_port=21",
             "seccomp_sandbox=YES",
         ):
             self.assertIn(directive, vsftpd_tpl)
+        for bad_directive in ("ssl_tlsv1_1=", "ssl_tlsv1_2=", "listen_port=5757"):
+            self.assertNotIn(bad_directive, vsftpd_tpl)
 
         sec_sh = (ROOT / "setup/modules/04-security.sh").read_text(encoding="utf-8")
         default_ports = subprocess.check_output(
@@ -821,7 +825,12 @@ state_snapshot
         fin_sh = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
         self.assertIn("chmod 0600 /etc/ssl/private/vsftpd.pem", fin_sh)
         self.assertIn("AETHERFLOW_ENABLE_FTPD", fin_sh)
-        for cli_cmd in ("af health", "af service status", "af service restart"):
+        self.assertNotIn("/sbin/iptables", fin_sh)
+        for cli_cmd in (
+            "af health",
+            "af service status aetherflow-api",
+            "af service restart aetherflow-api",
+        ):
             self.assertIn(cli_cmd, fin_sh)
         for old_cmd in ("aetherflow logs", "aetherflow restart", "aetherflow status"):
             self.assertNotIn(old_cmd, fin_sh)

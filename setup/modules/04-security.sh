@@ -97,8 +97,9 @@ _fw_allowed_ports() {
 		ports="${ports:+${ports} }${port}/tcp"
 	done
 	ports="${ports:+${ports} }80/tcp 443/tcp"
-	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
-		1|true|TRUE|yes|YES|y|Y|on|ON)
+	local ftpd_flag="${AETHERFLOW_ENABLE_FTPD:-no}"
+	case "${ftpd_flag,,}" in
+		1|true|yes|y|on)
 			ports="${ports} 21/tcp 10090:10100/tcp"
 			;;
 	esac
@@ -415,7 +416,7 @@ function _denyhosts() {
 		chmod +x /etc/cron.daily/denypublic
 		local hosts_file="${AF_HOSTS_FILE:-/etc/hosts}"
 		if [[ -L "${hosts_file}" ]]; then
-			echo "[ERROR] Refusing symlinked hosts file: ${hosts_file}" >>"${OUTTO}" 2>&1
+			echo "[ERROR] Refusing symlinked hosts file: ${hosts_file}" >>"${OUTTO:-/dev/null}" 2>&1
 			return 1
 		fi
 		local hosts_dir
@@ -481,7 +482,9 @@ function _apacheconf() {
 		a2enmod auth_digest >>"${outto}" 2>&1
 	fi
 	a2enmod ssl >>"${outto}" 2>&1
-	a2enmod scgi >>"${outto}" 2>&1
+	if [[ -f "${apache_etc}/mods-available/scgi.load" ]]; then
+		a2enmod scgi >>"${outto}" 2>&1 || true
+	fi
 	a2enmod rewrite >>"${outto}" 2>&1
 	a2enmod proxy >>"${outto}" 2>&1
 	a2enmod proxy_http >>"${outto}" 2>&1
@@ -535,28 +538,32 @@ function _apacheconf() {
 
 		# ensure opcache module is activated (only if phpenmod exists)
 		if command -v phpenmod >/dev/null 2>&1; then
-			phpenmod -v "${_php_ver}" opcache >>"${OUTTO}" 2>&1 || true
+			phpenmod -v "${_php_ver}" opcache >>"${outto}" 2>&1 || true
 		fi
 	fi
 
 	# these modules are purely experimental
-	#a2enmod proxy_fcgi >>"${OUTTO}" 2>&1
-	#a2dismod mpm_prefork >>"${OUTTO}" 2>&1
-	#a2enmod mpm_worker >>"${OUTTO}" 2>&1
+	#a2enmod proxy_fcgi >>"${outto}" 2>&1
+	#a2dismod mpm_prefork >>"${outto}" 2>&1
+	#a2enmod mpm_worker >>"${outto}" 2>&1
 
-	# ensure fastcgi & event MPM + HTTP/2 modules are activated for high-concurrency proxy multiplexing
-	a2enmod actions >>"${OUTTO}" 2>&1 || true
-	a2enmod headers >>"${OUTTO}" 2>&1 || true
-	a2enmod http2 >>"${OUTTO}" 2>&1 || true
-	a2enmod reqtimeout >>"${OUTTO}" 2>&1 || true
-	a2enmod fastcgi >>"${OUTTO}" 2>&1 || true
-	a2enmod proxy_fcgi setenvif >>"${OUTTO}" 2>&1 || true
-	if [[ -n "${_php_ver}" ]]; then
-		a2dismod "php${_php_ver}" >>"${OUTTO}" 2>&1 || true
-		a2enconf php"${_php_ver}"-fpm >>"${OUTTO}" 2>&1 || echo "[WARN] php${_php_ver}-fpm Apache config not available."
+	# ensure FCGI & event MPM + HTTP/2 modules are activated for high-concurrency proxy multiplexing
+	a2enmod actions >>"${outto}" 2>&1 || true
+	a2enmod headers >>"${outto}" 2>&1 || true
+	a2enmod http2 >>"${outto}" 2>&1 || true
+	a2enmod reqtimeout >>"${outto}" 2>&1 || true
+	if [[ -f "${apache_etc}/mods-available/fastcgi.load" ]]; then
+		a2enmod fastcgi >>"${outto}" 2>&1 || true
+	elif [[ -f "${apache_etc}/mods-available/fcgid.load" ]]; then
+		a2enmod fcgid >>"${outto}" 2>&1 || true
 	fi
-	a2dismod mpm_prefork >>"${OUTTO}" 2>&1 || true
-	a2enmod mpm_event >>"${OUTTO}" 2>&1 || true
+	a2enmod proxy_fcgi setenvif >>"${outto}" 2>&1 || true
+	if [[ -n "${_php_ver}" ]]; then
+		a2dismod "php${_php_ver}" >>"${outto}" 2>&1 || true
+		a2enconf php"${_php_ver}"-fpm >>"${outto}" 2>&1 || echo "[WARN] php${_php_ver}-fpm Apache config not available."
+	fi
+	a2dismod mpm_prefork >>"${outto}" 2>&1 || true
+	a2enmod mpm_event >>"${outto}" 2>&1 || true
 
 	#sed -i 's/memory_limit = 128M/memory_limit = 768M/g' /etc/php/${PHP_VER}/apache2/php.ini
 }
