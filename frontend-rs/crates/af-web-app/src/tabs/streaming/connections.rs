@@ -160,7 +160,7 @@ pub(super) fn StreamingServerSettings(
                             <label class="block text-sm space-y-1">
                                 {move || tt(context, field)}
                                 <input
-                                    class="glass-input p-2 w-full"
+                                    class="af-input p-2 w-full"
                                     disabled=move || busy.get()
                                     type=if field == "apiKey" { "password" } else { "text" }
                                     autocomplete="off"
@@ -205,7 +205,7 @@ pub(super) fn StreamingServerSettings(
                 </label>
                 <div class="flex gap-3">
                     <button
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || {
                             busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                         }
@@ -219,7 +219,7 @@ pub(super) fn StreamingServerSettings(
                         {move || tt(context, "Test and verify identity")}
                     </button>
                     <button
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                         }

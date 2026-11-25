@@ -368,7 +368,7 @@ fn StructuredPolicyEditor(
                         type="number"
                         min="0"
                         max="86400"
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || draft.with(|d| d.value().map(|v| text(&v, "minimumWatchSecs")).unwrap_or_default())
                         on:input=move |e| {
@@ -383,7 +383,7 @@ fn StructuredPolicyEditor(
                         type="number"
                         min="0"
                         max="3600"
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || draft.with(|d| d.value().map(|v| text(&v, "reconnectWindowSecs")).unwrap_or_default())
                         on:input=move |e| {
@@ -396,7 +396,7 @@ fn StructuredPolicyEditor(
                     <span class="block">{move || tt(context, "Excluded Users JSON")}</span>
                     <textarea
                         rows="4"
-                        class="glass-input p-2 w-full text-xs font-mono"
+                        class="af-input p-2 w-full text-xs font-mono"
                         disabled=move || busy.get()
                         prop:value=move || draft.with(|d| d.value().map(|v| text(&v, "excludedUsers")).unwrap_or_default())
                         on:input=move |e| {
@@ -409,7 +409,7 @@ fn StructuredPolicyEditor(
                     <span class="block">{move || tt(context, "Excluded Libraries JSON")}</span>
                     <textarea
                         rows="4"
-                        class="glass-input p-2 w-full text-xs font-mono"
+                        class="af-input p-2 w-full text-xs font-mono"
                         disabled=move || busy.get()
                         prop:value=move || draft.with(|d| d.value().map(|v| text(&v, "excludedLibraries")).unwrap_or_default())
                         on:input=move |e| {
@@ -426,7 +426,7 @@ fn StructuredPolicyEditor(
             }}
             <button
                 type="button"
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                 }
@@ -460,7 +460,7 @@ fn StructuredPolicyEditor(
                     </pre>
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || busy.get()
                         on:click=execute
                     >
@@ -630,7 +630,7 @@ fn StructuredUserBindingsEditor(
                     <input
                         type="number"
                         min="1"
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || af_user_id.get()
                         on:input=move |e| af_user_id.set(event_target_value(&e))
@@ -639,7 +639,7 @@ fn StructuredUserBindingsEditor(
                 <label class="text-xs text-slate-400 space-y-1">
                     <span class="block">{move || tt(context, "Provider")}</span>
                     <select
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || provider.get()
                         on:change=move |e| provider.set(event_target_value(&e))
@@ -654,7 +654,7 @@ fn StructuredUserBindingsEditor(
                     <input
                         type="text"
                         list="streaming-user-link-servers"
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || server_id.get()
                         on:input=move |e| server_id.set(event_target_value(&e))
@@ -674,7 +674,7 @@ fn StructuredUserBindingsEditor(
                     <span class="block">{move || tt(context, "Provider User ID")}</span>
                     <input
                         type="text"
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || provider_user_id.get()
                         on:input=move |e| provider_user_id.set(event_target_value(&e))
@@ -688,7 +688,7 @@ fn StructuredUserBindingsEditor(
             }}
             <button
                 type="button"
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Users)
                 }
@@ -704,7 +704,7 @@ fn StructuredUserBindingsEditor(
             <div class="overflow-x-auto">
                 <table class="w-full text-left text-xs border-collapse">
                     <thead>
-                        <tr class="border-b border-white/10 text-slate-400">
+                        <tr class="border-b border-[var(--af-border-hairline)] text-slate-400">
                             <th class="py-2 pr-3">{move || tt(context, "AF User ID")}</th>
                             <th class="py-2 pr-3">{move || tt(context, "Provider")}</th>
                             <th class="py-2 pr-3">{move || tt(context, "Server ID")}</th>
@@ -745,7 +745,7 @@ fn StructuredUserBindingsEditor(
                                             &[("user", &user_display)],
                                         );
                                         view! {
-                                            <tr class="border-b border-white/[0.06]">
+                                            <tr class="border-b border-[var(--af-border-hairline)]">
                                                 <td class="py-2 pr-3 font-mono">{user_display}</td>
                                                 <td class="py-2 pr-3">{lnk.provider}</td>
                                                 <td class="py-2 pr-3 font-mono">{lnk.server_id}</td>
@@ -753,7 +753,8 @@ fn StructuredUserBindingsEditor(
                                                 <td class="py-2 text-right">
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-2.5 py-1 text-xs text-rose-300"
+                                                        class="af-btn px-2.5 py-1 text-xs"
+                                                        data-tone="danger"
                                                         aria-label=remove_label
                                                         disabled=move || {
                                                             busy.get()
@@ -820,7 +821,7 @@ fn StructuredUserBindingsEditor(
                     </pre>
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || busy.get()
                         on:click=execute
                     >

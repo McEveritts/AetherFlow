@@ -790,7 +790,7 @@ pub fn GrantEditorModal(
                         <div class="flex flex-wrap justify-end gap-3">
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 on:click=move |_| open.set(false)
                             >
                                 {move || tt(context, "Cluster.grantCloseAction")}
@@ -799,7 +799,7 @@ pub fn GrantEditorModal(
                                 id="cluster-grant-retry"
                                 type="button"
                                 data-af-autofocus="true"
-                                class="glass-button-primary px-4 py-2"
+                                class="af-btn-primary px-4 py-2"
                                 disabled=move || gate.is_busy()
                                 on:click=move |_| retry_fetch()
                             >
@@ -811,7 +811,7 @@ pub fn GrantEditorModal(
 
                 <Show when=move || load_state.get() == GrantLoadState::Ready>
                     <div class="space-y-5">
-                        <div class="rounded-xl border border-white/10 bg-white/5 p-3 space-y-1">
+                        <div class="af-surface-inset p-3 space-y-1">
                             <p class="text-xs font-semibold text-slate-400">
                                 {move || tt(context, "Cluster.grantDirectionOverviewHeading")}
                             </p>
@@ -863,7 +863,7 @@ pub fn GrantEditorModal(
 
                         <section
                             aria-labelledby="cluster-grant-inbound-heading"
-                            class="rounded-xl border border-indigo-500/30 bg-white/5 p-4 space-y-4"
+                            class="af-surface-inset border-indigo-500/30 p-4 space-y-4"
                         >
                             <div class="space-y-1.5">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -940,7 +940,7 @@ pub fn GrantEditorModal(
                                             id="cluster-grant-preset-ro"
                                             type="button"
                                             data-af-autofocus="true"
-                                            class="glass-button px-3 py-1.5 text-xs"
+                                            class="af-btn px-3 py-1.5 text-xs"
                                             data-tone=move || {
                                                 (active_preset.get()
                                                     == Some(GrantPreset::ReadOnlyAll))
@@ -964,7 +964,7 @@ pub fn GrantEditorModal(
                                         <button
                                             id="cluster-grant-preset-rw"
                                             type="button"
-                                            class="glass-button px-3 py-1.5 text-xs"
+                                            class="af-btn px-3 py-1.5 text-xs"
                                             data-tone=move || {
                                                 (active_preset.get()
                                                     == Some(GrantPreset::ReadWriteAll))
@@ -1016,7 +1016,7 @@ pub fn GrantEditorModal(
                                                         </label>
                                                         <select
                                                             id=area.dom_id()
-                                                            class="glass-input px-3 py-1.5 w-full text-sm"
+                                                            class="af-input px-3 py-1.5 w-full text-sm"
                                                             disabled=move || gate.is_busy() || !delivery_supported.get()
                                                             prop:value=move || {
                                                                 draft.with(|d| {
@@ -1067,7 +1067,7 @@ pub fn GrantEditorModal(
                                     <button
                                         id="cluster-grant-save"
                                         type="submit"
-                                        class="glass-button-primary px-4 py-2"
+                                        class="af-btn-primary px-4 py-2"
                                         disabled=move || gate.is_busy() || !delivery_supported.get()
                                     >
                                         {move || {
@@ -1107,7 +1107,7 @@ pub fn GrantEditorModal(
                                                     <button
                                                         id="cluster-grant-revoke-open"
                                                         type="button"
-                                                        class="glass-button px-3 py-1.5 text-xs"
+                                                        class="af-btn px-3 py-1.5 text-xs"
                                                         data-tone="danger"
                                                         disabled=move || gate.is_busy()
                                                         aria-label=move || {
@@ -1153,7 +1153,7 @@ pub fn GrantEditorModal(
                                                 <button
                                                     id="cluster-grant-revoke-keep"
                                                     type="button"
-                                                    class="glass-button px-3 py-1.5 text-xs"
+                                                    class="af-btn px-3 py-1.5 text-xs"
                                                     disabled=move || gate.is_busy()
                                                     on:click=move |_| {
                                                         draft.update(|d| d.confirm_revoke = false);
@@ -1173,7 +1173,7 @@ pub fn GrantEditorModal(
                                                 <button
                                                     id="cluster-grant-revoke-confirm"
                                                     type="button"
-                                                    class="glass-button px-3 py-1.5 text-xs"
+                                                    class="af-btn px-3 py-1.5 text-xs"
                                                     data-tone="danger"
                                                     disabled=move || gate.is_busy()
                                                     on:click=move |_| confirm_revoke()
@@ -1200,7 +1200,7 @@ pub fn GrantEditorModal(
 
                         <section
                             aria-labelledby="cluster-grant-outbound-heading"
-                            class="rounded-xl border border-white/10 bg-white/5 p-4 space-y-4"
+                            class="af-surface-inset p-4 space-y-4"
                         >
                             <div class="space-y-1.5">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -1275,7 +1275,7 @@ pub fn GrantEditorModal(
                                                             let level_key = access_level_label_key(level);
                                                             let tone = access_level_badge_tone(level);
                                                             view! {
-                                                                <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5">
+                                                                <div class="af-surface-inset flex items-center justify-between gap-2 px-3 py-1.5">
                                                                     <dt class="text-slate-300">
                                                                         {move || tt(context, label_key)}
                                                                     </dt>
@@ -1304,7 +1304,7 @@ pub fn GrantEditorModal(
                                 }
                             }}
 
-                            <div class="rounded-xl border border-white/10 bg-white/5 p-3 space-y-2.5">
+                            <div class="af-surface-inset p-3 space-y-2.5">
                                 <div class="space-y-1">
                                     <h4 class="text-xs font-semibold text-slate-200">
                                         {move || tt(context, "Cluster.grantOfferHeading")}
@@ -1324,7 +1324,7 @@ pub fn GrantEditorModal(
                                     <button
                                         id="cluster-grant-offer"
                                         type="button"
-                                        class="glass-button px-3 py-1.5 text-xs"
+                                        class="af-btn px-3 py-1.5 text-xs"
                                         disabled=move || gate.is_busy() || !delivery_supported.get()
                                         aria-label=move || {
                                             (active_action.get() != Some(GrantAction::Offer))
@@ -1355,7 +1355,7 @@ pub fn GrantEditorModal(
                             <button
                                 id="cluster-grant-close"
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 on:click=move |_| open.set(false)
                             >
                                 {move || tt(context, "Cluster.grantCloseAction")}

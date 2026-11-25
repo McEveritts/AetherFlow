@@ -9,7 +9,7 @@ pub(super) const MAX_CSV_PREVIEW_BYTES: u64 = 5 * 1024 * 1024;
 pub(super) const MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 pub(super) const MAX_CSV_PREVIEW_ROWS: usize = 500;
-pub(super) const FORM: &str = "glass-input w-full px-3 py-2";
+pub(super) const FORM: &str = "af-input w-full px-3 py-2";
 pub(super) const ARCHIVES: [(&str, &str); 9] = [
     ("zip", ".zip"),
     ("tar", ".tar"),

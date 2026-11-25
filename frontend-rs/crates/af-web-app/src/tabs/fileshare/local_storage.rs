@@ -19,7 +19,7 @@ pub(crate) fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
     );
     view! {
         <div
-            class="rounded-xl border border-white/15 bg-slate-950 p-3 max-h-64 overflow-auto space-y-1"
+            class="af-surface-inset p-3 max-h-64 overflow-auto space-y-1"
             aria-label=move || tt(context, "Directory picker")
         >
             <Show when=move || !can_read_files.get()>
@@ -44,7 +44,7 @@ pub(crate) fn DirectoryPicker(current_path: RwSignal<String>) -> impl IntoView {
                         view! {
                             <button
                                 type="button"
-                                class="block text-left glass-button px-3 py-2 w-full break-all"
+                                class="block text-left af-btn px-3 py-2 w-full break-all"
                                 on:click=move |_| {
                                     match child_path(&current_path.get_untracked(), &name) {
                                         Ok(path) => current_path.set(path),
@@ -331,7 +331,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                 <div class="flex gap-2">
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             !context.is_admin()
                                 || uploading.get()
@@ -352,7 +352,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         aria-label=move || tt(context, "Refresh Directory")
                         disabled=move || !can_read_files.get()
                         title=move || {
@@ -449,7 +449,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                             view! {
                                 <button
                                     type="button"
-                                    class="glass-button px-3 py-2 text-sm"
+                                    class="af-btn px-3 py-2 text-sm"
                                     on:click=move |_| current_path.set(path.into())
                                 >
                                     {path}
@@ -471,17 +471,17 @@ pub(super) fn LocalStorage() -> impl IntoView {
                     <label class="flex-1 min-w-0 text-sm space-y-2">
                         <span>{move || tt(context, "Current directory")}</span>
                         <input
-                            class="glass-input px-3 py-2 w-full"
+                            class="af-input px-3 py-2 w-full"
                             prop:value=move || manual_path.get()
                             on:input=move |event| manual_path.set(event_target_value(&event))
                         />
                     </label>
-                    <button type="submit" class="glass-button px-4 py-2">
+                    <button type="submit" class="af-btn px-4 py-2">
                         {move || tt(context, "Go")}
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || current_path.get() == "/"
                         on:click=move |_| {
                             current_path.set(parent_path(&current_path.get_untracked()))
@@ -491,7 +491,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         aria-expanded=move || picker_open.get().to_string()
                         disabled=move || !can_read_files.get()
                         title=move || {
@@ -565,7 +565,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                 </p>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         !context.is_admin()
                             || uploading.get()
@@ -593,7 +593,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                         ></progress>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2 ml-3"
+                            class="af-btn px-4 py-2 ml-3"
                             on:click=move |_| {
                                 controller
                                     .with_value(|controller| {
@@ -656,7 +656,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                                             .to_owned();
                                         view! {
                                             <tr
-                                                class="border-t border-white/10"
+                                                class="border-t border-[var(--af-border-hairline)]"
                                                 class=("cursor-pointer", is_dir)
                                                 on:click=move |_| {
                                                     if is_dir {
@@ -695,7 +695,7 @@ pub(super) fn LocalStorage() -> impl IntoView {
                                                             .then(|| {
                                                                 view! {
                                                                     <a
-                                                                        class="glass-button px-3 py-2"
+                                                                        class="af-btn px-3 py-2"
                                                                         href=move || {
                                                                             context.active_server_id.track();
                                                                             fileshare_download_url_encoded(
@@ -712,7 +712,8 @@ pub(super) fn LocalStorage() -> impl IntoView {
                                                             })}
                                                         <button
                                                             type="button"
-                                                            class="glass-button px-3 py-2 text-rose-300"
+                                                            class="af-btn px-3 py-2"
+                                                            data-tone="danger"
                                                             disabled=move || {
                                                                 !context.is_admin()
                                                                     || deleting.get()

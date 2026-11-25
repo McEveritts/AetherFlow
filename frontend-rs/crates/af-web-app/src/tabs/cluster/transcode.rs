@@ -1141,7 +1141,7 @@ pub fn TranscodeSection(
                     </div>
                     <button
                         type="button"
-                        class="glass-button px-3 py-1.5 text-sm shrink-0"
+                        class="af-btn px-3 py-1.5 text-sm shrink-0"
                         disabled=move || loading.get() || is_mutating.get()
                         aria-label=move || tt(context, "Cluster.transcodeRefreshAction")
                         on:click=move |_| trigger_local_refresh.run(())
@@ -1162,7 +1162,7 @@ pub fn TranscodeSection(
                         <div>
                             <button
                                 type="button"
-                                class="glass-button px-3 py-2 text-sm"
+                                class="af-btn px-3 py-2 text-sm"
                                 on:click=move |_| trigger_local_refresh.run(())
                             >
                                 {move || tt(context, "Common.retry")}
@@ -1198,7 +1198,7 @@ pub fn TranscodeSection(
                                     <p class="break-words">{message}</p>
                                     <button
                                         type="button"
-                                        class="glass-button px-2 py-0.5 text-xs shrink-0"
+                                        class="af-btn px-2 py-0.5 text-xs shrink-0"
                                         aria-label=move || tt(context, "Cluster.dismissError")
                                         on:click=move |_| status_notice.set(None)
                                     >
@@ -1214,7 +1214,7 @@ pub fn TranscodeSection(
                     // 1. Global dispatcher & local worker service controls + runtime badges
                     <div class="space-y-4">
                         <div class="grid md:grid-cols-2 gap-4">
-                            <div class="rounded-xl border border-white/10 bg-white/5 p-4 flex items-start justify-between gap-4 min-w-0">
+                            <div class="af-surface-inset p-4 flex items-start justify-between gap-4 min-w-0">
                                 <div class="space-y-1 min-w-0">
                                     <p class="text-sm font-semibold text-slate-100">
                                         {move || tt(context, "Cluster.transcodeGlobalEnableLabel")}
@@ -1239,9 +1239,9 @@ pub fn TranscodeSection(
                                     class=move || {
                                         let on = config_memo.with(|c| c.as_ref().is_some_and(|cfg| cfg.enabled));
                                         if on {
-                                            "glass-button-primary px-3 py-1.5 text-xs shrink-0"
+                                            "af-btn-primary px-3 py-1.5 text-xs shrink-0"
                                         } else {
-                                            "glass-button px-3 py-1.5 text-xs shrink-0"
+                                            "af-btn px-3 py-1.5 text-xs shrink-0"
                                         }
                                     }
                                     on:click=toggle_global
@@ -1258,7 +1258,7 @@ pub fn TranscodeSection(
                                 </button>
                             </div>
 
-                            <div class="rounded-xl border border-white/10 bg-white/5 p-4 flex items-start justify-between gap-4 min-w-0">
+                            <div class="af-surface-inset p-4 flex items-start justify-between gap-4 min-w-0">
                                 <div class="space-y-1 min-w-0">
                                     <p class="text-sm font-semibold text-slate-100">
                                         {move || tt(context, "Cluster.transcodeWorkerServiceLabel")}
@@ -1283,9 +1283,9 @@ pub fn TranscodeSection(
                                     class=move || {
                                         let on = config_memo.with(|c| c.as_ref().is_some_and(|cfg| cfg.worker_service_enabled));
                                         if on {
-                                            "glass-button-primary px-3 py-1.5 text-xs shrink-0"
+                                            "af-btn-primary px-3 py-1.5 text-xs shrink-0"
                                         } else {
-                                            "glass-button px-3 py-1.5 text-xs shrink-0"
+                                            "af-btn px-3 py-1.5 text-xs shrink-0"
                                         }
                                     }
                                     on:click=toggle_worker_service
@@ -1344,7 +1344,7 @@ pub fn TranscodeSection(
                             };
 
                             Some(view! {
-                                <div class="rounded-xl border border-white/10 bg-white/5 p-3.5 space-y-3">
+                                <div class="af-surface-inset p-3.5 space-y-3">
                                     <div class="flex flex-wrap items-center gap-2">
                                         <Badge label=dispatcher_badge.0 tone=dispatcher_badge.1 />
                                         <Badge label=shim_badge.0 tone=shim_badge.1 />
@@ -1401,7 +1401,7 @@ pub fn TranscodeSection(
                     // 2. jellyfin-ffmpeg version alignment section
                     <div
                         data-testid="transcode-version-alignment"
-                        class="border-t border-white/10 pt-5 space-y-3 min-w-0"
+                        class="border-t border-[var(--af-border-hairline)] pt-5 space-y-3 min-w-0"
                     >
                         <div class="space-y-1">
                             <h3 class="text-base font-semibold">
@@ -1478,13 +1478,13 @@ pub fn TranscodeSection(
 
                             Some(view! {
                                 <div
-                                    class="overflow-x-auto rounded-xl border border-white/10 bg-white/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                                    class="af-surface-inset overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                                     tabindex="0"
                                     role="region"
                                     aria-label=move || tt(context, "Cluster.transcodeVersionHeading")
                                 >
                                     <table class="w-full text-left text-xs">
-                                        <thead class="border-b border-white/10 text-slate-400">
+                                        <thead class="border-b border-[var(--af-border-hairline)] text-slate-400">
                                             <tr>
                                                 <th class="py-2.5 px-3 font-medium">
                                                     {move || tt(context, "Cluster.transcodeColServer")}
@@ -1537,7 +1537,7 @@ pub fn TranscodeSection(
                                                                 <button
                                                                     type="button"
                                                                     data-testid="transcode-align-local-button"
-                                                                    class="glass-button-primary px-2.5 py-1 text-xs"
+                                                                    class="af-btn-primary px-2.5 py-1 text-xs"
                                                                     aria-label=move || tt(context, "Cluster.transcodeAlignUpdateLocalAria")
                                                                     disabled=move || align_busy.with(|set| set.contains("local"))
                                                                     on:click=move |_| {
@@ -1631,7 +1631,7 @@ pub fn TranscodeSection(
                                                                                 <Badge label="Cluster.transcodeAlignDiffers" tone="warning" />
                                                                                 <button
                                                                                     type="button"
-                                                                                    class="glass-button-primary px-2.5 py-1 text-xs"
+                                                                                    class="af-btn-primary px-2.5 py-1 text-xs"
                                                                                     aria-label=move || tt(context, "Cluster.transcodeAlignUpdateLocalAria")
                                                                                     disabled=move || align_busy.with(|set| set.contains("local"))
                                                                                     on:click=move |_| {
@@ -1666,7 +1666,7 @@ pub fn TranscodeSection(
                                                                                 <button
                                                                                     type="button"
                                                                                     data-testid=test_id
-                                                                                    class="glass-button-primary px-2.5 py-1 text-xs"
+                                                                                    class="af-btn-primary px-2.5 py-1 text-xs"
                                                                                     aria-label=move || {
                                                                                         tt_with(
                                                                                             context,
@@ -1711,7 +1711,7 @@ pub fn TranscodeSection(
                                                                                     <button
                                                                                         type="button"
                                                                                         data-testid=format!("transcode-align-disabled-{row_link_id}")
-                                                                                        class="glass-button px-2.5 py-1 text-xs opacity-60"
+                                                                                        class="af-btn px-2.5 py-1 text-xs"
                                                                                         disabled=true
                                                                                         title=move || tt(context, reason_key)
                                                                                         aria-describedby=reason_id_ref
@@ -1752,7 +1752,7 @@ pub fn TranscodeSection(
                                                                                     <Badge label="Cluster.transcodeAlignDiffers" tone="warning" />
                                                                                     <button
                                                                                         type="button"
-                                                                                        class="glass-button px-2.5 py-1 text-xs opacity-60"
+                                                                                        class="af-btn px-2.5 py-1 text-xs"
                                                                                         disabled=true
                                                                                         title=move || {
                                                                                             tt_with(
@@ -1812,7 +1812,7 @@ pub fn TranscodeSection(
                     // 3. Per-worker configuration cards
                     <div
                         data-testid="transcode-workers-list"
-                        class="border-t border-white/10 pt-5 space-y-3 min-w-0"
+                        class="border-t border-[var(--af-border-hairline)] pt-5 space-y-3 min-w-0"
                     >
                         <div class="space-y-1">
                             <h3 class="text-base font-semibold">
@@ -1858,7 +1858,7 @@ pub fn TranscodeSection(
                     // 4. Recent transcode jobs
                     <div
                         data-testid="transcode-recent-jobs"
-                        class="border-t border-white/10 pt-5 space-y-3 min-w-0"
+                        class="border-t border-[var(--af-border-hairline)] pt-5 space-y-3 min-w-0"
                     >
                         <div class="space-y-1">
                             <h3 class="text-base font-semibold">
@@ -1883,13 +1883,13 @@ pub fn TranscodeSection(
                             let jobs = cfg.recent_jobs.clone();
                             Some(view! {
                                 <div
-                                    class="overflow-x-auto rounded-xl border border-white/10 bg-white/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                                    class="af-surface-inset overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                                     tabindex="0"
                                     role="region"
                                     aria-label=move || tt(context, "Cluster.transcodeJobsHeading")
                                 >
                                     <table class="w-full text-left text-xs">
-                                        <thead class="border-b border-white/10 text-slate-400">
+                                        <thead class="border-b border-[var(--af-border-hairline)] text-slate-400">
                                             <tr>
                                                 <th class="py-2.5 px-3 font-medium">
                                                     {move || tt(context, "Cluster.transcodeJobColTarget")}
@@ -2123,7 +2123,7 @@ fn TranscodeWorkerCard(
             Some(view! {
                 <article
                     data-testid=format!("transcode-worker-card-{link_id_val}")
-                    class="rounded-xl border border-white/10 bg-white/5 p-4 space-y-4 min-w-0"
+                    class="af-surface-inset p-4 space-y-4 min-w-0"
                 >
                     <div class="flex flex-wrap items-start justify-between gap-3">
                         <div class="space-y-1.5 min-w-0">
@@ -2278,7 +2278,7 @@ fn TranscodeWorkerCard(
                                                 .into_iter()
                                                 .map(|enc| {
                                                     view! {
-                                                        <span class="px-1.5 py-0.5 rounded bg-white/10 font-mono text-slate-200">
+                                                        <span class="px-1.5 py-0.5 rounded border border-[var(--af-border-hairline)] bg-[var(--af-surface-card)] font-mono text-slate-200">
                                                             {enc}
                                                         </span>
                                                     }
@@ -2292,7 +2292,7 @@ fn TranscodeWorkerCard(
                     </dl>
 
                     <form
-                        class="border-t border-white/10 pt-3 flex flex-wrap items-end justify-between gap-4"
+                        class="border-t border-[var(--af-border-hairline)] pt-3 flex flex-wrap items-end justify-between gap-4"
                         on:submit=move |event| {
                             event.prevent_default();
                             on_save.run((link_for_submit.clone(), peer_for_submit.clone()));
@@ -2338,7 +2338,7 @@ fn TranscodeWorkerCard(
                                     min=WORKER_WEIGHT_MIN.to_string()
                                     max=WORKER_WEIGHT_MAX.to_string()
                                     inputmode="numeric"
-                                    class="glass-input px-2.5 py-1.5 w-24 text-sm font-mono"
+                                    class="af-input px-2.5 py-1.5 w-24 text-sm font-mono"
                                     disabled=move || {
                                         busy_action.get() != TranscodeAction::Idle || !can_save.get()
                                     }
@@ -2367,7 +2367,7 @@ fn TranscodeWorkerCard(
                                     min=WORKER_MAX_JOBS_MIN.to_string()
                                     max=WORKER_MAX_JOBS_MAX.to_string()
                                     inputmode="numeric"
-                                    class="glass-input px-2.5 py-1.5 w-24 text-sm font-mono"
+                                    class="af-input px-2.5 py-1.5 w-24 text-sm font-mono"
                                     disabled=move || {
                                         busy_action.get() != TranscodeAction::Idle || !can_save.get()
                                     }
@@ -2387,7 +2387,7 @@ fn TranscodeWorkerCard(
                         <div class="flex flex-wrap items-center gap-2 shrink-0">
                             <button
                                 type="button"
-                                class="glass-button px-3 py-1.5 text-xs"
+                                class="af-btn px-3 py-1.5 text-xs"
                                 title=reason_title_parity
                                 aria-describedby=disabled_reason.is_some().then_some(reason_id_for_parity)
                                 aria-label=move || {
@@ -2419,7 +2419,7 @@ fn TranscodeWorkerCard(
                             </button>
                             <button
                                 type="submit"
-                                class="glass-button-primary px-3 py-1.5 text-xs"
+                                class="af-btn-primary px-3 py-1.5 text-xs"
                                 aria-label=move || {
                                     tt_with(
                                         context,

@@ -265,7 +265,7 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
             <div class="flex flex-wrap gap-3 mb-5">
                 <button
                     type="button"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
                     }
@@ -280,7 +280,7 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
                     }
@@ -295,7 +295,7 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
                     }
@@ -316,7 +316,8 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2 text-rose-300"
+                    class="af-btn px-4 py-2"
+                    data-tone="danger"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
                     }
@@ -344,7 +345,7 @@ pub(super) fn TailscaleSettings(status: ApiResource) -> impl IntoView {
             </Show>
             <Show when=move || !auth_url.get().is_empty()>
                 <a
-                    class="glass-button-primary inline-block px-4 py-2 mb-4"
+                    class="af-btn-primary inline-block px-4 py-2 mb-4"
                     href=move || auth_url.get()
                     target="_blank"
                     rel="noopener noreferrer"

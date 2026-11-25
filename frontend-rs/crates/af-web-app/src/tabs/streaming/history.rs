@@ -233,7 +233,7 @@ fn HistoryField(
         <label class="text-xs text-slate-400 space-y-1 min-w-0">
             <span class="block">{move || tt(context, label)}</span>
             <input
-                class="glass-input p-2 w-full min-w-0"
+                class="af-input p-2 w-full min-w-0"
                 type=kind
                 prop:value=move || query.with(|q| q.fields.get(field).cloned().unwrap_or_default())
                 on:change=move |e| query.update(|q| q.edit(field, event_target_value(&e)))
@@ -253,7 +253,7 @@ fn HistorySelect(
         <label class="text-xs text-slate-400 space-y-1">
             <span class="block">{move || tt(context, label)}</span>
             <select
-                class="glass-input p-2 w-full"
+                class="af-input p-2 w-full"
                 prop:value=move || query.with(|q| q.fields.get(field).cloned().unwrap_or_default())
                 on:change=move |e| query.update(|q| q.edit(field, event_target_value(&e)))
             >
@@ -635,7 +635,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                                         )}
                                     </p>
                                     <button
-                                        class="glass-button px-3 py-2 mt-2"
+                                        class="af-btn px-3 py-2 mt-2"
                                         on:click=move |_| {
                                             query.update(HistoryQuery::reset);
                                             history.refresh();
@@ -650,7 +650,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                 <Show when=move || snapshot_invalid.get()>
                     <div role="alert" class="rounded-xl border border-rose-400/30 p-3 text-sm text-rose-300">
                         <p>{move || tt(context, "Analytics snapshot expired or changed. Restart history from page one.")}</p>
-                        <button type="button" class="glass-button px-3 py-2 mt-2" on:click=move |_| {
+                        <button type="button" class="af-btn px-3 py-2 mt-2" on:click=move |_| {
                             query.update(HistoryQuery::reset);
                             history.refresh();
                             snapshot_invalid.set(false);
@@ -688,7 +688,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                 />
                 <div class="flex flex-wrap gap-3 items-center">
                     <button
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         disabled=move || {
                             snapshot_invalid.get() || history.loading.get() || history.error.with(Option::is_some)
                                 || query.with(|q| q.previous.is_empty())
@@ -708,7 +708,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                         {move || tt_with(context, "Page {page}", &[("page", &(query.with(|q| q.previous.len() + 1)).to_string())])}
                     </span>
                     <button
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         disabled=move || {
                             snapshot_invalid.get() || history.loading.get() || history.error.with(Option::is_some)
                                 || page.get().next_cursor.is_none()
@@ -730,7 +730,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                         {move || tt(context, "Next")}
                     </button>
                     <button
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         disabled=move || history.loading.get()
                         on:click=move |_| {
                             query.update(HistoryQuery::reset);
@@ -741,7 +741,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                         {move || tt(context, "New snapshot")}
                     </button>
                     <button
-                        class="glass-button-primary px-3 py-2"
+                        class="af-btn-primary px-3 py-2"
                         disabled=move || {
                             snapshot_invalid.get() || export_busy.get() || history.loading.get()
                                 || history.error.with(Option::is_some)
@@ -751,7 +751,7 @@ pub(super) fn CanonicalHistory(on_inspect: Callback<Value>) -> impl IntoView {
                         {move || tt(context, "Export CSV · all matches")}
                     </button>
                     <button
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         disabled=move || {
                             snapshot_invalid.get() || export_busy.get() || history.loading.get()
                                 || history.error.with(Option::is_some)

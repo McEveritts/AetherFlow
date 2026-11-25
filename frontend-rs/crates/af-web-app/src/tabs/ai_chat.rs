@@ -567,7 +567,7 @@ pub fn AiChatTab() -> impl IntoView {
                     </p>
                 </div>
                 <button
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     on:click=move |_| context.select_tab(TabId::Settings)
                 >
                     {move || tt(context, "AI Settings")}
@@ -592,7 +592,7 @@ pub fn AiChatTab() -> impl IntoView {
                         view! {
                             <button
                                 type="button"
-                                class="glass-card p-3 text-left min-w-0"
+                                class="af-card af-card-interactive p-3 text-left min-w-0"
                                 aria-pressed=move || (provider.get() == id).to_string()
                                 on:click=move |_| {
                                     provider.set(id.into());
@@ -630,7 +630,7 @@ pub fn AiChatTab() -> impl IntoView {
             <label class="block text-sm space-y-2">
                 {move || tt(context, "Inference model ID")}
                 <input
-                    class="glass-input p-3 w-full"
+                    class="af-input p-3 w-full"
                     list="flowai-models"
                     prop:value=move || model.get()
                     on:input=move |e| model.set(event_target_value(&e))
@@ -650,7 +650,7 @@ pub fn AiChatTab() -> impl IntoView {
             <div class="grid grid-cols-1 lg:grid-cols-4 gap-5 min-w-0">
                 <aside class="space-y-3 min-w-0">
                     <button
-                        class="glass-button-primary px-4 py-2 w-full"
+                        class="af-btn-primary px-4 py-2 w-full"
                         disabled=move || busy.get()
                         on:click=move |_| {
                             let thread = new_thread(&crate::tabs::l10n::locale(context));
@@ -682,7 +682,7 @@ pub fn AiChatTab() -> impl IntoView {
                                     let delete_id = id.clone();
                                     let selected = id.clone();
                                     view! {
-                                        <div class="glass-card p-2 flex gap-2 min-w-0">
+                                        <div class="af-surface-inset p-2 flex gap-2 min-w-0">
                                             <button
                                                 class="text-left text-sm min-w-0 flex-1 truncate"
                                                 aria-current=move || {
@@ -696,7 +696,7 @@ pub fn AiChatTab() -> impl IntoView {
                                                 {text(&thread, "title")}
                                             </button>
                                             <button
-                                                class="glass-button px-2"
+                                                class="af-btn px-2"
                                                 aria-label=move || tt(context, "Delete conversation")
                                                 disabled=move || busy.get()
                                                 on:click=move |_| {
@@ -739,7 +739,7 @@ pub fn AiChatTab() -> impl IntoView {
                             .map(|(label, prompt)| {
                                 view! {
                                     <button
-                                        class="glass-button px-3 py-2 text-xs"
+                                        class="af-btn px-3 py-2 text-xs"
                                         disabled=move || {
                                             busy.get()
                                                 || !context.can_write_area(
@@ -824,7 +824,7 @@ pub fn AiChatTab() -> impl IntoView {
                                                                 </pre>
                                                             </details>
                                                             <button
-                                                                class="glass-button-primary px-4 py-2"
+                                                                class="af-btn-primary px-4 py-2"
                                                                 on:click=move |_| context.select_tab(TabId::Inbox)
                                                             >
                                                                 {move || tt(context, "Review in Approval Inbox")}
@@ -867,7 +867,7 @@ pub fn AiChatTab() -> impl IntoView {
                         <label>
                             {move || tt(context, "Context ")}
                             <select
-                                class="glass-input px-2 py-1"
+                                class="af-input px-2 py-1"
                                 prop:value=move || context_mode.get()
                                 on:change=move |e| context_mode.set(event_target_value(&e))
                             >
@@ -892,7 +892,7 @@ pub fn AiChatTab() -> impl IntoView {
                         }
                     >
                         <textarea
-                            class="glass-input p-3 min-w-0 flex-1"
+                            class="af-input p-3 min-w-0 flex-1"
                             rows="4"
                             aria-label=move || tt(context, "Message FlowAI")
                             placeholder=move || tt(context, "Ask FlowAI…")
@@ -907,7 +907,7 @@ pub fn AiChatTab() -> impl IntoView {
                         ></textarea>
                         <button
                             type="submit"
-                            class="glass-button-primary px-5 py-3"
+                            class="af-btn-primary px-5 py-3"
                             disabled=move || {
                                 busy.get()
                                     || input.get().trim().is_empty()
