@@ -1674,20 +1674,130 @@ pub(crate) fn resolve_local_server_name() -> String {
     "aetherflow".to_string()
 }
 
+/// Returns `true` for VPN, overlay, container, or hypervisor NAT interfaces whose private
+/// addresses are typically not directly reachable between bare-metal hosts and must not be
+/// recommended or auto-selected ahead of real host NICs for WireGuard pairing.
+pub(crate) fn is_virtual_or_overlay_interface(iface: &str) -> bool {
+    let lower = iface.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    const VIRTUAL_PREFIXES: &[&str] = &[
+        "wg",
+        "tailscale",
+        "utun",
+        "tun",
+        "tap",
+        "docker",
+        "br-",
+        "veth",
+        "podman",
+        "cni",
+        "flannel",
+        "calico",
+        "cali",
+        "cilium",
+        "kube",
+        "nerdctl",
+        "virbr",
+        "lxcbr",
+        "lxdbr",
+        "incusbr",
+        "vboxnet",
+        "vmnet",
+    ];
+    VIRTUAL_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
+fn classify_and_sort_endpoints(raw: Vec<(String, IpAddr)>) -> Vec<DetectedEndpoint> {
+    let mut ranked: Vec<(u8, DetectedEndpoint)> = Vec::new();
+    for (iface, ip) in raw {
+        if iface == "lo" || iface == af_runner::peer_network::PEER_WG_INTERFACE {
+            continue;
+        }
+        let parsed = match ip {
+            IpAddr::V4(v4) => {
+                if v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_multicast()
+                {
+                    None
+                } else {
+                    Some(("ipv4", v4.is_private()))
+                }
+            }
+            IpAddr::V6(v6) => {
+                let seg0 = v6.segments()[0];
+                let is_link_local = (seg0 & 0xffc0) == 0xfe80;
+                let is_ula = (seg0 & 0xfe00) == 0xfc00;
+                if v6.is_loopback() || is_link_local || v6.is_unspecified() || v6.is_multicast() {
+                    None
+                } else {
+                    Some(("ipv6", is_ula))
+                }
+            }
+        };
+
+        if let Some((family, is_private_lan)) = parsed {
+            let virtual_iface = is_virtual_or_overlay_interface(&iface);
+            let recommended = !virtual_iface && is_private_lan;
+            // Tier 0: real host NIC with private/VLAN address (preferred)
+            // Tier 1: real host NIC with public address
+            // Tier 2: virtual/VPN/container interface (still selectable, never auto-preferred)
+            let tier = if recommended {
+                0
+            } else if !virtual_iface {
+                1
+            } else {
+                2
+            };
+            ranked.push((
+                tier,
+                DetectedEndpoint {
+                    interface: iface,
+                    address: ip.to_string(),
+                    family,
+                    recommended,
+                },
+            ));
+        }
+    }
+
+    ranked.sort_by(|(tier_a, a), (tier_b, b)| {
+        tier_a
+            .cmp(tier_b)
+            .then_with(|| a.family.cmp(b.family))
+            .then_with(|| a.interface.cmp(&b.interface))
+            .then_with(|| a.address.cmp(&b.address))
+    });
+
+    let mut results: Vec<DetectedEndpoint> = Vec::with_capacity(ranked.len());
+    for (_, endpoint) in ranked {
+        if !results.iter().any(|e| e.address == endpoint.address) {
+            results.push(endpoint);
+        }
+    }
+    results
+}
+
 /// Enumerates non-loopback local interface addresses for the WireGuard endpoint picker,
-/// flagging RFC 1918 / RFC 4193 private (VLAN) addresses as recommended.
+/// flagging RFC 1918 / RFC 4193 private (VLAN) addresses on real host interfaces as recommended
+/// and sorting VPN/overlay/container interfaces below physical/host interfaces.
 pub(crate) fn detect_local_endpoints() -> Vec<DetectedEndpoint> {
     #[cfg(unix)]
     {
         use std::ffi::CStr;
         use std::net::{Ipv4Addr, Ipv6Addr};
 
-        let mut results: Vec<DetectedEndpoint> = Vec::new();
+        let mut raw: Vec<(String, IpAddr)> = Vec::new();
         let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
         // SAFETY: `getifaddrs` writes an allocated linked list pointer into `ifap`, which we
         // unconditionally release with `freeifaddrs` before returning.
         if unsafe { libc::getifaddrs(&mut ifap) } != 0 || ifap.is_null() {
-            return results;
+            return Vec::new();
         }
         let mut cur = ifap;
         while !cur.is_null() {
@@ -1695,61 +1805,36 @@ pub(crate) fn detect_local_endpoints() -> Vec<DetectedEndpoint> {
             let ifa = unsafe { &*cur };
             cur = ifa.ifa_next;
 
-            if ifa.ifa_name.is_null() || ifa.ifa_addr.is_null() {
+            if ifa.ifa_name.is_null()
+                || ifa.ifa_addr.is_null()
+                || (ifa.ifa_flags & (libc::IFF_UP as u32)) == 0
+            {
                 continue;
             }
             // SAFETY: `ifa_name` is a non-null C string provided by `getifaddrs`.
             let iface = unsafe { CStr::from_ptr(ifa.ifa_name) }
                 .to_string_lossy()
                 .into_owned();
-            if iface == "lo" || iface == af_runner::peer_network::PEER_WG_INTERFACE {
-                continue;
-            }
             // SAFETY: `ifa_addr` is non-null; inspect `sa_family` before casting.
             let family = unsafe { (*ifa.ifa_addr).sa_family as i32 };
             let parsed_ip = match family {
                 libc::AF_INET => {
                     // SAFETY: `sa_family == AF_INET` guarantees `sockaddr_in` layout.
                     let sin = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
-                    let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                    if ip.is_loopback()
-                        || ip.is_link_local()
-                        || ip.is_unspecified()
-                        || ip.is_multicast()
-                    {
-                        None
-                    } else {
-                        let recommended = ip.is_private();
-                        Some((IpAddr::V4(ip), "ipv4", recommended))
-                    }
+                    Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                        sin.sin_addr.s_addr,
+                    ))))
                 }
                 libc::AF_INET6 => {
                     // SAFETY: `sa_family == AF_INET6` guarantees `sockaddr_in6` layout.
                     let sin6 = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
-                    let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-                    let seg0 = ip.segments()[0];
-                    let is_link_local = (seg0 & 0xffc0) == 0xfe80;
-                    let is_ula = (seg0 & 0xfe00) == 0xfc00;
-                    if ip.is_loopback() || is_link_local || ip.is_unspecified() || ip.is_multicast()
-                    {
-                        None
-                    } else {
-                        Some((IpAddr::V6(ip), "ipv6", is_ula))
-                    }
+                    Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
                 }
                 _ => None,
             };
 
-            if let Some((ip, fam, recommended)) = parsed_ip {
-                let addr_str = ip.to_string();
-                if !results.iter().any(|e| e.address == addr_str) {
-                    results.push(DetectedEndpoint {
-                        interface: iface,
-                        address: addr_str,
-                        family: fam,
-                        recommended,
-                    });
-                }
+            if let Some(ip) = parsed_ip {
+                raw.push((iface, ip));
             }
         }
         // SAFETY: `ifap` was returned by `getifaddrs` above.
@@ -1757,17 +1842,88 @@ pub(crate) fn detect_local_endpoints() -> Vec<DetectedEndpoint> {
             libc::freeifaddrs(ifap);
         }
 
-        results.sort_by(|a, b| {
-            b.recommended
-                .cmp(&a.recommended)
-                .then_with(|| a.family.cmp(b.family))
-                .then_with(|| a.interface.cmp(&b.interface))
-                .then_with(|| a.address.cmp(&b.address))
-        });
-        results
+        classify_and_sort_endpoints(raw)
     }
     #[cfg(not(unix))]
     {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod endpoint_detection_tests {
+    use super::*;
+
+    #[test]
+    fn public_nic_ranks_above_wireguard_and_container_virtual_interfaces() {
+        let detected = classify_and_sort_endpoints(vec![
+            ("lo".into(), "127.0.0.1".parse().unwrap()),
+            ("afpeer0".into(), "10.231.51.234".parse().unwrap()),
+            ("wg0".into(), "10.66.66.1".parse().unwrap()),
+            ("docker0".into(), "172.17.0.1".parse().unwrap()),
+            ("br-9a1b2c3d4e5f".into(), "172.18.0.1".parse().unwrap()),
+            ("virbr0".into(), "192.168.122.1".parse().unwrap()),
+            ("tailscale0".into(), "100.64.0.1".parse().unwrap()),
+            ("enp0s31f6".into(), "94.130.161.251".parse().unwrap()),
+            ("enp0s31f6".into(), "2a01:4f8:13b:2a69::2".parse().unwrap()),
+        ]);
+
+        assert_eq!(detected[0].interface, "enp0s31f6");
+        assert_eq!(detected[0].address, "94.130.161.251");
+        assert!(!detected[0].recommended);
+
+        assert_eq!(detected[1].interface, "enp0s31f6");
+        assert_eq!(detected[1].address, "2a01:4f8:13b:2a69::2");
+        assert!(!detected[1].recommended);
+
+        // Virtual/VPN/container interfaces remain selectable at the end, never recommended.
+        let tail_ifaces: Vec<&str> = detected[2..].iter().map(|e| e.interface.as_str()).collect();
+        assert_eq!(
+            tail_ifaces,
+            vec!["br-9a1b2c3d4e5f", "docker0", "tailscale0", "virbr0", "wg0"]
+        );
+        assert!(detected[2..].iter().all(|e| !e.recommended));
+    }
+
+    #[test]
+    fn real_private_vlan_and_host_bridges_stay_recommended_above_public_and_vpn() {
+        let detected = classify_and_sort_endpoints(vec![
+            ("wg0".into(), "10.66.66.1".parse().unwrap()),
+            ("eth0".into(), "95.216.148.189".parse().unwrap()),
+            ("eth1".into(), "10.0.0.2".parse().unwrap()),
+            ("vmbr0".into(), "192.168.1.10".parse().unwrap()),
+            ("br0".into(), "10.10.0.5".parse().unwrap()),
+        ]);
+
+        assert_eq!(detected[0].interface, "br0");
+        assert!(detected[0].recommended);
+        assert_eq!(detected[1].interface, "eth1");
+        assert!(detected[1].recommended);
+        assert_eq!(detected[2].interface, "vmbr0");
+        assert!(detected[2].recommended);
+
+        assert_eq!(detected[3].interface, "eth0");
+        assert!(!detected[3].recommended);
+
+        assert_eq!(detected[4].interface, "wg0");
+        assert!(!detected[4].recommended);
+    }
+
+    #[test]
+    fn filters_loopback_link_local_multicast_unspecified_and_afpeer0() {
+        let detected = classify_and_sort_endpoints(vec![
+            ("lo".into(), "127.0.0.1".parse().unwrap()),
+            ("lo".into(), "::1".parse().unwrap()),
+            ("afpeer0".into(), "10.231.121.177".parse().unwrap()),
+            ("eth0".into(), "169.254.1.10".parse().unwrap()),
+            ("eth0".into(), "fe80::1".parse().unwrap()),
+            ("eth0".into(), "0.0.0.0".parse().unwrap()),
+            ("eth0".into(), "224.0.0.1".parse().unwrap()),
+            ("eth0".into(), "192.200.124.123".parse().unwrap()),
+        ]);
+
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].interface, "eth0");
+        assert_eq!(detected[0].address, "192.200.124.123");
     }
 }
