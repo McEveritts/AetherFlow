@@ -284,7 +284,14 @@ class TestB12TestsRunSafelyInParallel(TestCase):
         super().__init__("T2_B12_02", "F12", 2, "Unit test suites avoid global state mutation without synchronization")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B12: Parallel test safety verified")
+        plugin_tests = inspector.read_file("backend-rs/crates/af-api/src/plugins/tests.rs") or ""
+        route_tests = inspector.read_file("backend-rs/crates/af-api/src/routes/tests.rs") or ""
+        self.assert_true(
+            "fn run_plugin_test_in_subprocess()" in plugin_tests
+            and "AETHERFLOW_PLUGIN_TEST_ISOLATED" in plugin_tests
+            and "RECEIPT_TEST_MUTEX: std::sync::Mutex" in route_tests,
+            "B12: af-api test helpers must isolate DB/env state via subprocess isolation and Mutex guards",
+        )
 
 
 class TestB12MockRunnerHandlesMalformedPackets(TestCase):

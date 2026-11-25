@@ -147,7 +147,11 @@ class TestB30OptionalPackagesDoNotHaltBootstrap(TestCase):
         super().__init__("T2_B30_05", "F30", 2, "Failure of an optional utility does not abort setup")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B30: Package error recovery contract verified")
+        pkgs = inspector.read_file("setup/modules/02-packages.sh") or ""
+        self.assert_true(
+            '_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true' in pkgs,
+            "B30: 02-packages.sh must guard optional utility installs with non-fatal '|| true'",
+        )
 
 # ============================================================================
 # B31: Keyring Migration Boundaries
@@ -157,14 +161,22 @@ class TestB31KeyringDirectoryPermissions(TestCase):
         super().__init__("T2_B31_01", "F31", 2, "/usr/share/keyrings/ directory permissions are 0755 root:root")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B31: Keyring directory permissions contract verified")
+        pkgs = inspector.read_file("setup/modules/02-packages.sh") or ""
+        self.assert_true(
+            'install -d -m 0755 "${keyrings_dir}"' in pkgs,
+            "B31: 02-packages.sh must provision /usr/share/keyrings with mode 0755",
+        )
 
 class TestB31KeyringFilePermissions(TestCase):
     def __init__(self):
         super().__init__("T2_B31_02", "F31", 2, "Imported .gpg keyrings have world-readable permissions 0644")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B31: Keyring file permissions contract verified")
+        pkgs = inspector.read_file("setup/modules/02-packages.sh") or ""
+        self.assert_true(
+            'install -m 0644 "${sury_keyring_tmp}" "${keyrings_dir}/deb.sury.org-php.gpg"' in pkgs,
+            "B31: 02-packages.sh must install imported .gpg keyrings with mode 0644",
+        )
 
 class TestB31GpgDearmorUsedForAsciiKeys(TestCase):
     def __init__(self):

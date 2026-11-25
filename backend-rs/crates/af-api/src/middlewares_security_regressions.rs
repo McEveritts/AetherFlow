@@ -1,6 +1,7 @@
 use super::{
-    app_subdomain_proxy_middleware, is_host_trusted, is_private_or_loopback_ip,
-    resolve_app_target_for_host,
+    app_subdomain_proxy_middleware, host_validation_middleware, is_host_trusted,
+    is_private_or_loopback_ip, is_rate_limit_disabled_for_env, is_unauth_local_lan_ip,
+    resolve_app_target_for_host, unauth_local_lan_enabled,
 };
 use std::{env, fs, path::PathBuf};
 
@@ -357,6 +358,59 @@ fn security_gateway_ip_canonicalization_tailscale_cgnat_and_127_evil_rejection()
     assert!(!crate::ws::is_trusted_proxy_peer(
         "::ffff:203.0.113.10".parse().unwrap()
     ));
+
+    // ESC-10: unauthenticated LAN bypass classifier allows strictly RFC 1918, link-local,
+    // and IPv6 ULA — unconditionally excluding Tailscale CGNAT (100.64.0.0/10) and loopback.
+    for allowed_lan in [
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.50",
+        "169.254.1.1",
+        "fe80::1",
+        "fc00::1",
+        "fd12:3456:789a::1",
+        "::ffff:192.168.1.50",
+    ] {
+        assert!(
+            is_unauth_local_lan_ip(allowed_lan),
+            "expected RFC 1918/ULA/link-local {allowed_lan} to qualify"
+        );
+    }
+    for denied_bypass in [
+        "100.64.0.1",
+        "100.127.255.254",
+        "::ffff:100.100.100.100",
+        "127.0.0.1",
+        "127.0.0.2",
+        "::1",
+        "[::1]:8080",
+        "::ffff:127.0.0.1",
+        "203.0.113.10",
+        "localhost",
+        "",
+    ] {
+        assert!(
+            !is_unauth_local_lan_ip(denied_bypass),
+            "must never grant unauth local LAN bypass to {denied_bypass}"
+        );
+    }
+
+    assert!(!is_rate_limit_disabled_for_env(
+        Some("1"),
+        Some("production")
+    ));
+    assert!(!is_rate_limit_disabled_for_env(
+        Some("true"),
+        Some("PRODUCTION")
+    ));
+    assert!(!is_rate_limit_disabled_for_env(Some("1"), Some("release")));
+    assert!(!is_rate_limit_disabled_for_env(
+        Some("true"),
+        Some("Release")
+    ));
+    assert!(is_rate_limit_disabled_for_env(Some("1"), None));
+    assert!(is_rate_limit_disabled_for_env(Some("true"), Some("test")));
+    assert!(!is_rate_limit_disabled_for_env(None, None));
 }
 
 #[tokio::test]
@@ -873,4 +927,139 @@ fn security_gateway_never_exposes_stale_legacy_swizzin_receipt_or_symlinked_inst
         resolve_app_target_for_host("syncthing.aether.local"),
         Some(("syncthing".into(), 8384))
     );
+}
+
+#[tokio::test]
+async fn esc13_unlisted_ip_hosts_fail_closed_without_csp_or_oidc_reflection() {
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{header, Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    let name = "middlewares::security_regressions::esc13_unlisted_ip_hosts_fail_closed_without_csp_or_oidc_reflection";
+    if !isolated(name) {
+        return;
+    }
+    let _fixture = Fixture::new();
+    env::set_var("ALLOWED_HOSTS", "localhost,127.0.0.1,192.0.2.99");
+
+    let allowed = HashSet::from(["192.0.2.99".to_string()]);
+    assert!(is_host_trusted("127.0.0.1", &HashSet::new()));
+    assert!(is_host_trusted("[::1]:8080", &HashSet::new()));
+    assert!(is_host_trusted("192.0.2.99:8080", &allowed));
+    assert!(!is_host_trusted("192.0.2.55", &allowed));
+    assert!(!is_host_trusted("10.20.30.40:8080", &allowed));
+    assert!(!is_host_trusted("[2001:db8::1]:8080", &allowed));
+
+    let app = crate::routes::build_router();
+
+    // Unlisted IPv4/IPv6 Host and X-Forwarded-Host must return 400 INVALID_HOST with zero CSP reflection.
+    for bad_host in ["192.0.2.55:8080", "[2001:db8::1]:8080", "evil.example.test"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/openid-configuration")
+                    .header(header::HOST, bad_host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad_host}");
+        if let Some(csp) = resp
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+        {
+            assert!(
+                csp.contains("default-src 'none'")
+                    && !csp.contains(bad_host)
+                    && !csp.contains("'wasm-unsafe-eval'"),
+                "rejected Host {bad_host} must not reflect into SPA CSP: {csp}"
+            );
+        }
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("INVALID_HOST"), "{bad_host}: {body_str}");
+        assert!(!body_str.contains(bad_host), "{bad_host}: {body_str}");
+    }
+
+    // Trusted proxy forwarding an unlisted IP via X-Forwarded-Host also returns 400 INVALID_HOST.
+    let xfh_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health/live")
+                .header(header::HOST, "localhost:8080")
+                .header("x-forwarded-host", "198.51.100.77:8080")
+                .extension(ConnectInfo(
+                    "127.0.0.1:45678".parse::<SocketAddr>().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xfh_resp.status(), StatusCode::BAD_REQUEST);
+
+    // Allowed IP in ALLOWED_HOSTS succeeds and receives validated ws/wss connect-src on 200 OK,
+    // while non-200 error responses omit SPA CSP.
+    let ui_app = Router::new()
+        .route("/ok", get(|| async { (StatusCode::OK, "ok") }))
+        .route("/err", get(|| async { (StatusCode::NOT_FOUND, "missing") }))
+        .layer(middleware::from_fn(
+            crate::routes::security_headers_middleware,
+        ))
+        .layer(middleware::from_fn(host_validation_middleware));
+    let ok_resp = ui_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ok")
+                .header(header::HOST, "192.0.2.99:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok_resp.status(), StatusCode::OK);
+    let csp = ok_resp.headers()["content-security-policy"]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("connect-src 'self' ws://192.0.2.99:8080 wss://192.0.2.99:8080"));
+
+    let err_resp = ui_app
+        .oneshot(
+            Request::builder()
+                .uri("/err")
+                .header(header::HOST, "192.0.2.99:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(err_resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        err_resp.headers()["content-security-policy"],
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    );
+
+    // Verify AF_ALLOW_UNAUTH_LOCAL_LAN defaults to false and parses 1/true case-insensitively.
+    env::remove_var("AF_ALLOW_UNAUTH_LOCAL_LAN");
+    assert!(!unauth_local_lan_enabled());
+    env::set_var("AF_ALLOW_UNAUTH_LOCAL_LAN", "TRUE");
+    assert!(unauth_local_lan_enabled());
+    env::set_var("AF_ALLOW_UNAUTH_LOCAL_LAN", "1");
+    assert!(unauth_local_lan_enabled());
+    env::set_var("AF_ALLOW_UNAUTH_LOCAL_LAN", "0");
+    assert!(!unauth_local_lan_enabled());
+    env::remove_var("AF_ALLOW_UNAUTH_LOCAL_LAN");
 }

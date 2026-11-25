@@ -2767,5 +2767,6 @@
     "liveLogsClosed": "Transmisión cerrada",
     "liveLogsRevoked": "Transmisión de registros en vivo cerrada (código {code}); es posible que el acceso del par haya cambiado o sido revocado.",
     "remoteShareOriginUnavailable": "Los enlaces públicos de compartición no están disponibles para {server} porque su dominio base público no está configurado o no se puede leer. Configura un dominio base público en {server} y concede permiso de lectura de Configuración para crear enlaces compartidos remotos."
-  }
+  },
+  "Reset atmosphere defaults": "Restablecer valores predeterminados de atmósfera"
 }

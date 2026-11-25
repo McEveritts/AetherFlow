@@ -76,7 +76,7 @@ pub struct RestorePreflightOptions {
 impl Default for RestorePreflightOptions {
     fn default() -> Self {
         Self {
-            host_app_version: "4.0.0".to_string(),
+            host_app_version: crate::default_host_app_version(),
             max_supported_sqlite_user_version: None,
             overwrite_policy: OverwritePolicy::RejectExisting,
             require_artifact_sidecar: true,
@@ -516,6 +516,18 @@ pub fn validate_trusted_sqlite_db_path(custom_db_path: &Path) -> HostBackupResul
     Ok(normalized)
 }
 
+pub(super) fn is_service_data_dir_secret_key(relative_key: &str) -> bool {
+    matches!(
+        relative_key,
+        "var/lib/aetherflow/.master.creds" | "var/lib/aetherflow/oidc_rsa.pem"
+    )
+}
+
+pub(super) fn is_service_data_dir_secret_destination(dest: &Path) -> bool {
+    dest.ends_with("var/lib/aetherflow/.master.creds")
+        || dest.ends_with("var/lib/aetherflow/oidc_rsa.pem")
+}
+
 /// Checks whether a normalized relative archive path (`etc/AetherFlow/...`, `var/lib/aetherflow/aetherflow.sqlite`, etc.)
 /// is an explicitly allowlisted canonical AetherFlow host backup entry, and maps it to its trusted
 /// destination root + relative path under `canonical_base` (which is `/` on production hosts or an
@@ -530,6 +542,7 @@ pub fn resolve_trusted_canonical_host_destination_with_sqlite_override(
     let key = rel_buf.to_string_lossy().replace('\\', "/");
 
     let allowed = key == "var/lib/aetherflow/aetherflow.sqlite"
+        || is_service_data_dir_secret_key(&key)
         || key == "etc/aetherflow/aetherflow.env"
         || key.starts_with("etc/aetherflow/")
         || key == "var/www/html/dashboard/inc/config.php"

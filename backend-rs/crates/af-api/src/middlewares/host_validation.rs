@@ -98,7 +98,10 @@ pub(crate) fn is_trusted_request_host(candidate_raw: &str) -> bool {
     is_host_trusted(candidate_raw, &allowed_set)
 }
 
-pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedRequestHost(pub String);
+
+pub async fn host_validation_middleware(mut req: Request, next: Next) -> Response {
     if req
         .extensions()
         .get::<crate::auth::PeerPrincipal>()
@@ -107,6 +110,7 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
+    crate::ws::normalize_request_forwarding_for_peer(&mut req);
     let raw_allowed = env::var("ALLOWED_HOSTS").unwrap_or_default();
     let allowed_set: HashSet<String> = raw_allowed
         .split(',')
@@ -141,6 +145,7 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
                 .map(str::to_owned)
         })
         .flatten();
+    let validated_host_candidate = host.clone();
     let hosts: Vec<_> = host
         .into_iter()
         .chain(forwarded)
@@ -175,6 +180,20 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
                     "Host validation unavailable",
                 )
             }
+        }
+    }
+
+    if let Some(raw_host) = validated_host_candidate {
+        let trimmed = raw_host.trim();
+        if !trimmed.is_empty()
+            && trimmed.len() <= 255
+            && !strip_host_port_and_dot(trimmed).is_empty()
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+        {
+            req.extensions_mut()
+                .insert(ValidatedRequestHost(trimmed.to_string()));
         }
     }
 

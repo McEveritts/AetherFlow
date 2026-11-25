@@ -174,7 +174,7 @@ apache_app_probe_body_is_healthy() {
 
 wait_for_apache_app_ready() {
     local package_name="$1" port="$2" default_path="${3:-/}" attempts="${4:-${AF_READINESS_ATTEMPTS:-30}}"
-    local attempt target_output="" ready_url="" server_name="" probe_file="" http_status="" auth_credentials=""
+    local attempt target_output="" ready_url="" server_name="" probe_file="" http_status="" auth_credentials="" rutorrent_token=""
     local -a target_lines=() curl_tls_args=() curl_host_args=()
     local loopback_https_re='^https://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
     local loopback_url_re='^https?://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
@@ -196,12 +196,20 @@ wait_for_apache_app_ready() {
     if [[ -n "$server_name" ]]; then
         curl_host_args=(-H "Host: ${server_name}")
     fi
-    if [[ "$package_name" == "rutorrent" && "$ready_url" =~ $loopback_url_re && -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" ]]; then
-        auth_credentials="${MASTER_USER}:${MASTER_PASS}"
-        auth_credentials="${auth_credentials//\\/\\\\}"
-        auth_credentials="${auth_credentials//\"/\\\"}"
-        if [[ "$auth_credentials" == *$'\n'* || "$auth_credentials" == *$'\r'* ]]; then
-            auth_credentials=""
+    if [[ "$package_name" == "rutorrent" && "$ready_url" =~ $loopback_url_re ]]; then
+        if [[ -f /etc/aetherflow/rutorrent-proxy-token && ! -L /etc/aetherflow/rutorrent-proxy-token && -r /etc/aetherflow/rutorrent-proxy-token ]]; then
+            rutorrent_token="$(tr -d '[:space:]' < /etc/aetherflow/rutorrent-proxy-token 2>/dev/null || true)"
+            if [[ ! "$rutorrent_token" =~ ^[A-Za-z0-9_-]{32,128}$ ]]; then
+                rutorrent_token=""
+            fi
+        fi
+        if [[ -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" ]]; then
+            auth_credentials="${MASTER_USER}:${MASTER_PASS}"
+            auth_credentials="${auth_credentials//\\/\\\\}"
+            auth_credentials="${auth_credentials//\"/\\\"}"
+            if [[ "$auth_credentials" == *$'\n'* || "$auth_credentials" == *$'\r'* ]]; then
+                auth_credentials=""
+            fi
         fi
     fi
 
@@ -211,7 +219,15 @@ wait_for_apache_app_ready() {
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if systemctl is-active --quiet apache2; then
             : >"$probe_file"
-            if curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+            local primary_ok=false
+            if [[ -n "$rutorrent_token" ]]; then
+                if printf 'header = "X-Aetherflow-Rutorrent-Token: %s"\n' "$rutorrent_token" | curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+                    primary_ok=true
+                fi
+            elif curl --disable --noproxy '*' --max-filesize 2097152 "${curl_tls_args[@]}" "${curl_host_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >"$probe_file" 2>/dev/null; then
+                primary_ok=true
+            fi
+            if [[ "$primary_ok" == true ]]; then
                 if apache_app_probe_body_is_healthy "$package_name" "$probe_file"; then
                     rm -f -- "$probe_file"
                     return 0
@@ -476,6 +492,29 @@ def include_is_ssl_only(pattern, optional):
             return False
     return True
 
+def include_is_proxy_token_auth_only(pattern, optional):
+    files = expand_includes(pattern, optional)
+    if not files:
+        return False
+    for path in files:
+        if not os.path.basename(path).endswith('-proxy-token.conf'):
+            return False
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+                saw_rule = False
+                for raw_l in fh:
+                    s = raw_l.strip()
+                    if not s or s.startswith('#'):
+                        continue
+                    if not re.match(r'^Require\s+expr\b', s, re.IGNORECASE):
+                        return False
+                    saw_rule = True
+                if not saw_rule:
+                    return False
+        except OSError:
+            return False
+    return True
+
 blocks = []
 current = None
 for raw_line in raw.splitlines():
@@ -538,6 +577,8 @@ for block in blocks:
             is_opt = m_inc.group(1).lower() == 'includeoptional'
             if include_is_ssl_only(m_inc.group(2), is_opt):
                 preserved.append(line)
+                continue
+            if include_is_proxy_token_auth_only(m_inc.group(2), is_opt):
                 continue
             unsupported(f'non-SSL Include directive inside VirtualHost in {site_name}')
         if allowed_identity_re.match(line):
@@ -1444,6 +1485,9 @@ write_lock() {
     INSTALL_COMMITTED=true
     if [[ -n "${AF_ARCHIVE_BACKUP:-}" ]]; then
         rm -f -- "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+        if [[ -n "${AF_ARCHIVE_DESTINATION:-}" ]] && declare -F prune_app_archive_backups >/dev/null 2>&1; then
+            prune_app_archive_backups "$AF_ARCHIVE_DESTINATION" "${AF_ARCHIVE_UNIT:-$package_name}" "$AF_ARCHIVE_BACKUP" 2
+        fi
     fi
     local certbot_sync="${AF_CERTBOT_SYNC_BIN:-/usr/local/bin/af-certbot-sync}"
     if [[ -x "$certbot_sync" ]]; then

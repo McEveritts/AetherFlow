@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use url::Url;
 
 pub(crate) const APP_SESSION_COOKIE: &str = "__Host-aetherflow_app";
+pub(crate) const LOCAL_APP_SESSION_COOKIE: &str = "aetherflow_local_app";
 const APP_SESSION_ISSUER: &str = "aetherflow-app-session";
 const TICKET_TTL: Duration = Duration::from_secs(30);
 const MAX_PENDING_LAUNCHES: usize = 2048;
@@ -70,12 +71,16 @@ fn live_admin(user_id: i64, jti: &str, ver: i64, exp: i64) -> Option<ActiveSubje
         return None;
     }
     let conn = af_db::get_read_conn().ok()?;
-    let subject = auth::load_active_human_subject(&conn, user_id).ok()?;
-    (subject.role == "admin"
-        && ver >= subject.sessions_revoked_after
-        && af_db::has_unexpired_active_session(&conn, jti, user_id, now).ok()?
-        && !af_db::token_revocation_status_with_conn(&conn, jti).ok()?)
-    .then_some(subject)
+    let subject = auth::verify_active_session_on_conn(
+        &conn,
+        user_id,
+        jti,
+        ver,
+        now,
+        auth::RotationGrace::Disabled,
+    )
+    .ok()?;
+    (subject.role == "admin").then_some(subject)
 }
 
 fn dashboard_origin(headers: &HeaderMap) -> Option<String> {
@@ -124,30 +129,51 @@ fn configured_tls_port(app: &str, host: &str) -> Option<i32> {
         .then_some(cfg.listen_port)
 }
 
+fn is_single_label_local_app_host(app: &str, host: &str) -> bool {
+    let expected = format!("{}.aether.local", app.trim().to_ascii_lowercase());
+    let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    !app.trim().is_empty()
+        && !app.contains('.')
+        && lower == expected
+        && af_models::valid_ingress_hostname(&lower)
+}
+
 fn eligible_destination(req: &LaunchRequest) -> Option<Url> {
-    // ruTorrent retains its separate Apache/PHP Basic authentication.
-    if !requires_external_app_auth(&req.app)
-        || req.app == "rutorrent"
-        || req.destination.len() > 4096
-    {
+    if !requires_external_app_auth(&req.app) || req.destination.len() > 4096 {
         return None;
     }
     let destination = Url::parse(&req.destination).ok()?;
     let host = destination.host_str()?;
-    if destination.scheme() != "https"
-        || destination.port().is_some()
+    if destination.port().is_some()
         || !destination.username().is_empty()
         || destination.password().is_some()
         || destination.path() == APP_LAUNCH_EXCHANGE_PATH
         || !af_models::valid_ingress_hostname(host)
-        || host.ends_with(".aether.local")
     {
         return None;
     }
-    let port = configured_tls_port(&req.app, host)?;
-    (crate::middlewares::resolve_app_target_for_host(host) == Some((req.app.clone(), port))
-        && managed_tls_vhost(&req.app, host))
-    .then_some(destination)
+    match destination.scheme() {
+        "https" => {
+            if host.ends_with(".aether.local") {
+                return None;
+            }
+            let port = configured_tls_port(&req.app, host)?;
+            (crate::middlewares::resolve_app_target_for_host(host) == Some((req.app.clone(), port))
+                && managed_tls_vhost(&req.app, host))
+            .then_some(destination)
+        }
+        "http" => {
+            if !is_single_label_local_app_host(&req.app, host) {
+                return None;
+            }
+            crate::middlewares::resolve_app_target_for_host(host)
+                .filter(|(resolved_app, port)| {
+                    resolved_app == &req.app && (1..=65535).contains(port)
+                })
+                .map(|_| destination)
+        }
+        _ => None,
+    }
 }
 
 fn no_store(mut response: Response) -> Response {
@@ -255,12 +281,27 @@ fn unavailable() -> Response {
 }
 
 pub(crate) fn managed_origin(headers: &HeaderMap, raw_host: &str, managed: bool) -> Option<String> {
-    if !managed || header_str(headers, "x-forwarded-proto")? != "https" {
-        return None;
+    if managed {
+        if header_str(headers, "x-forwarded-proto")? != "https" {
+            return None;
+        }
+        let host = raw_host.strip_suffix(":443").unwrap_or(raw_host);
+        return af_models::valid_ingress_hostname(host)
+            .then(|| format!("https://{}", host.to_ascii_lowercase()));
     }
-    let host = raw_host.strip_suffix(":443").unwrap_or(raw_host);
-    af_models::valid_ingress_hostname(host)
-        .then(|| format!("https://{}", host.to_ascii_lowercase()))
+    let host = raw_host
+        .trim()
+        .strip_suffix(":80")
+        .unwrap_or_else(|| raw_host.trim())
+        .trim_end_matches('.');
+    let lower = host.to_ascii_lowercase();
+    let proto_is_http = header_str(headers, "x-forwarded-proto")
+        .is_none_or(|proto| proto.trim().eq_ignore_ascii_case("http"));
+    let is_single_label_local = lower
+        .strip_suffix(".aether.local")
+        .is_some_and(|label| !label.is_empty() && !label.contains('.'));
+    (proto_is_http && is_single_label_local && af_models::valid_ingress_hostname(&lower))
+        .then(|| format!("http://{lower}"))
 }
 
 pub(crate) async fn redeem(req: Request, app: String, origin: Option<String>) -> Response {
@@ -317,7 +358,22 @@ fn redeem_blocking(ticket: &str, headers: &HeaderMap, app: &str, origin: &str) -
     else {
         return invalid_session();
     };
-    if configured_tls_port(app, origin.trim_start_matches("https://")).is_none()
+    let (cookie_name, secure_cookie, origin_allowed) =
+        if let Some(host) = origin.strip_prefix("https://") {
+            (
+                APP_SESSION_COOKIE,
+                true,
+                configured_tls_port(app, host).is_some(),
+            )
+        } else if let Some(host) = origin.strip_prefix("http://") {
+            let allowed = is_single_label_local_app_host(app, host)
+                && crate::middlewares::resolve_app_target_for_host(host)
+                    .is_some_and(|(resolved, port)| resolved == app && (1..=65535).contains(&port));
+            (LOCAL_APP_SESSION_COOKIE, false, allowed)
+        } else {
+            (APP_SESSION_COOKIE, true, false)
+        };
+    if !origin_allowed
         || live_admin(session.user_id, &session.jti, session.ver, session.exp).is_none()
     {
         return invalid_session();
@@ -335,7 +391,7 @@ fn redeem_blocking(ticket: &str, headers: &HeaderMap, app: &str, origin: &str) -
         return invalid_session();
     }
     let cookie =
-        crate::ws::build_set_cookie(APP_SESSION_COOKIE, &token, max_age, "Lax", true, true);
+        crate::ws::build_set_cookie(cookie_name, &token, max_age, "Lax", secure_cookie, true);
     let Ok(cookie) = HeaderValue::from_str(&cookie) else {
         return unavailable();
     };
@@ -349,7 +405,17 @@ fn redeem_blocking(ticket: &str, headers: &HeaderMap, app: &str, origin: &str) -
 }
 
 pub(crate) fn authenticated_admin(headers: &HeaderMap, app: &str, origin: &str) -> Option<String> {
-    let token = crate::ws::extract_cookie(headers, APP_SESSION_COOKIE)?;
+    let cookie_name = if let Some(host) = origin.strip_prefix("https://") {
+        configured_tls_port(app, host)?;
+        APP_SESSION_COOKIE
+    } else {
+        let host = origin.strip_prefix("http://")?;
+        if !is_single_label_local_app_host(app, host) {
+            return None;
+        }
+        LOCAL_APP_SESSION_COOKIE
+    };
+    let token = crate::ws::extract_cookie(headers, cookie_name)?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&[origin]);
     validation.set_issuer(&[APP_SESSION_ISSUER]);
@@ -363,6 +429,5 @@ pub(crate) fn authenticated_admin(headers: &HeaderMap, app: &str, origin: &str) 
     if claims.app != app || !matches_client(headers, &claims.cfp) {
         return None;
     }
-    configured_tls_port(app, origin.strip_prefix("https://")?)?;
     live_admin(claims.user_id, &claims.jti, claims.ver, claims.exp).map(|subject| subject.username)
 }

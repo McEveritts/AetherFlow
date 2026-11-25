@@ -1,70 +1,43 @@
-# Experimental YouTube frontends
+# Experimental YouTube Frontends
 
-Piped and Invidious are available in the `nightly` marketplace as experimental
-packages. These are native bare-metal systemd installations, not containers.
-They are not promoted to stable by this change.
+Piped and Invidious are experimental entries included in AetherFlow's 77-package bare-metal Marketplace catalog (no automatic `stable`-channel exclusion is applied). Both run as native bare-metal systemd installations rather than containers.
 
-| App | Marketplace port | Managed services | Persistent configuration |
-| --- | --- | --- | --- |
-| Piped | 8280 | `af-piped`, `af-piped-api`, `af-piped-proxy` | `/etc/piped` |
-| Invidious | 8281 | `af-invidious`, `af-invidious-companion` | `/etc/invidious` |
+| App | Marketplace Port | Managed Services | Persistent Configuration |
+| :--- | :--- | :--- | :--- |
+| Piped | `8280` | `af-piped`, `af-piped-api`, `af-piped-proxy` | `/etc/piped` |
+| Invidious | `8281` | `af-invidious`, `af-invidious-companion` | `/etc/invidious` |
 
-Both apps bind to loopback behind AetherFlow's existing Apache/subdomain ingress.
-Configure the AetherFlow base domain and HTTPS before installation. Direct script
-users may set `AF_APP_DOMAIN` to the app's public hostname. `AF_APP_PORT` overrides
-the marketplace port. Private companion ports are allocated separately and saved
-under `/etc/<app>` so reinstall does not randomly change them.
+Both apps bind to loopback behind AetherFlow's existing Apache/subdomain ingress. Configure the AetherFlow base domain and HTTPS before installation. Direct script users may set `AF_APP_DOMAIN` to the app's public hostname. `AF_APP_PORT` overrides the Marketplace port. Private companion ports are allocated separately and saved under `/etc/<app>` so reinstalls keep them stable.
 
 ## Requirements
 
-- A Debian/Ubuntu server with systemd and PostgreSQL. Installation uses APT and
-  requires root, internet access, and enough free disk/RAM to compile upstream code.
-- Piped requires an APT source providing Java 21 and a sufficiently recent Rust
-  compiler. Its frontend uses Node 24 or newer and pnpm, installed/built on the
-  Linux server only. It runs a dedicated unprivileged Apache instance for static
-  assets, SPA routing, `/api/` and `/proxy/`; it does not modify the main vhosts.
-- Invidious supports Linux x86_64/aarch64 here. Its local Crystal 1.22.2 toolchain
-  and companion executable are downloaded from upstream releases with mandatory
-  SHA-256 verification. Invidious itself is built from source.
+- A Debian/Ubuntu server with `systemd` and PostgreSQL. Installation uses APT and requires `root`, internet access, and sufficient scratch disk/inodes (`af_prepare_job_scratch` preflight checks free space and inodes across the scratch root, `/opt`, `/var/lib`, and `/var/backups`, requiring at least `2048 MiB` and `16384` inodes for both Piped and Invidious) and RAM to compile upstream code.
+- **Piped**: Requires an APT source providing Java 21, **Rust >= 1.89** (`installpackage-piped` installs APT `cargo`/`rustc` and checks root-owned `cargo`/`rustc` on `PATH` first, falling back to scanning root-owned rustup/cargo toolchains under `/root/.rustup/toolchains/*`, `/usr/local/rustup/toolchains/*`, `/opt/rust/toolchains/*`, `/root/.cargo/bin`, and `/usr/local/cargo/bin`, failing closed otherwise), Node 24+, and `pnpm@10.11.0`, built on the Linux host only. It runs a dedicated unprivileged Apache instance for static assets, SPA routing, `/api/`, and `/proxy/` without modifying main host vhosts.
+- **Invidious**: Supports Linux `x86_64` and `aarch64`. Its local Crystal `1.22.2` toolchain and companion executable are downloaded from upstream releases with mandatory SHA-256 verification; Invidious itself is compiled from source.
 
-The first installation can take several minutes. Builds run as dedicated service
-users. PostgreSQL roles, databases and random credentials are created idempotently;
-credentials survive reinstall and are not included in installer output.
+The first installation can take several minutes. Builds run as dedicated service users. PostgreSQL roles, databases, and random credentials are created idempotently; credentials survive reinstall and are omitted from installer logs.
 
-The Invidious companion uses a dedicated 16-character alphanumeric secret,
-separate from the database password and HMAC key. An incompatible saved
-`/etc/invidious/companion-key` stops installation rather than being silently
-rotated; back up and remove that invalid key before retrying installation.
+The Invidious companion uses a dedicated 16-character alphanumeric secret, separate from the database password and HMAC key. An incompatible saved `/etc/invidious/companion-key` halts installation rather than silently rotating; back up and remove that invalid key before retrying installation.
 
-## Operations and limitations
+## Operations and Limitations
 
-Registration is disabled by default. Use AetherFlow's authenticated ingress and
-do not expose the internal API/proxy/companion ports to the internet. These
-installers do not create or synchronize an upstream application account.
+Registration is disabled by default. Use AetherFlow's authenticated ingress and do not expose internal API, proxy, or companion ports directly to the internet. These installers do not create or synchronize upstream application accounts.
 
-Configuration and data live under `/etc/<app>` and `/var/lib/<app>` respectively.
-Sources and binaries live under `/opt/<app>`. Logs are in
-`/var/log/aetherflow/install-<app>.log` and the corresponding systemd journals.
-The install lock is written only after HTTP readiness and companion unit checks.
+Configuration and data live under `/etc/<app>` and `/var/lib/<app>` respectively; sources and binaries live under `/opt/<app>`. Logs are written to `/var/log/aetherflow/install-<app>.log` and the corresponding systemd journals. The install lock is written only after HTTP readiness, companion unit checks, and (for Piped) `certify_piped` verification of all three git HEADs, published JAR/binary SHA-256 digests, and `/proc/<pid>/exe` identity for `piped-proxy`.
 
-Removal stops/disables the complete app stack and deletes its unit/drop-in files.
-It deliberately retains configuration, sources, service users, PostgreSQL databases
-and user data. It never purges the shared PostgreSQL, Apache or language runtimes.
+- **Ordinary Uninstall (`DELETE_DATA=false`)**: Stops and disables the complete app stack and deletes its systemd unit/drop-in files while retaining `/opt/<app>`, `/etc/<app>`, `/var/lib/<app>`, service users, and PostgreSQL databases.
+- **Explicit Purge (`DELETE_DATA=true` / `--purge` / `?purge=true`)**: Ensures `postgresql.service` is active, drops the app's PostgreSQL database and role (verifying removal), deletes `/opt/<app>`, `/etc/<app>`, and `/var/lib/<app>`, and purges the `<app>` system user via `purge_system_user`. Shared PostgreSQL, Apache, and language runtimes are never purged.
+- **Update Tracking**:
+  - **Invidious** tracks `iv-org/invidious` Git HEAD.
+  - **Piped** tracks all three repositories (`TeamPiped/Piped`, `TeamPiped/Piped-Backend`, `TeamPiped/Piped-Proxy`) using a composite manifest `frontend:<sha>,backend:<sha>,proxy:<sha>` persisted in `/opt/piped/.af-version` and `/opt/piped/.af-components.json`. Any commit change in any of the three repositories flags an update, and exact-target installs (`PIPED_TARGET_VERSION` / `AF_TARGET_VERSION`) require all three component pins.
 
-Marketplace update tracking follows each frontend's Git HEAD. Reinstall refreshes
-and rebuilds the complete stack, including companions; the frontend update badge
-does not independently track every companion/toolchain release.
-
-YouTube anti-bot checks, IP reputation and upstream changes can break playback
-even when the local services are healthy. Local readiness is not a guarantee of
-successful video playback. Review upstream Piped/Invidious documentation for
-additional proxy, token or network configuration. Treat both packages as
-experimental until clean-server installation and real playback have been tested.
+YouTube anti-bot checks, IP reputation, and upstream changes can break playback even when local services pass HTTP readiness checks. Local readiness does not establish working video playback. Review upstream Piped and Invidious documentation for additional proxy, token, or network settings, and treat both packages as experimental until validated on your host.
 
 Upstream references:
-- Piped: https://github.com/TeamPiped/Piped
-- Piped backend: https://github.com/TeamPiped/Piped-Backend
-- Piped proxy: https://github.com/TeamPiped/Piped-Proxy
-- Invidious: https://invidious.io/
-- Native Invidious installation: https://docs.invidious.io/installation/
-- Invidious companion: https://github.com/iv-org/invidious-companion
+
+- [Piped](https://github.com/TeamPiped/Piped)
+- [Piped Backend](https://github.com/TeamPiped/Piped-Backend)
+- [Piped Proxy](https://github.com/TeamPiped/Piped-Proxy)
+- [Invidious](https://invidious.io/)
+- [Native Invidious Installation](https://docs.invidious.io/installation/)
+- [Invidious Companion](https://github.com/iv-org/invidious-companion)

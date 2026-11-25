@@ -50,4 +50,8 @@ fi
 
 af_logged systemctl daemon-reload
 remove_lock palate
-report_progress 100 "Palate removed. Existing backups remain in /var/backups/aetherflow-palate.*."
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    report_progress 100 "Palate removed and application data purged."
+else
+    report_progress 100 "Palate removed. Existing backups remain in /var/backups/aetherflow-palate.*."
+fi

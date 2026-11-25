@@ -92,6 +92,22 @@ async fn notification_rule_create_and_partial_update_validate_the_resulting_rule
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Duplicate rule name (case-insensitive) returns 409 CONFLICT.
+    let dup_response = create_notification_rule(Json(CreateRuleReq {
+        name: "  test  ".into(),
+        condition_type: "disk_usage".into(),
+        condition_value: "90".into(),
+        level: "warning".into(),
+    }))
+    .await;
+    assert_eq!(dup_response.status(), StatusCode::CONFLICT);
+    let dup_body = axum::body::to_bytes(dup_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(std::str::from_utf8(&dup_body)
+        .unwrap()
+        .contains("DUPLICATE_RULE_NAME"));
 }
 
 #[test]

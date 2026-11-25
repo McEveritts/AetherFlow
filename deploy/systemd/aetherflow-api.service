@@ -29,7 +29,6 @@ Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 Environment=PRIVILEGED_RUNNER_ENABLED=true
 Environment=AETHERFLOW_ENV=production
-EnvironmentFile=-/opt/AetherFlow/current/backend/.env
 EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 # ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
@@ -87,15 +86,20 @@ ReadWritePaths=-/srv -/mnt -/media -/data
 ReadWritePaths=-/opt/AetherFlow/backend/data
 
 # ── Operator Drop-in Overrides ──────────────────────────────────────────────
-# Host-specific bind mounts, local media paths, or supplementary groups (such as
-# media downloader groups or user storage directories) should not be hard-coded
-# in this packaged unit. Instead, configure them in an operator-owned systemd
-# drop-in file at /etc/systemd/system/aetherflow-api.service.d/local.conf:
+# Host-specific media paths or supplementary groups (such as media downloader
+# groups or storage directories) should not be hard-coded in this packaged unit.
+# Instead, configure them in an operator-owned systemd drop-in file at
+# /etc/systemd/system/aetherflow-api.service.d/local.conf:
 #
 #   [Service]
 #   SupplementaryGroups=media
 #   ReadWritePaths=/mnt/storage
-#   BindPaths=/mnt/storage/media:/var/lib/aetherflow/mcbrowser/user-1/Media
+#
+# WARNING: Do NOT bind-mount shared host storage beneath
+# /var/lib/aetherflow/mcbrowser/user-* (e.g., BindPaths=/mnt/storage:/var/lib/aetherflow/mcbrowser/user-1/...).
+# Even though af-files enforces RESOLVE_NO_XDEV / st_dev mount-boundary guards
+# during recursive cleanup, shared host media belongs under explicit ReadWritePaths
+# (or AF_ALLOWED_FS_ROOTS), not inside per-user McBrowser home directories.
 
 # ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535

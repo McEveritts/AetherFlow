@@ -2767,5 +2767,6 @@
     "liveLogsClosed": "Stream closed",
     "liveLogsRevoked": "Live log stream closed (code {code}); peer access may have changed or been revoked.",
     "remoteShareOriginUnavailable": "Public share links are unavailable for {server} because its public base domain is not configured or cannot be read. Configure a public base domain on {server} and grant Settings read access to create remote share links."
-  }
+  },
+  "Reset atmosphere defaults": "Reset atmosphere defaults"
 }

@@ -96,7 +96,7 @@ impl Default for HostBackupConfig {
             .unwrap_or_else(|| PathBuf::from("/home/aetherflow"));
         Self {
             backup_dir: PathBuf::from("/var/lib/aetherflow/backups"),
-            app_version: "v4.0.0".to_string(),
+            app_version: crate::default_host_app_version(),
             sqlite_db_path: Some(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite")),
             snapshot_options: SnapshotOptions::default(),
             config_targets: default_host_targets_for_root(Path::new("/"), &owner_home),
@@ -345,12 +345,20 @@ pub fn create_host_archive_backup(
 
             if meta.is_file() {
                 let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
+                let trusted_uid = if matches!(
+                    rel_str.as_str(),
+                    "var/lib/aetherflow/.master.creds" | "var/lib/aetherflow/oidc_rsa.pem"
+                ) {
+                    config.snapshot_options.trusted_source_uid
+                } else {
+                    None
+                };
                 append_verified_file_to_tar(
                     &mut tar_builder,
                     &staging_dir,
                     &target.source_path,
                     None,
-                    None,
+                    trusted_uid,
                     &rel_str,
                     BackupTargetKind::ConfigFile,
                     target.logical_fhs_path.clone(),

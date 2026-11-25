@@ -194,6 +194,73 @@ pub fn execute_provision_steps(
     })
 }
 
+pub(super) fn discover_primary_non_loopback_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip().to_canonical();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+pub(super) fn build_allowed_hosts_and_cors_for_bind(
+    bind_addr: &str,
+    port: &str,
+    explicit_host_ip: Option<&str>,
+    discovered_ip: Option<std::net::IpAddr>,
+) -> (String, String) {
+    use std::net::IpAddr;
+
+    let mut hosts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    let mut cors = vec![
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+    ];
+    let mut push_ip = |ip: IpAddr| {
+        let canonical = ip.to_canonical();
+        if canonical.is_loopback() || canonical.is_unspecified() {
+            return;
+        }
+        let host_entry = canonical.to_string();
+        if !hosts.contains(&host_entry) {
+            hosts.push(host_entry.clone());
+        }
+        let origin = match canonical {
+            IpAddr::V4(_) => format!("http://{host_entry}:{port}"),
+            IpAddr::V6(_) => format!("http://[{host_entry}]:{port}"),
+        };
+        if !cors.contains(&origin) {
+            cors.push(origin);
+        }
+    };
+
+    let clean_bind = bind_addr
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if let Ok(ip) = clean_bind.parse::<IpAddr>() {
+        let canonical = ip.to_canonical();
+        if !canonical.is_loopback() {
+            if canonical.is_unspecified() {
+                if let Some(raw_explicit) = explicit_host_ip.map(str::trim) {
+                    if let Ok(explicit_ip) = raw_explicit
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<IpAddr>()
+                    {
+                        push_ip(explicit_ip);
+                    }
+                }
+                if let Some(ip) = discovered_ip {
+                    push_ip(ip);
+                }
+            } else {
+                push_ip(canonical);
+            }
+        }
+    }
+
+    (hosts.join(","), cors.join(","))
+}
+
 pub(super) fn generate_crypto_secret(len: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     // 248 is the largest multiple of 62 <= 256 (62 * 4 = 248); rejection sampling eliminates modulo bias.
@@ -429,14 +496,34 @@ fn execute_single_rust_step(
 
                 let aes_key = generate_crypto_secret(32);
                 let jwt_secret = generate_crypto_secret(64);
+                let bind_addr = std::env::var("BIND_ADDR")
+                    .or_else(|_| std::env::var("AETHERFLOW_BIND_ADDR"))
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "0.0.0.0".to_string());
+                let port = std::env::var("PORT")
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty() && v.parse::<u16>().is_ok_and(|p| p > 0))
+                    .unwrap_or_else(|| "8080".to_string());
+                let explicit_host_ip = std::env::var("AETHERFLOW_PUBLIC_IP")
+                    .or_else(|_| std::env::var("HOST_IP"))
+                    .ok();
+                let (allowed_hosts, allowed_cors_origin) = build_allowed_hosts_and_cors_for_bind(
+                    &bind_addr,
+                    &port,
+                    explicit_host_ip.as_deref(),
+                    discover_primary_non_loopback_ip(),
+                );
 
                 let env_content = format!(
                     "AES_MASTER_KEY={aes_key}\n\
                      JWT_SECRET={jwt_secret}\n\
-                     PORT=8080\n\
-                     BIND_ADDR=0.0.0.0\n\
-                     ALLOWED_HOSTS=localhost,127.0.0.1\n\
-                     ALLOWED_CORS_ORIGIN=http://localhost:8080,http://127.0.0.1:8080\n\
+                     PORT={port}\n\
+                     BIND_ADDR={bind_addr}\n\
+                     ALLOWED_HOSTS={allowed_hosts}\n\
+                     ALLOWED_CORS_ORIGIN={allowed_cors_origin}\n\
                      AF_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\n\
                      DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\n\
                      AETHERFLOW_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\n\

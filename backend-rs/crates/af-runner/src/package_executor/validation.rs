@@ -594,19 +594,6 @@ pub(super) fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecuto
             }
             Ok(())
         }
-        DeclarativeStep::RunCommand { program, args, .. } => {
-            if program.trim().is_empty() {
-                return Err(PackageExecutorError::Validation(
-                    "RunCommand requires a non-empty program".into(),
-                ));
-            }
-            if args.is_empty() {
-                return Err(PackageExecutorError::Validation(
-                    "RunCommand requires at least one argument".into(),
-                ));
-            }
-            Ok(())
-        }
         DeclarativeStep::WaitForHttpReady { path, .. } => {
             if !path.starts_with('/') || path.contains(['\0', '\n', '\r', ' ']) {
                 return Err(PackageExecutorError::Validation(format!(

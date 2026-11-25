@@ -13,6 +13,38 @@ use af_host::{
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+/// Resolves the running host version from `af_release::runtime::runtime_version_for_root`
+/// (honoring `<root>/opt/AetherFlow/current/.version` when `--root` is supplied), validates it
+/// as a semver triplet via `af_host::parse_semver_triplet`, and falls back to
+/// `concat!("v", env!("CARGO_PKG_VERSION"))` for non-semver or empty stamps.
+pub(crate) fn resolve_runtime_host_version(isolated_root: Option<&Path>) -> String {
+    let candidate = af_release::runtime::runtime_version_for_root(isolated_root);
+    if af_host::parse_semver_triplet(&candidate).is_ok() {
+        candidate
+    } else {
+        concat!("v", env!("CARGO_PKG_VERSION")).to_string()
+    }
+}
+
+pub(crate) fn target_requires_live_quiescence(
+    global: &GlobalOptions,
+    resolved_target: &Path,
+    active_db_path: Option<&Path>,
+) -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    if global.root.is_some() && resolved_target != Path::new("/") {
+        return false;
+    }
+    let target_contains_active_db =
+        af_models::resolve_contained_sqlite_restore_override(resolved_target, active_db_path)
+            .is_some();
+    resolved_target == Path::new("/")
+        || is_system_scoped_backup_path(resolved_target)
+        || target_contains_active_db
+}
+
 pub(crate) fn resolve_backup_config(
     global: &GlobalOptions,
     explicit_backup_dir: Option<&Path>,
@@ -249,11 +281,13 @@ pub(crate) fn execute_backup_command(
         } => Some((backup_dir.as_deref(), None, *operator_privileged)),
         _ => None,
     };
+    let runtime_host_version = resolve_runtime_host_version(global.root.as_deref());
     let _maintenance_lock = if global.dry_run {
         None
     } else if let Some((backup_dir, explicit_db_path, operator_privileged)) = mutating_backup_target
     {
-        let cfg = resolve_backup_config(global, backup_dir, explicit_db_path, "v4.0.0")?;
+        let cfg =
+            resolve_backup_config(global, backup_dir, explicit_db_path, &runtime_host_version)?;
         require_backup_write_privilege(
             global,
             &cfg.backup_dir,
@@ -335,7 +369,8 @@ pub(crate) fn execute_backup_command(
             ))
         }
         BackupCliCommand::List { backup_dir } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             let items = list_backup_inventory(&cfg.backup_dir)?;
             let mut lines = vec![format!(
                 "Backups in {} ({} total):",
@@ -368,7 +403,8 @@ pub(crate) fn execute_backup_command(
             backup_dir,
             trusted_sqlite_uid,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             let effective_trusted_uid = (*trusted_sqlite_uid).or(env_trusted_uid);
             let (verification, manifest_opt) = verify_backup_artifact_with_trusted_uid(
                 &cfg.backup_dir,
@@ -485,7 +521,8 @@ pub(crate) fn execute_backup_command(
             trusted_sqlite_uid,
             trusted_sqlite_gid,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             if global.dry_run {
                 let artifact_path = safe_backup_file_path(&cfg.backup_dir, filename)?;
                 if !std::fs::symlink_metadata(&artifact_path)
@@ -538,7 +575,7 @@ pub(crate) fn execute_backup_command(
             }
             if !*confirm_destructive_restore {
                 let dummy_manifest =
-                    BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
+                    BackupManifest::new(&runtime_host_version, "aetherflow_placeholder.sqlite")?;
                 let dummy_stage = target_root
                     .clone()
                     .unwrap_or_else(|| cfg.backup_dir.join("restore-stage"));
@@ -549,8 +586,8 @@ pub(crate) fn execute_backup_command(
                     compatibility: af_host::CompatibilityReport {
                         compatible: true,
                         manifest_schema_version: 1,
-                        backup_app_version: "v4.0.0".to_string(),
-                        host_app_version: "v4.0.0".to_string(),
+                        backup_app_version: runtime_host_version.clone(),
+                        host_app_version: runtime_host_version.clone(),
                         entry_count: 0,
                         has_sqlite_snapshot: false,
                         warnings: vec![format!("requested artifact: {}", filename)],
@@ -592,7 +629,7 @@ pub(crate) fn execute_backup_command(
                 None
             };
             let exec_opts = af_host::RestoreExecutionOptions {
-                host_app_version: "v4.0.0".to_string(),
+                host_app_version: runtime_host_version.clone(),
                 max_supported_sqlite_user_version: None,
                 allow_overwrite: *allow_overwrite,
                 confirm_destructive_restore: true,
@@ -606,8 +643,12 @@ pub(crate) fn execute_backup_command(
                 ..Default::default()
             };
 
-            let isolated_target = global.root.is_some() && resolved_target != Path::new("/");
-            let report = if isolated_target || !cfg!(target_os = "linux") {
+            let live_quiescence = target_requires_live_quiescence(
+                global,
+                &resolved_target,
+                cfg.sqlite_db_path.as_deref(),
+            );
+            let report = if !live_quiescence {
                 af_host::execute_staged_restore(
                     &cfg.backup_dir,
                     filename,
@@ -644,7 +685,8 @@ pub(crate) fn execute_backup_command(
             trusted_sqlite_uid,
             trusted_sqlite_gid,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             let resolved_target = target_root
                 .clone()
                 .or_else(|| global.root.clone())
@@ -695,8 +737,12 @@ pub(crate) fn execute_backup_command(
                 ));
             }
 
-            let isolated_target = global.root.is_some() && resolved_target != Path::new("/");
-            let recovered_directories = if isolated_target || !cfg!(target_os = "linux") {
+            let live_quiescence = target_requires_live_quiescence(
+                global,
+                &resolved_target,
+                cfg.sqlite_db_path.as_deref(),
+            );
+            let recovered_directories = if !live_quiescence {
                 af_host::recover_interrupted_restore_with_context(
                     &cfg.backup_dir,
                     &recovery_context,
@@ -730,7 +776,8 @@ pub(crate) fn execute_backup_command(
             backup_dir,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,
@@ -767,7 +814,8 @@ pub(crate) fn execute_backup_command(
             retention_days,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,
@@ -806,7 +854,8 @@ pub(crate) fn execute_backup_command(
             backup_dir,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,
@@ -856,7 +905,8 @@ pub(crate) fn execute_backup_command(
             backup_dir,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let cfg =
+                resolve_backup_config(global, backup_dir.as_deref(), None, &runtime_host_version)?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,

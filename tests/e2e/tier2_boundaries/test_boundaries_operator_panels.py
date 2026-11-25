@@ -132,7 +132,14 @@ class TestB25DuplicateRuleNamesHandled(TestCase):
         super().__init__("T2_B25_05", "F25", 2, "Creating rule with duplicate name handles collision gracefully")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(True, "B25: Duplicate rule collision contract verified")
+        rules = inspector.read_file("backend-rs/crates/af-api/src/notifications_ext/rules.rs") or ""
+        tests = inspector.read_file("backend-rs/crates/af-api/src/notifications_ext/tests.rs") or ""
+        self.assert_true(
+            "StatusCode::CONFLICT" in rules
+            and "DUPLICATE_RULE_NAME" in rules
+            and "DUPLICATE_RULE_NAME" in tests,
+            "B25: notification rule creation must reject duplicate names with 409 Conflict and Rust test coverage",
+        )
 
 
 # ============================================================================

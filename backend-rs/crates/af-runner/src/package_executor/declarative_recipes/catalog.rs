@@ -1077,6 +1077,7 @@ pub(in crate::package_executor) fn build_mergerfs_recipe() -> DeclarativePackage
             },
             DeclarativeStep::UnmountPaths {
                 paths: vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()],
+                only_if_delete_data: false,
                 progress_pct: 40,
                 description: "Unmounting active MergerFS mountpoints (/mnt/unionfs, /mnt/mergerfs)..."
                     .to_string(),
@@ -1255,14 +1256,9 @@ pub(in crate::package_executor) fn build_rclone_recipe() -> DeclarativePackageRe
                 progress_pct: 30,
                 description: "Stopping and removing rclone.service...".to_string(),
             },
-            DeclarativeStep::RunCommand {
-                program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "for mp in /mnt/remote; do if mountpoint -q \"$mp\" 2>/dev/null; then fusermount -u \"$mp\" 2>/dev/null || fusermount -uz \"$mp\" 2>/dev/null || umount -l \"$mp\" 2>/dev/null || true; if mountpoint -q \"$mp\" 2>/dev/null; then exit 1; fi; fi; done".to_string(),
-                ],
+            DeclarativeStep::UnmountPaths {
+                paths: vec!["/mnt/remote".to_string()],
                 only_if_delete_data: true,
-                ignore_errors: false,
                 progress_pct: 70,
                 description: "Unmounting active Rclone FUSE mountpoint (/mnt/remote) before directory removal...".to_string(),
             },

@@ -634,7 +634,10 @@ async fn metrics_endpoint_enforces_access_control_and_reports_runtime_version() 
     let health = health_check().await.0;
     assert_eq!(health["version"], expected_version);
 
-    // In-process oneshot without ConnectInfo is allowed
+    std::env::remove_var("METRICS_PUBLIC");
+    std::env::remove_var("METRICS_BEARER_TOKEN");
+
+    // In-process oneshot without credentials is rejected 401
     let app = build_router();
     let in_proc_resp = app
         .clone()
@@ -646,15 +649,7 @@ async fn metrics_endpoint_enforces_access_control_and_reports_runtime_version() 
         )
         .await
         .unwrap();
-    assert_eq!(in_proc_resp.status(), StatusCode::OK);
-    let metrics_bytes = axum::body::to_bytes(in_proc_resp.into_body(), 65536)
-        .await
-        .unwrap();
-    let metrics_text = String::from_utf8(metrics_bytes.to_vec()).unwrap();
-    assert!(
-        metrics_text.contains(&format!(r#"version="{}""#, expected_version)),
-        "expected version {expected_version} in metrics output: {metrics_text}"
-    );
+    assert_eq!(in_proc_resp.status(), StatusCode::UNAUTHORIZED);
 
     // Non-loopback ConnectInfo without credentials is rejected 401
     let mut remote_req = axum::http::Request::builder()
@@ -667,7 +662,7 @@ async fn metrics_endpoint_enforces_access_control_and_reports_runtime_version() 
     let remote_resp = app.clone().oneshot(remote_req).await.unwrap();
     assert_eq!(remote_resp.status(), StatusCode::UNAUTHORIZED);
 
-    // Loopback ConnectInfo is allowed
+    // Loopback ConnectInfo without credentials is also rejected 401 (ESC-07)
     let mut loopback_req = axum::http::Request::builder()
         .uri("/metrics")
         .body(axum::body::Body::empty())
@@ -676,9 +671,9 @@ async fn metrics_endpoint_enforces_access_control_and_reports_runtime_version() 
         .extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44444))));
     let loopback_resp = app.clone().oneshot(loopback_req).await.unwrap();
-    assert_eq!(loopback_resp.status(), StatusCode::OK);
+    assert_eq!(loopback_resp.status(), StatusCode::UNAUTHORIZED);
 
-    // Non-loopback with valid METRICS_BEARER_TOKEN is allowed
+    // Valid METRICS_BEARER_TOKEN is allowed and reports runtime version
     std::env::set_var("METRICS_BEARER_TOKEN", "test-metrics-secret-token");
     let mut bearer_req = axum::http::Request::builder()
         .uri("/metrics")
@@ -688,9 +683,30 @@ async fn metrics_endpoint_enforces_access_control_and_reports_runtime_version() 
     bearer_req
         .extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([198, 51, 100, 10], 44445))));
-    let bearer_resp = app.oneshot(bearer_req).await.unwrap();
+    let bearer_resp = app.clone().oneshot(bearer_req).await.unwrap();
     std::env::remove_var("METRICS_BEARER_TOKEN");
     assert_eq!(bearer_resp.status(), StatusCode::OK);
+    let metrics_bytes = axum::body::to_bytes(bearer_resp.into_body(), 65536)
+        .await
+        .unwrap();
+    let metrics_text = String::from_utf8(metrics_bytes.to_vec()).unwrap();
+    assert!(
+        metrics_text.contains(&format!(r#"version="{}""#, expected_version)),
+        "expected version {expected_version} in metrics output: {metrics_text}"
+    );
+
+    // Explicit METRICS_PUBLIC=1 opt-in allows unauthenticated scrapes
+    std::env::set_var("METRICS_PUBLIC", "1");
+    let mut public_req = axum::http::Request::builder()
+        .uri("/metrics")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    public_req
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44446))));
+    let public_resp = app.oneshot(public_req).await.unwrap();
+    std::env::remove_var("METRICS_PUBLIC");
+    assert_eq!(public_resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

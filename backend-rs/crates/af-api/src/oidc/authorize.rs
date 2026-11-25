@@ -336,21 +336,10 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
         let return_to = urlencoding::encode(full_uri);
         return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
     };
-
-    let user_active = crate::auth::load_active_human_subject(&conn, claims.user_id)
-        .is_ok_and(|subj| claims.ver >= subj.sessions_revoked_after);
-    let session_family_id =
-        crate::auth::resolve_session_family_id(&conn, claims.user_id, &claims.jti);
-    let validated_scope = validate_oidc_scopes(&q.scope);
-    let existing_consent = if user_active {
-        match has_existing_consent_in_conn(&conn, claims.user_id, &q.client_id, &validated_scope) {
-            Ok(consented) => consented,
-            Err(_) => return oidc_server_error(),
-        }
-    } else {
-        false
-    };
-    drop(conn);
+    if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
+        let return_to = urlencoding::encode(full_uri);
+        return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
+    }
 
     let peer_ip = req
         .extensions()
@@ -362,18 +351,39 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let client_ip = crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip);
-    let caller_strict_fp = crate::auth::legacy_client_fingerprint(&client_ip, user_agent);
-    if !user_active
-        || crate::auth::is_session_token_revoked_beyond_grace_for_fp(
-            &claims.jti,
-            claims.user_id,
-            Some(&caller_strict_fp),
-        )
-        || !crate::auth::matches_client_fingerprint(&claims.cfp, &client_ip, user_agent)
-    {
+    if !crate::auth::matches_client_fingerprint(&claims.cfp, &client_ip, user_agent) {
         let return_to = urlencoding::encode(full_uri);
         return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
     }
+    let caller_strict_fp = crate::auth::legacy_client_fingerprint(&client_ip, user_agent);
+    let session_check = crate::auth::verify_active_session_on_conn(
+        &conn,
+        claims.user_id,
+        &claims.jti,
+        claims.ver,
+        Utc::now().timestamp(),
+        crate::auth::RotationGrace::StrictFingerprint(&caller_strict_fp),
+    );
+    match session_check {
+        Ok(_) => {}
+        Err(crate::auth::SessionValidationError::DbError) => return oidc_server_error(),
+        Err(
+            crate::auth::SessionValidationError::Suspended
+            | crate::auth::SessionValidationError::MissingOrRevoked,
+        ) => {
+            let return_to = urlencoding::encode(full_uri);
+            return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
+        }
+    }
+    let session_family_id =
+        crate::auth::resolve_session_family_id(&conn, claims.user_id, &claims.jti);
+    let validated_scope = validate_oidc_scopes(&q.scope);
+    let existing_consent =
+        match has_existing_consent_in_conn(&conn, claims.user_id, &q.client_id, &validated_scope) {
+            Ok(consented) => consented,
+            Err(_) => return oidc_server_error(),
+        };
+    drop(conn);
 
     if existing_consent {
         let Ok(code) = generate_and_store_auth_code(

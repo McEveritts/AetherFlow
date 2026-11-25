@@ -95,6 +95,14 @@ af_ensure_lock_dir() {
 }
 
 
+af_mkdir_p_0755() {
+    if [[ "$#" -eq 0 ]]; then
+        return 0
+    fi
+    ( umask 022 && mkdir -p -- "$@" ) || return 1
+    chmod 0755 -- "$@" || return 1
+}
+
 timestamp() {
     date "+%Y-%m-%d %H:%M:%S"
 }

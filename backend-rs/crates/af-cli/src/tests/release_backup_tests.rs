@@ -939,3 +939,88 @@ fn backup_restore_dry_run_validates_traversal_and_missing_artifact_or_manifest()
         .message
         .contains("missing required backup manifest"));
 }
+
+#[test]
+fn backup_preflight_allow_overwrite_alias_quiescence_gating_and_dynamic_version() {
+    let tmp = TempTestDir::new("esc08-cli-flags-quiescence-version");
+    let root = tmp.path().join("root");
+    let current = root.join("opt/AetherFlow/current");
+    fs::create_dir_all(&current).unwrap();
+    fs::write(current.join(".version"), "v4.2.1-nightly.9\n").unwrap();
+
+    // 1. Dynamic host version resolution honors `<root>/opt/AetherFlow/current/.version`.
+    let resolved_root_ver = crate::commands::backup::resolve_runtime_host_version(Some(&root));
+    assert_eq!(resolved_root_ver, "v4.2.1-nightly.9");
+
+    // Non-semver `.version` falls back safely to Cargo package version.
+    fs::write(current.join(".version"), "dev-untagged\n").unwrap();
+    let fallback_ver = crate::commands::backup::resolve_runtime_host_version(Some(&root));
+    assert_eq!(fallback_ver, concat!("v", env!("CARGO_PKG_VERSION")));
+
+    // 2. `--allow-overwrite` is accepted as an alias for `--allow-staging-overwrite` on restore-preflight.
+    fs::write(current.join(".version"), "v4.2.1\n").unwrap();
+    let inv = parse_cli_args([
+        "--root",
+        root.to_str().unwrap(),
+        "backup",
+        "restore-preflight",
+        "sample.tar.gz",
+        "--target-root",
+        "/tmp/stage-preflight",
+        "--allow-overwrite",
+    ])
+    .unwrap();
+    match inv.command {
+        AfCommand::Backup(BackupCliCommand::RestorePreflight {
+            host_version,
+            overwrite_policy,
+            ..
+        }) => {
+            assert_eq!(host_version, "v4.2.1");
+            assert_eq!(
+                overwrite_policy,
+                af_host::OverwritePolicy::AllowRegularFilesInStaging
+            );
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    // 3. Quiescence gating: isolated staging target without `--root` does NOT trigger live
+    //    quiescence unless the target is `/`, system-scoped, or contains the active AF_DB_PATH.
+    let live_global = GlobalOptions::default();
+    let default_db = Path::new("/var/lib/aetherflow/aetherflow.sqlite");
+    assert!(
+        !crate::commands::backup::target_requires_live_quiescence(
+            &live_global,
+            Path::new("/tmp/stage-123"),
+            Some(default_db),
+        ),
+        "isolated staging target must use NoopQuiescenceController"
+    );
+    assert!(
+        crate::commands::backup::target_requires_live_quiescence(
+            &live_global,
+            Path::new("/"),
+            Some(default_db),
+        ),
+        "canonical `/` restore must quiesce live services"
+    );
+    let custom_db = Path::new("/mnt/fast-ssd/af-data/aetherflow.sqlite");
+    assert!(
+        crate::commands::backup::target_requires_live_quiescence(
+            &live_global,
+            Path::new("/mnt/fast-ssd/af-data"),
+            Some(custom_db),
+        ),
+        "target containing custom live AF_DB_PATH must quiesce live services"
+    );
+    let isolated_global = GlobalOptions {
+        root: Some(root.clone()),
+        ..GlobalOptions::default()
+    };
+    assert!(!crate::commands::backup::target_requires_live_quiescence(
+        &isolated_global,
+        &root,
+        Some(&root.join("var/lib/aetherflow/aetherflow.sqlite")),
+    ));
+}

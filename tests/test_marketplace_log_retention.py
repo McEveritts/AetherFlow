@@ -434,6 +434,7 @@ SYSTEMD_UNITS_DST="$2"
 LOG_FILE="$3"
 verify_isolated_systemd_lifecycle_authorized() { :; }
 log_info() { :; }
+log_warn() { printf 'WARN %s\n' "$*" >&2; }
 systemctl() {
     printf 'systemctl %s\n' "$*" >> "$LOG_FILE"
     [[ "$*" != 'start aetherflow-log-retention.service' || "${FAIL_START}" != fail ]]
@@ -452,17 +453,23 @@ pm2() { printf 'stubbed pm2 %s\n' "$*" >> "$LOG_FILE"; }
             self.assertEqual((self.units / name).read_bytes(), (ROOT / "deploy/systemd" / name).read_bytes())
         commands = self.commands.read_text()
         self.assertLess(commands.index("systemctl daemon-reload"),
-                        commands.index("systemctl start aetherflow-log-retention.service"))
-        self.assertLess(commands.index("systemctl enable --now aetherflow-log-retention.timer"),
                         commands.index("systemctl restart aetherflow-runner.service"))
+        self.assertLess(commands.index("systemctl restart aetherflow-runner.service"),
+                        commands.index("systemctl restart aetherflow-api.service"))
+        self.assertLess(commands.index("systemctl restart aetherflow-api.service"),
+                        commands.index("systemctl enable --now aetherflow-log-retention.timer"))
+        self.assertLess(commands.index("systemctl enable --now aetherflow-log-retention.timer"),
+                        commands.index("systemctl start aetherflow-log-retention.service"))
 
     def test_release_retention_failure_is_not_silently_ignored(self):
         result = self.restart(fail_start=True)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         commands = self.commands.read_text()
+        self.assertIn("systemctl restart aetherflow-runner.service", commands)
+        self.assertIn("systemctl restart aetherflow-api.service", commands)
+        self.assertIn("systemctl enable --now aetherflow-log-retention.timer", commands)
         self.assertIn("systemctl start aetherflow-log-retention.service", commands)
-        self.assertNotIn("systemctl enable --now aetherflow-log-retention.timer", commands)
-        self.assertNotIn("systemctl restart aetherflow-runner.service", commands)
+        self.assertIn("WARN Best-effort systemctl start aetherflow-log-retention.service failed; continuing.", result.stderr)
 
     def test_pre_feature_release_does_not_enable_an_absent_helper(self):
         (self.current / "deploy/log-retention.py").unlink()

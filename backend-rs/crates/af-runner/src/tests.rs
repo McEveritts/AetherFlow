@@ -239,22 +239,27 @@ async fn runner_shutdown_drains_inflight_response_before_exiting() {
 
 #[test]
 fn test_package_script_resolution_prefers_current_release() {
-    let defaults = package_script_roots();
+    let exe_dir = PathBuf::from("/opt/AetherFlow/releases/20261123-immutable");
+    let defaults = package_script_roots_for_exe_dir(Some(&exe_dir));
+    assert_eq!(defaults[0], exe_dir.join("packages/package"));
+    assert_eq!(defaults[1], exe_dir.join("../packages/package"));
     assert_eq!(
-        defaults[0],
+        defaults[2],
         PathBuf::from("/opt/AetherFlow/current/packages/package")
     );
     assert_eq!(
-        defaults[1],
+        defaults[3],
         PathBuf::from("/opt/AetherFlow/packages/package")
     );
     assert_eq!(
-        defaults[2],
+        defaults[4],
         PathBuf::from("/usr/local/bin/AetherFlow/package")
     );
 
+    // Without an exe_dir, fallback order stays current -> legacy -> usr/local
+    let fallback_defaults = package_script_roots_for_exe_dir(None);
     let scratch = env::temp_dir().join(format!("af-script-paths-{}", uuid::Uuid::new_v4()));
-    let roots: Vec<_> = defaults[..3]
+    let roots: Vec<_> = fallback_defaults[..3]
         .iter()
         .map(|root| scratch.join(root.strip_prefix("/").unwrap()))
         .collect();
@@ -299,6 +304,74 @@ fn test_package_script_resolution_prefers_current_release() {
         resolve_package_script_in_roots("invalid", "installpackage-dispatcharr", &roots).is_none()
     );
     fs::remove_dir_all(scratch).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_runner_resolvers_prefer_current_exe_parent_and_receipts_are_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let exe_dir = PathBuf::from("/opt/AetherFlow/releases/20261123-slot");
+
+    let af_candidates = af_cli_binary_candidates(Some(&exe_dir));
+    assert_eq!(af_candidates[0], exe_dir.join("bin/af"));
+    assert_eq!(af_candidates[1], exe_dir.join("af"));
+    assert_eq!(
+        af_candidates[2],
+        PathBuf::from("/opt/AetherFlow/current/bin/af")
+    );
+    assert_eq!(af_candidates[4], PathBuf::from("/usr/local/bin/af"));
+
+    let rm_candidates = release_manager_script_candidates(Some(&exe_dir));
+    assert_eq!(rm_candidates[0], exe_dir.join("deploy/release-manager.sh"));
+    assert_eq!(
+        rm_candidates[1],
+        exe_dir.join("../deploy/release-manager.sh")
+    );
+    assert_eq!(
+        rm_candidates[2],
+        PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.sh")
+    );
+
+    let sandbox_candidates = sandbox_script_candidates(Some(&exe_dir));
+    assert_eq!(
+        sandbox_candidates[0],
+        exe_dir.join("deploy/security/af-systemd-sandbox")
+    );
+    assert_eq!(
+        sandbox_candidates[2],
+        exe_dir.join("packages/system/af-systemd-sandbox")
+    );
+    assert_eq!(
+        sandbox_candidates[4],
+        PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox")
+    );
+
+    let scratch = env::temp_dir().join(format!("af-receipt-mode-{}", uuid::Uuid::new_v4()));
+    let jobs_dir = scratch.join(".self-update-jobs");
+    fs::create_dir_all(&jobs_dir).unwrap();
+    fs::set_permissions(&jobs_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let receipt_path = jobs_dir.join("aetherflow-self-update-deploy-stable-12345678.service.json");
+    let status = SelfUpdateJobStatus {
+        status: "launching".into(),
+        completed: false,
+        success: false,
+        job_unit: "aetherflow-self-update-deploy-stable-12345678.service".into(),
+        error: String::new(),
+        exit_code: None,
+    };
+    write_self_update_job_status_atomic(&receipt_path, &status).unwrap();
+    let mode = fs::symlink_metadata(&receipt_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "self-update receipt must be private 0600, got {:o}",
+        mode
+    );
+    let _ = fs::remove_dir_all(&scratch);
 }
 
 #[test]

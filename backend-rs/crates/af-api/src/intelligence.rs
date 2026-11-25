@@ -16,7 +16,8 @@ mod flowai_tests;
 mod media_cluster_tests;
 
 pub(crate) use ai_providers::{
-    call_configured_ai, clean_json_fence, is_forbidden_model_alias, is_valid_local_model_id,
+    call_configured_ai, clean_json_fence, is_forbidden_model_alias, is_self_target_ai_endpoint,
+    is_valid_local_model_id,
 };
 pub use ai_providers::{resolve_provider_settings, ChatMessage, ProposedAction, ProviderSettings};
 pub use bandwidth::{bandwidth_analyze, bandwidth_apply};

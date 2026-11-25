@@ -179,7 +179,11 @@ if [[ -n "$TWC_TAG" ]] && git ls-remote --exit-code --tags "$TWC_REPO" "refs/tag
     if af_logged git clone --branch "$TWC_TAG" --depth 1 "$TWC_REPO" "$TMP_TWC" && git -C "$TMP_TWC" rev-parse --verify HEAD >/dev/null 2>&1; then
         if [[ -d "${TMP_TWC}/src" ]]; then
             WEB_DIR="/usr/share/transmission/web"
-            install -d -m 0755 -- "$WEB_DIR"
+            if declare -F af_mkdir_p_0755 >/dev/null 2>&1; then
+                af_mkdir_p_0755 "$WEB_DIR"
+            else
+                ( umask 022 && mkdir -p -- "$WEB_DIR" ) && chmod 0755 -- "$WEB_DIR"
+            fi
             if [[ -f "${WEB_DIR}/index.html" && ! -f "${WEB_DIR}/index.original.html" ]]; then
                 cp "${WEB_DIR}/index.html" "${WEB_DIR}/index.original.html"
             fi

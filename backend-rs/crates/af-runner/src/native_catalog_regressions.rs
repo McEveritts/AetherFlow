@@ -651,18 +651,14 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
 
     // 3. A failed purge preserves .rclone.retained so the operator can retry safely.
     let mut failing_recipe = recipe.clone();
-    failing_recipe.remove_steps.push(DeclarativeStep::RunCommand {
-        program: "/bin/false".into(),
-        args: vec!["purge-fail".into()],
-        only_if_delete_data: true,
-        ignore_errors: false,
+    failing_recipe.remove_steps.push(DeclarativeStep::AptUpdate {
         progress_pct: 99,
         description: "Inject purge failure before receipt commit".into(),
     });
     let mut purge_env = base_env.clone();
     purge_env.delete_data = true;
     let failing_runner = MockCommandRunner {
-        fail_program: Some("/bin/false".into()),
+        fail_program: Some("apt-get".into()),
         ..Default::default()
     };
     let err = DeclarativePackageExecutor::with_runner(purge_env.clone(), failing_runner)
@@ -674,7 +670,7 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("/bin/false"), "{err}");
+    assert!(err.to_string().contains("apt-get"), "{err}");
     assert!(fixture("/install/.rclone.retained").is_file());
 
     // 4. Successful explicit purge removes .rclone.retained and managed data while preserving
@@ -749,21 +745,26 @@ async fn rclone_failed_migration_restores_unit_and_credentials() {
         fs::write(path, content).unwrap();
     }
 
+    fs::create_dir_all(root.join("mnt/remote")).unwrap();
+    fs::create_dir_all(root.join("proc")).unwrap();
+    fs::write(
+        root.join("proc/mounts"),
+        "rclone:remote /mnt/remote fuse.rclone rw,nosuid,nodev 0 0\n",
+    )
+    .unwrap();
     let mut recipe = get_declarative_recipe("rclone").unwrap();
-    recipe.install_steps.push(DeclarativeStep::RunCommand {
-        program: "/bin/false".into(),
-        args: vec!["fixture".into()],
+    recipe.install_steps.push(DeclarativeStep::UnmountPaths {
+        paths: vec!["/mnt/remote".into()],
         only_if_delete_data: false,
-        ignore_errors: false,
         progress_pct: 99,
         description: "Inject a failure after Rclone migration".into(),
     });
-    let runner = MockCommandRunner { fail_program: Some("/bin/false".into()), ..Default::default() };
+    let runner = MockCommandRunner::default();
     let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
     let error = executor
         .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
         .await.unwrap_err();
-    assert!(error.to_string().contains("/bin/false"), "{error}");
+    assert!(error.to_string().contains("active mountpoint"), "{error}");
     for (path, content) in original {
         assert_eq!(fs::read(path).unwrap(), content, "{}", path.display());
     }
@@ -954,17 +955,13 @@ async fn af_aud_002_mergerfs_and_rclone_purge_preflight_and_mountpoint_guard() {
         .iter()
         .position(|s| matches!(
             s,
-            DeclarativeStep::UnmountPaths { paths, .. }
-                if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
+            DeclarativeStep::UnmountPaths {
+                paths,
+                only_if_delete_data: false,
+                ..
+            } if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
         ))
-        .expect("mergerfs uninstall must emit shell-free DeclarativeStep::UnmountPaths preflight");
-    assert!(
-        !mergerfs_recipe
-            .remove_steps
-            .iter()
-            .any(|s| matches!(s, DeclarativeStep::RunCommand { .. })),
-        "mergerfs uninstall must not shell out via RunCommand"
-    );
+        .expect("mergerfs uninstall must emit unconditional shell-free DeclarativeStep::UnmountPaths preflight");
     let remove_idx = mergerfs_recipe
         .remove_steps
         .iter()
@@ -993,8 +990,15 @@ async fn af_aud_002_mergerfs_and_rclone_purge_preflight_and_mountpoint_guard() {
     let rclone_cmd_idx = rclone_recipe
         .remove_steps
         .iter()
-        .position(|s| matches!(s, DeclarativeStep::RunCommand { .. }))
-        .expect("rclone DELETE_DATA=true uninstall must emit DeclarativeStep::RunCommand preflight");
+        .position(|s| matches!(
+            s,
+            DeclarativeStep::UnmountPaths {
+                paths,
+                only_if_delete_data: true,
+                ..
+            } if paths == &vec!["/mnt/remote".to_string()]
+        ))
+        .expect("rclone DELETE_DATA=true uninstall must emit shell-free DeclarativeStep::UnmountPaths preflight");
     let rclone_remove_idx = rclone_recipe
         .remove_steps
         .iter()

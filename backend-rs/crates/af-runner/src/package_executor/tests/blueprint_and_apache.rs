@@ -848,7 +848,7 @@ fn managed_apache_vhost_routes_protected_apps_through_the_gateway() {
 }
 
 #[test]
-fn inherited_apache_vhost_and_rutorrent_keep_apache_auth() {
+fn external_rutorrent_routes_through_gateway_while_inherited_custom_blocks_keep_apache_auth() {
     let root = create_isolated_test_dir("inherited-vhost-auth");
     let htpasswd = root.join(APACHE_HTPASSWD.trim_start_matches('/'));
     fs::create_dir_all(htpasswd.parent().unwrap()).unwrap();
@@ -871,9 +871,9 @@ fn inherited_apache_vhost_and_rutorrent_keep_apache_auth() {
         &[],
     )
     .unwrap();
-    assert!(body.contains("ProxyPass / http://127.0.0.1:8087/"));
-    assert!(body.contains(APACHE_HTPASSWD));
-    assert!(!body.contains(GATEWAY_APP_HEADER));
+    assert!(body.contains("ProxyPass / http://127.0.0.1:8080/"));
+    assert!(body.contains(&format!("RequestHeader set {GATEWAY_APP_HEADER} rutorrent")));
+    assert!(!body.contains(APACHE_HTPASSWD));
 
     let legacy = "\
 <VirtualHost *:80>

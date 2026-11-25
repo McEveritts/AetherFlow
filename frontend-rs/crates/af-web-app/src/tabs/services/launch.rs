@@ -77,18 +77,34 @@ pub(crate) fn launch_app(
 }
 
 fn launch_exchange(service: &Value, destination: &str) -> Option<Url> {
-    let public_domain = service["public_domain"].as_str()?;
     let url = Url::parse(destination).ok()?;
-    if service["external_access_enabled"] != true
-        || url.scheme() != "https"
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !url.host_str()?.eq_ignore_ascii_case(public_domain)
-    {
+    if url.port().is_some() || !url.username().is_empty() || url.password().is_some() {
         return None;
     }
-    url.join(APP_LAUNCH_EXCHANGE_PATH).ok()
+    let host = url.host_str()?;
+    match url.scheme() {
+        "https" => {
+            let public_domain = service["public_domain"].as_str()?;
+            if service["external_access_enabled"] != true
+                || !host.eq_ignore_ascii_case(public_domain)
+            {
+                return None;
+            }
+            url.join(APP_LAUNCH_EXCHANGE_PATH).ok()
+        }
+        "http" => {
+            let app = field(service, &["id", "slug", "process"]);
+            if app.is_empty() || app.contains('.') {
+                return None;
+            }
+            let expected_local = format!("{}.aether.local", app.to_ascii_lowercase());
+            if !host.eq_ignore_ascii_case(&expected_local) {
+                return None;
+            }
+            url.join(APP_LAUNCH_EXCHANGE_PATH).ok()
+        }
+        _ => None,
+    }
 }
 
 fn open_direct(popup: &Window, destination: &str) -> Result<(), JsValue> {
@@ -154,5 +170,18 @@ mod tests {
         }
         service["external_access_enabled"] = false.into();
         assert!(launch_exchange(&service, "https://metrics.example.com/").is_none());
+
+        let local_service = json!({
+            "id": "prometheus",
+            "external_access_enabled": false,
+        });
+        assert_eq!(
+            launch_exchange(&local_service, "http://prometheus.aether.local/graph")
+                .unwrap()
+                .as_str(),
+            "http://prometheus.aether.local/.well-known/aetherflow/app-launch"
+        );
+        assert!(launch_exchange(&local_service, "http://other.aether.local/").is_none());
+        assert!(launch_exchange(&local_service, "https://prometheus.aether.local/").is_none());
     }
 }

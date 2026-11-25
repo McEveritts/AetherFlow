@@ -2,6 +2,7 @@ use crate::BrowserFs;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -42,6 +43,14 @@ pub struct ResolvedDirListing {
     pub resolved_path: String,
     pub resolution_paths: Vec<String>,
     pub entry: Entry,
+}
+
+/// Result of a recursive directory removal (`remove_tree_with_outcome*`), recording both
+/// accounted user bytes removed and any mountpoint subtrees preserved at filesystem boundaries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveTreeOutcome {
+    pub removed_bytes: u64,
+    pub skipped_mount_paths: Vec<PathBuf>,
 }
 
 /// Error returned by [`BrowserFs::remove_tree_with_size`], carrying the total regular-file bytes

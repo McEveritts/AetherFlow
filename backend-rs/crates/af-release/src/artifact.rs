@@ -79,6 +79,28 @@ pub fn verify_release_provenance(
     expected_channel: Option<ReleaseChannel>,
     bundle_file: Option<&Path>,
 ) -> ReleaseResult<()> {
+    verify_release_provenance_with_token(
+        github_repo,
+        expected_digest,
+        artifact_name,
+        expected_tag,
+        expected_channel,
+        bundle_file,
+        None,
+    )
+}
+
+/// Same as [`verify_release_provenance`] while also forwarding an explicit `github_token`
+/// loaded from `ReleaseConfig` into the scrubbed verifier subprocess environment.
+pub fn verify_release_provenance_with_token(
+    github_repo: &str,
+    expected_digest: &str,
+    artifact_name: &str,
+    expected_tag: Option<&str>,
+    expected_channel: Option<ReleaseChannel>,
+    bundle_file: Option<&Path>,
+    github_token: Option<&str>,
+) -> ReleaseResult<()> {
     let mut cmd = Command::new("python3");
     cmd.env_clear();
     for key in [
@@ -94,6 +116,9 @@ pub fn verify_release_provenance(
         if let Some(val) = std::env::var_os(key) {
             cmd.env(key, val);
         }
+    }
+    if let Some(tok) = github_token.map(str::trim).filter(|t| !t.is_empty()) {
+        cmd.env("AF_GITHUB_TOKEN", tok);
     }
     cmd.args([
         "-I",

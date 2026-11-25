@@ -51,6 +51,24 @@ pub use manifest::{
     CURRENT_MANIFEST_SCHEMA_VERSION, MAX_SUPPORTED_MANIFEST_SCHEMA_VERSION,
     MIN_SUPPORTED_MANIFEST_SCHEMA_VERSION, SUPPORTED_APP_MAJOR_VERSION,
 };
+
+/// Resolves the running host application version dynamically from a sibling `.version`
+/// metadata file next to the current executable when it parses as a valid semver triplet,
+/// falling back to `concat!("v", env!("CARGO_PKG_VERSION"))`.
+pub fn default_host_app_version() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
+        if let Some(parent) = canonical.parent() {
+            if let Ok(raw) = std::fs::read_to_string(parent.join(".version")) {
+                let candidate = raw.trim();
+                if !candidate.is_empty() && parse_semver_triplet(candidate).is_ok() {
+                    return candidate.to_string();
+                }
+            }
+        }
+    }
+    concat!("v", env!("CARGO_PKG_VERSION")).to_string()
+}
 pub use restore::{
     execute_destructive_restore, execute_staged_restore, plan_restore_from_manifest,
     plan_restore_from_manifest_with_sqlite_override,

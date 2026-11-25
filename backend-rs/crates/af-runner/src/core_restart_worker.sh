@@ -114,7 +114,7 @@ def receipt(phase, code=0):
         temporary = path.name + ".tmp." + uuid.uuid4().hex
         output_fd = open_file(directory, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(output_fd, "w", encoding="utf-8") as output:
-            os.fchmod(output.fileno(), 0o644)
+            os.fchmod(output.fileno(), 0o600)
             json.dump(payload, output)
             output.flush()
             os.fsync(output.fileno())

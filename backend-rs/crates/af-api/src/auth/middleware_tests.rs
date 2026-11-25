@@ -359,3 +359,86 @@ fn legacy_plugin_jwt_is_rejected_by_both_token_decoders() {
     assert!(decode_session_claims(&token, false).is_err());
     assert!(crate::plugins::decode_and_verify_plugin_token(&token).is_err());
 }
+
+#[tokio::test]
+async fn esc13_refresh_routes_are_rate_limited_and_production_ignores_disable_flag() {
+    use crate::plugins::tests::run_plugin_test_in_subprocess;
+    use tower::ServiceExt;
+    if run_plugin_test_in_subprocess() {
+        return;
+    }
+    env::set_var("AF_DISABLE_RATELIMIT", "true");
+    env::set_var("AETHERFLOW_ENV", "production");
+    env::set_var("ALLOWED_HOSTS", "localhost");
+    let app = crate::routes::build_router();
+
+    for path in ["/api/v1/auth/refresh", "/api/auth/refresh"] {
+        let ip = if path.contains("/v1/") {
+            "203.0.113.21"
+        } else {
+            "203.0.113.22"
+        };
+        for _ in 0..10 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .header(header::HOST, "localhost")
+                        .header("x-real-ip", ip)
+                        .extension(axum::extract::ConnectInfo(
+                            "127.0.0.1:42000".parse::<std::net::SocketAddr>().unwrap(),
+                        ))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let limited = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(header::HOST, "localhost")
+                    .header("x-real-ip", ip)
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:42000".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            limited.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path} must enforce auth rate limit even when AF_DISABLE_RATELIMIT=true in production"
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_session_cookie_returns_401_without_panic() {
+    use axum::{middleware, routing::get, Router};
+    use tower::ServiceExt;
+
+    assert!(decode_session_claims("!!!not_a_valid_jwt!!!", false).is_err());
+    let app = Router::new()
+        .route("/api/v1/auth/session", get(|| async { StatusCode::OK }))
+        .layer(middleware::from_fn(auth_middleware));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .header(header::COOKIE, "aetherflow_session=!!!not_a_valid_jwt!!!")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

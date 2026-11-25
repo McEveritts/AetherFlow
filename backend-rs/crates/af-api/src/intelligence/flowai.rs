@@ -1,9 +1,10 @@
 use super::ai_providers::{
-    ai_endpoint_origin_tuple, call_anthropic_api, call_gemini_api, call_openai_compatible_api,
-    infer_local_runtime, is_forbidden_model_alias, is_loopback_ai_endpoint,
-    is_valid_gemini_model_id, is_valid_local_model_id, resolve_provider, resolve_provider_settings,
-    sanitize_chat_history, split_runtime_prefixed_model, ChatMessage, ProposedAction,
-    ALLOWED_AI_MODELS,
+    ai_endpoint_origin_tuple, allow_user_cloud_ai_providers, call_anthropic_api, call_gemini_api,
+    call_openai_compatible_api, infer_local_runtime, is_forbidden_model_alias,
+    is_loopback_ai_endpoint, is_self_target_ai_endpoint, is_valid_gemini_model_id,
+    is_valid_local_model_id, resolve_provider, resolve_provider_settings, sanitize_chat_history,
+    split_runtime_prefixed_model, ChatMessage, ProposedAction, ALLOWED_AI_MODELS,
+    DEFAULT_ANTHROPIC_LOCAL_ENDPOINT,
 };
 use super::telemetry::{get_system_metrics_context, AUDIT_LOG_FALLBACK_SQL};
 use crate::auth::{api_error, AuthUser, PeerPrincipal};
@@ -262,9 +263,28 @@ pub(super) async fn run_chat_session(
         );
     }
 
+    let is_admin = user.as_ref().is_some_and(|u| u.role == "admin");
+    let uses_paid_cloud_dispatch = match provider_type {
+        "openai" | "gemini" => true,
+        "anthropic" => {
+            !ps.anthropic_api_key.trim().is_empty()
+                || ps.anthropic_endpoint.trim().is_empty()
+                || !is_loopback_ai_endpoint(&ps.anthropic_endpoint)
+        }
+        "localai" => false,
+        _ => true,
+    };
+    if uses_paid_cloud_dispatch && !is_admin && !allow_user_cloud_ai_providers() {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "AI_PROVIDER_ADMIN_ONLY",
+            "Cloud AI providers are restricted to administrators",
+        );
+    }
+
     let prompt = if !system_prompt_override.is_empty() {
         system_prompt_override.to_string()
-    } else if user.as_ref().map(|u| u.role == "admin").unwrap_or(false) {
+    } else if is_admin {
         format!(
             "{}\n\nLive system telemetry from this AetherFlow server is attached below:\n\n{}",
             ps.system_prompt,
@@ -293,6 +313,15 @@ pub(super) async fn run_chat_session(
             }
         }
         "anthropic" => {
+            if !ps.anthropic_endpoint.trim().is_empty()
+                && is_self_target_ai_endpoint(&ps.anthropic_endpoint)
+            {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "AI_SELF_TARGET_REJECTED",
+                    "AI endpoint cannot target the AetherFlow API server itself",
+                );
+            }
             call_anthropic_api(
                 &ps.anthropic_endpoint,
                 &ps.anthropic_api_key,
@@ -307,38 +336,51 @@ pub(super) async fn run_chat_session(
             let local_runtime = infer_local_runtime(effective_hint, &ps);
             match local_runtime {
                 "anthropic-local" => {
-                    let endpoint = if !ps.anthropic_endpoint.is_empty() {
-                        ps.anthropic_endpoint.clone()
+                    let endpoint = if !ps.anthropic_endpoint.trim().is_empty() {
+                        ps.anthropic_endpoint.trim().to_string()
                     } else {
-                        "http://localhost:8080".to_string()
+                        DEFAULT_ANTHROPIC_LOCAL_ENDPOINT.to_string()
                     };
-                    call_anthropic_api(
-                        &endpoint,
-                        &ps.anthropic_api_key,
-                        &ai_model,
-                        &prompt,
-                        &history,
-                        &message,
-                    )
-                    .await
+                    if is_self_target_ai_endpoint(&endpoint) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
+                    call_anthropic_api(&endpoint, "", &ai_model, &prompt, &history, &message).await
                 }
                 "ollama" => {
-                    let endpoint = if !ps.ollama_endpoint.is_empty() {
-                        ps.ollama_endpoint.clone()
+                    let endpoint = if !ps.ollama_endpoint.trim().is_empty() {
+                        ps.ollama_endpoint.trim().to_string()
                     } else {
                         "http://localhost:11434".to_string()
                     };
+                    if is_self_target_ai_endpoint(&endpoint) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
                     call_openai_compatible_api(
                         &endpoint, "", &ai_model, &prompt, &history, &message,
                     )
                     .await
                 }
                 _ => {
-                    let endpoint = if !ps.lm_studio_endpoint.is_empty() {
-                        ps.lm_studio_endpoint.clone()
+                    let endpoint = if !ps.lm_studio_endpoint.trim().is_empty() {
+                        ps.lm_studio_endpoint.trim().to_string()
                     } else {
                         "http://localhost:1234".to_string()
                     };
+                    if is_self_target_ai_endpoint(&endpoint) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
                     call_openai_compatible_api(
                         &endpoint, "", &ai_model, &prompt, &history, &message,
                     )
@@ -349,7 +391,6 @@ pub(super) async fn run_chat_session(
         _ => call_gemini_api(&ps.gemini_api_key, &ai_model, &prompt, &history, &message).await,
     };
 
-    let is_admin = user.as_ref().is_some_and(|u| u.role == "admin");
     let reply_text = match result {
         Ok(t) if !t.trim().is_empty() => t,
         Ok(_) => "I received an empty response. Please try again.".to_string(),
@@ -787,6 +828,13 @@ pub async fn test_ai_connection(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        if is_self_target_ai_endpoint(ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         let Ok(clean_ep) = af_services::validate_server_url(ep) else {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -794,6 +842,13 @@ pub async fn test_ai_connection(
                 "Invalid or disallowed endpoint URL",
             );
         };
+        if is_self_target_ai_endpoint(&clean_ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         let wants_anth = matches!(provider_type, "anthropic" | "anthropic-local")
             || req
                 .get("local_provider")
@@ -811,6 +866,13 @@ pub async fn test_ai_connection(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        if is_self_target_ai_endpoint(ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         let Ok(clean_ep) = af_services::validate_server_url(ep) else {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -818,6 +880,13 @@ pub async fn test_ai_connection(
                 "Invalid or disallowed endpoint URL",
             );
         };
+        if is_self_target_ai_endpoint(&clean_ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         ps.anthropic_endpoint = clean_ep;
     }
     if let Some(ep) = req
@@ -826,6 +895,13 @@ pub async fn test_ai_connection(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        if is_self_target_ai_endpoint(ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         let Ok(clean_ep) = af_services::validate_server_url(ep) else {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -833,6 +909,13 @@ pub async fn test_ai_connection(
                 "Invalid or disallowed endpoint URL",
             );
         };
+        if is_self_target_ai_endpoint(&clean_ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         ps.lm_studio_endpoint = clean_ep;
     }
     if let Some(ep) = req
@@ -841,6 +924,13 @@ pub async fn test_ai_connection(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        if is_self_target_ai_endpoint(ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         let Ok(clean_ep) = af_services::validate_server_url(ep) else {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -848,6 +938,13 @@ pub async fn test_ai_connection(
                 "Invalid or disallowed endpoint URL",
             );
         };
+        if is_self_target_ai_endpoint(&clean_ep) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "AI_SELF_TARGET_REJECTED",
+                "AI endpoint cannot target the AetherFlow API server itself",
+            );
+        }
         ps.ollama_endpoint = clean_ep;
     }
 
@@ -867,18 +964,15 @@ pub async fn test_ai_connection(
     let next_anth_endpoint = if !ps.anthropic_endpoint.trim().is_empty() {
         ps.anthropic_endpoint.trim()
     } else if is_anthropic_local_test {
-        "http://localhost:8080"
+        DEFAULT_ANTHROPIC_LOCAL_ENDPOINT
     } else {
         "https://api.anthropic.com"
     };
     let anth_origin_changed = ai_endpoint_origin_tuple(&stored_anth_endpoint)
         != ai_endpoint_origin_tuple(next_anth_endpoint);
     if is_anthropic_local_test {
-        if had_stored_anth_key && !supplied_fresh_anth_key && anth_origin_changed {
-            // Testing a local Anthropic-compatible runtime at a different origin must neither
-            // falsely fail with a cloud-key rebind error nor forward the stored cloud API key.
-            ps.anthropic_api_key.clear();
-        }
+        // Local Anthropic-compatible runtimes never attach paid cloud API keys.
+        ps.anthropic_api_key.clear();
     } else if had_stored_anth_key && !supplied_fresh_anth_key && anth_origin_changed {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -969,6 +1063,15 @@ pub async fn test_ai_connection(
             if !ALLOWED_AI_MODELS.contains(&model) || !is_anthropic_model_id(model) {
                 return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid AI model");
             }
+            if !ps.anthropic_endpoint.trim().is_empty()
+                && is_self_target_ai_endpoint(&ps.anthropic_endpoint)
+            {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "AI_SELF_TARGET_REJECTED",
+                    "AI endpoint cannot target the AetherFlow API server itself",
+                );
+            }
             call_anthropic_api(
                 &ps.anthropic_endpoint,
                 &ps.anthropic_api_key,
@@ -1002,14 +1105,21 @@ pub async fn test_ai_connection(
             }
             match local_runtime {
                 "anthropic-local" => {
-                    let ep = if !ps.anthropic_endpoint.is_empty() {
-                        ps.anthropic_endpoint.clone()
+                    let ep = if !ps.anthropic_endpoint.trim().is_empty() {
+                        ps.anthropic_endpoint.trim().to_string()
                     } else {
-                        "http://localhost:8080".to_string()
+                        DEFAULT_ANTHROPIC_LOCAL_ENDPOINT.to_string()
                     };
+                    if is_self_target_ai_endpoint(&ep) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
                     call_anthropic_api(
                         &ep,
-                        &ps.anthropic_api_key,
+                        "",
                         local_model,
                         "",
                         &[],
@@ -1018,11 +1128,18 @@ pub async fn test_ai_connection(
                     .await
                 }
                 "ollama" => {
-                    let ep = if !ps.ollama_endpoint.is_empty() {
-                        ps.ollama_endpoint.clone()
+                    let ep = if !ps.ollama_endpoint.trim().is_empty() {
+                        ps.ollama_endpoint.trim().to_string()
                     } else {
                         "http://localhost:11434".to_string()
                     };
+                    if is_self_target_ai_endpoint(&ep) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
                     call_openai_compatible_api(
                         &ep,
                         "",
@@ -1034,11 +1151,18 @@ pub async fn test_ai_connection(
                     .await
                 }
                 _ => {
-                    let ep = if !ps.lm_studio_endpoint.is_empty() {
-                        ps.lm_studio_endpoint.clone()
+                    let ep = if !ps.lm_studio_endpoint.trim().is_empty() {
+                        ps.lm_studio_endpoint.trim().to_string()
                     } else {
                         "http://localhost:1234".to_string()
                     };
+                    if is_self_target_ai_endpoint(&ep) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
                     call_openai_compatible_api(
                         &ep,
                         "",

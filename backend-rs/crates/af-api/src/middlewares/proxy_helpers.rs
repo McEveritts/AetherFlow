@@ -238,6 +238,38 @@ pub(super) fn is_private_or_loopback_ip(raw_ip: &str) -> bool {
     }
 }
 
+/// Restricts opt-in unauthenticated `*.aether.local` bypass strictly to RFC 1918,
+/// IPv4/IPv6 link-local, and IPv6 ULA peers. Unconditionally excludes RFC 6598
+/// CGNAT/Tailscale (`100.64.0.0/10`) and host loopback (`127.0.0.0/8`, `::1`).
+pub(super) fn is_unauth_local_lan_ip(raw_ip: &str) -> bool {
+    let Some(addr) = parse_strict_ip_or_socket(raw_ip) else {
+        return false;
+    };
+    match addr {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                return false;
+            }
+            v4.is_private() || v4.is_link_local()
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return false;
+            }
+            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+pub(super) fn unauth_local_lan_enabled() -> bool {
+    env::var("AF_ALLOW_UNAUTH_LOCAL_LAN")
+        .map(|v| {
+            let trimmed = v.trim();
+            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
 pub(super) fn resolve_optional_authenticated_user(
     headers: &axum::http::HeaderMap,
     peer: Option<IpAddr>,
@@ -266,19 +298,21 @@ pub(super) fn resolve_optional_authenticated_user(
     } else {
         "127.0.0.1".to_string()
     };
-    let fingerprint = crate::auth::legacy_client_fingerprint(&ip, user_agent);
-    if crate::auth::is_session_token_revoked_beyond_grace_for_fp(
-        &claims.jti,
-        claims.user_id,
-        Some(&fingerprint),
-    ) || !crate::auth::matches_client_fingerprint(&claims.cfp, &ip, user_agent)
-    {
+    if !crate::auth::matches_client_fingerprint(&claims.cfp, &ip, user_agent) {
         return None;
     }
+    let fingerprint = crate::auth::legacy_client_fingerprint(&ip, user_agent);
     let conn = af_db::get_read_conn().ok()?;
-    let subject = crate::auth::load_active_human_subject(&conn, claims.user_id).ok()?;
-    (claims.ver >= subject.sessions_revoked_after && !subject.username.is_empty())
-        .then_some(subject)
+    let subject = crate::auth::verify_active_session_on_conn(
+        &conn,
+        claims.user_id,
+        &claims.jti,
+        claims.ver,
+        chrono::Utc::now().timestamp(),
+        crate::auth::RotationGrace::StrictFingerprint(&fingerprint),
+    )
+    .ok()?;
+    (!subject.username.is_empty()).then_some(subject)
 }
 
 pub(super) fn verify_proxy_basic_credentials(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -319,15 +353,65 @@ pub(super) fn verify_proxy_basic_credentials(headers: &axum::http::HeaderMap) ->
     });
     drop(conn);
 
-    let (master_user, master_password, _) = af_services::mutators::load_master_credentials();
-    if username == master_user
-        && !master_password.is_empty()
-        && af_models::constant_time_eq(password.as_bytes(), master_password.as_bytes())
-    {
-        return Some(master_user);
-    }
     let (username, hash) = admin?;
     crate::auth::verify_password(password, &hash).then_some(username)
+}
+
+pub(super) fn read_rutorrent_proxy_token() -> Result<Option<String>, String> {
+    let override_path =
+        env::var_os("AETHERFLOW_RUTORRENT_PROXY_TOKEN_FILE").filter(|path| !path.is_empty());
+    let (path, explicit) = match override_path {
+        Some(path) => (PathBuf::from(path), true),
+        None => (
+            af_services::mutators::resolve_config_path("/etc/aetherflow/rutorrent-proxy-token"),
+            false,
+        ),
+    };
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "Cannot inspect ruTorrent proxy token at {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        let meta = std::fs::symlink_metadata(ancestor).map_err(|error| {
+            format!(
+                "Cannot inspect ruTorrent proxy token path {}: {error}",
+                ancestor.display()
+            )
+        })?;
+        if meta.file_type().is_symlink() || (ancestor == path && !meta.is_file()) {
+            return Err(format!(
+                "ruTorrent proxy token must be a regular file reached without symlinks: {}",
+                ancestor.display()
+            ));
+        }
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "Cannot read ruTorrent proxy token at {}: {error}",
+            path.display()
+        )
+    })?;
+    let token = raw.trim();
+    if token.is_empty()
+        || token.len() > 256
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(format!(
+            "Invalid ruTorrent proxy token content in {}",
+            path.display()
+        ));
+    }
+    Ok(Some(token.to_string()))
 }
 
 pub(super) fn librespeed_tls_client() -> Result<Option<reqwest::Client>, String> {
@@ -725,6 +809,7 @@ pub(super) fn managed_app_route_unavailable() -> Response {
 pub(super) fn strip_gateway_session_cookies(headers: &mut axum::http::HeaderMap, protected: bool) {
     if !protected
         && crate::ws::extract_cookie(headers, crate::app_launch::APP_SESSION_COOKIE).is_none()
+        && crate::ws::extract_cookie(headers, crate::app_launch::LOCAL_APP_SESSION_COOKIE).is_none()
     {
         return;
     }
@@ -741,6 +826,7 @@ pub(super) fn strip_gateway_session_cookies(headers: &mut axum::http::HeaderMap,
                         && !cookie.split_once('=').is_some_and(|(name, _)| {
                             let name = name.trim();
                             name == crate::app_launch::APP_SESSION_COOKIE
+                                || name == crate::app_launch::LOCAL_APP_SESSION_COOKIE
                                 || (protected && name == "aetherflow_session")
                         })
                 })

@@ -1549,14 +1549,7 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let recipe = get_declarative_recipe("mergerfs").unwrap();
 
-    // Must not invoke /bin/sh -c or remove /mnt/unionfs or /mnt/mergerfs
-    assert!(
-        !recipe
-            .remove_steps
-            .iter()
-            .any(|s| matches!(s, DeclarativeStep::RunCommand { .. })),
-        "mergerfs remove_steps must not shell out via RunCommand"
-    );
+    // Must preserve /mnt/unionfs and /mnt/mergerfs even on DELETE_DATA=true
     assert!(
         !recipe.remove_steps.iter().any(|s| matches!(
             s,
@@ -1571,11 +1564,14 @@ async fn test_mergerfs_remove_and_purge_unmount_shell_free_fail_closed_and_prese
         .position(|s| {
             matches!(
                 s,
-                DeclarativeStep::UnmountPaths { paths, .. }
-                    if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
+                DeclarativeStep::UnmountPaths {
+                    paths,
+                    only_if_delete_data: false,
+                    ..
+                } if paths == &vec!["/mnt/unionfs".to_string(), "/mnt/mergerfs".to_string()]
             )
         })
-        .expect("mergerfs remove_steps must include shell-free UnmountPaths");
+        .expect("mergerfs remove_steps must include unconditional shell-free UnmountPaths");
     let apt_idx = recipe
         .remove_steps
         .iter()

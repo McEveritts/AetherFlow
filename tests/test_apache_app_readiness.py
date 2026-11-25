@@ -290,6 +290,7 @@ class _LocalProbeServer:
                     "path": self.path,
                     "host": self.headers.get("Host", ""),
                     "authorization": self.headers.get("Authorization", ""),
+                    "headers": {k.lower(): v for k, v in self.headers.items()},
                 }
                 outer.requests.append(req)
                 status, headers, body = handler_fn(req)
@@ -512,30 +513,59 @@ class ApacheAppReadinessTests(unittest.TestCase):
     def test_rutorrent_installer_respects_auth_challenge_and_detects_post_auth_failure(self):
         expected_auth = "Basic " + base64.b64encode(b"test-admin:test-password").decode("ascii")
 
-        # 1. Fresh install: 401 challenge followed by 200 HTML when MASTER_USER:MASTER_PASS authenticates.
+        # 0. Default loopback mode (AF_APACHE_LISTEN_ALL=0): provisions proxy-token secret + Apache conf and sends header.
+        def proxy_token_handler(req):
+            token_path = self.fx.root / "etc/aetherflow/rutorrent-proxy-token"
+            expected_token = token_path.read_text(encoding="utf-8").strip() if token_path.is_file() else ""
+            presented = req.get("headers", {}).get("x-aetherflow-rutorrent-token", "")
+            if expected_token and presented == expected_token:
+                return 200, {"Content-Type": "text/html"}, "<!doctype html><title>ruTorrent</title>"
+            return 403, {"Content-Type": "text/plain"}, "Forbidden"
+
+        with _LocalProbeServer(proxy_token_handler) as srv:
+            res = self.fx.run_installer("rutorrent", srv.port)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((self.fx.root / "install/.rutorrent.lock").is_file())
+            self.assertEqual((self.fx.root / "var/www/rutorrent/.af-version").read_text().strip(), "2.1.0")
+            token_file = self.fx.root / "etc/aetherflow/rutorrent-proxy-token"
+            token_conf = self.fx.root / "etc/aetherflow/rutorrent-proxy-token.conf"
+            self.assertTrue(token_file.is_file())
+            self.assertTrue(token_conf.is_file())
+            self.assertEqual(token_file.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(token_conf.stat().st_mode & 0o777, 0o640)
+            vhost_text = (self.fx.root / "etc/apache2/sites-available/rutorrent.conf").read_text()
+            self.assertIn("Require local", vhost_text)
+            self.assertIn("rutorrent-proxy-token.conf", vhost_text)
+            self.assertIn("SetEnvIf X-Aetherflow-User", vhost_text)
+            self.assertNotIn("AuthType Basic", vhost_text)
+            self.assertFalse((self.fx.root / "etc/apache2/AetherFlow/rutorrent.htpasswd").exists())
+
+        # 1. Explicit AF_APACHE_LISTEN_ALL=1 install: 401 challenge followed by 200 HTML when MASTER_USER:MASTER_PASS authenticates.
+        fx_all = ApacheAppReadinessFixture()
+        self.addCleanup(fx_all.cleanup)
         def fresh_auth_handler(req):
             if req["authorization"] == expected_auth:
                 return 200, {"Content-Type": "text/html"}, "<!doctype html><title>ruTorrent</title>"
             return 401, {"WWW-Authenticate": 'Basic realm="ruTorrent"'}, "Unauthorized"
 
         with _LocalProbeServer(fresh_auth_handler) as srv:
-            res = self.fx.run_installer("rutorrent", srv.port)
+            res = fx_all.run_installer("rutorrent", srv.port, {"AF_APACHE_LISTEN_ALL": "1"})
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-            self.assertTrue((self.fx.root / "install/.rutorrent.lock").is_file())
-            self.assertEqual((self.fx.root / "var/www/rutorrent/.af-version").read_text().strip(), "2.1.0")
+            self.assertTrue((fx_all.root / "install/.rutorrent.lock").is_file())
+            self.assertEqual((fx_all.root / "var/www/rutorrent/.af-version").read_text().strip(), "2.1.0")
             self.assertGreaterEqual(len(srv.requests), 2)
             self.assertEqual(srv.requests[0]["authorization"], "")
             self.assertEqual(srv.requests[-1]["authorization"], expected_auth)
 
         # 2. Update with custom operator htpasswd: 401 challenge even with master credentials is respected.
-        self.fx.file("etc/apache2/AetherFlow/rutorrent.htpasswd", "operator:$2y$05$customhash\n")
+        fx_all.file("etc/apache2/AetherFlow/rutorrent.htpasswd", "operator:$2y$05$customhash\n")
         with _LocalProbeServer(
             lambda _req: (401, {"WWW-Authenticate": 'Basic realm="operator-access"'}, "Unauthorized")
         ) as srv:
-            res = self.fx.run_installer("rutorrent", srv.port, {"AF_PACKAGE_ACTION": "update"})
+            res = fx_all.run_installer("rutorrent", srv.port, {"AF_PACKAGE_ACTION": "update", "AF_APACHE_LISTEN_ALL": "1"})
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             self.assertEqual(
-                (self.fx.root / "etc/apache2/AetherFlow/rutorrent.htpasswd").read_text(),
+                (fx_all.root / "etc/apache2/AetherFlow/rutorrent.htpasswd").read_text(),
                 "operator:$2y$05$customhash\n",
             )
 
@@ -548,7 +578,7 @@ class ApacheAppReadinessTests(unittest.TestCase):
         fx_fail = ApacheAppReadinessFixture()
         self.addCleanup(fx_fail.cleanup)
         with _LocalProbeServer(broken_post_auth_handler) as srv:
-            res = fx_fail.run_installer("rutorrent", srv.port)
+            res = fx_fail.run_installer("rutorrent", srv.port, {"AF_APACHE_LISTEN_ALL": "1"})
             self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
             self.assertFalse((fx_fail.root / "install/.rutorrent.lock").exists())
             self.assertFalse((fx_fail.root / "etc/apache2/sites-enabled/rutorrent.conf").exists())
@@ -1304,12 +1334,14 @@ class ApachePerAppQuiescenceTests(unittest.TestCase):
                 f"LoadModule authn_core_module /usr/lib/apache2/modules/mod_authn_core.so\n"
                 f"LoadModule authn_file_module /usr/lib/apache2/modules/mod_authn_file.so\n"
                 f"LoadModule authz_core_module /usr/lib/apache2/modules/mod_authz_core.so\n"
+                f"LoadModule authz_host_module /usr/lib/apache2/modules/mod_authz_host.so\n"
                 f"LoadModule authz_user_module /usr/lib/apache2/modules/mod_authz_user.so\n"
                 f"LoadModule auth_basic_module /usr/lib/apache2/modules/mod_auth_basic.so\n"
                 f"LoadModule alias_module /usr/lib/apache2/modules/mod_alias.so\n"
                 f"LoadModule headers_module /usr/lib/apache2/modules/mod_headers.so\n"
                 f"LoadModule dir_module /usr/lib/apache2/modules/mod_dir.so\n"
                 f"LoadModule env_module /usr/lib/apache2/modules/mod_env.so\n"
+                f"LoadModule setenvif_module /usr/lib/apache2/modules/mod_setenvif.so\n"
                 f"LoadModule mime_module /usr/lib/apache2/modules/mod_mime.so\n"
                 f"LoadModule rewrite_module /usr/lib/apache2/modules/mod_rewrite.so\n"
                 f"LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so\n"
@@ -1432,13 +1464,23 @@ class ApachePerAppQuiescenceTests(unittest.TestCase):
 
             # Wait briefly for Apache graceful reload to settle before final live HTTP check.
             time.sleep(0.2)
-            final_code, _, final_body = http_get(f"http://127.0.0.1:{app_port}{readiness_path}", auth_headers)
             if mode == "success":
                 self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                final_headers = dict(auth_headers)
+                if app == "rutorrent":
+                    token_file = fx.root / "etc/aetherflow/rutorrent-proxy-token"
+                    self.assertTrue(token_file.is_file(), "ruTorrent proxy token missing after upgrade")
+                    self.assertIn("rutorrent-proxy-token.conf", app_vhost.read_text())
+                    self.assertNotIn("AuthType Basic", app_vhost.read_text())
+                    unauth_code, _, _ = http_get(f"http://127.0.0.1:{app_port}{readiness_path}", {})
+                    self.assertEqual(unauth_code, 403)
+                    final_headers = {"X-Aetherflow-Rutorrent-Token": token_file.read_text(encoding="utf-8").strip()}
+                final_code, _, final_body = http_get(f"http://127.0.0.1:{app_port}{readiness_path}", final_headers)
                 self.assertEqual(final_code, 200, final_body)
                 self.assertIn("2.1.0", final_body)
                 self.assertEqual((fx.root / f"var/www/{app}/.af-version").read_text().strip(), "2.1.0")
             else:
+                final_code, _, final_body = http_get(f"http://127.0.0.1:{app_port}{readiness_path}", auth_headers)
                 self.assertNotEqual(res.returncode, 0, f"{app}/{mode} should have failed")
                 self.assertNotIn("Rollback incomplete", res.stdout + res.stderr)
                 self.assertEqual(final_code, 200, final_body)

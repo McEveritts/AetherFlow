@@ -284,33 +284,3 @@ class AetherFlowApiClient:
     def is_server_reachable(self, timeout: float = 1.0) -> bool:
         code, _, _ = self.request("GET", "/health/ready", timeout=timeout)
         return code in [200, 404]
-
-class RunnerSocketClient:
-    """Client for testing privileged runner UNIX domain socket or mock interface."""
-    def __init__(self, socket_path: str = "/run/aetherflow/runner.sock"):
-        self.socket_path = socket_path
-
-    def is_socket_present(self) -> bool:
-        return os.path.exists(self.socket_path)
-
-    def send_socket_request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
-        if not self.is_socket_present():
-            return 0, "Socket file does not exist"
-        if not hasattr(socket, "AF_UNIX"):
-            return 0, "AF_UNIX not supported on this platform"
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(3.0)
-            sock.connect(self.socket_path)
-            body = json.dumps(payload).encode("utf-8") if payload else b""
-            req_bytes = f"{method.upper()} {path} HTTP/1.1\r\nHost: runner.sock\r\nContent-Length: {len(body)}\r\nContent-Type: application/json\r\n\r\n".encode("utf-8") + body
-            sock.sendall(req_bytes)
-            res = sock.recv(8192).decode("utf-8", errors="replace")
-            sock.close()
-            parts = res.split("\r\n\r\n", 1)
-            header_lines = parts[0].split("\r\n")
-            status_code = int(header_lines[0].split(" ")[1])
-            body_res = parts[1] if len(parts) > 1 else ""
-            return status_code, body_res
-        except Exception as e:
-            return 0, str(e)

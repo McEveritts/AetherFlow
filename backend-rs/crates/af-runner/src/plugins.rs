@@ -125,6 +125,43 @@ pub(super) fn resolve_plugin_tokens_root() -> Result<PathBuf, PluginRunnerError>
     Ok(path)
 }
 
+pub(super) const MIN_PLUGIN_SYSTEMD_MAJOR_VERSION: u32 = 249;
+
+pub(super) fn parse_systemd_major_version(output: &str) -> Option<u32> {
+    let first_line = output.lines().next()?.trim();
+    let mut parts = first_line.split_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("systemd") {
+        return None;
+    }
+    let version_token = parts.next()?;
+    let major_str = version_token.split(['.', '-', '~']).next()?;
+    major_str.parse::<u32>().ok()
+}
+
+pub(super) fn validate_systemd_cgroup_v2_and_version(
+    cgroup_controllers_path: &Path,
+    systemctl_version_output: &str,
+) -> Result<(), PluginRunnerError> {
+    if !cgroup_controllers_path.is_file() {
+        return Err(PluginRunnerError::IsolationUnavailable(
+            "Managed plugin isolation is unavailable: unified cgroup v2 hierarchy is required (/sys/fs/cgroup/cgroup.controllers is absent) to enforce systemd SocketBindDeny/IPAddressDeny network confinement."
+                .to_string(),
+        ));
+    }
+    let Some(major) = parse_systemd_major_version(systemctl_version_output) else {
+        return Err(PluginRunnerError::IsolationUnavailable(
+            "Managed plugin isolation is unavailable: failed to parse systemd version from `systemctl --version`."
+                .to_string(),
+        ));
+    };
+    if major < MIN_PLUGIN_SYSTEMD_MAJOR_VERSION {
+        return Err(PluginRunnerError::IsolationUnavailable(format!(
+            "Managed plugin isolation is unavailable: systemd version {major} is below the minimum required version {MIN_PLUGIN_SYSTEMD_MAJOR_VERSION} needed for SocketBindDeny/SocketBindAllow and IPAddressDeny/IPAddressAllow enforcement."
+        )));
+    }
+    Ok(())
+}
+
 pub fn ensure_systemd_isolation_ready() -> Result<(PathBuf, PathBuf), PluginRunnerError> {
     if !cfg!(target_os = "linux") {
         return Err(PluginRunnerError::IsolationUnavailable(
@@ -159,6 +196,25 @@ pub fn ensure_systemd_isolation_ready() -> Result<(PathBuf, PathBuf), PluginRunn
                     .to_string(),
             ));
         }
+        let ver_out = std::process::Command::new(&systemctl)
+            .arg("--version")
+            .output()
+            .map_err(|e| {
+                PluginRunnerError::IsolationUnavailable(format!(
+                    "Managed plugin isolation is unavailable: failed to run `systemctl --version`: {e}"
+                ))
+            })?;
+        if !ver_out.status.success() {
+            return Err(PluginRunnerError::IsolationUnavailable(format!(
+                "Managed plugin isolation is unavailable: `systemctl --version` exited with {}",
+                ver_out.status
+            )));
+        }
+        let ver_text = String::from_utf8_lossy(&ver_out.stdout);
+        validate_systemd_cgroup_v2_and_version(
+            Path::new("/sys/fs/cgroup/cgroup.controllers"),
+            &ver_text,
+        )?;
     }
 
     Ok((systemd_run, systemctl))

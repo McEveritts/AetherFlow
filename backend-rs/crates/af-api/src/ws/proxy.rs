@@ -131,6 +131,9 @@ pub fn extract_client_ip_for_peer(
 }
 
 pub fn normalize_request_forwarding_for_peer(req: &mut axum::extract::Request) {
+    if req.extensions().get::<InboundProxyForwarded>().is_some() {
+        return;
+    }
     let had_inbound_forwarding = req.headers().contains_key("x-forwarded-for")
         || req.headers().contains_key("x-real-ip")
         || req.headers().contains_key("forwarded");

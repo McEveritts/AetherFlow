@@ -178,9 +178,13 @@ pub(crate) fn is_session_token_revoked_beyond_grace_with_conn(
             else {
                 return true;
             };
+            let now = Utc::now().timestamp();
             if matches!(
                 af_db::token_revocation_status_with_conn(conn, &leaf_jti),
                 Ok(false)
+            ) && matches!(
+                af_db::has_unexpired_active_session(conn, &leaf_jti, user_id, now),
+                Ok(true)
             ) {
                 false
             } else {
@@ -205,7 +209,17 @@ pub(crate) fn is_session_token_revoked_beyond_grace_for_fp(
             else {
                 return true;
             };
-            if matches!(af_db::token_revocation_status(&leaf_jti), Ok(false)) {
+            let now = Utc::now().timestamp();
+            let leaf_live = af_db::get_read_conn().ok().is_some_and(|conn| {
+                matches!(
+                    af_db::token_revocation_status_with_conn(&conn, &leaf_jti),
+                    Ok(false)
+                ) && matches!(
+                    af_db::has_unexpired_active_session(&conn, &leaf_jti, user_id, now),
+                    Ok(true)
+                )
+            });
+            if leaf_live {
                 false
             } else {
                 evict_rotation_grace_for_family(&grace.family_id, jti);

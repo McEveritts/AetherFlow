@@ -83,7 +83,7 @@ pub struct RestoreExecutionOptions {
 impl Default for RestoreExecutionOptions {
     fn default() -> Self {
         Self {
-            host_app_version: "4.0.0".to_string(),
+            host_app_version: crate::default_host_app_version(),
             max_supported_sqlite_user_version: None,
             confirm_destructive_restore: false,
             allow_overwrite: false,
@@ -262,6 +262,7 @@ fn is_secret_credential_entry(relative_path: &str, kind: BackupTargetKind) -> bo
     lower.ends_with(".env")
         || lower.ends_with(".key")
         || lower.ends_with(".pem")
+        || lower.ends_with(".creds")
         || lower.contains("secret")
         || lower.contains("token")
 }

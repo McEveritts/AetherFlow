@@ -379,6 +379,10 @@ fn push_common_isolation_properties(
         "--property=SystemCallFilter=~@privileged @mount @debug @obsolete @cpu-emulation"
             .to_string(),
         "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6".to_string(),
+        "--property=SocketBindDeny=any".to_string(),
+        format!("--property=SocketBindAllow=ipv4:tcp:{port}"),
+        "--property=IPAddressDeny=any".to_string(),
+        "--property=IPAddressAllow=localhost".to_string(),
         "--property=StandardInput=null".to_string(),
         "--property=StandardOutput=null".to_string(),
         "--property=StandardError=null".to_string(),

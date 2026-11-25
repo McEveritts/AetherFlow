@@ -591,6 +591,17 @@ fn collect_disk_ownership_evidence(
                 }
             }
         }
+        "rutorrent" => {
+            for logical in [
+                "/etc/aetherflow/rutorrent-proxy-token",
+                "/etc/aetherflow/rutorrent-proxy-token.conf",
+            ] {
+                let marker = resolve_path_for_fs_root(logical, fs_root);
+                if matches!(inspect_receipt_file(&marker, fs_root), Ok(true)) {
+                    evidence.push(format!("rutorrent_aetherflow_config:{}", marker.display()));
+                }
+            }
+        }
         _ => {}
     }
 

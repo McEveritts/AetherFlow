@@ -331,6 +331,29 @@ fn check_ws_jti_revocation(connection: &rusqlite::Connection, entry: &WsTicketEn
     )
 }
 
+fn verify_ws_session(
+    connection: &rusqlite::Connection,
+    entry: &mut WsTicketEntry,
+) -> Option<crate::auth::ActiveSubject> {
+    if entry.session_jti.trim().is_empty() {
+        return None;
+    }
+    let check_ver = entry.session_ver.unwrap_or(0);
+    let subj = crate::auth::verify_active_session_on_conn(
+        connection,
+        entry.user_id,
+        &entry.session_jti,
+        check_ver,
+        chrono::Utc::now().timestamp(),
+        crate::auth::RotationGrace::AllowAnyFingerprint,
+    )
+    .ok()?;
+    if entry.session_ver.is_none() {
+        entry.session_ver = Some(subj.sessions_revoked_after);
+    }
+    Some(subj)
+}
+
 fn verify_peer_entry_with_conn(
     connection: &rusqlite::Connection,
     entry: &mut WsTicketEntry,
@@ -405,17 +428,7 @@ pub(super) fn consume_live_ws_ticket(
         }
         map.remove(ticket)
     })?;
-    if !check_ws_jti_revocation(connection, &entry) {
-        return None;
-    }
-    let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
-    if let Some(issued_ver) = entry.session_ver {
-        if subj.sessions_revoked_after > issued_ver {
-            return None;
-        }
-    } else {
-        entry.session_ver = Some(subj.sessions_revoked_after);
-    }
+    let subj = verify_ws_session(connection, &mut entry)?;
     entry.diagnostics_allowed = subj.role == "admin";
     Some(entry)
 }
@@ -473,17 +486,7 @@ pub(super) async fn consume_live_ws_ticket_for_context(
         let mut checked = entry;
         tokio::task::spawn_blocking(move || {
             let connection = af_db::get_read_conn().ok()?;
-            if !check_ws_jti_revocation(&connection, &checked) {
-                return None;
-            }
-            let subj = crate::auth::load_active_human_subject(&connection, checked.user_id).ok()?;
-            if let Some(issued_ver) = checked.session_ver {
-                if subj.sessions_revoked_after > issued_ver {
-                    return None;
-                }
-            } else {
-                checked.session_ver = Some(subj.sessions_revoked_after);
-            }
+            let subj = verify_ws_session(&connection, &mut checked)?;
             checked.diagnostics_allowed = subj.role == "admin";
             Some(checked)
         })
@@ -577,17 +580,7 @@ pub(super) fn refresh_ws_authorization(
         return verify_peer_entry_with_conn(connection, entry, WsPeerScope::Telemetry)
             .map(|snap| snap.diagnostics_allowed);
     }
-    if !check_ws_jti_revocation(connection, entry) {
-        return None;
-    }
-    let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
-    if let Some(issued_ver) = entry.session_ver {
-        if subj.sessions_revoked_after > issued_ver {
-            return None;
-        }
-    } else {
-        entry.session_ver = Some(subj.sessions_revoked_after);
-    }
+    let subj = verify_ws_session(connection, entry)?;
     entry.diagnostics_allowed &= subj.role == "admin";
     Some(entry.diagnostics_allowed)
 }

@@ -2767,5 +2767,6 @@
     "liveLogsClosed": "Stream geschlossen",
     "liveLogsRevoked": "Live-Log-Stream geschlossen (Code {code}); der Peer-Zugriff wurde möglicherweise geändert oder widerrufen.",
     "remoteShareOriginUnavailable": "Öffentliche Freigabelinks sind für {server} nicht verfügbar, da die öffentliche Basisdomain nicht konfiguriert ist oder nicht gelesen werden kann. Konfigurieren Sie eine öffentliche Basisdomain auf {server} und gewähren Sie Lesezugriff auf die Einstellungen, um entfernte Freigabelinks zu erstellen."
-  }
+  },
+  "Reset atmosphere defaults": "Atmosphären-Standardwerte zurücksetzen"
 }

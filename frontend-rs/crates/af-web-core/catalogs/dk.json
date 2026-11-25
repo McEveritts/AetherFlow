@@ -2767,5 +2767,6 @@
     "liveLogsClosed": "Strøm lukket",
     "liveLogsRevoked": "Direkte logstrøm lukket (kode {code}); peer-adgangen kan være ændret eller tilbagekaldt.",
     "remoteShareOriginUnavailable": "Offentlige delingslinks er ikke tilgængelige for {server}, fordi dens offentlige basisdomæne ikke er konfigureret eller ikke kan læses. Konfigurer et offentligt basisdomæne på {server} og giv læseadgang til indstillinger for at oprette eksterne delingslinks."
-  }
+  },
+  "Reset atmosphere defaults": "Nulstil atmosfærestandarder"
 }

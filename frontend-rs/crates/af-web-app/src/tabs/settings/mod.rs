@@ -734,6 +734,20 @@ pub fn SettingsTab() -> impl IntoView {
                                         {move || tt(context, "Settings.reducedMotionActiveHint")}
                                     </p>
                                 </Show>
+
+                                <div class="pt-1">
+                                    <button
+                                        type="button"
+                                        data-testid="settings-atmosphere-reset"
+                                        class="glass-button px-3 py-1.5 text-xs"
+                                        on:click=move |_| {
+                                            context.reset_atmosphere_defaults();
+                                            context.haptic(8);
+                                        }
+                                    >
+                                        {move || tt(context, "Reset atmosphere defaults")}
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="pt-3">

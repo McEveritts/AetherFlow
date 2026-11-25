@@ -106,6 +106,20 @@ pub(crate) enum SubjectStatusError {
     DbError,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionValidationError {
+    Suspended,
+    MissingOrRevoked,
+    DbError,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RotationGrace<'a> {
+    Disabled,
+    StrictFingerprint(&'a str),
+    AllowAnyFingerprint,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema Introspection & Active Subject Lookups
 // ─────────────────────────────────────────────────────────────────────────────
@@ -257,6 +271,71 @@ pub(crate) fn load_active_subject(
         role,
         sessions_revoked_after,
     })
+}
+
+pub(crate) fn verify_active_session_on_conn(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    jti: &str,
+    ver: i64,
+    now: i64,
+    grace: RotationGrace<'_>,
+) -> Result<ActiveSubject, SessionValidationError> {
+    let trimmed_jti = jti.trim();
+    if user_id <= 0 || trimmed_jti.is_empty() {
+        return Err(SessionValidationError::MissingOrRevoked);
+    }
+
+    let subj = load_active_human_subject(conn, user_id).map_err(|err| match err {
+        SubjectStatusError::Suspended => SessionValidationError::Suspended,
+        SubjectStatusError::MissingOrPlugin => SessionValidationError::MissingOrRevoked,
+        SubjectStatusError::DbError => SessionValidationError::DbError,
+    })?;
+
+    if ver < subj.sessions_revoked_after {
+        return Err(SessionValidationError::MissingOrRevoked);
+    }
+
+    let revoked = af_db::token_revocation_status_with_conn(conn, trimmed_jti)
+        .map_err(|_| SessionValidationError::DbError)?;
+    if !revoked {
+        let active = af_db::has_unexpired_active_session(conn, trimmed_jti, user_id, now)
+            .map_err(|_| SessionValidationError::DbError)?;
+        return if active {
+            Ok(subj)
+        } else {
+            Err(SessionValidationError::MissingOrRevoked)
+        };
+    }
+
+    let caller_strict_fp = match grace {
+        RotationGrace::Disabled => return Err(SessionValidationError::MissingOrRevoked),
+        RotationGrace::StrictFingerprint(fp) => {
+            if fp.trim().is_empty() {
+                return Err(SessionValidationError::MissingOrRevoked);
+            }
+            Some(fp)
+        }
+        RotationGrace::AllowAnyFingerprint => None,
+    };
+
+    let Some((grace_entry, _, _, leaf_jti)) =
+        super::revocation::resolve_latest_grace_token(trimmed_jti, user_id, caller_strict_fp)
+    else {
+        return Err(SessionValidationError::MissingOrRevoked);
+    };
+
+    let leaf_revoked = af_db::token_revocation_status_with_conn(conn, &leaf_jti)
+        .map_err(|_| SessionValidationError::DbError)?;
+    let leaf_active = !leaf_revoked
+        && af_db::has_unexpired_active_session(conn, &leaf_jti, user_id, now)
+            .map_err(|_| SessionValidationError::DbError)?;
+    if leaf_active {
+        Ok(subj)
+    } else {
+        super::revocation::evict_rotation_grace_for_family(&grace_entry.family_id, trimmed_jti);
+        Err(SessionValidationError::MissingOrRevoked)
+    }
 }
 
 pub(crate) fn query_user_credential_version(

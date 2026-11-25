@@ -21,7 +21,7 @@ INSTALLER_SH = ROOT / "packages/package/install/installpackage-autoscan"
 AUTOMATION_JSON = ROOT / "config/package_automation.json"
 
 REBASE_RE = re.compile(
-    r"(?<![\w/.-])(/usr/local|/opt|/var|/etc|/install)(?=/|[^\w.-]|$)"
+    r"(?:(?<![\w/.-])|(?<=:-))(/usr/local|/opt|/var|/etc|/install)(?=/|[^\w.-]|$)"
 )
 
 

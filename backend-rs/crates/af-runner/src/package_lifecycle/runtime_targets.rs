@@ -465,6 +465,10 @@ pub(super) fn candidate_runtime_targets(
             "/etc/default/quasselcore".into(),
             "/usr/bin/quasselcore".into(),
         ]),
+        "rutorrent" => file_candidates.extend([
+            "/etc/aetherflow/rutorrent-proxy-token".into(),
+            "/etc/aetherflow/rutorrent-proxy-token.conf".into(),
+        ]),
         "sabnzbd" => file_candidates.push("/etc/default/sabnzbdplus".into()),
         "tailscale" => file_candidates.extend([
             "/etc/default/tailscaled".into(),

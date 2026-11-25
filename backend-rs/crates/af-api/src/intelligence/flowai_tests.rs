@@ -55,6 +55,7 @@ async fn ai_models_support_context_modes_and_non_admin_error_sanitization() {
         return;
     }
     init_ai_test_settings();
+    std::env::remove_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS");
     let non_admin = AuthUser {
         user_id: 42,
         username: "viewer".into(),
@@ -63,6 +64,27 @@ async fn ai_models_support_context_modes_and_non_admin_error_sanitization() {
         plugin_id: None,
         plugin_scopes: Vec::new(),
     };
+    // Cloud providers are restricted to admins by default (ESC-04).
+    let cloud_blocked = run_chat_session(
+        Some(non_admin.clone()),
+        true,
+        "",
+        "",
+        "",
+        "gpt-4o",
+        "openai",
+        vec![],
+        "hello".to_string(),
+    )
+    .await;
+    assert_eq!(cloud_blocked.status(), StatusCode::FORBIDDEN);
+    let blocked_bytes = axum::body::to_bytes(cloud_blocked.into_body(), 4096)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&blocked_bytes).contains("AI_PROVIDER_ADMIN_ONLY"));
+
+    // When non-admin cloud access is explicitly opted in, upstream errors remain sanitized.
+    std::env::set_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS", "true");
     let err_resp = run_chat_session(
         Some(non_admin),
         true,
@@ -75,6 +97,7 @@ async fn ai_models_support_context_modes_and_non_admin_error_sanitization() {
         "hello".to_string(),
     )
     .await;
+    std::env::remove_var("AF_AI_ALLOW_USER_CLOUD_PROVIDERS");
     assert_eq!(err_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let bytes = axum::body::to_bytes(err_resp.into_body(), 4096)
         .await

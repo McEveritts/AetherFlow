@@ -4687,7 +4687,7 @@ class R16ShellInstallerRegressions(unittest.TestCase):
                                      'fixture', str(fixture.root / 'packages/common.sh'), str(receipt)],
                                     env=variables, text=True, capture_output=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn(['apt-get', 'install', '--reinstall', '-y', 'jellyfin', 'jellyfin-server'], self.commands(fixture))
+            self.assertIn(['apt-get', 'install', '-o', 'DPkg::Lock::Timeout=120', '--reinstall', '-y', 'jellyfin', 'jellyfin-server'], self.commands(fixture))
 
     def run_legacy_cli(self, fixture, *arguments, **environment):
         cli = fixture.file('packages/system/af', fixture.rewrite((ROOT / 'packages/system/af').read_text()))

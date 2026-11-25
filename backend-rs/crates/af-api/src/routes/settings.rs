@@ -192,8 +192,24 @@ pub(super) async fn update_settings(
         &mut req.anthropic_endpoint,
     ] {
         if !endpoint.trim().is_empty() {
+            if crate::intelligence::is_self_target_ai_endpoint(endpoint) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "AI_SELF_TARGET_REJECTED",
+                    "AI endpoint cannot target the AetherFlow API server itself",
+                );
+            }
             match af_services::validate_server_url(endpoint) {
-                Ok(clean) => *endpoint = clean,
+                Ok(clean) => {
+                    if crate::intelligence::is_self_target_ai_endpoint(&clean) {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "AI_SELF_TARGET_REJECTED",
+                            "AI endpoint cannot target the AetherFlow API server itself",
+                        );
+                    }
+                    *endpoint = clean;
+                }
                 Err(_) => {
                     return api_error(
                         StatusCode::BAD_REQUEST,

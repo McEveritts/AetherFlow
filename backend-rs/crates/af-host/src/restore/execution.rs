@@ -10,6 +10,7 @@ use super::journal::{
     JOURNAL_STATE_ROLLED_BACK,
 };
 use super::policy::{
+    is_service_data_dir_secret_destination, is_service_data_dir_secret_key,
     resolve_effective_quiesce_services, resolve_recovery_provenance_dir,
     validate_destination_not_provenance, validate_quiesce_service_entries,
     validate_trusted_sqlite_db_path, OverwritePolicy, RestorePreflightOptions,
@@ -36,6 +37,27 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
+
+fn effective_is_root() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn uses_service_data_dir_ownership(
+    relative_key: Option<&str>,
+    dest: &Path,
+    kind: BackupTargetKind,
+) -> bool {
+    kind == BackupTargetKind::SqliteSnapshot
+        || relative_key.is_some_and(is_service_data_dir_secret_key)
+        || is_service_data_dir_secret_destination(dest)
+}
 
 /// Executes a verified, offline-staged, service-quiesced, rollback-protected restore of a backup
 /// artifact (`<filename>` inside `backup_dir`) into `target_root`.
@@ -233,11 +255,22 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                     expected.kind,
                     options,
                 );
+                let is_service_secret = is_service_data_dir_secret_key(&key)
+                    || is_service_data_dir_secret_destination(&dest_path);
                 let uid = if expected.kind == BackupTargetKind::SqliteSnapshot {
                     options
                         .trusted_sqlite_uid
                         .or(expected.unix_uid)
                         .or(header_uid)
+                } else if is_service_secret {
+                    if effective_is_root() {
+                        options
+                            .trusted_sqlite_uid
+                            .or(expected.unix_uid)
+                            .or(header_uid)
+                    } else {
+                        None
+                    }
                 } else {
                     expected.unix_uid.or(header_uid)
                 };
@@ -246,6 +279,15 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                         .trusted_sqlite_gid
                         .or(expected.unix_gid)
                         .or(header_gid)
+                } else if is_service_secret {
+                    if effective_is_root() {
+                        options
+                            .trusted_sqlite_gid
+                            .or(expected.unix_gid)
+                            .or(header_gid)
+                    } else {
+                        None
+                    }
                 } else {
                     expected.unix_gid.or(header_gid)
                 };
@@ -508,7 +550,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                 reject_symlink_chain(&normalized_root, &item.destination_path)?;
             }
 
-            let trusted_ancestor_uid = if item.kind == BackupTargetKind::SqliteSnapshot {
+            let trusted_ancestor_uid = if uses_service_data_dir_ownership(
+                Some(&item.relative_key),
+                &item.destination_path,
+                item.kind,
+            ) {
                 options.trusted_sqlite_uid
             } else {
                 None
@@ -832,11 +878,12 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
             }
 
             if rec_ok {
-                let trusted_ancestor_uid = if rec.kind == BackupTargetKind::SqliteSnapshot {
-                    options.trusted_sqlite_uid
-                } else {
-                    None
-                };
+                let trusted_ancestor_uid =
+                    if uses_service_data_dir_ownership(None, &rec.destination_path, rec.kind) {
+                        options.trusted_sqlite_uid
+                    } else {
+                        None
+                    };
 
                 if rec.kind == BackupTargetKind::SqliteSnapshot {
                     let (wal_path, shm_path) = sqlite_sidecar_paths(&rec.destination_path);

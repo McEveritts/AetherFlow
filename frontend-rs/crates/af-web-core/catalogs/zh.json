@@ -2767,5 +2767,6 @@
     "liveLogsClosed": "日志流已关闭",
     "liveLogsRevoked": "实时日志流已关闭（代码 {code}）；对等节点访问权限可能已变更或被撤销。",
     "remoteShareOriginUnavailable": "{server} 的公开分享链接不可用，因为未配置公共基础域名或无法读取设置。请在 {server} 上配置公共基础域名并授予设置读取权限以创建远程分享链接。"
-  }
+  },
+  "Reset atmosphere defaults": "重置氛围默认设置"
 }

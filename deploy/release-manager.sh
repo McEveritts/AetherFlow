@@ -174,8 +174,8 @@ try:
     try:
         output_fd = open_file(directory, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(output_fd, "w", encoding="utf-8") as output:
-            # Keep the runner reader's existing readability contract.
-            os.fchmod(output.fileno(), 0o644)
+            # Keep self-update receipts private (root-only 0600).
+            os.fchmod(output.fileno(), 0o600)
             json.dump(payload, output)
             output.flush()
             os.fsync(output.fileno())
@@ -519,6 +519,9 @@ PY
                 fi
             else
                 printf -v "${key}" '%s' "${val}"
+                if [[ "${key}" == "HEALTH_ENDPOINT" && -n "${val}" ]]; then
+                    HEALTH_ENDPOINT_EXPLICIT=true
+                fi
             fi
         done <<< "${parsed_records}"
         return 0
@@ -528,6 +531,12 @@ PY
     echo "[FATAL] ${LAST_LOG_ERROR}"
     exit 4
 }
+
+# Track whether HEALTH_ENDPOINT was explicitly supplied via process env or non-default conf.
+HEALTH_ENDPOINT_EXPLICIT=false
+if [[ -n "${HEALTH_ENDPOINT:-}" ]]; then
+    HEALTH_ENDPOINT_EXPLICIT=true
+fi
 
 # ── Load Configuration ───────────────────────────────────────────────────────
 if [[ -n "${CLI_CONF_OVERRIDE}" ]]; then
@@ -682,6 +691,28 @@ LEGACY_BIN_ROOT="${LEGACY_BIN_ROOT:-/usr/local/bin/AetherFlow}"
 DRY_RUN_ROOT="${DRY_RUN_ROOT:-/tmp/aetherflow-dryrun}"
 RESOLVED_DB_PATH=""
 RESOLVED_DB_SOURCE=""
+ENV_FILE_GITHUB_TOKEN=""
+EFFECTIVE_SKIP_PROVENANCE_VERIFY="${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-}"
+
+is_trusted_root_env_file() {
+    local target="$1"
+    [[ -n "${target}" && -f "${target}" && ! -L "${target}" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "${target}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY' >/dev/null 2>&1
+import os, stat, sys
+target, isolated_root = sys.argv[1], sys.argv[2]
+st = os.lstat(target)
+if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+    sys.exit(1)
+if st.st_mode & 0o022:
+    sys.exit(1)
+if st.st_uid == 0:
+    sys.exit(0)
+if isolated_root and st.st_uid == os.geteuid():
+    sys.exit(0)
+sys.exit(1)
+PY
+}
 
 # ── Dry-Run Override ─────────────────────────────────────────────────────────
 # Writes stay under DRY_RUN_ROOT. CONFIG_ENV_FILE / CONFIG_DATA_DIR stay put
@@ -875,6 +906,40 @@ PY
     [[ -n "${found}" ]] || return 1
     printf '%s' "${found}"
 }
+
+# Unified loading of HEALTH_ENDPOINT, GitHub tokens, and root-only provenance bypass
+# from CONFIG_ENV_FILE (/etc/aetherflow/aetherflow.env) when AETHERFLOW_SKIP_ENV_FILES!=1:
+# process env > explicit --config > CONFIG_ENV_FILE > default-fallback --config > compiled default.
+apply_unified_env_file_overrides() {
+    [[ "${AETHERFLOW_SKIP_ENV_FILES:-0}" != "1" ]] || return 0
+    [[ -n "${CONFIG_ENV_FILE:-}" && -f "${CONFIG_ENV_FILE}" && ! -L "${CONFIG_ENV_FILE}" ]] || return 0
+
+    if [[ "${HEALTH_ENDPOINT_EXPLICIT:-false}" != "true" ]]; then
+        local env_health=""
+        env_health="$(read_env_file_value "${CONFIG_ENV_FILE}" "HEALTH_ENDPOINT" || true)"
+        if [[ -n "${env_health}" ]]; then
+            HEALTH_ENDPOINT="${env_health}"
+        fi
+    fi
+
+    local tok_key="" tok_val=""
+    for tok_key in AF_GITHUB_TOKEN GITHUB_TOKEN GH_TOKEN; do
+        tok_val="$(read_env_file_value "${CONFIG_ENV_FILE}" "${tok_key}" || true)"
+        if [[ -n "${tok_val}" ]]; then
+            ENV_FILE_GITHUB_TOKEN="${tok_val}"
+            break
+        fi
+    done
+
+    if [[ -z "${EFFECTIVE_SKIP_PROVENANCE_VERIFY}" ]] && is_trusted_root_env_file "${CONFIG_ENV_FILE}"; then
+        local env_skip=""
+        env_skip="$(read_env_file_value "${CONFIG_ENV_FILE}" "AETHERFLOW_SKIP_PROVENANCE_VERIFY" || true)"
+        if [[ -n "${env_skip}" ]]; then
+            EFFECTIVE_SKIP_PROVENANCE_VERIFY="${env_skip}"
+        fi
+    fi
+}
+apply_unified_env_file_overrides
 
 # `systemctl show -p Environment` prints one or more `Environment=K=V K2=V2`
 # lines. Values may be quoted. Missing systemctl or a missing unit yields nothing.
@@ -1189,7 +1254,7 @@ is_v4_or_newer_release_tag() {
 resolve_github_token_for_url() {
     local url="$1"
     [[ "${url}" == https://api.github.com/* || "${url}" == https://github.com/* ]] || return 1
-    local tok="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
+    local tok="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-${ENV_FILE_GITHUB_TOKEN:-}}}}"
     [[ -n "${tok}" ]] || return 1
     printf '%s' "${tok}"
 }
@@ -1410,7 +1475,7 @@ pull_prebuilt_artifact() {
     fi
     log_info "SHA-256 OK ${actual_hash}"
 
-    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+    if [[ "${EFFECTIVE_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
         log_info "Verifying Sigstore + SLSA v1 GitHub Actions build provenance for ${tag}..."
         local -a prov_args=(
             --repo "${GITHUB_REPO}"
@@ -1431,7 +1496,8 @@ pull_prebuilt_artifact() {
             prov_args+=(--bundle-file "${effective_bundle_file}")
         fi
         local prov_out=""
-        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! prov_out="$(python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" 2>&1)"; then
+        local prov_gh_token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-${ENV_FILE_GITHUB_TOKEN:-}}}}"
+        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! prov_out="$(AF_GITHUB_TOKEN="${prov_gh_token}" python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" 2>&1)"; then
             [[ -n "${prov_out}" ]] && log_warn "Provenance verifier output: ${prov_out}"
             log_error "Sigstore build provenance verification FAILED for ${ARTIFACT_NAME} (${tag}). Refusing unverified binary."
             rm -rf "${tmp_dir}"
@@ -2032,16 +2098,13 @@ restart_systemd_units() {
     fi
 
     if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]] && id -u aetherflow >/dev/null 2>&1; then
-        local host_dir
-        for host_dir in /var/log/aetherflow /run/aetherflow; do
-            if [[ -L "${host_dir}" ]]; then
-                printf 'Refusing symlinked host directory: %s\n' "${host_dir}" >&2
-                return 1
-            fi
-            mkdir -p "${host_dir}"
-            chown root:aetherflow "${host_dir}"
-            chmod 0750 "${host_dir}"
-        done
+        if [[ -L /run/aetherflow ]]; then
+            printf 'Refusing symlinked host directory: /run/aetherflow\n' >&2
+            return 1
+        fi
+        mkdir -p /run/aetherflow
+        chown root:aetherflow /run/aetherflow
+        chmod 0750 /run/aetherflow
     fi
 
     local transcode_src="${CURRENT_LINK}/bin/af-transcode"
@@ -2088,11 +2151,6 @@ restart_systemd_units() {
 
     systemctl daemon-reload || return 1
 
-    if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
-        systemctl start aetherflow-log-retention.service || return 1
-        systemctl enable --now aetherflow-log-retention.timer || return 1
-    fi
-
     systemctl stop aetherflow-frontend.service 2>/dev/null || true
     systemctl disable aetherflow-frontend.service 2>/dev/null || true
     if command -v pm2 &>/dev/null; then
@@ -2104,6 +2162,23 @@ restart_systemd_units() {
     systemctl restart aetherflow-api.service || return 1
     if systemctl is-active --quiet af-transcode-worker.service 2>/dev/null; then
         systemctl restart af-transcode-worker.service || return 1
+    fi
+
+    # Best-effort post-restart log retention housekeeping: never block Stage 3/4 recovery.
+    if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]] && id -u aetherflow >/dev/null 2>&1; then
+        if [[ -L /var/log/aetherflow ]]; then
+            log_warn "Skipping /var/log/aetherflow ownership setup because path is a symlink."
+        elif ! mkdir -p /var/log/aetherflow || ! chown root:aetherflow /var/log/aetherflow || ! chmod 0750 /var/log/aetherflow; then
+            log_warn "Best-effort /var/log/aetherflow ownership setup failed; continuing."
+        fi
+    fi
+    if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
+        if ! systemctl enable --now aetherflow-log-retention.timer; then
+            log_warn "Best-effort systemctl enable --now aetherflow-log-retention.timer failed; continuing."
+        fi
+        if ! systemctl start aetherflow-log-retention.service; then
+            log_warn "Best-effort systemctl start aetherflow-log-retention.service failed; continuing."
+        fi
     fi
 }
 

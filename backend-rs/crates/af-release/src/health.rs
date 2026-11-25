@@ -830,29 +830,30 @@ impl LifecycleController for SystemdLifecycleController {
 
         if config.isolated_root.is_none() {
             crate::fs_security::apply_root_aetherflow_dir_ownership_and_mode(Path::new(
-                "/var/log/aetherflow",
-            ))?;
-            crate::fs_security::apply_root_aetherflow_dir_ownership_and_mode(Path::new(
                 "/run/aetherflow",
             ))?;
         }
 
         let _ = refresh_installed_transcode_shim(config)?;
 
-        run_systemctl(&["daemon-reload"], true)?;
+        run_systemctl(&config.log_file, &["daemon-reload"], true)?;
 
-        if has_log_retention {
-            run_systemctl(&["start", "aetherflow-log-retention.service"], true)?;
-            run_systemctl(&["enable", "--now", "aetherflow-log-retention.timer"], true)?;
-        }
-
-        let _ = run_systemctl(&["stop", "aetherflow-frontend.service"], false);
-        let _ = run_systemctl(&["disable", "aetherflow-frontend.service"], false);
+        let _ = run_systemctl(
+            &config.log_file,
+            &["stop", "aetherflow-frontend.service"],
+            false,
+        );
+        let _ = run_systemctl(
+            &config.log_file,
+            &["disable", "aetherflow-frontend.service"],
+            false,
+        );
         let _ = Command::new("pm2")
             .args(["delete", "aetherflow-frontend", "aetherflow-api"])
             .output();
 
         run_systemctl(
+            &config.log_file,
             &[
                 "enable",
                 "aetherflow-runner.service",
@@ -860,9 +861,19 @@ impl LifecycleController for SystemdLifecycleController {
             ],
             true,
         )?;
-        run_systemctl(&["restart", "aetherflow-runner.service"], true)?;
-        run_systemctl(&["restart", "aetherflow-api.service"], true)?;
+        run_systemctl(
+            &config.log_file,
+            &["restart", "aetherflow-runner.service"],
+            true,
+        )?;
+        run_systemctl(
+            &config.log_file,
+            &["restart", "aetherflow-api.service"],
+            true,
+        )?;
         let _ = restart_transcode_worker_if_active_with_bin(Path::new("systemctl"))?;
+
+        run_post_restart_log_retention_with_bin(Path::new("systemctl"), config, has_log_retention);
         Ok(())
     }
 
@@ -929,32 +940,88 @@ fn run_systemctl_if_present(args: &[&str]) -> ReleaseResult<()> {
     }
 }
 
-fn run_systemctl(args: &[&str], required: bool) -> ReleaseResult<()> {
-    run_systemctl_with_bin(Path::new("systemctl"), args, required)
+pub fn run_post_restart_log_retention_with_bin(
+    systemctl_bin: &Path,
+    config: &ReleaseConfig,
+    has_log_retention: bool,
+) {
+    if config.isolated_root.is_none() {
+        if let Err(err) = crate::fs_security::apply_root_aetherflow_dir_ownership_and_mode(
+            Path::new("/var/log/aetherflow"),
+        ) {
+            crate::engine::append_jsonl_log(
+                &config.log_file,
+                "WARN",
+                &format!(
+                    "Best-effort /var/log/aetherflow ownership setup failed (continuing): {err}"
+                ),
+            );
+        }
+    }
+    if has_log_retention {
+        let _ = run_systemctl_with_bin(
+            systemctl_bin,
+            Some(&config.log_file),
+            &["enable", "--now", "aetherflow-log-retention.timer"],
+            false,
+        );
+        let _ = run_systemctl_with_bin(
+            systemctl_bin,
+            Some(&config.log_file),
+            &["start", "aetherflow-log-retention.service"],
+            false,
+        );
+    }
+}
+
+fn run_systemctl(log_file: &Path, args: &[&str], required: bool) -> ReleaseResult<()> {
+    run_systemctl_with_bin(Path::new("systemctl"), Some(log_file), args, required)
 }
 
 fn run_systemctl_with_bin(
     systemctl_bin: &Path,
+    log_file: Option<&Path>,
     args: &[&str],
     required: bool,
 ) -> ReleaseResult<()> {
     let action_desc = format!("systemctl {}", args.join(" "));
     match Command::new(systemctl_bin).args(args).output() {
         Ok(out) => {
-            if out.status.success() || !required {
+            if out.status.success() {
                 Ok(())
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 let detail = if !stderr.is_empty() { stderr } else { stdout };
-                Err(ReleaseError::Systemd {
-                    action: action_desc,
-                    reason: format!("exit {}: {}", out.status, detail),
-                })
+                if !required {
+                    if let Some(log_file) = log_file {
+                        crate::engine::append_jsonl_log(
+                            log_file,
+                            "WARN",
+                            &format!(
+                                "Best-effort {action_desc} failed (exit {}): {detail}",
+                                out.status
+                            ),
+                        );
+                    }
+                    Ok(())
+                } else {
+                    Err(ReleaseError::Systemd {
+                        action: action_desc,
+                        reason: format!("exit {}: {}", out.status, detail),
+                    })
+                }
             }
         }
         Err(e) => {
             if !required {
+                if let Some(log_file) = log_file {
+                    crate::engine::append_jsonl_log(
+                        log_file,
+                        "WARN",
+                        &format!("Best-effort {action_desc} failed to execute: {e}"),
+                    );
+                }
                 Ok(())
             } else {
                 Err(ReleaseError::Systemd {
@@ -985,7 +1052,12 @@ pub(crate) fn restart_transcode_worker_if_active_with_bin(
     systemctl_bin: &Path,
 ) -> ReleaseResult<bool> {
     if systemctl_unit_is_active(systemctl_bin, TRANSCODE_WORKER_UNIT)? {
-        run_systemctl_with_bin(systemctl_bin, &["restart", TRANSCODE_WORKER_UNIT], true)?;
+        run_systemctl_with_bin(
+            systemctl_bin,
+            None,
+            &["restart", TRANSCODE_WORKER_UNIT],
+            true,
+        )?;
         Ok(true)
     } else {
         Ok(false)

@@ -2767,5 +2767,6 @@
     "liveLogsClosed": "Flux fermé",
     "liveLogsRevoked": "Flux de journaux en direct fermé (code {code}) ; l’accès au pair a peut-être changé ou été révoqué.",
     "remoteShareOriginUnavailable": "Les liens de partage public sont indisponibles pour {server} car son domaine de base public n’est pas configuré ou ne peut pas être lu. Configurez un domaine de base public sur {server} et accordez l’accès en lecture aux paramètres pour créer des liens de partage distants."
-  }
+  },
+  "Reset atmosphere defaults": "Réinitialiser les paramètres d'atmosphère"
 }

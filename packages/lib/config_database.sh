@@ -988,6 +988,7 @@ replace_app_tree() {
             return 1
         fi
         log_info "Previous application files retained in $backup/app"
+        prune_app_archive_backups "$destination" "" "$backup" 2
     else
         mv -T "$staged" "$destination"
     fi
@@ -1265,12 +1266,103 @@ rollback_app_archive_update() {
     exit "$status"
 }
 
+# Retain the newest N (default 2) completed ${destination}.af-backup.* directories
+# for the same owner, mirroring retain_successful_app_backups() while skipping
+# symlinks, pending/in-flight backups (.af-archive-pending), and foreign owners.
+prune_app_archive_backups() {
+    local destination="$1" expected_owner="${2:-}" keep_path="${3:-}" keep_count="${4:-2}"
+    [[ -n "$destination" && ! -L "$destination" ]] || return 0
+    [[ "$keep_count" =~ ^[0-9]+$ ]] || keep_count=2
+    local obsolete=""
+    obsolete="$(python3 - "$destination" "$expected_owner" "$keep_path" "$keep_count" <<'PYEOF'
+import os, stat, sys
+
+destination, expected_owner, keep_path, keep_count_raw = sys.argv[1:5]
+keep_count = max(0, int(keep_count_raw))
+parent = os.path.dirname(destination) or "/"
+base = os.path.basename(destination)
+prefix = base + ".af-backup."
+keep_name = os.path.basename(keep_path) if keep_path and os.path.dirname(keep_path) == parent else ""
+
+try:
+    parent_st = os.lstat(parent)
+    if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
+        sys.exit(0)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(0)
+
+try:
+    candidates = []
+    for name in os.listdir(parent_fd):
+        if not name.startswith(prefix) or len(name) <= len(prefix):
+            continue
+        try:
+            entry_st = os.lstat(name, dir_fd=parent_fd)
+        except OSError:
+            continue
+        if stat.S_ISLNK(entry_st.st_mode) or not stat.S_ISDIR(entry_st.st_mode):
+            continue
+        try:
+            child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError:
+            continue
+        try:
+            try:
+                os.lstat(".af-archive-pending", dir_fd=child_fd)
+                continue
+            except FileNotFoundError:
+                pass
+            owner_matched = True
+            try:
+                owner_st = os.lstat(".af-archive-owner", dir_fd=child_fd)
+                if stat.S_ISLNK(owner_st.st_mode) or not stat.S_ISREG(owner_st.st_mode):
+                    owner_matched = False
+                else:
+                    ofd = os.open(".af-archive-owner", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=child_fd)
+                    with os.fdopen(ofd, "r", encoding="utf-8", errors="replace") as fh:
+                        owner_val = fh.read(256).strip()
+                    if expected_owner and owner_val != expected_owner:
+                        owner_matched = False
+                    elif not expected_owner and owner_val:
+                        owner_matched = False
+            except FileNotFoundError:
+                pass
+            if not owner_matched:
+                continue
+            candidates.append((entry_st.st_mtime_ns, name))
+        finally:
+            os.close(child_fd)
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    kept = []
+    if keep_name:
+        kept.append(keep_name)
+    for _, name in candidates:
+        if name in kept:
+            continue
+        if len(kept) < keep_count:
+            kept.append(name)
+        else:
+            print(os.path.join(parent, name))
+finally:
+    os.close(parent_fd)
+PYEOF
+    )" || return 0
+    local dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" && ! -L "$dir" && -d "$dir" ]] || continue
+        rm -rf -- "$dir" || true
+    done <<< "$obsolete"
+}
+
 finish_app_archive_update() {
     local unit="$1" port="$2" readiness_path="${3:-}"
     wait_for_service_ready "$unit" "$port" "$readiness_path" || return 1
     if [[ -n "${AF_ARCHIVE_BACKUP:-}" ]]; then
         rm -rf -- "$AF_ARCHIVE_BACKUP/release"
         log_info "Previous application and state retained privately in $AF_ARCHIVE_BACKUP"
+        prune_app_archive_backups "${AF_ARCHIVE_DESTINATION:-}" "${AF_ARCHIVE_UNIT:-$unit}" "$AF_ARCHIVE_BACKUP" 2
     fi
 }
 

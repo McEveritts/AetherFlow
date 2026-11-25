@@ -931,7 +931,7 @@ AETHERFLOW_E2E_USER="${ADMIN_USER}" \
 AETHERFLOW_E2E_PASS="${ADMIN_PASS}" \
 AETHERFLOW_E2E_USERNAME="${ADMIN_USER}" \
 AETHERFLOW_E2E_PASSWORD="${ADMIN_PASS}" \
-python3 "${ROOT_DIR}/tests/run_e2e.py" --mode live --url "${BASE_URL}" --socket "${RUNNER_SOCK}" --json-out "${WORK_DIR}/e2e-report.json"
+python3 "${ROOT_DIR}/tests/run_e2e.py" --mode live --url "${BASE_URL}" --json-out "${WORK_DIR}/e2e-report.json"
 
 if [[ "${RUN_PLAYWRIGHT}" == "1" ]]; then
     python3 - "${DB_FILE}" "${WORK_DIR}" <<'PY'

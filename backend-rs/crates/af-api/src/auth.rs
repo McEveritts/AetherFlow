@@ -24,15 +24,17 @@ pub use mfa::{
     MfaVerifyRequest,
 };
 
-pub(crate) use middleware::require_admin;
 pub use middleware::{admin_only_middleware, auth_middleware, csrf_middleware, issue_csrf_token};
+pub(crate) use middleware::{is_production_or_release_env, require_admin};
 
 #[allow(unused_imports)]
-pub(crate) use revocation::{evict_rotation_grace_for_family, evict_rotation_grace_for_user};
 pub(crate) use revocation::{
-    finalize_user_credential_revocation, is_session_token_revoked_beyond_grace,
-    is_session_token_revoked_beyond_grace_for_fp, is_session_token_revoked_beyond_grace_with_conn,
-    oidc_session_tag, resolve_current_session_jti, resolve_session_family_id,
+    evict_rotation_grace_for_family, evict_rotation_grace_for_user,
+    is_session_token_revoked_beyond_grace, is_session_token_revoked_beyond_grace_for_fp,
+    is_session_token_revoked_beyond_grace_with_conn, resolve_current_session_jti,
+};
+pub(crate) use revocation::{
+    finalize_user_credential_revocation, oidc_session_tag, resolve_session_family_id,
     revoke_all_user_credentials_in_tx,
 };
 
@@ -61,5 +63,6 @@ pub use tokens::{
 pub(crate) use tokens::{
     blocking_auth_work, blocking_response, column_exists, create_session_jwt_in_conn,
     load_active_human_subject, load_active_peer_subject, load_active_subject_for_request,
-    set_session_cookie, table_exists, ActiveSubject, SubjectStatusError,
+    set_session_cookie, table_exists, verify_active_session_on_conn, ActiveSubject, RotationGrace,
+    SessionValidationError, SubjectStatusError,
 };

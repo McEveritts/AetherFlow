@@ -1073,6 +1073,13 @@ impl AppContext {
     pub fn set_card_lift_enabled(self, enabled: bool) {
         self.set_card_lift(if enabled { -4 } else { 0 });
     }
+    pub fn reset_atmosphere_defaults(self) {
+        self.set_theme("dark");
+        self.set_aurora_opacity(55);
+        self.set_aurora_animation(false);
+        self.set_grain_display(true);
+        self.set_card_lift(-4);
+    }
     pub fn haptic(self, ms: u32) {
         if !self.haptic_feedback.get_untracked()
             || self.reduced_motion.get_untracked()

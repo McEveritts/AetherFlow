@@ -37,7 +37,8 @@ fn rule_validation_error(message: &str) -> Response {
 }
 
 pub async fn create_notification_rule(Json(req): Json<CreateRuleReq>) -> Response {
-    if req.name.trim().is_empty() || req.name.trim().len() > 128 {
+    let trimmed_name = req.name.trim();
+    if trimmed_name.is_empty() || trimmed_name.len() > 128 {
         return rule_validation_error("Rule name must be between 1 and 128 characters");
     }
     let condition_type = req.condition_type.trim();
@@ -50,18 +51,39 @@ pub async fn create_notification_rule(Json(req): Json<CreateRuleReq>) -> Respons
         Err(message) => return rule_validation_error(message),
     };
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to create rule",
         );
     };
+    let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to create rule",
+        );
+    };
+    let duplicate_exists = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM notification_rules WHERE LOWER(TRIM(name)) = LOWER(?1))",
+            params![trimmed_name],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if duplicate_exists {
+        return api_error(
+            StatusCode::CONFLICT,
+            "DUPLICATE_RULE_NAME",
+            "A notification rule with that name already exists",
+        );
+    }
 
-    if conn
+    if tx
         .execute(
             "INSERT INTO notification_rules (name, condition_type, condition_value, level) VALUES (?1, ?2, ?3, ?4)",
-            params![req.name.trim(), condition_type, value, level],
+            params![trimmed_name, condition_type, value, level],
         )
         .is_err()
     {
@@ -72,7 +94,14 @@ pub async fn create_notification_rule(Json(req): Json<CreateRuleReq>) -> Respons
         );
     }
 
-    let id = conn.last_insert_rowid();
+    let id = tx.last_insert_rowid();
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to create rule",
+        );
+    }
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -137,6 +166,22 @@ pub async fn update_notification_rule(
     let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
         return rule_update_failed();
     };
+    if let Some(ref name) = req.name {
+        let duplicate_exists = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM notification_rules WHERE LOWER(TRIM(name)) = LOWER(?1) AND id != ?2)",
+                params![name.trim(), id],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if duplicate_exists {
+            return api_error(
+                StatusCode::CONFLICT,
+                "DUPLICATE_RULE_NAME",
+                "A notification rule with that name already exists",
+            );
+        }
+    }
     if req.condition_type.is_some() || req.condition_value.is_some() {
         let current = tx.query_row(
             "SELECT condition_type, condition_value FROM notification_rules WHERE id = ?1",
