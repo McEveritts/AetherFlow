@@ -400,9 +400,7 @@ html[data-theme="light"] {
 
   .af-card-interactive {
     cursor: pointer;
-    transition:
-      background-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      border-color var(--obs-duration-fast) var(--obs-ease-out-120);
+    transition: border-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
   @media (hover: hover) and (pointer: fine) {
@@ -591,10 +589,7 @@ html[data-theme="light"] {
     font-size: 13px;
     white-space: nowrap;
     text-align: left;
-    transition:
-      background-color 120ms var(--obs-ease-out-120),
-      color 120ms var(--obs-ease-out-120),
-      border-color 120ms var(--obs-ease-out-120);
+    transition: border-color 120ms var(--obs-ease-out-120);
   }
 
   .af-nav-button:hover {
@@ -707,10 +702,7 @@ html[data-theme="light"] {
     min-height: 40px;
     box-shadow: none;
     touch-action: manipulation;
-    transition:
-      background-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      border-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      color var(--obs-duration-fast) var(--obs-ease-out-120);
+    transition: border-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
   @media (hover: hover) and (pointer: fine) {
@@ -786,10 +778,7 @@ html[data-theme="light"] {
     min-height: 40px;
     box-shadow: none;
     touch-action: manipulation;
-    transition:
-      background-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      border-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      color var(--obs-duration-fast) var(--obs-ease-out-120);
+    transition: border-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
   @media (hover: hover) and (pointer: fine) {
@@ -821,9 +810,7 @@ html[data-theme="light"] {
     color: var(--af-fg-primary);
     min-height: 40px;
     box-shadow: none;
-    transition:
-      border-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      background-color var(--obs-duration-fast) var(--obs-ease-out-120);
+    transition: border-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
   .af-input::placeholder {
@@ -866,10 +853,7 @@ html[data-theme="light"] {
     min-height: 36px;
     box-shadow: none;
     touch-action: manipulation;
-    transition:
-      background-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      color var(--obs-duration-fast) var(--obs-ease-out-120),
-      border-color var(--obs-duration-fast) var(--obs-ease-out-120);
+    transition: border-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
   @media (hover: hover) and (pointer: fine) {
@@ -1131,16 +1115,13 @@ html[data-theme="light"] {
   .obs-gpu-120hz-rail {
     transition:
       width 180ms var(--obs-ease-out-120),
-      background-color 180ms var(--obs-ease-out-120),
       border-color 180ms var(--obs-ease-out-120);
   }
 
   .obs-gpu-120hz-interactive {
     transition:
       opacity var(--obs-duration-fast) var(--obs-ease-out-120),
-      background-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      border-color var(--obs-duration-fast) var(--obs-ease-out-120),
-      color var(--obs-duration-fast) var(--obs-ease-out-120);
+      border-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
   .obs-touch-pills {
