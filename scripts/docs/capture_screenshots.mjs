@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * AetherFlow v4.0.0 — 1440p Dashboard Screenshot Capture Script (Dark & Light)
+ * AetherFlow v4.0.1 — 1440p Dashboard Screenshot Capture Script (Dark & Light)
  *
  * Launches a local static HTTP server serving the compiled Leptos/WASM
  * `web/dist` bundle (either local or downloaded from a GitHub release) and
  * captures deterministic 2560x1440 PNG screenshots across all 16 dashboard
- * tabs plus the Security & 2FA subtab (17 views × dark & light = 34 PNGs)
- * plus the 1280x640 dark social-crop preview, using 100% synthetic fixture
- * data (RFC 5737/ULA IPs, example.com hostnames, fictional users).
+ * tabs plus Security & 2FA, Login, Command Palette, McBrowser Code Editor,
+ * and Distributed Transcoding (21 views × dark & light = 42 PNGs) plus the
+ * 1280x640 dark social-crop preview, using 100% synthetic fixture data
+ * (RFC 5737/ULA IPs, example.com hostnames, fictional users).
  *
  * Usage:
  *   node scripts/docs/capture_screenshots.mjs
@@ -15,7 +16,7 @@
  *   node scripts/docs/capture_screenshots.mjs --theme light --tabs overview,inbox,quotas
  *   node scripts/docs/capture_screenshots.mjs --dist /path/to/web/dist
  *   node scripts/docs/capture_screenshots.mjs --guides
- *   node scripts/docs/capture_screenshots.mjs --release v4.0.0
+ *   node scripts/docs/capture_screenshots.mjs --release v4.0.1
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -56,7 +57,7 @@ function parseArgs(argv) {
   const opts = {
     dist: process.env.AETHERFLOW_WEB_DIST || '',
     out: path.join(REPO_ROOT, 'docs', 'assets', 'screenshots'),
-    release: 'v4.0.0',
+    release: 'v4.0.1',
     theme: 'both',
     tabs: null,
     guides: false,
@@ -95,9 +96,9 @@ function parseArgs(argv) {
 Options:
   --dist <dir>       Path to compiled web/dist directory (default: web/dist or download release)
   --out <dir>        Output directory (default: docs/assets/screenshots)
-  --release <tag>    GitHub release tag to download if web/dist is not present (default: v4.0.0)
+  --release <tag>    GitHub release tag to download if web/dist is not present (default: v4.0.1)
   --theme <mode>     Theme mode: dark, light, or both (default: both)
-  --tabs <list>      Comma-separated shot names to capture (default: all 17 views)
+  --tabs <list>      Comma-separated shot names to capture (default: all 21 views)
   --guides [list]    Run annotated guide captures via scripts/docs/capture_guides.mjs
   --no-optimize      Skip PNG optimization step
   --help             Show this message
@@ -410,7 +411,7 @@ function buildFixtures() {
     prometheus: { installed: '3.2.1', latest: '3.2.1', hits: 10620 },
     vaultwarden: { installed: '1.33.2', latest: '1.33.2', hits: 13200 },
     nextcloud: { installed: '31.0.2', latest: '31.0.2', hits: 12460 },
-    librespeed: { installed: '4.0.0', latest: '4.0.0', hits: 8910 },
+    librespeed: { installed: '4.0.1', latest: '4.0.1', hits: 8910 },
     uptimekuma: { installed: '1.23.16', latest: '1.23.16', hits: 11340 },
   };
   const marketplaceApps = rawCatalog.map((pkg, idx) => {
@@ -442,9 +443,9 @@ function buildFixtures() {
       name: 'AetherFlow API',
       slug: 'aetherflow-api',
       status: 'running',
-      version: '4.0.0',
-      installed_version: '4.0.0',
-      latest_version: '4.0.0',
+      version: '4.0.1',
+      installed_version: '4.0.1',
+      latest_version: '4.0.1',
       uptime: '42d 11h 18m',
       cpu_pct: 1.4,
       memory_mb: 118.4,
@@ -460,9 +461,9 @@ function buildFixtures() {
       name: 'AetherFlow Runner',
       slug: 'aetherflow-runner',
       status: 'running',
-      version: '4.0.0',
-      installed_version: '4.0.0',
-      latest_version: '4.0.0',
+      version: '4.0.1',
+      installed_version: '4.0.1',
+      latest_version: '4.0.1',
       uptime: '42d 11h 18m',
       cpu_pct: 0.3,
       memory_mb: 24.2,
@@ -476,9 +477,9 @@ function buildFixtures() {
       name: 'Transcode Worker',
       slug: 'af-transcode-worker',
       status: 'running',
-      version: '4.0.0',
-      installed_version: '4.0.0',
-      latest_version: '4.0.0',
+      version: '4.0.1',
+      installed_version: '4.0.1',
+      latest_version: '4.0.1',
       uptime: '18d 06h 42m',
       cpu_pct: 11.8,
       memory_mb: 642.0,
@@ -732,9 +733,9 @@ function buildFixtures() {
       name: 'LibreSpeed (Rust)',
       slug: 'librespeed',
       status: 'running',
-      version: '4.0.0',
-      installed_version: '4.0.0',
-      latest_version: '4.0.0',
+      version: '4.0.1',
+      installed_version: '4.0.1',
+      latest_version: '4.0.1',
       uptime: '42d 11h 18m',
       cpu_pct: 0.1,
       memory_mb: 18.6,
@@ -801,7 +802,7 @@ function buildFixtures() {
         endpoint: '198.51.100.21',
         wg_port: 51821,
         state: 'active',
-        peer_version: '4.0.0',
+        peer_version: '4.0.1',
         peer_protocol: 1,
         capabilities: ['links', 'grants', 'proxy', 'storage', 'transcode'],
         compatibility: 'compatible',
@@ -873,7 +874,7 @@ function buildFixtures() {
         endpoint: '203.0.113.42',
         wg_port: 51821,
         state: 'active',
-        peer_version: '4.0.0',
+        peer_version: '4.0.1',
         peer_protocol: 1,
         capabilities: ['links', 'grants', 'proxy', 'storage', 'transcode'],
         compatibility: 'compatible',
@@ -918,7 +919,7 @@ function buildFixtures() {
         endpoint: '192.0.2.55',
         wg_port: 51821,
         state: 'active',
-        peer_version: '4.0.0',
+        peer_version: '4.0.1',
         peer_protocol: 1,
         capabilities: ['links', 'grants', 'proxy', 'storage'],
         compatibility: 'compatible',
@@ -1627,6 +1628,37 @@ function buildFixtures() {
     { id: 1273, username: 'alex', action: 'user_totp_verified', target_type: 'auth', target_id: 'user:1', detail: 'Verified TOTP hardware authenticator enrollment and stored recovery digest', ip_address: '198.51.100.14', severity: 'warning', created_at: isoAgo(44 * 3600_000) },
   ];
 
+  // Sample syntax-highlighted policy document for McBrowser code editor showcase
+  const samplePolicyToml = [
+    '# AetherFlow v4.0.1 Peer Cluster Policy — atlas.example.com',
+    '# Native Rust/Leptos ETag-guarded policy configuration',
+    '',
+    '[cluster]',
+    'name = "atlas.example.com"',
+    'role = "primary-control-plane"',
+    'tunnel_cidr = "10.231.0.0/16"',
+    'wg_port = 51821',
+    'listen_port = 8443',
+    'rtt_warn_ms = 120',
+    'verify_peer_protocol = true',
+    '',
+    '[transcode]',
+    'enabled = true',
+    'dispatcher_socket = "/run/aetherflow/transcode.sock"',
+    'package = "jellyfin-ffmpeg8"',
+    'version = "8.1.3-1-trixie"',
+    'hw_encoders = ["h264_nvenc", "hevc_nvenc", "av1_nvenc"]',
+    'preferred_workers = ["vega.example.com", "nova.example.com"]',
+    'max_concurrent_jobs = 10',
+    'path_parity_check = true',
+    '',
+    '[backup]',
+    'schedule = "smart"',
+    'window_utc = "03:00"',
+    'retention_days = 30',
+    'verify_sha256 = true',
+  ].join('\n');
+
   return {
     nowMs,
     isoAgo,
@@ -1639,6 +1671,7 @@ function buildFixtures() {
     transcodeConfig,
     streamingDashboard,
     mcbrowserEntries,
+    samplePolicyToml,
     flowAiThreads,
     networkStatus,
     ingressConfigs,
@@ -1657,7 +1690,7 @@ function buildFixtures() {
       aiModel: 'gemini-4-carbon',
       localProvider: 'ollama',
       localModel: 'llama3.2:latest',
-      systemPrompt: 'You are FlowAI, the AetherFlow v4.0.0 infrastructure diagnostics copilot.',
+      systemPrompt: 'You are FlowAI, the AetherFlow v4.0.1 infrastructure diagnostics copilot.',
       language: 'en',
       timezone: 'UTC',
       updateChannel: 'stable',
@@ -1774,7 +1807,7 @@ function buildFixtures() {
     },
     topology: {
       nodes: [
-        { id: 'aetherflow-api', status: 'running', group: 'core', details: 'Rust control plane · v4.0.0' },
+        { id: 'aetherflow-api', status: 'running', group: 'core', details: 'Rust control plane · v4.0.1' },
         { id: 'aetherflow-runner', status: 'running', group: 'core', details: 'Privileged socket daemon' },
         { id: 'af-transcode-worker', status: 'running', group: 'cluster', details: 'Distributed FFmpeg dispatcher' },
         { id: 'jellyfin', status: 'running', group: 'media', details: '12.4.0 · 2 active streams' },
@@ -2150,10 +2183,16 @@ async function installMocks(page, fixtures, unmockedLog, options = {}) {
   await page.route(/\/api(\/v1)?(\/public)?\/csrf-token/, (route) =>
     json(route, { csrf_token: 'mock-csrf-token' }),
   );
-  await page.route(/\/api(\/v1)?(\/public)?\/auth\/setup\/check/, (route) =>
+  await page.route(/\/api(\/v1)?(\/public)?\/auth\/setup(\/check|-status)(?:\?.*)?$/, (route) =>
     json(route, { setupRequired: false }),
   );
+  await page.route(/\/api(\/v1)?(\/public)?\/auth\/oidc\/providers(?:\?.*)?$/, (route) =>
+    json(route, { providers: [] }),
+  );
   await page.route(/\/api(\/v1)?(\/auth)?\/session(?:\?.*)?$/, (route) =>
+    json(route, fixtures.user),
+  );
+  await page.route(/\/api(\/v1)?\/auth\/me(?:\?.*)?$/, (route) =>
     json(route, fixtures.user),
   );
   await page.route(/\/api\/v1\/auth\/ws\/ticket(?:\?.*)?$/, (route) =>
@@ -2173,10 +2212,10 @@ async function installMocks(page, fixtures, unmockedLog, options = {}) {
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/check(?:\?.*)?$/, (route) =>
     json(route, {
       updateAvailable: false,
-      currentVersion: 'v4.0.0',
-      latestVersion: 'v4.0.0',
-      message: 'AetherFlow v4.0.0 is up to date (Sigstore provenance verified).',
-      url: 'https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0',
+      currentVersion: 'v4.0.1',
+      latestVersion: 'v4.0.1',
+      message: 'AetherFlow v4.0.1 is up to date (Sigstore provenance verified).',
+      url: 'https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.1',
     }),
   );
 
@@ -2334,6 +2373,17 @@ async function installMocks(page, fixtures, unmockedLog, options = {}) {
   );
 
   // McBrowser
+  await page.route(/\/api\/v1\/auth\/mcbrowser\/content(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { etag: '"sha256-atlas-policy-v401"' },
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: fixtures.samplePolicyToml,
+        etag: '"sha256-atlas-policy-v401"',
+      }),
+    }),
+  );
   await page.route(/\/api\/v1\/auth\/mcbrowser\/entries(?:\?.*)?$/, (route) =>
     json(route, { path: '', entries: fixtures.mcbrowserEntries }),
   );
@@ -2615,6 +2665,82 @@ const SHOTS = [
       await page.getByText('sess-fam-9a41f0c2').first().waitFor({ timeout: 15_000 });
     },
   },
+  {
+    name: 'login',
+    url: '/login',
+    unauthenticated: true,
+    ready: async (page) => {
+      await page.locator('input#username').waitFor({ state: 'visible', timeout: 20_000 });
+      await page.locator('input#password').waitFor({ state: 'visible', timeout: 15_000 });
+      await page.locator('button[type="submit"].af-btn-primary').waitFor({ state: 'visible', timeout: 15_000 });
+      await page.locator('.obs-brand-mark').waitFor({ state: 'visible', timeout: 15_000 });
+    },
+  },
+  {
+    name: 'command-palette',
+    url: '/?tab=overview',
+    preserveScroll: true,
+    ready: async (page) => {
+      await page.getByRole('heading', { name: 'Overview', exact: true }).waitFor({ timeout: 20_000 });
+      await page.locator('.af-chart svg').first().waitFor({ timeout: 15_000 });
+      await page.getByText('API Connected').waitFor({ timeout: 10_000 }).catch(() => {});
+      await page.evaluate(() => {
+        const main = document.querySelector('#main-content');
+        if (main) main.scrollTop = 0;
+        window.scrollTo(0, 0);
+      });
+      await waitForSettle(page);
+      await page.locator('header .af-command-button').click();
+      const dialog = page.locator('dialog.af-modal[open]').first();
+      await dialog.waitFor({ state: 'visible', timeout: 15_000 });
+      await dialog.locator('#af-command-results li[role="option"]').first().waitFor({ state: 'visible', timeout: 15_000 });
+    },
+  },
+  {
+    name: 'mcbrowser-editor',
+    url: '/?tab=mcbrowser',
+    preserveScroll: true,
+    ready: async (page) => {
+      const fileItem = page.locator('#main-content').getByText('atlas-cluster-policy.toml').first();
+      await fileItem.waitFor({ state: 'visible', timeout: 20_000 });
+      await page.evaluate(() => {
+        const main = document.querySelector('#main-content');
+        if (main) main.scrollTop = 0;
+        window.scrollTo(0, 0);
+      });
+      await fileItem.dblclick();
+      const dialog = page.locator('dialog.af-modal[open]').first();
+      await dialog.waitFor({ state: 'visible', timeout: 15_000 });
+      await dialog.locator('.af-editor').waitFor({ state: 'visible', timeout: 15_000 });
+      await dialog.locator('.af-editor-highlight span').first().waitFor({ state: 'visible', timeout: 15_000 });
+      await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    },
+  },
+  {
+    name: 'cluster-transcode',
+    url: '/?tab=cluster',
+    preserveScroll: true,
+    ready: async (page) => {
+      const section = page.locator('[data-testid="cluster-transcode-section"]').first();
+      await section.waitFor({ state: 'visible', timeout: 20_000 });
+      await page.locator('[data-testid="transcode-version-alignment"]').waitFor({ state: 'visible', timeout: 15_000 });
+      await page.locator('[data-testid="transcode-workers-list"]').waitFor({ state: 'visible', timeout: 15_000 });
+      await page.locator('[data-testid="transcode-recent-jobs"]').waitFor({ state: 'visible', timeout: 15_000 });
+      await waitForSettle(page);
+      await page.evaluate(() => {
+        const main = document.querySelector('#main-content');
+        const sectionEl = document.querySelector('[data-testid="cluster-transcode-section"]');
+        const card = sectionEl?.closest('.af-card') || sectionEl;
+        const header = document.querySelector('header.af-header');
+        if (main && card) {
+          const headerHeight = header ? header.getBoundingClientRect().height : 80;
+          const mainRect = main.getBoundingClientRect();
+          const cardRect = card.getBoundingClientRect();
+          main.scrollTop += (cardRect.top - mainRect.top) - headerHeight - 16;
+        }
+      });
+    },
+  },
 ];
 
 function commandExists(cmd) {
@@ -2744,20 +2870,75 @@ async function main() {
 
       for (const shot of selectedShots) {
         const targetUrl = `${baseUrl}${shot.url}`;
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-        await page.locator(`html[data-theme="${theme}"]`).waitFor({ timeout: 15_000 });
-        await shot.ready(page);
-        await waitForSettle(page);
-        // Scroll main dashboard container to top to guarantee consistent framing.
-        await page.evaluate(() => {
-          const main = document.querySelector('#main-content');
-          if (main) main.scrollTop = 0;
-          window.scrollTo(0, 0);
-        });
-        await page.waitForTimeout(150);
-
         const outPath = path.join(themeOut, `${shot.name}.png`);
-        await page.screenshot({ path: outPath, type: 'png', fullPage: false });
+
+        if (shot.unauthenticated) {
+          const unauthContext = await browser.newContext({
+            viewport: VIEWPORT,
+            deviceScaleFactor: 1,
+            colorScheme: theme,
+            reducedMotion: 'no-preference',
+            serviceWorkers: 'block',
+          });
+          try {
+            const unauthPage = await unauthContext.newPage();
+            unauthPage.on('console', (msg) => {
+              if (msg.type() === 'error') {
+                consoleErrors.push(`[${theme}] ${msg.text()}`);
+              }
+            });
+            unauthPage.on('pageerror', (err) => {
+              consoleErrors.push(`[${theme}] PAGEERROR: ${err.message}`);
+            });
+            await installMocks(unauthPage, fixtures, unmockedLog, { theme });
+            await unauthPage.route(/\/api(\/v1)?(\/auth)?\/session(?:\?.*)?$/, (route) =>
+              route.fulfill({
+                status: 401,
+                contentType: 'application/json',
+                body: JSON.stringify({ error: 'unauthorized' }),
+              }),
+            );
+            await unauthPage.route(/\/api(\/v1)?\/auth\/me(?:\?.*)?$/, (route) =>
+              route.fulfill({
+                status: 401,
+                contentType: 'application/json',
+                body: JSON.stringify({ error: 'unauthorized' }),
+              }),
+            );
+            await unauthPage.route(/\/api(\/v1)?(\/public)?\/auth\/setup(\/check|-status)(?:\?.*)?$/, (route) =>
+              route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ setupRequired: false }),
+              }),
+            );
+
+            await unauthPage.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+            await unauthPage.locator(`html[data-theme="${theme}"]`).waitFor({ timeout: 15_000 });
+            await shot.ready(unauthPage);
+            await waitForSettle(unauthPage);
+            await unauthPage.waitForTimeout(150);
+            await unauthPage.screenshot({ path: outPath, type: 'png', fullPage: false });
+          } finally {
+            await unauthContext.close();
+          }
+        } else {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+          await page.locator(`html[data-theme="${theme}"]`).waitFor({ timeout: 15_000 });
+          await shot.ready(page);
+          await waitForSettle(page);
+          if (!shot.preserveScroll) {
+            // Scroll main dashboard container to top to guarantee consistent framing.
+            await page.evaluate(() => {
+              const main = document.querySelector('#main-content');
+              if (main) main.scrollTop = 0;
+              window.scrollTo(0, 0);
+            });
+          }
+          await page.waitForTimeout(150);
+          await page.screenshot({ path: outPath, type: 'png', fullPage: false });
+        }
+
         const optimizer = opts.optimize ? optimizePng(outPath) : 'skipped';
         const bytes = fs.statSync(outPath).size;
         results.push({ name: `${theme}/${shot.name}.png`, path: outPath, bytes, optimizer });

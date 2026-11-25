@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * AetherFlow v4.0.0 — Annotated Step-by-Step Guide Screenshot Capture Script
+ * AetherFlow v4.0.1 — Annotated Step-by-Step Guide Screenshot Capture Script
  *
  * Drives the real compiled Leptos/WASM UI with Playwright against deterministic
  * synthetic fixtures, injects a non-destructive HTML/SVG callout overlay
@@ -39,7 +39,7 @@ function parseArgs(argv) {
   const opts = {
     dist: process.env.AETHERFLOW_WEB_DIST || '',
     out: path.join(REPO_ROOT, 'docs', 'assets', 'guides'),
-    release: 'v4.0.0',
+    release: 'v4.0.1',
     guides: null,
     optimize: true,
     keepTemp: false,
@@ -64,7 +64,7 @@ function parseArgs(argv) {
 Options:
   --dist <dir>       Path to compiled web/dist directory
   --out <dir>        Output directory (default: docs/assets/guides)
-  --release <tag>    GitHub release tag to download if web/dist is absent (default: v4.0.0)
+  --release <tag>    GitHub release tag to download if web/dist is absent (default: v4.0.1)
   --guides <list>    Comma-separated guide slugs or guide/step IDs (default: all 33 steps)
   --no-optimize      Skip PNG optimization step
   --help             Show this message
@@ -911,7 +911,7 @@ const GUIDE_STEPS = [
         await allowBtn.waitFor({ state: 'visible', timeout: 20_000 });
         await waitForSettle(page);
 
-        const headerCard = allowBtn.locator('xpath=ancestor::section[1] | ancestor::*[contains(@class,"glass-card")][1]').first();
+        const headerCard = allowBtn.locator('xpath=ancestor::header[1] | ancestor::*[contains(@class,"af-card") or contains(@class,"af-canvas-section")][1]').first();
         const novaCard = page.locator('#main-content .af-tab-content').getByText('nova.example.com').first();
 
         return await annotateAndCrop(page, outPath, {
@@ -1078,7 +1078,7 @@ const GUIDE_STEPS = [
         await waitForSettle(page);
 
         const codeEl = page.locator('#main-content').getByText(/482\s*[-–]?\s*917/).first();
-        const attemptCard = approveBtn.locator('xpath=ancestor::div[contains(@class,"glass-card") or contains(@class,"rounded")][1]').first();
+        const attemptCard = approveBtn.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
 
         return await annotateAndCrop(page, outPath, {
           annotations: [
@@ -1109,7 +1109,7 @@ const GUIDE_STEPS = [
 
         const novaCard = main.locator('[role="listitem"]').filter({ hasText: 'nova.example.com' }).first();
         const statusBadge = novaCard.getByText('Linked, healthy').first();
-        const versionEl = novaCard.getByText(/4\.0\.0.*protocol v1/i).first();
+        const versionEl = novaCard.getByText(/4\.0\.\d+.*protocol v1/i).first();
         const rttEl = novaCard.getByText('4.2 ms').first();
 
         return await annotateAndCrop(page, outPath, {
@@ -1357,8 +1357,8 @@ const GUIDE_STEPS = [
         await section.scrollIntoViewIfNeeded();
         await waitForSettle(page);
 
-        const card = section.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
-        const globalToggle = section.getByText(/Use paired servers for Jellyfin transcoding/i).first().locator('xpath=ancestor::div[contains(@class,"rounded")][1]').first();
+        const card = section.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
+        const globalToggle = section.getByText(/Use paired servers for Jellyfin transcoding/i).first().locator('xpath=ancestor::div[contains(@class,"af-surface-inset") or contains(@class,"rounded")][1]').first();
         const alignmentTable = section.locator('table').first().locator('..');
 
         return await annotateAndCrop(page, outPath, {
@@ -1414,7 +1414,7 @@ const GUIDE_STEPS = [
         await checkBtn.scrollIntoViewIfNeeded();
         await waitForSettle(page);
 
-        const card = checkBtn.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
+        const card = checkBtn.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
         const channelSelect = card.locator('select').first();
         const applyBtn = card.getByRole('button', { name: 'Apply Self-Update', exact: true });
 
@@ -1481,7 +1481,7 @@ const GUIDE_STEPS = [
         await receiptLine.scrollIntoViewIfNeeded();
         await waitForSettle(page);
 
-        const card = receiptLine.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
+        const card = receiptLine.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
         const progressLine = card.getByText(/Update in progress/i).first();
 
         return await annotateAndCrop(page, outPath, {
@@ -1515,7 +1515,7 @@ const GUIDE_STEPS = [
         await modelInput.waitFor({ state: 'visible', timeout: 15_000 });
         await waitForSettle(page);
 
-        const card = modelInput.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
+        const card = modelInput.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
         const localSelect = card.locator('select').first();
         const apiKeyInput = card.locator('input[type="password"]').first();
 
@@ -1603,7 +1603,7 @@ const GUIDE_STEPS = [
         await waitForSettle(page);
 
         const proposalCard = reviewBtn.locator('xpath=ancestor::div[contains(@class,"rounded")][1]').first();
-        const assistantCard = proposalCard.locator('xpath=ancestor::div[contains(@class,"glass-card") or contains(@class,"rounded-2xl")][1]').first();
+        const assistantCard = proposalCard.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
 
         return await annotateAndCrop(page, outPath, {
           annotations: [
@@ -1628,7 +1628,7 @@ const GUIDE_STEPS = [
       const { context, page } = await openFreshContext(browser, fixtures, unmockedLog, consoleErrors);
       try {
         await page.goto(`${baseUrl}/?tab=inbox`, { waitUntil: 'domcontentloaded' });
-        const pruneCard = page.locator('#main-content .af-tab-content').getByText('prune_transcode_cache').first().locator('xpath=ancestor::*[contains(@class,"glass-card")][1]');
+        const pruneCard = page.locator('#main-content .af-tab-content').getByText('prune_transcode_cache').first().locator('xpath=ancestor::*[contains(@class,"af-card")][1]');
         await pruneCard.waitFor({ state: 'visible', timeout: 20_000 });
         await pruneCard.getByRole('button', { name: 'Inspect action', exact: true }).click();
 
@@ -1710,7 +1710,7 @@ const GUIDE_STEPS = [
 
         const passInput = dialog.locator('input[type="password"]').first();
         const expiryInput = dialog.locator('input[type="number"], select').first();
-        const createBtn = dialog.locator('button[type="submit"], button.glass-button-primary').first();
+        const createBtn = dialog.locator('button[type="submit"], button.af-btn-primary').first();
 
         return await annotateAndCrop(page, outPath, {
           annotations: [
@@ -1776,7 +1776,7 @@ const GUIDE_STEPS = [
 
         const dialog = page.getByRole('dialog').first();
         await dialog.waitFor({ state: 'visible', timeout: 15_000 });
-        const editorArea = dialog.locator('textarea, [contenteditable="true"], .cm-editor').first();
+        const editorArea = dialog.locator('.af-editor, textarea, [contenteditable="true"]').first();
         await editorArea.waitFor({ state: 'visible', timeout: 15_000 });
         await page.evaluate(() => window.getSelection()?.removeAllRanges());
         await waitForSettle(page);
@@ -1786,7 +1786,7 @@ const GUIDE_STEPS = [
         return await annotateAndCrop(page, outPath, {
           annotations: [
             { num: 1, locator: editorArea, placement: 'left' },
-            { num: 2, locator: saveBtn, placement: 'top' },
+            { num: 2, locator: saveBtn, placement: 'left' },
           ],
           contextLocator: dialog,
           smallDialog: true,
@@ -1964,7 +1964,7 @@ const GUIDE_STEPS = [
         });
         await waitForSettle(page);
 
-        const card = tsHeading.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
+        const card = tsHeading.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
         const routesInput = card.locator('input[type="text"], input:not([type="checkbox"])').first();
         const acceptBox = card.getByText(/Accept routes from other nodes/i).first().locator('..');
         const exitBox = card.getByText(/Advertise this host as an exit node/i).first().locator('..');
@@ -2058,7 +2058,7 @@ const GUIDE_STEPS = [
         });
         await waitForSettle(page);
 
-        const card = heading.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
+        const card = heading.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
         const firstSession = card.getByText(/sess-fam-9a41f0c2/).first().locator('xpath=ancestor::div[contains(@class,"border-t")][1]');
         const lastSession = card.getByText(/sess-fam-3d92a7e5/).first().locator('xpath=ancestor::div[contains(@class,"border-t")][1]');
         const revokeAllBtn = card.getByRole('button', { name: 'Revoke all other sessions', exact: true }).first();
@@ -2095,7 +2095,7 @@ const GUIDE_STEPS = [
         await snapBtn.waitFor({ state: 'visible', timeout: 15_000 });
         await waitForSettle(page);
 
-        const card = snapBtn.locator('xpath=ancestor::*[contains(@class,"glass-card")][1]').first();
+        const card = snapBtn.locator('xpath=ancestor::*[contains(@class,"af-card")][1]').first();
         const manifestTable = card.locator('[role="grid"], table').first();
         await page.getByText(/aetherflow-db-20261125-0300\.sqlite\.zst/).first().waitFor({ state: 'visible', timeout: 15_000 });
         await waitForSettle(page);

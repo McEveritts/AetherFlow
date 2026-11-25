@@ -1,6 +1,6 @@
 # Dashboard Screenshot & Annotated Guide Generation (`scripts/docs/`)
 
-Generates deterministic **1440p (`2560x1440`, `deviceScaleFactor: 1`)** screenshots of the real AetherFlow v4.0.0 Leptos/WASM dashboard in both **dark** and **light** themes (`docs/assets/screenshots/{dark,light}/*.png`), the `1280x640` social-preview crop (`docs/assets/screenshots/social-crop.png`), and **33 annotated step-by-step guide images** across 11 operator workflows (`docs/assets/guides/<guide>/<NN>-<step>.png`).
+Generates deterministic **1440p (`2560x1440`, `deviceScaleFactor: 1`)** screenshots of the real AetherFlow v4.0.1 Leptos/WASM dashboard on the Unified Flat Surface & Control System in both **dark** and **light** themes (`docs/assets/screenshots/{dark,light}/*.png`), the `1280x640` social-preview crop (`docs/assets/screenshots/social-crop.png`), and **33 annotated step-by-step guide images** across 11 operator workflows (`docs/assets/guides/<guide>/<NN>-<step>.png`).
 
 All captured data is 100% synthetic (RFC 5737 / CGNAT / ULA IPs, `*.example.com` hostnames, fictional users, deterministic SHA-256 fake keys) served via Playwright route interception against an ephemeral local static HTTP server hosting `web/dist`. No live backend, database, or real server telemetry is touched.
 
@@ -8,15 +8,15 @@ All captured data is 100% synthetic (RFC 5737 / CGNAT / ULA IPs, `*.example.com`
 
 - Node.js 22+ with Playwright installed (`npm ci` at repo root, or `PLAYWRIGHT_MODULE_PATH` set).
 - Playwright Chromium browser installed (`npx --workspace @aetherflow/e2e playwright install chromium`).
-- Either a built `web/dist/` directory (`./scripts/build_wasm_frontend.sh`) **or** `gh` CLI authenticated to download the prebuilt `v4.0.0` release bundle (`aetherflow-linux-amd64.tar.gz`).
+- Either a built `web/dist/` directory (`./scripts/build_wasm_frontend.sh`) **or** `gh` CLI authenticated to download the prebuilt `v4.0.1` release bundle (`aetherflow-linux-amd64.tar.gz`).
 - ImageMagick (`convert`) for generating `social-crop.png` and PNG8 optimization (`oxipng` / `pngquant` are used automatically when installed).
 
 ## Full-Tab Screenshots (Dark & Light)
 
-Captures all 16 `TabId::ALL` dashboard tabs plus the `Security & 2FA` settings subtab (17 views × 2 themes = **34 PNGs**) plus `social-crop.png`:
+Captures all 16 `TabId::ALL` dashboard tabs plus the `Security & 2FA` settings subtab, unauthenticated `Login` screen, Tier 3 opaque `Command Palette`, native `McBrowser Code Editor`, and `Distributed Transcoding` cluster telemetry view (21 views × 2 themes = **42 PNGs**) plus `social-crop.png`:
 
 ```bash
-# Regenerate all 34 dark + light screenshots and social-crop.png
+# Regenerate all 42 dark + light screenshots and social-crop.png
 node scripts/docs/capture_screenshots.mjs
 
 # Capture a single theme only (dark | light | both)
@@ -26,20 +26,20 @@ node scripts/docs/capture_screenshots.mjs --theme light
 # Use an already extracted web/dist bundle
 node scripts/docs/capture_screenshots.mjs --dist /path/to/web/dist
 
-# Regenerate specific tabs only
-node scripts/docs/capture_screenshots.mjs --theme both --tabs overview,inbox,mediaflow,quotas
+# Regenerate specific views only
+node scripts/docs/capture_screenshots.mjs --theme both --tabs overview,login,command-palette,mcbrowser-editor,cluster-transcode
 
 # Override release tag or output directory
-node scripts/docs/capture_screenshots.mjs --release v4.0.0 --out docs/assets/screenshots
+node scripts/docs/capture_screenshots.mjs --release v4.0.1 --out docs/assets/screenshots
 ```
 
 Output structure:
-- `docs/assets/screenshots/dark/<view>.png` — 17 dark-theme views (`2560x1440`)
-- `docs/assets/screenshots/light/<view>.png` — 17 light-theme views (`2560x1440`, driven by the real `aetherflow-theme = "light"` theme via `html[data-theme="light"]`)
+- `docs/assets/screenshots/dark/<view>.png` — 21 dark-theme views (`2560x1440`)
+- `docs/assets/screenshots/light/<view>.png` — 21 light-theme views (`2560x1440`, driven by the real `aetherflow-theme = "light"` theme via `html[data-theme="light"]`)
 - `docs/assets/screenshots/social-crop.png` — `1280x640` top crop of `dark/overview.png`
 
 Valid `<view>` names:
-`overview`, `inbox`, `services`, `marketplace`, `mcbrowser`, `fileshare`, `streaming`, `mediaflow`, `flowai`, `network`, `cluster`, `users`, `audit`, `settings`, `notifications`, `quotas`, `security`.
+`overview`, `inbox`, `services`, `marketplace`, `mcbrowser`, `fileshare`, `streaming`, `mediaflow`, `flowai`, `network`, `cluster`, `users`, `audit`, `settings`, `notifications`, `quotas`, `security`, `login`, `command-palette`, `mcbrowser-editor`, `cluster-transcode`.
 
 ## Annotated Step-by-Step Guide Screenshots
 
