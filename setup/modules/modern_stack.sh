@@ -733,7 +733,11 @@ _build_modern_stack() {
 
     # ── Detect host IPs for ALLOWED_HOSTS / CORS ──────────────────────────
     local host_ip
-    host_ip="$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $7}')"
+    if type _af_primary_ipv4 &>/dev/null; then
+        host_ip="$(_af_primary_ipv4)"
+    else
+        host_ip="$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {for (i=1; i<NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)"
+    fi
     [[ -z "${host_ip}" ]] && host_ip="127.0.0.1"
 
     local public_ip=""

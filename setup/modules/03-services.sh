@@ -22,10 +22,16 @@ function _makedirs() {
 
 # function to install vsftpd (explicit opt-in via AETHERFLOW_ENABLE_FTPD=yes)
 function _installftpd() {
-	case "${AETHERFLOW_ENABLE_FTPD:-no}" in
-		1|true|TRUE|yes|YES|y|Y|on|ON) ;;
+	local ftpd_flag="${AETHERFLOW_ENABLE_FTPD:-no}"
+	case "${ftpd_flag,,}" in
+		1|true|yes|y|on) ;;
 		*) return 0 ;;
 	esac
-	apt-get purge -y vsftpd pure-ftpd >>"${OUTTO}" 2>&1
-	apt-get install -y vsftpd >>"${OUTTO}" 2>&1
+	local outto="${OUTTO:-/dev/null}"
+	DEBIAN_FRONTEND=noninteractive apt-get purge -y vsftpd pure-ftpd >>"${outto}" 2>&1 || true
+	if type _af_apt_install &>/dev/null; then
+		_af_apt_install vsftpd || return 1
+	else
+		DEBIAN_FRONTEND=noninteractive apt-get -yqq install vsftpd >>"${outto}" 2>&1 || return 1
+	fi
 }
