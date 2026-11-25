@@ -362,7 +362,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                 </label>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2 self-end"
+                    class="af-btn px-4 py-2 self-end"
                     disabled=move || form.busy.get() || !can_read_policy.get()
                     title=move || {
                         context
@@ -470,7 +470,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                             key=|index| *index
                             children=move |index| {
                                 view! {
-                                    <div class="rounded-xl border border-white/10 p-3 space-y-2">
+                                    <div class="af-surface-inset p-3 space-y-2">
                                         <label class="block text-xs space-y-1">
                                             <span>
                                                 {move || tt_with(
@@ -541,7 +541,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                             </label>
                                             <button
                                                 type="button"
-                                                class="glass-button px-2"
+                                                class="af-btn px-2"
                                                 disabled=move || {
                                                     index == 0 || form.busy.get() || !can_write_policy.get()
                                                 }
@@ -563,7 +563,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                             </button>
                                             <button
                                                 type="button"
-                                                class="glass-button px-2"
+                                                class="af-btn px-2"
                                                 disabled=move || {
                                                     form.busy.get()
                                                         || !can_write_policy.get()
@@ -590,7 +590,8 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                                             </button>
                                             <button
                                                 type="button"
-                                                class="glass-button px-2 text-rose-300"
+                                                class="af-btn px-2"
+                                                data-tone="danger"
                                                 disabled=move || form.busy.get() || !can_write_policy.get()
                                                 on:click=move |_| {
                                                     if !can_edit_now() {
@@ -642,7 +643,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                     <div class="flex flex-wrap gap-2">
                         <button
                             type="button"
-                            class="glass-button px-3 py-2"
+                            class="af-btn px-3 py-2"
                             disabled=move || {
                                 form.busy.get()
                                     || !can_write_policy.get()
@@ -672,7 +673,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2"
+                            class="af-btn-primary px-4 py-2"
                             disabled=move || {
                                 form.busy.get() || !form.dirty() || !can_write_policy.get()
                             }
@@ -687,7 +688,7 @@ pub(super) fn PolicyAdmin() -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || form.busy.get() || !form.dirty() || !can_write_policy.get()
                             on:click=move |_| reset.set(true)
                         >

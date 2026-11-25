@@ -481,7 +481,7 @@ pub fn McBrowserTab() -> impl IntoView {
                 </div>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     on:click=move |_| queue.open.set(true)
                 >
                     {move || tt_with(
@@ -548,7 +548,7 @@ pub fn McBrowserTab() -> impl IntoView {
                             <div class="flex gap-2">
                                 <button
                                     type="button"
-                                    class="glass-button px-3 py-2"
+                                    class="af-btn px-3 py-2"
                                     disabled=move || path.get().is_empty()
                                     on:click=move |_| path.set(parent(&path.get_untracked()).to_owned())
                                 >
@@ -556,7 +556,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                 </button>
                                 <button
                                     type="button"
-                                    class="glass-button px-3 py-2"
+                                    class="af-btn px-3 py-2"
                                     disabled=move || !can_read_files.get()
                                     title=move || {
                                         context
@@ -592,7 +592,7 @@ pub fn McBrowserTab() -> impl IntoView {
                         >
                             <button
                                 type="button"
-                                class="glass-button px-3 py-2"
+                                class="af-btn px-3 py-2"
                                 on:click=move |_| path.set(String::new())
                             >
                                 {move || tt(context, "/")}
@@ -610,7 +610,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                             <span aria-hidden="true">{move || tt(context, "/")}</span>
                                             <button
                                                 type="button"
-                                                class="glass-button px-3 py-2"
+                                                class="af-btn px-3 py-2"
                                                 on:click=move |_| path.set(target.clone())
                                             >
                                                 {part.to_owned()}
@@ -685,7 +685,7 @@ pub fn McBrowserTab() -> impl IntoView {
                             <SkeletonBox class="h-36" />
                         </Show>
                         <div
-                            class="rounded-xl border border-dashed border-white/15 min-h-36 p-3"
+                            class="rounded-xl border border-dashed border-[var(--af-border-hairline)] min-h-36 p-3"
                             class=("bg-cyan-500/10", move || dragging.get())
                             on:dragover=move |event: web_sys::DragEvent| {
                                 event.prevent_default();
@@ -744,9 +744,9 @@ pub fn McBrowserTab() -> impl IntoView {
                                         view! {
                                             <div class=move || {
                                                 if grid.get() {
-                                                    "flex flex-col gap-2 p-3 rounded-xl border border-white/10 bg-white/[0.02] min-w-0"
+                                                    "af-surface-inset flex flex-col gap-2 p-3 min-w-0"
                                                 } else {
-                                                    "flex flex-wrap items-center gap-3 p-3 border-b border-white/5 min-w-0"
+                                                    "flex flex-wrap items-center gap-3 p-3 border-b border-[var(--af-border-hairline)] min-w-0"
                                                 }
                                             }>
                                                 {thumb_path.clone().map(|encoded| {
@@ -755,7 +755,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                                         <Show when=move || grid.get() && can("read") && !thumb_failed.get()>
                                                             <button
                                                                 type="button"
-                                                                class="w-full overflow-hidden rounded-lg border border-white/10 bg-slate-950/60"
+                                                                class="af-surface-inset w-full overflow-hidden"
                                                                 on:click=move |_| open_entry.run(row.get_value())
                                                             >
                                                                 <img
@@ -858,7 +858,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                                                 view! {
                                                                     <Show when=move || can("download")>
                                                                         <a
-                                                                            class="glass-button text-xs px-3 py-2"
+                                                                            class="af-btn text-xs px-3 py-2"
                                                                             href={
                                                                                 let encoded = encoded.clone();
                                                                                 move || {
@@ -902,7 +902,7 @@ pub fn McBrowserTab() -> impl IntoView {
                                         .map(|result| {
                                             let summary = result.clone();
                                             view! {
-                                                <div class="text-xs border-b border-white/10 pb-2">
+                                                <div class="text-xs border-b border-[var(--af-border-hairline)] pb-2">
                                                     <p class="font-medium break-all">
                                                         {move || format!(
                                                             "{} · {}",
@@ -963,7 +963,7 @@ pub fn McBrowserTab() -> impl IntoView {
             <Show when=move || !share_preview_url.get().is_empty()>
                 <button
                     type="button"
-                    class="glass-button px-3 py-2"
+                    class="af-btn px-3 py-2"
                     on:click=move |_| share_preview.set(true)
                 >
                     {move || tt(context, "Last created share URL / QR")}

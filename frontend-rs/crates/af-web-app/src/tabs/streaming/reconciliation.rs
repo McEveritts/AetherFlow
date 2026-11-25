@@ -192,7 +192,7 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
             <label class="block text-sm">
                 {move || tt(context, "Candidate IDs (empty selects the bounded legacy cohort)")}
                 <input
-                    class="glass-input p-2 w-full"
+                    class="af-input p-2 w-full"
                     disabled=move || busy.get()
                     prop:value=move || ids.get()
                     on:input=move |e| {
@@ -207,7 +207,7 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                     type="number"
                     min="1"
                     max="1000"
-                    class="glass-input p-2"
+                    class="af-input p-2"
                     disabled=move || busy.get()
                     prop:value=move || limit.get()
                     on:input=move |e| {
@@ -217,7 +217,7 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                 />
             </label>
             <button
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Services)
                 }
@@ -266,7 +266,7 @@ pub(super) fn HistoryReconciliation(on_changed: Callback<()>) -> impl IntoView {
                         )}
                     </label>
                     <button
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get()
                                 || !approved.get()

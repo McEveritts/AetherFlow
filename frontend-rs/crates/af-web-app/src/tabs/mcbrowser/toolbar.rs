@@ -72,7 +72,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </div>
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 aria-pressed=move || (!grid.get()).to_string()
                 on:click=move |_| grid.set(false)
             >
@@ -80,7 +80,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </button>
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 aria-pressed=move || grid.get().to_string()
                 on:click=move |_| grid.set(true)
             >
@@ -89,7 +89,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             <label class="inline-flex items-center gap-2 text-xs text-slate-400">
                 {move || tt(context, "Sort")}
                 <select
-                    class="glass-input px-3 py-2"
+                    class="af-input px-3 py-2"
                     prop:value=move || sort.get()
                     on:change=move |event| sort.set(event_target_value(&event))
                 >
@@ -101,7 +101,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </label>
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 on:click=move |_| descending.update(|value| *value = !*value)
             >
                 {move || {
@@ -122,7 +122,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </div>
             <select
                 aria-label=move || tt(context, "Search entry type")
-                class="glass-input px-3 py-2"
+                class="af-input px-3 py-2"
                 prop:value=move || search_type.get()
                 on:change=move |event| search_type.set(event_target_value(&event))
             >
@@ -132,7 +132,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </select>
             <button
                 type="submit"
-                class="glass-button-primary px-4 py-2"
+                class="af-btn-primary px-4 py-2"
                 disabled=move || {
                     search_busy.get() || search_query.get().trim().is_empty() || !can("read")
                 }
@@ -147,7 +147,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </button>
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 on:click=move |_| {
                     search_generation.update(|generation| *generation += 1);
                     search_busy.set(false);
@@ -176,7 +176,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
         <div class="flex flex-wrap gap-2 my-4">
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 disabled=move || {
                     !can("create")
                         || actions.busy.get()
@@ -193,7 +193,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </button>
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 disabled=move || {
                     !can("create")
                         || actions.busy.get()
@@ -210,7 +210,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             </button>
             <button
                 type="button"
-                class="glass-button-primary px-3 py-2"
+                class="af-btn-primary px-3 py-2"
                 disabled=move || {
                     !can("create") || !context.can_write_area(crate::state::PeerArea::Files)
                 }
@@ -244,7 +244,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
             <label class="text-xs self-center">
                 {move || tt(context, "Large upload conflicts")}
                 <select
-                    class="glass-input px-2 py-1 ml-2"
+                    class="af-input px-2 py-1 ml-2"
                     prop:value=move || conflict.get()
                     on:change=move |event| conflict.set(event_target_value(&event))
                 >
@@ -301,7 +301,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
                     view! {
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 capitalize"
+                            class="af-btn px-3 py-2 capitalize"
                             disabled=move || {
                                 let count = selected.with(BTreeSet::len);
                                 count == 0 || actions.busy.get()
@@ -341,7 +341,7 @@ pub(super) fn WorkspaceToolbar(state: ToolbarState) -> impl IntoView {
                 .collect_view()}
             <button
                 type="button"
-                class="glass-button px-3 py-2"
+                class="af-btn px-3 py-2"
                 disabled=move || {
                     selected.with(BTreeSet::len) != 1
                         || !can("share")

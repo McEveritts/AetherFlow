@@ -78,7 +78,7 @@ fn NetworkAdminContent() -> impl IntoView {
                         </p>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || status.loading.get() || !can_read_network.get()
                             title=move || context.area_block_reason(PeerArea::Network, false).unwrap_or_default()
                             on:click=move |_| status.refresh()
@@ -196,7 +196,7 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
                 <label class="text-sm space-y-2">
                     <span>{move || tt(context, "VPN diagnostic provider")}</span>
                     <select
-                        class="glass-input px-3 py-2 block"
+                        class="af-input px-3 py-2 block"
                         prop:value=move || provider.get()
                         on:change=move |event| provider.set(event_target_value(&event))
                     >
@@ -206,7 +206,7 @@ fn NetworkDiagnostics(status: ApiResource) -> impl IntoView {
                 </label>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || diagnostics.loading.get() || !context.can_read_area(PeerArea::Network)
                     title=move || context.area_block_reason(PeerArea::Network, false).unwrap_or_default()
                     on:click=move |_| {

@@ -475,7 +475,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
     view! {
         <div class="space-y-4 pt-3">
             <button
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                 }
@@ -516,7 +516,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             <label class="block text-sm">
                 {move || tt(context, "Restore mode")}
                 <select
-                    class="glass-input p-2"
+                    class="af-input p-2"
                     disabled=move || busy.get()
                     prop:value=move || mode.get()
                     on:change=move |e| {
@@ -561,7 +561,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 {move || tt(context, "Archive JSON")}
                 <textarea
                     rows="5"
-                    class="glass-input p-3 w-full text-xs font-mono"
+                    class="af-input p-3 w-full text-xs font-mono"
                     disabled=move || busy.get()
                     prop:value=move || raw.get()
                     on:input=move |e| {
@@ -571,7 +571,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 ></textarea>
             </label>
             <button
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                 }
@@ -625,7 +625,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                         )}
                     </label>
                     <button
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get()
                                 || !approved.get()

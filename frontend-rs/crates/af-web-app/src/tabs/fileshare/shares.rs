@@ -214,18 +214,18 @@ pub(crate) fn ShareLinkDetails(#[prop(into)] url: Signal<String>) -> impl IntoVi
                 </p>
                 <label class="block text-sm space-y-1">
                     <span>{move || tt(context, "Share URL")}</span>
-                    <input class="glass-input w-full px-3 py-2" readonly prop:value=move || url.get() />
+                    <input class="af-input w-full px-3 py-2" readonly prop:value=move || url.get() />
                 </label>
                 <div class="flex flex-wrap gap-2">
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         on:click=move |_| copy_url(url.get_untracked())
                     >
                         {move || tt(context, "Copy share URL")}
                     </button>
                     <a
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         href=move || url.get()
                         target="_blank"
                         rel="noopener noreferrer"
@@ -415,7 +415,7 @@ pub(crate) fn ShareCreateModal(
                     <label class="block text-sm space-y-1">
                         <span>{move || tt(context, "File or folder path")}</span>
                         <input
-                            class="glass-input w-full px-3 py-2"
+                            class="af-input w-full px-3 py-2"
                             required
                             prop:value=move || path.get()
                             disabled=move || busy.get()
@@ -425,7 +425,7 @@ pub(crate) fn ShareCreateModal(
                     <label class="block text-sm space-y-1">
                         <span>{move || tt(context, "Password (optional)")}</span>
                         <input
-                            class="glass-input w-full px-3 py-2"
+                            class="af-input w-full px-3 py-2"
                             type="password"
                             autocomplete="new-password"
                             prop:value=move || password.get()
@@ -436,7 +436,7 @@ pub(crate) fn ShareCreateModal(
                     <label class="block text-sm space-y-1">
                         <span>{move || tt(context, "Expires after")}</span>
                         <select
-                            class="glass-input w-full px-3 py-2"
+                            class="af-input w-full px-3 py-2"
                             prop:value=move || lifetime.get()
                             disabled=move || busy.get()
                             on:change=move |event| lifetime.set(event_target_value(&event))
@@ -459,7 +459,7 @@ pub(crate) fn ShareCreateModal(
                     </label>
                     <button
                         type="submit"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get()
                                 || !context.can_write_area(crate::state::PeerArea::Files)
@@ -674,7 +674,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                 <div class="flex gap-2">
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || !can_read_files.get()
                         title=move || {
                             context
@@ -692,7 +692,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                     </button>
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             !context.can_write_area(PeerArea::Files)
                                 || !share_origin_available(context)
@@ -799,7 +799,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                         <SearchInput value=query placeholder="Filter by name, path or share ID" />
                     </div>
                     <select
-                        class="glass-input px-3 py-2"
+                        class="af-input px-3 py-2"
                         aria-label=move || tt(context, "Share status")
                         prop:value=move || filter.get()
                         on:change=move |event| filter.set(event_target_value(&event))
@@ -860,7 +860,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                                         })
                                     };
                                     view! {
-                                        <tr class="border-t border-white/10 align-top">
+                                        <tr class="border-t border-[var(--af-border-hairline)] align-top">
                                             <td class="p-3">
                                                 <p class="font-medium break-all">
                                                     {row.with_value(|row| row.path.clone())}
@@ -894,7 +894,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                                                 <div class="flex flex-wrap gap-2">
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-3 py-2"
+                                                        class="af-btn px-3 py-2"
                                                         disabled=move || url().is_none() || expired()
                                                         on:click=move |_| {
                                                             if let Some(url) = url() {
@@ -906,7 +906,7 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                                                     </button>
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-3 py-2"
+                                                        class="af-btn px-3 py-2"
                                                         disabled=move || url().is_none() || expired()
                                                         on:click=move |_| {
                                                             if let Some(url) = url() {
@@ -919,7 +919,8 @@ pub(super) fn PublicShareLinks() -> impl IntoView {
                                                     </button>
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-3 py-2 text-rose-300"
+                                                        class="af-btn px-3 py-2"
+                                                        data-tone="danger"
                                                         disabled=move || {
                                                             busy.get()
                                                                 || !context.can_write_area(

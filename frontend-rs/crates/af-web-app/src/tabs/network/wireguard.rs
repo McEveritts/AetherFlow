@@ -81,7 +81,7 @@ pub(super) fn ProviderControl(provider: &'static str, status: ApiResource) -> im
                     view! {
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || {
                                 busy.get()
                                     || !context.can_write_area(crate::state::PeerArea::Network)
@@ -512,7 +512,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
             <ProviderControl provider="wireguard" status />
             <button
                 type="button"
-                class="glass-button-primary px-4 py-2 mb-5"
+                class="af-btn-primary px-4 py-2 mb-5"
                 disabled=move || {
                     busy.get()
                         || status.data.get()["wireguard"]["state"] != "running"
@@ -569,7 +569,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 <label class="text-sm space-y-2">
                     <span>{move || tt(context, "Client public key")}</span>
                     <input
-                        class="glass-input w-full px-3 py-2"
+                        class="af-input w-full px-3 py-2"
                         disabled=move || busy.get() || !enrolled_key.get().is_empty()
                         prop:value=move || text(&draft_value(form), "public_key")
                         on:input=move |event| {
@@ -624,7 +624,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
             <div class="flex flex-wrap gap-3">
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         busy.get()
                             || !enrolled_key.get().is_empty()
@@ -641,7 +641,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
                     }
@@ -691,7 +691,8 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
             />
             <button
                 type="button"
-                class="glass-button px-4 py-2 mt-4 text-rose-300"
+                class="af-btn px-4 py-2 mt-4"
+                data-tone="danger"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Network)
                 }
@@ -723,7 +724,7 @@ pub(super) fn WireGuardSettings(status: ApiResource) -> impl IntoView {
             </pre>
             <button
                 type="button"
-                class="glass-button-primary px-4 py-2"
+                class="af-btn-primary px-4 py-2"
                 on:click=move |_| {
                     if let Err(error) = download_text(
                         &exported.get_untracked(),

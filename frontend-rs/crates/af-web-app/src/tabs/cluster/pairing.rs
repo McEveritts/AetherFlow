@@ -663,7 +663,7 @@ pub fn OpenPairingWindowModal(
                                         id="cluster-window-endpoint"
                                         data-af-autofocus="true"
                                         aria-describedby="cluster-window-endpoint-hint"
-                                        class="glass-input px-3 py-2 w-full"
+                                        class="af-input px-3 py-2 w-full"
                                         disabled=move || gate.is_busy()
                                         prop:value=move || endpoint_selection.get()
                                         on:change=move |event| {
@@ -705,7 +705,7 @@ pub fn OpenPairingWindowModal(
                                             id="cluster-window-custom-endpoint"
                                             type="text"
                                             autocomplete="off"
-                                            class="glass-input px-3 py-2 w-full"
+                                            class="af-input px-3 py-2 w-full"
                                             placeholder=move || tt(context, "Cluster.endpointHostPlaceholder")
                                             disabled=move || gate.is_busy()
                                             prop:value=move || custom_endpoint.get()
@@ -729,7 +729,7 @@ pub fn OpenPairingWindowModal(
                                             type="url"
                                             autocomplete="off"
                                             aria-describedby="cluster-window-https-url-hint"
-                                            class="glass-input px-3 py-2 w-full"
+                                            class="af-input px-3 py-2 w-full"
                                             placeholder="https://peer.example.com"
                                             disabled=move || gate.is_busy()
                                             prop:value=move || https_url.get()
@@ -753,7 +753,7 @@ pub fn OpenPairingWindowModal(
                                             max="65535"
                                             inputmode="numeric"
                                             aria-describedby="cluster-window-wg-port-hint"
-                                            class="glass-input px-3 py-2 w-full"
+                                            class="af-input px-3 py-2 w-full"
                                             placeholder="51821"
                                             disabled=move || gate.is_busy()
                                             prop:value=move || wg_port.get()
@@ -768,7 +768,7 @@ pub fn OpenPairingWindowModal(
                                 <div class="flex flex-wrap justify-end gap-3 pt-2">
                                     <button
                                         type="button"
-                                        class="glass-button px-4 py-2"
+                                        class="af-btn px-4 py-2"
                                         disabled=move || gate.is_busy()
                                         on:click=move |_| open.set(false)
                                     >
@@ -776,7 +776,7 @@ pub fn OpenPairingWindowModal(
                                     </button>
                                     <button
                                         type="submit"
-                                        class="glass-button-primary px-4 py-2"
+                                        class="af-btn-primary px-4 py-2"
                                         disabled=move || gate.is_busy()
                                     >
                                         {move || {
@@ -839,7 +839,7 @@ pub fn OpenPairingWindowModal(
                                             id="cluster-generated-pairing-string"
                                             readonly
                                             rows="4"
-                                            class="glass-input px-3 py-2 w-full font-mono text-xs break-all"
+                                            class="af-input px-3 py-2 w-full font-mono text-xs break-all"
                                             prop:value=window.pairing_string.clone()
                                         ></textarea>
                                     </div>
@@ -847,7 +847,7 @@ pub fn OpenPairingWindowModal(
                                     <div class="flex flex-wrap justify-between items-center gap-3 pt-1">
                                         <button
                                             type="button"
-                                            class="glass-button px-4 py-2"
+                                            class="af-btn px-4 py-2"
                                             data-tone="danger"
                                             disabled=move || gate.is_busy()
                                             on:click=move |_| close_current_window()
@@ -857,7 +857,7 @@ pub fn OpenPairingWindowModal(
                                         <button
                                             type="button"
                                             data-af-autofocus="true"
-                                            class="glass-button-primary px-4 py-2"
+                                            class="af-btn-primary px-4 py-2"
                                             disabled=move || { now_secs.get() >= expires_at }
                                             on:click=move |_| {
                                                 copy_text_to_clipboard(context, copy_value.clone());
@@ -971,7 +971,7 @@ pub fn ActivePairingWindowsCard(
                     <Show when=move || { windows.with(Vec::len) > 1 }>
                         <button
                             type="button"
-                            class="glass-button px-3 py-1.5 text-sm"
+                            class="af-btn px-3 py-1.5 text-sm"
                             data-tone="danger"
                             disabled=move || busy.get()
                             on:click=move |_| close_all()
@@ -999,7 +999,7 @@ pub fn ActivePairingWindowsCard(
                             view! {
                                 <div
                                     role="listitem"
-                                    class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 p-3 text-sm"
+                                    class="af-surface-inset flex flex-wrap items-center justify-between gap-3 p-3 text-sm"
                                 >
                                     <div class="flex flex-wrap items-center gap-3 min-w-0">
                                         <span class="font-mono text-slate-200">
@@ -1027,7 +1027,7 @@ pub fn ActivePairingWindowsCard(
                                     </div>
                                     <button
                                         type="button"
-                                        class="glass-button px-3 py-1.5 text-xs"
+                                        class="af-btn px-3 py-1.5 text-xs"
                                         data-tone="danger"
                                         disabled=move || busy.get()
                                         on:click=move |_| close_one(win_id.clone())
@@ -1176,7 +1176,7 @@ pub fn StartPairingModal(
                         required
                         autocomplete="off"
                         spellcheck="false"
-                        class="glass-input px-3 py-2 w-full font-mono text-xs break-all"
+                        class="af-input px-3 py-2 w-full font-mono text-xs break-all"
                         placeholder=move || tt(context, "Cluster.pastePairingStringPlaceholder")
                         disabled=move || gate.is_busy()
                         prop:value=move || draft.with(|d| d.pairing_string.clone())
@@ -1199,7 +1199,7 @@ pub fn StartPairingModal(
                         type="text"
                         autocomplete="off"
                         aria-describedby="cluster-pair-name-hint"
-                        class="glass-input px-3 py-2 w-full"
+                        class="af-input px-3 py-2 w-full"
                         placeholder="media-2"
                         disabled=move || gate.is_busy()
                         prop:value=move || draft.with(|d| d.peer_name.clone())
@@ -1223,7 +1223,7 @@ pub fn StartPairingModal(
                     <select
                         id="cluster-pair-endpoint"
                         aria-describedby="cluster-pair-endpoint-hint"
-                        class="glass-input px-3 py-2 w-full"
+                        class="af-input px-3 py-2 w-full"
                         disabled=move || gate.is_busy()
                         prop:value=move || draft.with(|d| d.endpoint_selection.clone())
                         on:change=move |event| {
@@ -1263,7 +1263,7 @@ pub fn StartPairingModal(
                             id="cluster-pair-custom-endpoint"
                             type="text"
                             autocomplete="off"
-                            class="glass-input px-3 py-2 w-full"
+                            class="af-input px-3 py-2 w-full"
                             placeholder=move || tt(context, "Cluster.endpointHostPlaceholder")
                             disabled=move || gate.is_busy()
                             prop:value=move || draft.with(|d| d.custom_endpoint.clone())
@@ -1278,7 +1278,7 @@ pub fn StartPairingModal(
                 <div class="flex flex-wrap justify-end gap-3 pt-2">
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || gate.is_busy()
                         on:click=move |_| open.set(false)
                     >
@@ -1286,7 +1286,7 @@ pub fn StartPairingModal(
                     </button>
                     <button
                         type="submit"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || gate.is_busy()
                     >
                         {move || {
@@ -1389,7 +1389,7 @@ pub fn InitiatedPairingCard(
                                     </span>
                                 </div>
 
-                                <div class="rounded-xl border border-indigo-400/35 bg-white/5 p-4 text-center space-y-1">
+                                <div class="af-surface-inset border-indigo-400/35 p-4 text-center space-y-1">
                                     <p class="text-xs uppercase tracking-wider text-indigo-300">
                                         {move || tt(context, "Cluster.comparisonCodeLabel")}
                                     </p>
@@ -1415,7 +1415,7 @@ pub fn InitiatedPairingCard(
                                 <div class="flex justify-end">
                                     <button
                                         type="button"
-                                        class="glass-button px-4 py-2 text-sm"
+                                        class="af-btn px-4 py-2 text-sm"
                                         data-tone="danger"
                                         disabled=move || busy.get()
                                         on:click=move |_| cancel_initiated()
@@ -1580,7 +1580,7 @@ pub fn PendingAttemptsPanel(
                             view! {
                                 <article
                                     role="listitem"
-                                    class="rounded-xl border border-indigo-400/35 bg-white/5 p-4 space-y-4"
+                                    class="af-surface-inset border-indigo-400/35 p-4 space-y-4"
                                 >
                                     <div class="flex flex-wrap items-start justify-between gap-3">
                                         <div class="space-y-1 min-w-0">
@@ -1635,7 +1635,7 @@ pub fn PendingAttemptsPanel(
                                         </span>
                                     </div>
 
-                                    <div class="rounded-xl border border-white/10 bg-black/25 p-3 text-center space-y-1">
+                                    <div class="af-surface-inset p-3 text-center space-y-1">
                                         <p class="text-xs uppercase tracking-wider text-indigo-300">
                                             {move || tt(context, "Cluster.comparisonCodeLabel")}
                                         </p>
@@ -1683,7 +1683,7 @@ pub fn PendingAttemptsPanel(
                                                 id=input_id
                                                 type="text"
                                                 autocomplete="off"
-                                                class="glass-input px-3 py-2 w-full text-sm"
+                                                class="af-input px-3 py-2 w-full text-sm"
                                                 placeholder=move || {
                                                     let fallback = placeholder_name_opt
                                                         .clone()
@@ -1713,7 +1713,7 @@ pub fn PendingAttemptsPanel(
                                         <div class="flex flex-wrap gap-2">
                                             <button
                                                 type="button"
-                                                class="glass-button px-4 py-2 text-sm"
+                                                class="af-btn px-4 py-2 text-sm"
                                                 data-tone="danger"
                                                 disabled=move || busy_attempt.with(Option::is_some)
                                                 on:click=move |_| cancel(att_id_cancel.clone())
@@ -1722,7 +1722,7 @@ pub fn PendingAttemptsPanel(
                                             </button>
                                             <button
                                                 type="button"
-                                                class="glass-button-primary px-4 py-2 text-sm"
+                                                class="af-btn-primary px-4 py-2 text-sm"
                                                 disabled=move || {
                                                     now_secs.get() >= expires_at
                                                         || busy_attempt.with(Option::is_some)

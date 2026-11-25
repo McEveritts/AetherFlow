@@ -72,7 +72,7 @@ pub(super) fn ShareAuditView() -> impl IntoView {
                     </p>
                 </Show>
                 <button
-                    class="glass-button px-3 py-2"
+                    class="af-btn px-3 py-2"
                     disabled=move || !can_read_files.get()
                     title=move || {
                         context
@@ -103,7 +103,7 @@ pub(super) fn ShareAuditView() -> impl IntoView {
                             }
                             .into_iter()
                             .map(|row| view! {
-                                <tr class="border-t border-white/10">
+                                <tr class="border-t border-[var(--af-border-hairline)]">
                                     <td class="p-3 whitespace-nowrap">{row.timestamp}</td>
                                     <td class="p-3 break-all">{row.username}</td>
                                     <td class="p-3 break-all">{row.trigger}</td>

@@ -111,7 +111,7 @@ pub fn StreamingTab() -> impl IntoView {
                     </p>
                 </div>
                 <button
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || dashboard.loading.get() || !can_read_services.get()
                     title=move || {
                         context
@@ -182,7 +182,7 @@ pub fn StreamingTab() -> impl IntoView {
                         <label class="text-xs text-slate-400 space-y-1">
                             <span class="block">{move || tt(context, "Estimate window ")}</span>
                             <select
-                                class="glass-input p-2 w-full"
+                                class="af-input p-2 w-full"
                                 prop:value=move || window.get()
                                 on:change=move |e| window.set(event_target_value(&e))
                             >
@@ -195,7 +195,7 @@ pub fn StreamingTab() -> impl IntoView {
                         <label class="text-xs text-slate-400 space-y-1">
                             <span class="block">{move || tt(context, "Play method")}</span>
                             <select
-                                class="glass-input p-2 w-full"
+                                class="af-input p-2 w-full"
                                 prop:value=move || play_method.get()
                                 on:change=move |e| play_method.set(event_target_value(&e))
                             >
@@ -209,7 +209,7 @@ pub fn StreamingTab() -> impl IntoView {
                         <label class="text-xs text-slate-400 space-y-1">
                             <span class="block">{move || tt(context, "Media type")}</span>
                             <select
-                                class="glass-input p-2 w-full"
+                                class="af-input p-2 w-full"
                                 prop:value=move || media_type.get()
                                 on:change=move |e| media_type.set(event_target_value(&e))
                             >

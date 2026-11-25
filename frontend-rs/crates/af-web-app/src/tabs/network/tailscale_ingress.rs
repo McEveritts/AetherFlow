@@ -294,7 +294,7 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                     </p>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || {
                             busy.get() || sync.busy.get() || !context.can_write_area(PeerArea::Network)
                         }
@@ -382,7 +382,7 @@ pub(super) fn ExternalAccessSettings() -> impl IntoView {
                     </span>
                     <button
                         type="button"
-                        class="glass-button px-3 py-1.5 text-xs"
+                        class="af-btn px-3 py-1.5 text-xs"
                         on:click=move |_| focused_app.set(None)
                     >
                         {move || tt(context, "Show all applications")}

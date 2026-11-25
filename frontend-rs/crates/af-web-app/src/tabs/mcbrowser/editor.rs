@@ -287,7 +287,7 @@ pub(super) fn EditorPanel(
                             {move || tt(context, "Editor theme")}
                             <select
                                 id="mcbrowser-editor-theme"
-                                class="glass-input px-2 py-1 text-xs font-mono"
+                                class="af-input px-2 py-1 text-xs font-mono"
                                 data-testid="editor-theme-select"
                                 aria-label=move || tt(context, "Editor theme")
                                 prop:value=move || editor_theme.get()
@@ -369,7 +369,7 @@ pub(super) fn EditorPanel(
                 <div class="flex flex-wrap gap-2">
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             readonly.get() || editor.saving.get() || editor.loading.get()
                                 || !editor.dirty()
@@ -383,7 +383,7 @@ pub(super) fn EditorPanel(
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || {
                             editor.saving.get() || editor.loading.get()
                                 || editor.path.get().is_empty()
@@ -402,7 +402,7 @@ pub(super) fn EditorPanel(
                 <Show when=move || language(&editor.path.get()) == "markdown">
                     <button
                         type="button"
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         on:click=move |_| markdown_preview.update(|open| *open = !*open)
                     >
                         {move || tt(context, "Markdown + MathML preview")}
@@ -424,7 +424,7 @@ pub(super) fn EditorPanel(
                         </p>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2"
+                            class="af-btn px-3 py-2"
                             disabled=move || readonly.get() || editor.saving.get()
                             on:click=move |_| overwrite.set(true)
                         >
@@ -814,7 +814,7 @@ pub(super) fn MediaPreview(
                     <div class="flex items-center gap-2 shrink-0">
                         <button
                             type="button"
-                            class="glass-button px-3 py-1.5 text-xs"
+                            class="af-btn px-3 py-1.5 text-xs"
                             data-testid="media-preview-prev"
                             disabled=move || nav_position.get().is_none_or(|(idx, _)| idx == 0)
                             on:click=move |_| {
@@ -839,7 +839,7 @@ pub(super) fn MediaPreview(
                         </span>
                         <button
                             type="button"
-                            class="glass-button px-3 py-1.5 text-xs"
+                            class="af-btn px-3 py-1.5 text-xs"
                             data-testid="media-preview-next"
                             disabled=move || {
                                 nav_position
@@ -880,7 +880,7 @@ pub(super) fn MediaPreview(
                                     <div class="flex flex-wrap items-center gap-2">
                                         <button
                                             type="button"
-                                            class="glass-button px-3 py-1 text-xs"
+                                            class="af-btn px-3 py-1 text-xs"
                                             data-testid="image-zoom-out"
                                             disabled=move || { zoom.get() <= ZOOM_STEPS[0] }
                                             on:click=move |_| zoom.update(|z| *z = next_zoom(*z, false))
@@ -892,7 +892,7 @@ pub(super) fn MediaPreview(
                                         </span>
                                         <button
                                             type="button"
-                                            class="glass-button px-3 py-1 text-xs"
+                                            class="af-btn px-3 py-1 text-xs"
                                             data-testid="image-zoom-in"
                                             disabled=move || { zoom.get() >= ZOOM_STEPS[ZOOM_STEPS.len() - 1] }
                                             on:click=move |_| zoom.update(|z| *z = next_zoom(*z, true))
@@ -901,14 +901,14 @@ pub(super) fn MediaPreview(
                                         </button>
                                         <button
                                             type="button"
-                                            class="glass-button px-3 py-1 text-xs"
+                                            class="af-btn px-3 py-1 text-xs"
                                             disabled=move || zoom.get() == 100
                                             on:click=move |_| zoom.set(100)
                                         >
                                             {move || tt(context, "Reset zoom")}
                                         </button>
                                     </div>
-                                    <div class="overflow-auto max-h-[65vh] rounded-lg border border-white/10 bg-slate-950/40 p-2">
+                                    <div class="af-surface-inset overflow-auto max-h-[65vh] p-2">
                                         <img
                                             src=move || {
                                                 if image_fallback.get() {
@@ -965,7 +965,7 @@ pub(super) fn MediaPreview(
                                         <label class="inline-flex items-center gap-2">
                                             {move || tt(context, "Playback speed")}
                                             <select
-                                                class="glass-input px-2 py-1 text-xs"
+                                                class="af-input px-2 py-1 text-xs"
                                                 data-testid="media-playback-speed"
                                                 prop:value=move || playback_rate.get()
                                                 on:change=move |event| {
@@ -1012,7 +1012,7 @@ pub(super) fn MediaPreview(
                                     <label class="inline-flex items-center gap-2 text-xs text-slate-400">
                                         {move || tt(context, "Playback speed")}
                                         <select
-                                            class="glass-input px-2 py-1 text-xs"
+                                            class="af-input px-2 py-1 text-xs"
                                             data-testid="media-playback-speed"
                                             prop:value=move || playback_rate.get()
                                             on:change=move |event| {
@@ -1038,7 +1038,7 @@ pub(super) fn MediaPreview(
                             let file_name = leaf(&current_path).to_owned();
                             let download_name = file_name.clone();
                             view! {
-                                <div class="rounded-xl border border-white/10 bg-slate-950/60 p-5 space-y-4">
+                                <div class="af-surface-inset p-5 space-y-4">
                                     <div>
                                         <h3 class="font-semibold break-all">{file_name}</h3>
                                         <p class="text-sm text-slate-400 mt-1">
@@ -1047,7 +1047,7 @@ pub(super) fn MediaPreview(
                                     </div>
                                     <div class="flex flex-wrap gap-3">
                                         <a
-                                            class="glass-button-primary px-4 py-2"
+                                            class="af-btn-primary px-4 py-2"
                                             href=src
                                             target="_blank"
                                             rel="noopener noreferrer"
@@ -1056,7 +1056,7 @@ pub(super) fn MediaPreview(
                                         </a>
                                         <Show when=move || can_download.get()>
                                             <a
-                                                class="glass-button px-4 py-2"
+                                                class="af-btn px-4 py-2"
                                                 href=download_href.clone()
                                                 download=download_name.clone()
                                             >
@@ -1077,7 +1077,7 @@ pub(super) fn MediaPreview(
                                             <label class="inline-flex items-center gap-2 text-xs text-slate-400">
                                                 {move || tt(context, "Delimiter")}
                                                 <select
-                                                    class="glass-input px-2 py-1 text-xs"
+                                                    class="af-input px-2 py-1 text-xs"
                                                     data-testid="csv-delimiter-select"
                                                     prop:value=move || csv_delim.get()
                                                     on:change=move |event| csv_delim.set(event_target_value(&event))
@@ -1092,7 +1092,7 @@ pub(super) fn MediaPreview(
                                             <label class="inline-flex items-center gap-2 text-xs text-slate-400">
                                                 {move || tt(context, "Encoding")}
                                                 <select
-                                                    class="glass-input px-2 py-1 text-xs font-mono"
+                                                    class="af-input px-2 py-1 text-xs font-mono"
                                                     data-testid="csv-encoding-select"
                                                     aria-label=move || tt(context, "Encoding")
                                                     prop:value=move || csv_encoding.get()
@@ -1114,7 +1114,7 @@ pub(super) fn MediaPreview(
                                             view! {
                                                 <button
                                                     type="button"
-                                                    class="glass-button px-3 py-1.5 text-xs"
+                                                    class="af-btn px-3 py-1.5 text-xs"
                                                     on:click=move |_| {
                                                         open.set(false);
                                                         cb.run(edit_path.clone());
@@ -1169,15 +1169,15 @@ pub(super) fn MediaPreview(
                                                                 }
                                                             }}
                                                         </p>
-                                                        <div class="overflow-auto max-h-[55vh] rounded-lg border border-white/10">
+                                                        <div class="overflow-auto max-h-[55vh] rounded-lg border border-[var(--af-border-hairline)]">
                                                             <table class="w-full text-xs text-left border-collapse">
-                                                                <thead class="bg-white/5 sticky top-0">
+                                                                <thead class="bg-[var(--af-bg-chrome)] sticky top-0">
                                                                     <tr>
                                                                         {headers
                                                                             .into_iter()
                                                                             .map(|header| {
                                                                                 view! {
-                                                                                    <th class="px-3 py-2 font-semibold border-b border-white/10 whitespace-nowrap">
+                                                                                    <th class="px-3 py-2 font-semibold border-b border-[var(--af-border-hairline)] whitespace-nowrap">
                                                                                         {header}
                                                                                     </th>
                                                                                 }
@@ -1254,7 +1254,7 @@ pub(super) fn MediaPreview(
                                             };
                                             view! {
                                                 <div class="space-y-3">
-                                                    <div class="border-b border-white/10 pb-3">
+                                                    <div class="border-b border-[var(--af-border-hairline)] pb-3">
                                                         <h3 class="font-semibold text-base break-words">{book.title}</h3>
                                                         {(!byline.is_empty()).then(|| view! {
                                                             <p class="text-xs text-slate-400 mt-1">{byline}</p>
@@ -1267,14 +1267,14 @@ pub(super) fn MediaPreview(
                                                         {(!chapter_titles.is_empty()).then(|| view! {
                                                             <button
                                                                 type="button"
-                                                                class="glass-button px-3 py-1 text-xs"
+                                                                class="af-btn px-3 py-1 text-xs"
                                                                 disabled=move || epub_chapter.get() == 0
                                                                 on:click=move |_| epub_chapter.update(|c| *c = c.saturating_sub(1))
                                                             >
                                                                 {move || tt(context, "Previous chapter")}
                                                             </button>
                                                             <select
-                                                                class="glass-input px-2 py-1 text-xs flex-1 min-w-40"
+                                                                class="af-input px-2 py-1 text-xs flex-1 min-w-40"
                                                                 data-testid="epub-chapter-select"
                                                                 aria-label=move || tt(context, "EPUB chapter")
                                                                 prop:value=move || active_idx.to_string()
@@ -1293,7 +1293,7 @@ pub(super) fn MediaPreview(
                                                             </select>
                                                             <button
                                                                 type="button"
-                                                                class="glass-button px-3 py-1 text-xs"
+                                                                class="af-btn px-3 py-1 text-xs"
                                                                 disabled=move || {
                                                                     chapter_count == 0 || epub_chapter.get() + 1 >= chapter_count
                                                                 }
@@ -1310,7 +1310,7 @@ pub(super) fn MediaPreview(
                                                         })}
                                                         <button
                                                             type="button"
-                                                            class="glass-button px-2 py-1 text-xs"
+                                                            class="af-btn px-2 py-1 text-xs"
                                                             aria-label=move || tt(context, "Decrease font size")
                                                             disabled=move || { epub_font.get() <= 12 }
                                                             on:click=move |_| epub_font.update(|f| *f = f.saturating_sub(1).max(12))
@@ -1322,7 +1322,7 @@ pub(super) fn MediaPreview(
                                                         </span>
                                                         <button
                                                             type="button"
-                                                            class="glass-button px-2 py-1 text-xs"
+                                                            class="af-btn px-2 py-1 text-xs"
                                                             aria-label=move || tt(context, "Increase font size")
                                                             disabled=move || { epub_font.get() >= 24 }
                                                             on:click=move |_| epub_font.update(|f| *f = (*f + 1).min(24))
@@ -1332,7 +1332,7 @@ pub(super) fn MediaPreview(
                                                     </div>
                                                     <article class=move || {
                                                         format!(
-                                                            "space-y-3 leading-relaxed max-h-[50vh] overflow-auto p-4 rounded-xl border border-white/10 bg-slate-950/40 af-editor-fs-{}",
+                                                            "af-surface-inset space-y-3 leading-relaxed max-h-[50vh] overflow-auto p-4 af-editor-fs-{}",
                                                             epub_font.get()
                                                         )
                                                     }>
@@ -1403,7 +1403,7 @@ pub(super) fn MediaPreview(
             </Show>
             <Show when=move || can_download.get() && !path.with(String::is_empty)>
                 <a
-                    class="glass-button inline-block px-4 py-2 mt-3"
+                    class="af-btn inline-block px-4 py-2 mt-3"
                     href=move || {
                         context.server_epoch.track();
                         let server = context.active_server_id.get();

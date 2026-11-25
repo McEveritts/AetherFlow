@@ -245,7 +245,7 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                     </label>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 self-end"
+                        class="af-btn px-4 py-2 self-end"
                         disabled=move || !can_read_files.get()
                         title=move || {
                             context
@@ -316,7 +316,7 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                     </label>
                     <button
                         type="button"
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         disabled=move || {
                             busy.get()
                                 || !context.can_write_area(crate::state::PeerArea::Files)
@@ -334,7 +334,7 @@ pub(super) fn EventsAdmin() -> impl IntoView {
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-3 py-2"
+                        class="af-btn px-3 py-2"
                         disabled=move || {
                             busy.get()
                                 || selected.get()["status"] != "queued"

@@ -192,9 +192,9 @@ fn LiveSession(
         artwork_failed.set(false);
     });
     view! {
-        <article class="rounded-xl border border-white/10 p-4 space-y-3 min-w-0">
+        <article class="af-surface-inset p-4 space-y-3 min-w-0">
             <div class="flex items-start gap-3">
-                <div class="w-16 h-24 rounded-xl border border-white/10 bg-white/5 overflow-hidden shrink-0 flex items-center justify-center">
+                <div class="af-surface-inset w-16 h-24 overflow-hidden shrink-0 flex items-center justify-center">
                     {move || {
                         let item_name = session.with(|s| display(context, &s.item_name));
                         match artwork_url.get() {
@@ -279,7 +279,7 @@ fn LiveSession(
                 }}
             </p>
             <button
-                class="glass-button px-3 py-2 text-sm"
+                class="af-btn px-3 py-2 text-sm"
                 on:click=move |_| on_inspect.run(serde_json::to_value(session.get_untracked()).unwrap_or_default())
             >
                 {move || tt(context, "Playback details")}
@@ -476,21 +476,22 @@ pub(super) fn StreamingDetails(
                     <div class="space-y-3">
                         <div class="flex gap-2">
                             <button
-                                class="glass-button px-3 py-2"
+                                class="af-btn px-3 py-2"
                                 disabled=move || busy.get()
                                 on:click=move |_| command.run("pause".into())
                             >
                                 {move || tt(context, "Pause")}
                             </button>
                             <button
-                                class="glass-button px-3 py-2"
+                                class="af-btn px-3 py-2"
                                 disabled=move || busy.get()
                                 on:click=move |_| command.run("resume".into())
                             >
                                 {move || tt(context, "Resume")}
                             </button>
                             <button
-                                class="glass-button px-3 py-2 text-rose-300"
+                                class="af-btn px-3 py-2"
+                                data-tone="danger"
                                 disabled=move || busy.get()
                                 on:click=move |_| stop_confirm.set(true)
                             >
@@ -501,13 +502,13 @@ pub(super) fn StreamingDetails(
                             <label class="text-sm">
                                 {move || tt(context, "Message viewer")}
                                 <input
-                                    class="glass-input p-2 w-full"
+                                    class="af-input p-2 w-full"
                                     prop:value=move || message.get()
                                     on:input=move |e| message.set(event_target_value(&e))
                                 />
                             </label>
                             <button
-                                class="glass-button px-3 py-2"
+                                class="af-btn px-3 py-2"
                                 disabled=move || busy.get() || message.get().trim().is_empty()
                                 on:click=move |_| command.run("message".into())
                             >
@@ -567,7 +568,7 @@ pub(super) fn ProviderCards(
                                             .then(|| {
                                                 view! {
                                                     <button
-                                                        class="glass-button px-3 py-2 text-sm"
+                                                        class="af-btn px-3 py-2 text-sm"
                                                         disabled=move || {
                                                             !context.can_write_area(
                                                                 crate::state::PeerArea::Settings,
@@ -819,7 +820,7 @@ pub(super) fn DemoTelemetryBanner(
                                 view! {
                                     <button
                                         type="button"
-                                        class="glass-button px-4 py-2 text-sm"
+                                        class="af-btn px-4 py-2 text-sm"
                                         disabled=move || {
                                             busy.get()
                                                 || dashboard.error.with(Option::is_some)
@@ -844,7 +845,8 @@ pub(super) fn DemoTelemetryBanner(
                         >
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2 text-sm text-amber-300"
+                                class="af-btn px-4 py-2 text-sm"
+                                data-tone="danger"
                                 disabled=move || {
                                     busy.get()
                                         || dashboard.error.with(Option::is_some)
@@ -920,7 +922,7 @@ pub(super) fn DemoTelemetryBanner(
                     </span>
                     <input
                         type="text"
-                        class="glass-input w-full px-3 py-2"
+                        class="af-input w-full px-3 py-2"
                         autocomplete="off"
                         spellcheck="false"
                         disabled=move || busy.get()
@@ -931,7 +933,7 @@ pub(super) fn DemoTelemetryBanner(
                 <div class="flex gap-3 justify-end">
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || busy.get()
                         on:click=move |_| confirm_open.set(false)
                     >
@@ -939,7 +941,7 @@ pub(super) fn DemoTelemetryBanner(
                     </button>
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get()
                                 || !context.is_admin()

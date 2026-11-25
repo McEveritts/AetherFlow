@@ -200,7 +200,7 @@ pub fn MediaflowTab() -> impl IntoView {
                     </p>
                 </div>
                 <button
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         resource.loading.get()
                             || (!can_read_services.get() && !can_read_blueprints.get())
@@ -305,7 +305,7 @@ pub fn MediaflowTab() -> impl IntoView {
                                                     </p>
                                                     <p class="text-xs text-slate-500">{ids.join(" / ")}</p>
                                                     <button
-                                                        class="glass-button-primary px-3 py-2 text-sm"
+                                                        class="af-btn-primary px-3 py-2 text-sm"
                                                         on:click=move |_| context.select_tab(TabId::Marketplace)
                                                     >
                                                         {move || tt(context, "Provision in Marketplace")}
@@ -348,7 +348,7 @@ pub fn MediaflowTab() -> impl IntoView {
                                                     Value::Null
                                                 };
                                                 view! {
-                                                    <article class="space-y-2 border-t border-white/10 pt-3 min-w-0">
+                                                    <article class="space-y-2 border-t border-[var(--af-border-hairline)] pt-3 min-w-0">
                                                         <h3 class="font-semibold break-words">
                                                             {text(&service, "name")}
                                                         </h3>
@@ -378,7 +378,7 @@ pub fn MediaflowTab() -> impl IntoView {
                                                             .map(|url| {
                                                                 view! {
                                                                     <a
-                                                                        class="glass-button inline-block px-3 py-2 text-sm"
+                                                                        class="af-btn inline-block px-3 py-2 text-sm"
                                                                         href=url
                                                                         target="_blank"
                                                                         rel="noopener noreferrer"
@@ -388,7 +388,7 @@ pub fn MediaflowTab() -> impl IntoView {
                                                                 }
                                                             })}
                                                         <button
-                                                            class="glass-button px-3 py-2 text-sm"
+                                                            class="af-btn px-3 py-2 text-sm"
                                                             on:click=move |_| context.select_tab(TabId::Services)
                                                         >
                                                             {move || tt(context, "Configure in Services")}
@@ -397,7 +397,7 @@ pub fn MediaflowTab() -> impl IntoView {
                                                             .then(|| {
                                                                 view! {
                                                                     <button
-                                                                        class="glass-button px-3 py-2 text-sm"
+                                                                        class="af-btn px-3 py-2 text-sm"
                                                                         disabled=move || {
                                                                             syncing.with(Option::is_some)
                                                                                 || !context.can_all_areas(&blueprint_sync_reqs)
@@ -839,14 +839,14 @@ fn MediaflowQueue(
                     <label class="flex-1 min-w-0 text-sm">
                         {move || tt(context, "Scan directory")}
                         <input
-                            class="glass-input p-3 w-full"
+                            class="af-input p-3 w-full"
                             prop:value=move || directory.get()
                             on:input=move |e| directory.set(event_target_value(&e))
                         />
                     </label>
                     <button
                         type="submit"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get() || !context.can_write_area(PeerArea::Transcoding)
                         }
@@ -877,7 +877,7 @@ fn MediaflowQueue(
                     </p>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || {
                             connected.get() || stream_requested.get() || !can_open_stream.get()
                         }
@@ -953,7 +953,7 @@ fn MediaflowQueue(
                                 let rejection = row.clone();
                                 let cancellation = row.clone();
                                 view! {
-                                    <article class="p-4 border border-white/10 rounded-xl space-y-2">
+                                    <article class="af-surface-inset p-4 space-y-2">
                                         <p class="text-sm font-semibold break-all">
                                             {text(&row, "filePath")}
                                         </p>
@@ -986,7 +986,7 @@ fn MediaflowQueue(
                                                 view! {
                                                     <div class="flex gap-3">
                                                         <button
-                                                            class="glass-button-primary px-4 py-2"
+                                                            class="af-btn-primary px-4 py-2"
                                                             disabled=move || {
                                                                 busy.get()
                                                                     || id.is_none()
@@ -1006,7 +1006,7 @@ fn MediaflowQueue(
                                                             {move || tt(context, "Approve transcode")}
                                                         </button>
                                                         <button
-                                                            class="glass-button px-4 py-2"
+                                                            class="af-btn px-4 py-2"
                                                             disabled=move || {
                                                                 busy.get()
                                                                     || id.is_none()
@@ -1035,7 +1035,7 @@ fn MediaflowQueue(
                                                 view! {
                                                     <div class="flex gap-3">
                                                         <button
-                                                            class="glass-button px-4 py-2"
+                                                            class="af-btn px-4 py-2"
                                                             disabled=move || {
                                                                 busy.get()
                                                                     || id.is_none()

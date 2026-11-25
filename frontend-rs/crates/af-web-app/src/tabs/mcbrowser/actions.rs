@@ -357,7 +357,7 @@ pub(super) fn ActionsDialog(actions: Actions) -> impl IntoView {
                 </Show>
                 <button
                     type="submit"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || {
                         let requires_write = action_requires_files_write(&actions.kind.get());
                         actions.busy.get()

@@ -10,7 +10,7 @@ pub mod transcode;
 
 use crate::state::{app, owned_resource_reads, run_resource_read, AppContext, ResourceReads};
 use crate::tabs::busy::BusyGuard;
-use crate::tabs::l10n::{tt, tt_with, EmptyState, ObsCard};
+use crate::tabs::l10n::{tt, tt_with, EmptyState};
 use af_web_core::api::{
     api_url_for_server, clear_csrf_token, cookie_value, current_auth_epoch, ensure_same_auth_epoch,
     is_csrf_rejection, percent_encode_header_component, ApiClient, ApiError, API_ACCEPT,
@@ -798,7 +798,7 @@ pub fn PeerErrorAlert(
                                     view! {
                                         <button
                                             type="button"
-                                            class="glass-button px-2.5 py-1 text-xs shrink-0"
+                                            class="af-btn px-2.5 py-1 text-xs shrink-0"
                                             aria-label=move || tt(context, "Cluster.dismissError")
                                             on:click=move |_| dismiss.run(())
                                         >
@@ -1024,8 +1024,8 @@ fn ClusterAdminContent() -> impl IntoView {
 
     view! {
         <section class="space-y-6 py-5 min-w-0 max-w-full">
-            <ObsCard>
-                <div class="flex flex-wrap justify-between items-start gap-4 mb-4">
+            <header class="af-canvas-section pb-5 space-y-4">
+                <div class="flex flex-wrap justify-between items-start gap-4">
                     <div class="space-y-1.5 min-w-0">
                         <h2 class="text-lg font-semibold">
                             {move || tt(context, "Tabs.clusterHeading")}
@@ -1097,7 +1097,7 @@ fn ClusterAdminContent() -> impl IntoView {
                     <div class="flex flex-wrap gap-3">
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || loading.get()
                             aria-label=move || tt(context, "Cluster.refreshPeers")
                             on:click=move |_| trigger_refresh.run(())
@@ -1106,14 +1106,14 @@ fn ClusterAdminContent() -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             on:click=move |_| allow_modal_open.set(true)
                         >
                             {move || tt(context, "Cluster.allowServerAction")}
                         </button>
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2"
+                            class="af-btn-primary px-4 py-2"
                             on:click=move |_| pair_modal_open.set(true)
                         >
                             {move || tt(context, "Cluster.pairServerAction")}
@@ -1133,7 +1133,7 @@ fn ClusterAdminContent() -> impl IntoView {
                         <div>
                             <button
                                 type="button"
-                                class="glass-button px-3 py-2 text-sm"
+                                class="af-btn px-3 py-2 text-sm"
                                 on:click=move |_| trigger_refresh.run(())
                             >
                                 {move || tt(context, "Common.retry")}
@@ -1141,7 +1141,7 @@ fn ClusterAdminContent() -> impl IntoView {
                         </div>
                     </div>
                 </Show>
-            </ObsCard>
+            </header>
 
             <InitiatedPairingCard
                 initiated=initiated_pairing

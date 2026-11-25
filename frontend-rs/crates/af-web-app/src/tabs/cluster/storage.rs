@@ -734,7 +734,7 @@ pub fn PeerRowStorageSummary(
                 Some(view! {
                     <div
                         data-testid=format!("peer-storage-summary-{}", current.id)
-                        class="rounded-xl border border-white/10 bg-white/5 p-3 space-y-3"
+                        class="af-surface-inset p-3 space-y-3"
                     >
                         <div class="flex flex-wrap items-center justify-between gap-2">
                             <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">
@@ -782,7 +782,7 @@ pub fn PeerRowStorageSummary(
                                             let remote_for_aria = remote_path.clone();
 
                                             view! {
-                                                <li class="rounded-lg border border-white/10 bg-white/5 p-2.5 space-y-1.5 text-xs">
+                                                <li class="af-surface-inset p-2.5 space-y-1.5 text-xs">
                                                     <div class="flex flex-wrap items-center justify-between gap-2">
                                                         <span class="font-mono text-slate-200 break-all">
                                                             {remote_path}
@@ -811,7 +811,7 @@ pub fn PeerRowStorageSummary(
                                                                     </div>
                                                                     <button
                                                                         type="button"
-                                                                        class="glass-button px-2 py-1 text-xs shrink-0"
+                                                                        class="af-btn px-2 py-1 text-xs shrink-0"
                                                                         aria-label=move || {
                                                                             tt_with(
                                                                                 context,
@@ -869,7 +869,7 @@ pub fn PeerRowStorageSummary(
                                             };
                                             let mode_tone = if export.writable { "warning" } else { "muted" };
                                             view! {
-                                                <li class="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs">
+                                                <li class="af-surface-inset inline-flex items-center gap-2 px-2.5 py-1 text-xs">
                                                     <span class="font-mono text-slate-200 break-all">
                                                         {export.path}
                                                     </span>
@@ -1571,7 +1571,7 @@ pub fn StorageManagerModal(
                 // ── Section 1: Local exports (this server -> peer) ──────────────────────
                 <section
                     aria-labelledby="cluster-storage-exports-heading"
-                    class="rounded-xl border border-indigo-500/30 bg-white/5 p-4 space-y-4"
+                    class="af-surface-inset border-indigo-500/30 p-4 space-y-4"
                 >
                     <div class="space-y-1">
                         <h3
@@ -1608,7 +1608,7 @@ pub fn StorageManagerModal(
                             <button
                                 id="cluster-storage-exports-retry"
                                 type="button"
-                                class="glass-button px-3 py-1.5 text-xs"
+                                class="af-btn px-3 py-1.5 text-xs"
                                 on:click=move |_| retry_exports()
                             >
                                 {move || tt(context, "Common.retry")}
@@ -1670,7 +1670,7 @@ pub fn StorageManagerModal(
                                             let created_at = export.created_at.trim().to_string();
 
                                             view! {
-                                                <li class="rounded-lg border border-white/10 bg-white/5 p-3 space-y-2">
+                                                <li class="af-surface-inset p-3 space-y-2">
                                                     <div class="flex flex-wrap items-start justify-between gap-2">
                                                         <div class="space-y-1 min-w-0">
                                                             <div class="flex flex-wrap items-center gap-2">
@@ -1716,7 +1716,7 @@ pub fn StorageManagerModal(
                                                                         <button
                                                                             id=format!("cluster-storage-export-keep-{safe_id}")
                                                                             type="button"
-                                                                            class="glass-button px-2.5 py-1 text-xs"
+                                                                            class="af-btn px-2.5 py-1 text-xs"
                                                                             disabled=move || gate.is_busy()
                                                                             on:click=move |_| {
                                                                                 state.update(|s| s.confirm_remove_export_id = None);
@@ -1735,7 +1735,7 @@ pub fn StorageManagerModal(
                                                                         <button
                                                                             id=format!("cluster-storage-export-confirm-{safe_id}")
                                                                             type="button"
-                                                                            class="glass-button px-2.5 py-1 text-xs"
+                                                                            class="af-btn px-2.5 py-1 text-xs"
                                                                             data-tone="danger"
                                                                             disabled=move || gate.is_busy()
                                                                             on:click=move |_| {
@@ -1763,7 +1763,7 @@ pub fn StorageManagerModal(
                                                                 <button
                                                                     id=format!("cluster-storage-export-remove-{safe_id}")
                                                                     type="button"
-                                                                    class="glass-button px-2.5 py-1 text-xs shrink-0"
+                                                                    class="af-btn px-2.5 py-1 text-xs shrink-0"
                                                                     data-tone="danger"
                                                                     disabled=move || gate.is_busy()
                                                                     aria-label=move || tt_with(
@@ -1802,7 +1802,7 @@ pub fn StorageManagerModal(
                     }}
 
                     <form
-                        class="space-y-3 border-t border-white/10 pt-3"
+                        class="space-y-3 border-t border-[var(--af-border-hairline)] pt-3"
                         on:submit=move |event| {
                             event.prevent_default();
                             submit_create_export();
@@ -1822,7 +1822,7 @@ pub fn StorageManagerModal(
                                     data-af-autofocus="true"
                                     autocomplete="off"
                                     aria-describedby="cluster-storage-export-path-hint"
-                                    class="glass-input px-3 py-2 flex-1 min-w-48 font-mono text-sm"
+                                    class="af-input px-3 py-2 flex-1 min-w-48 font-mono text-sm"
                                     placeholder=move || tt(context, "Cluster.storageExportPathPlaceholder")
                                     disabled=move || gate.is_busy() || !storage_supported.get()
                                     prop:value=move || state.with(|s| s.export_path.clone())
@@ -1835,7 +1835,7 @@ pub fn StorageManagerModal(
                                 <button
                                     id="cluster-storage-browse-toggle"
                                     type="button"
-                                    class="glass-button px-3 py-2 text-xs shrink-0"
+                                    class="af-btn px-3 py-2 text-xs shrink-0"
                                     disabled=move || gate.is_busy() || !storage_supported.get()
                                     aria-expanded=move || browser_open.get().to_string()
                                     on:click=move |_| {
@@ -1866,7 +1866,7 @@ pub fn StorageManagerModal(
                         <Show when=move || browser_open.get()>
                             <div
                                 data-testid="cluster-storage-folder-browser"
-                                class="rounded-xl border border-white/15 bg-white/5 p-3 space-y-3"
+                                class="af-surface-inset p-3 space-y-3"
                             >
                                 <div class="flex flex-wrap items-center justify-between gap-2">
                                     <h4 class="text-xs font-semibold text-slate-200">
@@ -1882,7 +1882,7 @@ pub fn StorageManagerModal(
                                                 view! {
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-2 py-1 text-xs font-mono"
+                                                        class="af-btn px-2 py-1 text-xs font-mono"
                                                         disabled=move || browser_loading.get()
                                                         on:click=move |_| fetch_local_dir(root.to_string())
                                                     >
@@ -1913,7 +1913,7 @@ pub fn StorageManagerModal(
                                                     <button
                                                         id="cluster-storage-browser-up"
                                                         type="button"
-                                                        class="glass-button px-2.5 py-1 text-xs"
+                                                        class="af-btn px-2.5 py-1 text-xs"
                                                         disabled=move || {
                                                             browser_loading.get() || !has_parent
                                                         }
@@ -1928,7 +1928,7 @@ pub fn StorageManagerModal(
                                                     <button
                                                         id="cluster-storage-browser-use"
                                                         type="button"
-                                                        class="glass-button-primary px-2.5 py-1 text-xs"
+                                                        class="af-btn-primary px-2.5 py-1 text-xs"
                                                         disabled=move || browser_loading.get()
                                                         on:click=move |_| {
                                                             mutation_error.set(None);
@@ -1976,7 +1976,7 @@ pub fn StorageManagerModal(
                                                         view! {
                                                             <button
                                                                 type="button"
-                                                                class="block w-full text-left glass-button px-2.5 py-1.5 text-xs font-mono break-all"
+                                                                class="block w-full text-left af-btn px-2.5 py-1.5 text-xs font-mono break-all"
                                                                 on:click=move |_| {
                                                                     match join_local_child_dir(&base_for_click, &name) {
                                                                         Ok(child) => fetch_local_dir(child),
@@ -2065,7 +2065,7 @@ pub fn StorageManagerModal(
                             <button
                                 id="cluster-storage-export-submit"
                                 type="submit"
-                                class="glass-button-primary px-4 py-2 text-sm"
+                                class="af-btn-primary px-4 py-2 text-sm"
                                 disabled=move || gate.is_busy() || !storage_supported.get()
                             >
                                 {move || {
@@ -2083,7 +2083,7 @@ pub fn StorageManagerModal(
                 // ── Section 2: Local mounts & remote export catalog (peer -> this server) ──
                 <section
                     aria-labelledby="cluster-storage-mounts-heading"
-                    class="rounded-xl border border-white/10 bg-white/5 p-4 space-y-4"
+                    class="af-surface-inset p-4 space-y-4"
                 >
                     <div class="space-y-1">
                         <h3
@@ -2127,7 +2127,7 @@ pub fn StorageManagerModal(
                             <button
                                 id="cluster-storage-mounts-retry"
                                 type="button"
-                                class="glass-button px-3 py-1.5 text-xs"
+                                class="af-btn px-3 py-1.5 text-xs"
                                 on:click=move |_| retry_mounts()
                             >
                                 {move || tt(context, "Common.retry")}
@@ -2197,7 +2197,7 @@ pub fn StorageManagerModal(
                                                 .filter(|msg| !msg.trim().is_empty());
 
                                             view! {
-                                                <li class="rounded-xl border border-white/10 bg-white/5 p-3 space-y-2.5">
+                                                <li class="af-surface-inset p-3 space-y-2.5">
                                                     <div class="flex flex-wrap items-start justify-between gap-2">
                                                         <div class="space-y-1 min-w-0">
                                                             <p class="text-xs text-slate-400">
@@ -2228,7 +2228,7 @@ pub fn StorageManagerModal(
                                                                         <button
                                                                             id=format!("cluster-storage-mount-keep-{safe_id}")
                                                                             type="button"
-                                                                            class="glass-button px-2.5 py-1 text-xs"
+                                                                            class="af-btn px-2.5 py-1 text-xs"
                                                                             disabled=move || gate.is_busy()
                                                                             on:click=move |_| {
                                                                                 state.update(|s| s.confirm_remove_mount_id = None);
@@ -2247,7 +2247,7 @@ pub fn StorageManagerModal(
                                                                         <button
                                                                             id=format!("cluster-storage-mount-confirm-{safe_id}")
                                                                             type="button"
-                                                                            class="glass-button px-2.5 py-1 text-xs"
+                                                                            class="af-btn px-2.5 py-1 text-xs"
                                                                             data-tone="danger"
                                                                             disabled=move || gate.is_busy()
                                                                             on:click=move |_| {
@@ -2275,7 +2275,7 @@ pub fn StorageManagerModal(
                                                                 <button
                                                                     id=format!("cluster-storage-mount-remove-{safe_id}")
                                                                     type="button"
-                                                                    class="glass-button px-2.5 py-1 text-xs shrink-0"
+                                                                    class="af-btn px-2.5 py-1 text-xs shrink-0"
                                                                     data-tone="danger"
                                                                     disabled=move || gate.is_busy()
                                                                     aria-label=move || tt_with(
@@ -2313,7 +2313,7 @@ pub fn StorageManagerModal(
                                                         }
                                                     })}
 
-                                                    <div class="rounded-lg border border-white/10 bg-white/5 p-2.5 space-y-1.5">
+                                                    <div class="af-surface-inset p-2.5 space-y-1.5">
                                                         <div class="flex flex-wrap items-center justify-between gap-2">
                                                             <span class="text-xs font-medium text-slate-300">
                                                                 {move || tt(context, "Cluster.storageMountLibraryPathLabel")}
@@ -2322,7 +2322,7 @@ pub fn StorageManagerModal(
                                                                 view! {
                                                                     <button
                                                                         type="button"
-                                                                        class="glass-button px-2.5 py-1 text-xs shrink-0"
+                                                                        class="af-btn px-2.5 py-1 text-xs shrink-0"
                                                                         aria-label=move || tt_with(
                                                                             context,
                                                                             "Cluster.storageCopyLibraryPathAria",
@@ -2378,7 +2378,7 @@ pub fn StorageManagerModal(
                     }}
 
                     // Remote export catalog & new mount creation form.
-                    <div class="border-t border-white/10 pt-3 space-y-3">
+                    <div class="border-t border-[var(--af-border-hairline)] pt-3 space-y-3">
                         <div class="space-y-1">
                             <h4 class="text-sm font-semibold text-slate-200 break-words">
                                 {move || {
@@ -2407,7 +2407,7 @@ pub fn StorageManagerModal(
                                     <button
                                         id="cluster-storage-retry-catalog"
                                         type="button"
-                                        class="glass-button px-3 py-1.5 text-xs"
+                                        class="af-btn px-3 py-1.5 text-xs"
                                         disabled=move || {
                                             gate.is_busy()
                                                 || mounts_load_state.get() == SectionLoadState::Loading
@@ -2457,7 +2457,7 @@ pub fn StorageManagerModal(
                                         </label>
                                         <select
                                             id="cluster-storage-mount-export"
-                                            class="glass-input px-3 py-2 w-full text-sm font-mono"
+                                            class="af-input px-3 py-2 w-full text-sm font-mono"
                                             disabled=move || {
                                                 gate.is_busy()
                                                     || !storage_supported.get()
@@ -2580,7 +2580,7 @@ pub fn StorageManagerModal(
                                         <button
                                             id="cluster-storage-mount-submit"
                                             type="submit"
-                                            class="glass-button-primary px-4 py-2 text-sm"
+                                            class="af-btn-primary px-4 py-2 text-sm"
                                             disabled=move || {
                                                 gate.is_busy()
                                                     || !storage_supported.get()
@@ -2610,7 +2610,7 @@ pub fn StorageManagerModal(
                     <button
                         id="cluster-storage-refresh"
                         type="button"
-                        class="glass-button px-3 py-2 text-sm"
+                        class="af-btn px-3 py-2 text-sm"
                         disabled=move || {
                             gate.is_busy()
                                 || exports_load_state.get() == SectionLoadState::Loading
@@ -2623,7 +2623,7 @@ pub fn StorageManagerModal(
                     <button
                         id="cluster-storage-close"
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         on:click=move |_| open.set(false)
                     >
                         {move || tt(context, "Cluster.storageCloseAction")}

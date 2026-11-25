@@ -512,7 +512,7 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                             row.sent as f64 / row.size as f64 * 100.0
                         };
                         view! {
-                            <div class="rounded-xl border border-white/10 p-3 space-y-2">
+                            <div class="af-surface-inset p-3 space-y-2">
                                 <p class="font-medium text-sm break-all">{row.path}</p>
                                 <div class="flex justify-between gap-2 text-xs text-slate-400">
                                     <span>{move || tt(context, row.status.label())}</span>
@@ -540,7 +540,7 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                                             view! {
                                                 <button
                                                     type="button"
-                                                    class="glass-button px-3 py-2"
+                                                    class="af-btn px-3 py-2"
                                                     disabled=move || !context.can_write_area(PeerArea::Files)
                                                     title=move || {
                                                         context
@@ -563,7 +563,7 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                                             view! {
                                                 <button
                                                     type="button"
-                                                    class="glass-button-primary px-3 py-2"
+                                                    class="af-btn-primary px-3 py-2"
                                                     disabled=move || !context.can_write_area(PeerArea::Files)
                                                     title=move || {
                                                         context
@@ -588,7 +588,8 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
                                             view! {
                                                 <button
                                                     type="button"
-                                                    class="glass-button px-3 py-2 text-rose-300"
+                                                    class="af-btn px-3 py-2"
+                                                    data-tone="danger"
                                                     disabled=move || !context.can_write_area(PeerArea::Files)
                                                     title=move || {
                                                         context
@@ -615,7 +616,7 @@ pub(super) fn TransferPanel(queue: TransferQueue) -> impl IntoView {
             </div>
             <button
                 type="button"
-                class="glass-button px-4 py-2 mt-4"
+                class="af-btn px-4 py-2 mt-4"
                 on:click=move |_| {
                     queue
                         .inner

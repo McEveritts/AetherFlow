@@ -173,7 +173,7 @@ fn CohortGroup(
                     } else { cohort_patch(kind, &row) };
                     let disabled = patch.is_none();
                     view! {
-                        <button type="button" class="glass-button w-full text-left p-3 break-words disabled:opacity-60" disabled=disabled
+                        <button type="button" class="af-btn w-full text-left p-3 break-words" disabled=disabled
                             on:click=move |_| if let Some(patch) = patch.clone() {
                                 query.update(|query| {
                                     for (key, value) in patch { query.fields.insert(key, value); }
@@ -338,7 +338,7 @@ pub(super) fn HistoryAnalytics(
         });
     });
     view! {
-        <div class="space-y-3 border-t border-white/10 pt-4">
+        <div class="space-y-3 border-t border-[var(--af-border-hairline)] pt-4">
             <div class="flex flex-wrap justify-between gap-3">
                 <h3 class="font-semibold">
                     {move || tt(
@@ -349,7 +349,7 @@ pub(super) fn HistoryAnalytics(
                 <label class="text-sm">
                     {move || tt(context, "Rollup ")}
                     <select
-                        class="glass-input p-2"
+                        class="af-input p-2"
                         prop:value=move || bucket_ms.get().to_string()
                         on:change=move |e| {
                             if let Ok(value) = event_target_value(&e).parse() {
@@ -425,7 +425,7 @@ pub(super) fn HistoryAnalytics(
                     }}
                 </pre>
             </details>
-            <section class="border-t border-white/10 pt-4 space-y-4" aria-label=move || tt(context, "Cohort drilldowns")>
+            <section class="border-t border-[var(--af-border-hairline)] pt-4 space-y-4" aria-label=move || tt(context, "Cohort drilldowns")>
                 <h4 class="font-semibold">{move || tt(context, "Cohort drilldowns")}</h4>
                 {move || drilldown.error.get().map(|error| view! { <p role="alert" class="text-rose-300">{move || tt(context, &error.message)}</p> })}
                 <Show when=move || drilldown.loading.get()><p role="status">{move || tt(context, "Loading cohort report…")}</p></Show>
@@ -479,7 +479,7 @@ fn BreakdownList(title: &'static str, rows: Vec<BreakdownEntry>) -> impl IntoVie
     let total_rows = rows.len();
     view! {
         <section
-            class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3"
+            class="af-surface-inset p-4 space-y-3"
             aria-label=move || tt(context, title)
         >
             <h3 class="font-semibold text-sm">{move || tt(context, title)}</h3>
@@ -581,26 +581,26 @@ pub(super) fn DashboardDistributions(dashboard: crate::state::ApiResource) -> im
                 view! {
                     <div class="space-y-5">
                         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
-                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                            <div class="af-surface-inset p-3">
                                 <p class="text-xs text-slate-400">{move || tt(context, "Total plays")}</p>
                                 <p class="text-lg font-semibold font-mono mt-1">{analytics.total_plays}</p>
                             </div>
-                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                            <div class="af-surface-inset p-3">
                                 <p class="text-xs text-slate-400">{move || tt(context, "Watch time")}</p>
                                 <p class="text-lg font-semibold font-mono mt-1">{watch_text}</p>
                             </div>
-                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                            <div class="af-surface-inset p-3">
                                 <p class="text-xs text-slate-400">{move || tt(context, "Data transferred")}</p>
                                 <p class="text-lg font-semibold font-mono mt-1">{data_text}</p>
                             </div>
-                            <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                            <div class="af-surface-inset p-3">
                                 <p class="text-xs text-slate-400">{move || tt(context, "Peak bandwidth")}</p>
                                 <p class="text-lg font-semibold font-mono mt-1">{bw_text}</p>
                             </div>
                         </div>
 
                         <section
-                            class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3"
+                            class="af-surface-inset p-4 space-y-3"
                             aria-label=move || tt(context, "Playback method breakdown")
                         >
                             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -687,7 +687,7 @@ pub(super) fn DashboardDistributions(dashboard: crate::state::ApiResource) -> im
                             view! {
                                 <div class="grid lg:grid-cols-2 gap-4 text-xs">
                                     <section
-                                        class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-2"
+                                        class="af-surface-inset p-4 space-y-2"
                                         aria-label=move || tt(context, "Top watchers")
                                     >
                                         <h3 class="font-semibold text-sm">{move || tt(context, "Top watchers")}</h3>
@@ -718,7 +718,7 @@ pub(super) fn DashboardDistributions(dashboard: crate::state::ApiResource) -> im
                                         }}
                                     </section>
                                     <section
-                                        class="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-2"
+                                        class="af-surface-inset p-4 space-y-2"
                                         aria-label=move || tt(context, "Top titles")
                                     >
                                         <h3 class="font-semibold text-sm">{move || tt(context, "Top titles")}</h3>
@@ -781,7 +781,7 @@ pub(super) fn ImportedEstimates(
                     <label class="text-sm">
                         {move || tt(context, "Estimate window ")}
                         <select
-                            class="glass-input p-2"
+                            class="af-input p-2"
                             prop:value=move || window.get()
                             on:change=move |e| window.set(event_target_value(&e))
                         >
@@ -810,7 +810,7 @@ pub(super) fn ImportedEstimates(
                                     y: row.watch_time_secs? / 3600.0,
                                 })).collect::<Vec<_>>();
                                 view! {
-                                    <div class="border-t border-white/10 pt-3">
+                                    <div class="border-t border-[var(--af-border-hairline)] pt-3">
                                         <h3 class="font-semibold">
                                             {move || display(context, &estimate.provenance)}
                                         </h3>

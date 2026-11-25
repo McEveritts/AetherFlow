@@ -731,7 +731,7 @@ fn PeerRowCard(
     view! {
         <article
             role="listitem"
-            class="rounded-xl border border-white/10 bg-white/5 p-4 space-y-4 min-w-0"
+            class="af-surface-inset p-4 space-y-4 min-w-0"
         >
             <div class="flex flex-wrap items-start justify-between gap-3">
                 <div class="space-y-1 min-w-0">
@@ -769,7 +769,7 @@ fn PeerRowCard(
                 <div class="flex flex-wrap items-center gap-2 shrink-0">
                     <button
                         type="button"
-                        class="glass-button px-3 py-1.5 text-sm"
+                        class="af-btn px-3 py-1.5 text-sm"
                         aria-label=move || {
                             let name = peer.with(|p| {
                                 p.as_ref().map(|p| p.name.clone()).unwrap_or_default()
@@ -787,7 +787,7 @@ fn PeerRowCard(
                     <Show when=move || grants_manageable.get()>
                         <button
                             type="button"
-                            class="glass-button px-3 py-1.5 text-sm"
+                            class="af-btn px-3 py-1.5 text-sm"
                             aria-label=move || {
                                 let name = peer.with(|p| {
                                     p.as_ref().map(|p| p.name.clone()).unwrap_or_default()
@@ -806,7 +806,7 @@ fn PeerRowCard(
                     <Show when=move || storage_manageable.get()>
                         <button
                             type="button"
-                            class="glass-button px-3 py-1.5 text-sm"
+                            class="af-btn px-3 py-1.5 text-sm"
                             aria-label=move || {
                                 let name = peer.with(|p| {
                                     p.as_ref().map(|p| p.name.clone()).unwrap_or_default()
@@ -842,10 +842,11 @@ fn PeerRowCard(
                             <button
                                 type="button"
                                 class=if is_active {
-                                    "glass-button px-3 py-1.5 text-sm text-cyan-200 border-cyan-500/30"
+                                    "af-btn px-3 py-1.5 text-sm bg-[var(--af-tab-active-bg)] border-[var(--af-tab-active-border)] text-[var(--af-tab-active-fg)]"
                                 } else {
-                                    "glass-button-primary px-3 py-1.5 text-sm disabled:opacity-50"
+                                    "af-btn-primary px-3 py-1.5 text-sm"
                                 }
+                                data-tone=is_active.then_some("primary")
                                 data-testid=format!("peer-manage-{}", id)
                                 data-active=is_active.to_string()
                                 disabled=disabled
@@ -861,7 +862,7 @@ fn PeerRowCard(
                     <Show when=move || editable.get()>
                         <button
                             type="button"
-                            class="glass-button px-3 py-1.5 text-sm"
+                            class="af-btn px-3 py-1.5 text-sm"
                             aria-label=move || {
                                 let name = peer.with(|p| {
                                     p.as_ref().map(|p| p.name.clone()).unwrap_or_default()
@@ -879,7 +880,7 @@ fn PeerRowCard(
                     </Show>
                     <button
                         type="button"
-                        class="glass-button px-3 py-1.5 text-sm"
+                        class="af-btn px-3 py-1.5 text-sm"
                         data-tone="danger"
                         aria-label=move || {
                             let name = peer.with(|p| {
@@ -1228,7 +1229,7 @@ pub fn EditEndpointModal(
                         data-af-autofocus="true"
                         autocomplete="off"
                         required
-                        class="glass-input px-3 py-2 w-full"
+                        class="af-input px-3 py-2 w-full"
                         placeholder=move || tt(context, "Cluster.endpointHostPlaceholder")
                         disabled=move || gate.is_busy()
                         prop:value=move || endpoint_input.get()
@@ -1247,7 +1248,7 @@ pub fn EditEndpointModal(
                         max="65535"
                         inputmode="numeric"
                         aria-describedby="cluster-edit-endpoint-port-hint"
-                        class="glass-input px-3 py-2 w-full"
+                        class="af-input px-3 py-2 w-full"
                         disabled=move || gate.is_busy()
                         prop:value=move || port_input.get()
                         on:input=move |event| port_input.set(event_target_value(&event))
@@ -1260,7 +1261,7 @@ pub fn EditEndpointModal(
                 <div class="flex flex-wrap justify-end gap-3 pt-2">
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || gate.is_busy()
                         on:click=move |_| open.set(false)
                     >
@@ -1268,7 +1269,7 @@ pub fn EditEndpointModal(
                     </button>
                     <button
                         type="submit"
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || gate.is_busy()
                     >
                         {move || {
@@ -1413,7 +1414,7 @@ pub fn RevokeLinkModal(
                     <button
                         type="button"
                         data-af-autofocus="true"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || gate.is_busy()
                         on:click=move |_| open.set(false)
                     >
@@ -1421,7 +1422,7 @@ pub fn RevokeLinkModal(
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         data-tone="danger"
                         disabled=move || gate.is_busy()
                         on:click=move |_| confirm_revoke()
@@ -1498,12 +1499,12 @@ pub fn PeerDetailsDrawer(
                                         {move || tt(context, "Cluster.detailWgPubkey")}
                                     </dt>
                                     <dd class="space-y-2">
-                                        <code class="block text-xs break-all p-2.5 rounded-lg bg-white/5 font-mono">
+                                        <code class="af-surface-inset block text-xs break-all p-2.5 font-mono">
                                             {peer.wg_pubkey.clone()}
                                         </code>
                                         <button
                                             type="button"
-                                            class="glass-button px-3 py-1.5 text-xs"
+                                            class="af-btn px-3 py-1.5 text-xs"
                                             on:click=move |_| {
                                                 copy_text_to_clipboard(context, pubkey_copy.clone());
                                             }

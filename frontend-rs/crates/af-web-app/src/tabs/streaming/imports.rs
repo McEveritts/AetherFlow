@@ -467,7 +467,7 @@ pub(super) fn HistoryEventImport(
                 <label class="text-sm">
                     {move || tt(context, "Source format")}
                     <select
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || format.get()
                         on:change=move |e| {
@@ -489,7 +489,7 @@ pub(super) fn HistoryEventImport(
                 <label class="text-sm">
                     {move || tt(context, "Bind to verified server")}
                     <select
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || binding.get()
                         on:change=move |e| {
@@ -526,7 +526,7 @@ pub(super) fn HistoryEventImport(
                 <label class="text-sm">
                     {move || tt(context, "Source / checkpoint namespace")}
                     <input
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || source.get()
                         on:input=move |e| {
@@ -538,7 +538,7 @@ pub(super) fn HistoryEventImport(
                 <label class="text-sm">
                     {move || tt(context, "New opaque checkpoint")}
                     <input
-                        class="glass-input p-2 w-full"
+                        class="af-input p-2 w-full"
                         disabled=move || busy.get()
                         prop:value=move || checkpoint.get()
                         on:input=move |e| {
@@ -581,7 +581,7 @@ pub(super) fn HistoryEventImport(
                 {move || tt(context, "Source event JSON")}
                 <textarea
                     rows="7"
-                    class="glass-input p-3 w-full text-xs font-mono"
+                    class="af-input p-3 w-full text-xs font-mono"
                     disabled=move || busy.get()
                     prop:value=move || raw.get()
                     on:input=move |e| {
@@ -591,7 +591,7 @@ pub(super) fn HistoryEventImport(
                 ></textarea>
             </label>
             <button
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || busy.get()
                 on:click=move |_| validate.run(())
             >
@@ -617,7 +617,7 @@ pub(super) fn HistoryEventImport(
                         {move || serde_json::to_string_pretty(&prepared.get()).unwrap_or_default()}
                     </pre>
                     <button
-                        class="glass-button-primary px-4 py-2"
+                        class="af-btn-primary px-4 py-2"
                         disabled=move || {
                             busy.get() || !context.can_write_area(crate::state::PeerArea::Services)
                         }
@@ -655,7 +655,7 @@ pub(super) fn HistoryEventImport(
                 </pre>
             </details>
             <button
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || {
                     busy.get() || !context.can_write_area(crate::state::PeerArea::Services)
                 }
