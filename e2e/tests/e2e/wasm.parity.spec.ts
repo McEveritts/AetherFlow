@@ -436,4 +436,92 @@ test.describe('Rust WASM appliance parity', () => {
     expect(Math.max(...actions.map((action) => action.y)) - Math.min(...actions.map((action) => action.y)))
       .toBeLessThanOrEqual(12);
   });
+
+  test('keeps modals, drawers, popovers, and toasts opaque on hover in dark and light themes', async ({ page }) => {
+    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+    await page.goto('/?tab=notifications');
+    await expect(page.getByRole('button', { name: 'Add channel', exact: true })).toBeVisible();
+
+    const readOverlaySurface = (element: Element) => {
+      const computed = getComputedStyle(element);
+      const after = getComputedStyle(element, '::after');
+      return {
+        backgroundColor: computed.backgroundColor,
+        backgroundImage: computed.backgroundImage,
+        borderTopColor: computed.borderTopColor,
+        boxShadow: computed.boxShadow,
+        backdropFilter: computed.backdropFilter || computed.getPropertyValue('-webkit-backdrop-filter') || 'none',
+        transform: computed.transform,
+        afterContent: after.content,
+      };
+    };
+
+    const expectOpaqueOverlay = async (
+      locator: ReturnType<typeof page.locator>,
+      expectedBackground: string,
+    ) => {
+      await expect(locator).toBeVisible();
+      await page.mouse.move(0, 0);
+      await expect.poll(() => locator.evaluate((el) => getComputedStyle(el).transform)).toBe('none');
+      const rest = await locator.evaluate(readOverlaySurface);
+      await locator.hover();
+      await expect
+        .poll(() => locator.evaluate(readOverlaySurface))
+        .toEqual({
+          backgroundColor: expectedBackground,
+          backgroundImage: 'none',
+          borderTopColor: rest.borderTopColor,
+          boxShadow: rest.boxShadow,
+          backdropFilter: 'none',
+          transform: 'none',
+          afterContent: 'none',
+        });
+    };
+
+    for (const { theme, background } of [
+      { theme: 'dark', background: 'rgb(15, 20, 34)' },
+      { theme: 'light', background: 'rgb(248, 250, 252)' },
+    ]) {
+      if (theme === 'light') {
+        await page.locator('header').getByRole('button', { name: 'Toggle theme', exact: true }).click();
+        await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+      }
+
+      // Modal (Command Palette)
+      await page.keyboard.press('Control+k');
+      const palette = page.getByRole('dialog', { name: 'Command Palette', exact: true });
+      await expectOpaqueOverlay(palette, background);
+      await page.keyboard.press('Escape');
+      await expect(palette).toBeHidden();
+
+      // Drawer (Notifications)
+      await page.locator('header').getByRole('button', { name: 'Notifications', exact: true }).click();
+      const drawer = page.getByRole('dialog', { name: 'Notifications', exact: true });
+      await expectOpaqueOverlay(drawer, background);
+      expect(await drawer.evaluate((el) => getComputedStyle(el).borderRadius)).toBe('0px');
+      await page.keyboard.press('Escape');
+      await expect(drawer).toBeHidden();
+
+      // Header popover (Account menu)
+      await page.getByTestId('header-account-menu-trigger').click();
+      const accountMenu = page.getByTestId('header-account-menu');
+      await expectOpaqueOverlay(accountMenu, background);
+      expect(await accountMenu.evaluate((el) => getComputedStyle(el).position)).toBe('absolute');
+      await page.keyboard.press('Escape');
+      await expect(accountMenu).toBeHidden();
+
+      // Toast notification (close modal first so the toast is outside the dialog top layer)
+      await page.getByRole('button', { name: 'Add channel', exact: true }).click();
+      const channelDialog = page.getByRole('dialog', { name: 'Configure delivery channel', exact: true });
+      await expect(channelDialog).toBeVisible();
+      await channelDialog.getByLabel('Delivery URL', { exact: true }).fill('https://example.com/webhook');
+      await channelDialog.getByRole('button', { name: 'Create channel', exact: true }).click();
+      await page.keyboard.press('Escape');
+      await expect(channelDialog).toBeHidden();
+      const toast = page.locator('.af-toast').first();
+      await expectOpaqueOverlay(toast, background);
+      await toast.getByRole('button', { name: 'Dismiss notification', exact: true }).click();
+      await expect(toast).toBeHidden();
+    }
+  });
 });

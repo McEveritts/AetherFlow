@@ -151,9 +151,34 @@ test('deep-links Settings to McBrowser Policy, renders lazy grid thumbnails, and
   });
   await expect(page.getByTestId('mcbrowser-grid-thumb')).toHaveAttribute('src', /\/preview\/thumb\?path=cover\.png/);
 
-  // 3. Open image preview -> zoom & metadata + Next -> inert EPUB preview -> Next -> inert CSV preview with encoding switch.
+  // 3. Open image preview -> hover stays opaque -> zoom & metadata + Next -> inert EPUB preview -> Next -> inert CSV preview with encoding switch.
   await page.getByRole('button', { name: /cover\.png/ }).first().click();
   await expect(page.getByTestId('media-preview-metadata')).toContainText('640×480');
+  const previewDialog = page.getByRole('dialog', { name: 'Media preview', exact: true });
+  const readSurface = (element: Element) => {
+    const computed = getComputedStyle(element);
+    return {
+      backgroundColor: computed.backgroundColor,
+      backgroundImage: computed.backgroundImage,
+      borderTopColor: computed.borderTopColor,
+      boxShadow: computed.boxShadow,
+      backdropFilter: computed.backdropFilter || computed.getPropertyValue('-webkit-backdrop-filter') || 'none',
+      transform: computed.transform,
+      afterContent: getComputedStyle(element, '::after').content,
+    };
+  };
+  await page.mouse.move(0, 0);
+  const restSurface = await previewDialog.evaluate(readSurface);
+  await previewDialog.locator('img').hover();
+  expect(await previewDialog.evaluate(readSurface)).toEqual({
+    backgroundColor: 'rgb(15, 20, 34)',
+    backgroundImage: 'none',
+    borderTopColor: restSurface.borderTopColor,
+    boxShadow: restSurface.boxShadow,
+    backdropFilter: 'none',
+    transform: 'none',
+    afterContent: 'none',
+  });
   await page.getByTestId('image-zoom-in').click();
   await expect(page.getByText('125%', { exact: true })).toBeVisible();
 

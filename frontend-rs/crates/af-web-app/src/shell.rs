@@ -883,6 +883,22 @@ pub fn Header() -> impl IntoView {
     let account_open = RwSignal::new(false);
     let transfers_open = RwSignal::new(false);
     let avatar_failed = RwSignal::new(false);
+    let escape_listener = StoredValue::new_local(web_sys::window().map(|window| {
+        EventListener::new(&window, "keydown", move |event| {
+            if event
+                .dyn_ref::<web_sys::KeyboardEvent>()
+                .is_some_and(|key| key.key() == "Escape")
+            {
+                if account_open.try_get_untracked() == Some(true) {
+                    account_open.set(false);
+                }
+                if transfers_open.try_get_untracked() == Some(true) {
+                    transfers_open.set(false);
+                }
+            }
+        })
+    }));
+    on_cleanup(move || escape_listener.set_value(None));
     Effect::new(move |_| {
         let _ = context.typed_user().map(|u| u.avatar_url);
         context.active_server_id.track();
@@ -998,7 +1014,7 @@ pub fn Header() -> impl IntoView {
                                 role="dialog"
                                 aria-label=move || context.t("Background transfers")
                                 data-testid="header-transfers-popover"
-                                class="absolute right-0 mt-2 w-80 max-w-[90vw] glass-card p-3 z-40 border border-white/10 space-y-2 shadow-xl"
+                                class="af-popover absolute right-0 mt-2 w-80 max-w-[90vw] p-3 z-40 space-y-2"
                             >
                                 <div class="flex items-center justify-between gap-2">
                                     <p class="text-xs font-semibold uppercase tracking-wider text-slate-300">
@@ -1112,7 +1128,7 @@ pub fn Header() -> impl IntoView {
                             role="menu"
                             aria-label=move || context.t("Account menu")
                             data-testid="header-account-menu"
-                            class="absolute right-0 mt-2 w-64 glass-card p-3 z-40 border border-white/10 space-y-2 shadow-xl"
+                            class="af-popover absolute right-0 mt-2 w-64 p-3 z-40 space-y-2"
                         >
                             <div class="pb-2 border-b border-white/10 space-y-0.5">
                                 <p class="text-sm font-semibold text-slate-100 truncate">
@@ -1490,7 +1506,7 @@ pub fn ToastContainer() -> impl IntoView {
                 view! {
                 <div
                     role=if toast.error { "alert" } else { "status" }
-                    class=if toast.error { "glass-card af-toast border-rose-500/40" } else { "glass-card af-toast" }
+                    class=if toast.error { "af-toast af-toast-error" } else { "af-toast" }
                 >
                     <span>{move || context.render_toast(&rendered_toast)}</span>
                     <button
