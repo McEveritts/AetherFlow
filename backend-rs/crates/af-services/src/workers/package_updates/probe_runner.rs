@@ -161,7 +161,7 @@ pub(in crate::workers) fn build_package_update_record_for_source(
                 if !prev_ver.is_empty() {
                     used_prev_latest = true;
                 } else {
-                    if let Ok(pkgs) = crate::get_packages() {
+                    if let Ok(pkgs) = crate::get_package_catalog() {
                         if let Some(pkg) = pkgs.iter().find(|p| p.name == pkg_name) {
                             if (pkg.update_source == "github_release"
                                 || pkg.update_source == "github")
