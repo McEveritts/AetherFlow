@@ -38,19 +38,31 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
 
     def test_embedded_contracts_typecheck_and_cover_wasm_parity(self) -> None:
         ci_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        embedded = ci_text.split("  embedded-e2e:\n", 1)[1].split("\n  backend:\n", 1)[0]
+        embedded = ci_text.split("  embedded-e2e:\n", 1)[1].split("\n  embedded-contracts:\n", 1)[0]
+        contracts = ci_text.split("  embedded-contracts:\n", 1)[1].split("\n  backend:\n", 1)[0]
         typecheck = embedded.index("- name: Typecheck Playwright E2E Suite")
         self.assertIn("../node_modules/.bin/tsc --noEmit --incremental false", embedded)
         self.assertLess(embedded.index("npm ci"), typecheck)
         self.assertLess(typecheck, embedded.index("bash scripts/run_embedded_e2e.sh"))
-        self.assertIn('export AF_ALLOWED_FS_ROOTS="${AETHERFLOW_FS_ROOT},${MCBROWSER_ROOT}"', embedded)
-        self.assertIn('"${MCBROWSER_ROOT}/user-1/README.md"', embedded)
-        self.assertIn("needs: [backend-rs, frontend-rs]", embedded)
-        self.assertIn("path: backend-rs/target/release/web/dist", embedded)
-        self.assertIn("name: aetherflow-rs-binaries", embedded)
-        self.assertIn("name: frontend-wasm-dist", embedded)
+        for job_block in (embedded, contracts):
+            self.assertIn("needs: [backend-rs, frontend-rs]", job_block)
+            self.assertIn("path: backend-rs/target/release/web/dist", job_block)
+            self.assertIn("name: aetherflow-rs-binaries", job_block)
+            self.assertIn("name: frontend-wasm-dist", job_block)
         self.assertIn('--static-dir "${PWD}/backend-rs/target/release/web/dist"', embedded)
-        contract_gate = embedded.split("- name: Execute All Playwright Contract Specs Against Isolated API", 1)[1]
+        self.assertIn('export AF_ALLOWED_FS_ROOTS="${AETHERFLOW_FS_ROOT},${MCBROWSER_ROOT}"', contracts)
+        self.assertIn('"${MCBROWSER_ROOT}/user-1/README.md"', contracts)
+        for browser, expected_shards in (
+            ("chromium", ("1/1",)),
+            ("firefox", ("1/2", "2/2")),
+            ("webkit", ("1/4", "2/4", "3/4", "4/4")),
+        ):
+            for shard in expected_shards:
+                self.assertRegex(
+                    contracts,
+                    rf"- browser: {browser}\n\s+shard: \"{re.escape(shard)}\"",
+                )
+        contract_gate = contracts.split("- name: Execute All Playwright Contract Specs Against Isolated API", 1)[1]
         command = next(line.strip() for line in contract_gate.splitlines()
                        if line.strip().startswith("npx playwright test "))
         selector = shlex.split(command)[3]

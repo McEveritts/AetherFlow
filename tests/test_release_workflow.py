@@ -109,6 +109,38 @@ class ParallelTestRunnerShardingTests(unittest.TestCase):
         self.assertEqual(len(set(seen_targets)), expected_total)
         self.assertLessEqual(max(shard_totals) - min(shard_totals), 12)
 
+    def test_select_shard_units_spreads_heavy_module_evenly_across_shards(self):
+        run_parallel_tests = self._runner_module()
+
+        heavy_units = [
+            ([f"test_heavy.HeavyCase.test_{i}_{j}" for j in range(4)], 4)
+            for i in range(16)
+        ]
+        light_units = [
+            ([f"test_light_{i}.Case.test_0", f"test_light_{i}.Case.test_1"], 2)
+            for i in range(8)
+        ]
+        all_units = heavy_units + light_units
+        heavy_per_shard = []
+        for idx in range(1, 5):
+            selected, _ = run_parallel_tests.select_shard_units(all_units, idx, 4)
+            heavy_per_shard.append(
+                sum(count for targets, count in selected if targets[0].startswith("test_heavy."))
+            )
+        self.assertEqual(heavy_per_shard, [16, 16, 16, 16])
+
+    def test_discover_work_units_supports_multiple_patterns_without_duplicates(self):
+        run_parallel_tests = self._runner_module()
+
+        units, total = run_parallel_tests.discover_work_units(
+            patterns=("test_release_workflow.py", "test_release_workflow.py", "test_verify_provenance.py")
+        )
+        all_targets = [target for targets, _ in units for target in targets]
+        self.assertGreater(total, 30)
+        self.assertEqual(len(all_targets), len(set(all_targets)))
+        self.assertTrue(any(t.startswith("test_release_workflow.") for t in all_targets))
+        self.assertTrue(any(t.startswith("test_verify_provenance.") for t in all_targets))
+
 
 class ReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -477,6 +509,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         repeated = self.run_step(package, **stage_env)
         self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
         self.assertEqual(archive_path.read_bytes(), packed)
+        # SKIP_CARGO_BUILD=1 must fail closed if any prebuilt binary is absent.
+        (compiled / "af-transcode").unlink()
+        missing_bin = self.run_step(package, **stage_env)
+        self.assertNotEqual(missing_bin.returncode, 0)
+        self.assertIn("expected compiled binary", missing_bin.stderr)
 
     def test_standalone_speedtest_archives_use_all_three_platforms(self):
         tag = "v4.0.0-nightly.123.1"

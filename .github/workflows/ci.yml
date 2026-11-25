@@ -35,9 +35,10 @@ jobs:
 
       - name: Test Release Routing, Provenance & Modern Stack
         run: |
-          python3 -m unittest discover -s tests -p 'test_release*.py' -v
-          python3 -m unittest discover -s tests -p 'test_verify_provenance.py' -v
-          python3 -m unittest discover -s tests -p 'test_modern_stack_env.py' -v
+          python3 tests/run_parallel_tests.py \
+            --pattern 'test_release*.py' \
+            --pattern 'test_verify_provenance.py' \
+            --pattern 'test_modern_stack_env.py'
 
   node-installers:
     name: Node Application Installer Regression Tests (Shard ${{ matrix.shard }}/4)
@@ -126,9 +127,10 @@ jobs:
 
       - name: Run Release, Build Tools & Bootstrap Regression Suite
         run: |
-          python3 -m unittest discover -s tests -p 'test_rust_build_tools.py' -v
-          python3 -m unittest discover -s tests -p 'test_release_manager.py' -v
-          python3 -m unittest discover -s tests -p 'test_v4_release_bootstrap_ci.py' -v
+          python3 tests/run_parallel_tests.py \
+            --pattern 'test_rust_build_tools.py' \
+            --pattern 'test_release_manager.py' \
+            --pattern 'test_v4_release_bootstrap_ci.py'
           python3 tests/check_shell_hygiene.py
 
   website:
@@ -197,6 +199,8 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -263,6 +267,11 @@ jobs:
           workspaces: "backend-rs -> target"
           cache-targets: "false"
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-nextest@0.9.151
+
       - name: Verify Zero-Go Repository Hygiene
         working-directory: .
         run: |
@@ -296,13 +305,17 @@ jobs:
           TMPDIR: /tmp
         run: |
           test -f Cargo.lock
-          cargo test --workspace --locked -- --test-threads=1
+          cargo nextest run --workspace --locked --no-fail-fast
+          cargo test --workspace --doc --locked
 
   backend-rs:
     name: Backend, CLI & LibreSpeed (Rust Build)
     runs-on: ubuntu-22.04
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "2"
     defaults:
       run:
         working-directory: backend-rs
@@ -412,10 +425,70 @@ jobs:
         run: |
           bash scripts/run_embedded_e2e.sh --binary "${PWD}/backend-rs/target/release/aetherflow-api" --static-dir "${PWD}/backend-rs/target/release/web/dist" --port 18080 --playwright
 
+  embedded-contracts:
+    name: Rust API & External Frontend Contract Specs (${{ matrix.browser }} ${{ matrix.shard }})
+    runs-on: ubuntu-22.04
+    needs: [backend-rs, frontend-rs]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: chromium
+            shard: "1/1"
+          - browser: firefox
+            shard: "1/2"
+          - browser: firefox
+            shard: "2/2"
+          - browser: webkit
+            shard: "1/4"
+          - browser: webkit
+            shard: "2/4"
+          - browser: webkit
+            shard: "3/4"
+          - browser: webkit
+            shard: "4/4"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node (for Playwright Client Runner)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Download Rust API, CLI & LibreSpeed Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: aetherflow-rs-binaries
+          path: backend-rs/target/release
+
+      - name: Download External Frontend Beside API
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: frontend-wasm-dist
+          path: backend-rs/target/release/web/dist
+
+      - name: Make Compiled Binaries Executable
+        run: |
+          chmod +x backend-rs/target/release/{aetherflow-api,af,speedtest-backend}
+
+      - name: Install Playwright Browser Engines
+        env:
+          PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
+        run: |
+          npm ci
+          cd e2e
+          npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"
+
       - name: Execute All Playwright Contract Specs Against Isolated API
         env:
           CI: "true"
           PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
+          PLAYWRIGHT_SHARD: ${{ matrix.shard }}
           AETHERFLOW_SKIP_ENV_FILES: "1"
           AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
           AETHERFLOW_E2E_ISOLATED: "1"
@@ -465,4 +538,4 @@ jobs:
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 --retry-max-time 60 "${PLAYWRIGHT_BASE_URL}/health/ready"
           cd e2e
           # Discover every contract suite automatically.
-          npx playwright test 'tests/e2e/(?!.*[.]live[.]spec[.]ts$|visual[.]spec[.]ts$).*[.]spec[.]ts$' --project="${PLAYWRIGHT_BROWSER}" --workers=1
+          npx playwright test 'tests/e2e/(?!.*[.]live[.]spec[.]ts$|visual[.]spec[.]ts$).*[.]spec[.]ts$' --project="${PLAYWRIGHT_BROWSER}" --shard="${PLAYWRIGHT_SHARD}" --workers=1

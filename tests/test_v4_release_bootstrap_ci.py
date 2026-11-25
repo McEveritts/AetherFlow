@@ -252,10 +252,10 @@ _depends
 
         self.assertRegex(
             build_job,
-            r"needs:\s*\[.*security-gate.*security-frontend.*security-python.*package-amd64.*package-arm64.*package-armv7-speedtest.*\]",
+            r"needs:\s*\[.*security-gate.*security-frontend.*security-python.*build-wasm.*package-amd64.*package-arm64.*package-armv7-speedtest.*\]",
         )
-        self.assertRegex(amd64_job, r"needs:\s*\[.*build-wasm.*\]")
-        self.assertRegex(arm64_job, r"needs:\s*\[.*build-wasm.*\]")
+        self.assertRegex(amd64_job, r"needs:\s*\[validate-release\]")
+        self.assertRegex(arm64_job, r"needs:\s*\[validate-release\]")
         self.assertRegex(e2e_job, r"needs:\s*\[.*release-build.*\]")
         self.assertRegex(
             pub_job,
@@ -271,17 +271,19 @@ _depends
         self.assertIn("cargo deny --locked check advisories bans licenses sources", sec_job)
         self.assertIn("cargo audit --file Cargo.lock", sec_job)
         self.assertIn(WORKSPACE_CLIPPY, sec_job)
-        self.assertIn("cargo test --workspace --locked", sec_job)
+        self.assertIn("cargo nextest run --workspace --locked", sec_job)
+        self.assertIn("cargo test --workspace --doc --locked", sec_job)
         self.assertIn("updater_survives_caller_restart", sec_job)
-        self.assertLess(sec_job.index(WORKSPACE_CLIPPY), sec_job.index("cargo test --workspace --locked"))
+        self.assertLess(sec_job.index(WORKSPACE_CLIPPY), sec_job.index("cargo nextest run --workspace --locked"))
         self.assertIn('node-version: "24.22.2"', sec_fe_job)
         self.assertIn("cargo deny --manifest-path frontend-rs/Cargo.toml --locked", sec_fe_job)
 
         # 4. Build, assembly, live E2E, and attestation stages enforce strict ordering and packaging invariants.
         self.assertIn("bash scripts/build_wasm_frontend.sh --stage", wasm_job)
-        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", amd64_job)
+        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=0 BUILD_CLI=1 BUILD_SPEEDTEST=1", amd64_job)
         self.assertIn("bash scripts/build_gold.sh", amd64_job)
-        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", arm64_job)
+        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=0 BUILD_CLI=1 BUILD_SPEEDTEST=1", arm64_job)
+        self.assertIn("SKIP_CARGO_BUILD=1 BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", build_job)
         self.assertIn("release-dist/SHA256SUMS", build_job)
         self.assertLess(
             build_job.index("- name: Build and Package Standalone Rust LibreSpeed Archives"),
@@ -309,20 +311,24 @@ _depends
         self.assertIn("backend-rs-checks", jobs)
         self.assertIn("backend-rs", jobs)
         self.assertIn("embedded-e2e", jobs)
+        self.assertIn("embedded-contracts", jobs)
 
         self.assertIn("runs-on: ubuntu-22.04", jobs["backend-rs"])
         self.assertIn("runs-on: ubuntu-22.04", jobs["backend-rs-checks"])
         self.assertIn("runs-on: ubuntu-22.04", jobs["frontend-rs"])
         self.assertIn("runs-on: ubuntu-22.04", jobs["frontend-rs-checks"])
         self.assertIn("runs-on: ubuntu-22.04", jobs["embedded-e2e"])
+        self.assertIn("runs-on: ubuntu-22.04", jobs["embedded-contracts"])
         self.assertIn("needs: [backend-rs, frontend-rs]", jobs["embedded-e2e"])
+        self.assertIn("needs: [backend-rs, frontend-rs]", jobs["embedded-contracts"])
         self.assertIn("browser: [chromium, firefox, webkit]", jobs["embedded-e2e"])
         self.assertIn("tests/run_parallel_tests.py --shard", jobs["node-installers"])
         self.assertIn('node-version: "24.22.2"', ci_yml)
         self.assertIn("bash scripts/smoke_v4_release_lifecycle.sh", jobs["release-lifecycle-smoke"])
         self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", jobs["backend-rs"])
         self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", jobs["backend-rs-checks"])
-        self.assertIn("cargo test --workspace --locked", jobs["backend-rs-checks"])
+        self.assertIn("cargo nextest run --workspace --locked", jobs["backend-rs-checks"])
+        self.assertIn("cargo test --workspace --doc --locked", jobs["backend-rs-checks"])
         self.assertIn("cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend", jobs["backend-rs"])
         self.assertIn("bash scripts/run_embedded_e2e.sh", jobs["embedded-e2e"])
 

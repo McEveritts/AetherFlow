@@ -34,6 +34,7 @@ RUN_TESTS="${RUN_TESTS:-1}"
 BUILD_FRONTEND="${BUILD_FRONTEND:-1}"
 FRONTEND_ENGINE="${FRONTEND_ENGINE:-wasm}"
 PACKAGE_RELEASE="${PACKAGE_RELEASE:-1}"
+SKIP_CARGO_BUILD="${SKIP_CARGO_BUILD:-0}"
 TARGETS="${TARGETS:-amd64}"
 
 if command -v git >/dev/null 2>&1; then
@@ -204,39 +205,43 @@ build_target() {
     cargo_bin_args+=(--bin "${CARGO_TRANSCODE_BIN_NAME}")
   fi
 
-  echo "==> Building ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
-  (
-    cd "${BACKEND_RS_DIR}"
-    export AETHERFLOW_VERSION="${VERSION}"
-    export AF_BUILD_VERSION="${VERSION}"
-    export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
-    export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
-    export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
-    if [[ "${arch}" != "${host_arch}" ]]; then
-      case "${rust_target}" in
-        aarch64-unknown-linux-gnu)
-          export CC_aarch64_unknown_linux_gnu="${CC_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-gcc}"
-          export AR_aarch64_unknown_linux_gnu="${AR_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-ar}"
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-aarch64-linux-gnu-gcc}"
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-          ;;
-        armv7-unknown-linux-gnueabihf)
-          export CC_armv7_unknown_linux_gnueabihf="${CC_armv7_unknown_linux_gnueabihf:-arm-linux-gnueabihf-gcc}"
-          export AR_armv7_unknown_linux_gnueabihf="${AR_armv7_unknown_linux_gnueabihf:-arm-linux-gnueabihf-ar}"
-          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
-          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-          ;;
-        x86_64-unknown-linux-gnu)
-          export CC_x86_64_unknown_linux_gnu="${CC_x86_64_unknown_linux_gnu:-x86_64-linux-gnu-gcc}"
-          export AR_x86_64_unknown_linux_gnu="${AR_x86_64_unknown_linux_gnu:-x86_64-linux-gnu-ar}"
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-x86_64-linux-gnu-gcc}"
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-          ;;
-      esac
-    fi
-    configure_rust_linker "${rust_target}" "${arch}" "${host_arch}"
-    cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" "${cargo_bin_args[@]}"
-  )
+  if [[ "${SKIP_CARGO_BUILD}" == "1" ]]; then
+    echo "==> Packaging prebuilt ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
+  else
+    echo "==> Building ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
+    (
+      cd "${BACKEND_RS_DIR}"
+      export AETHERFLOW_VERSION="${VERSION}"
+      export AF_BUILD_VERSION="${VERSION}"
+      export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
+      export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
+      export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
+      if [[ "${arch}" != "${host_arch}" ]]; then
+        case "${rust_target}" in
+          aarch64-unknown-linux-gnu)
+            export CC_aarch64_unknown_linux_gnu="${CC_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-gcc}"
+            export AR_aarch64_unknown_linux_gnu="${AR_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-ar}"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-aarch64-linux-gnu-gcc}"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            ;;
+          armv7-unknown-linux-gnueabihf)
+            export CC_armv7_unknown_linux_gnueabihf="${CC_armv7_unknown_linux_gnueabihf:-arm-linux-gnueabihf-gcc}"
+            export AR_armv7_unknown_linux_gnueabihf="${AR_armv7_unknown_linux_gnueabihf:-arm-linux-gnueabihf-ar}"
+            export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
+            export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            ;;
+          x86_64-unknown-linux-gnu)
+            export CC_x86_64_unknown_linux_gnu="${CC_x86_64_unknown_linux_gnu:-x86_64-linux-gnu-gcc}"
+            export AR_x86_64_unknown_linux_gnu="${AR_x86_64_unknown_linux_gnu:-x86_64-linux-gnu-ar}"
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-x86_64-linux-gnu-gcc}"
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            ;;
+        esac
+      fi
+      configure_rust_linker "${rust_target}" "${arch}" "${host_arch}"
+      cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" "${cargo_bin_args[@]}"
+    )
+  fi
 
   local cargo_target_dir="${CARGO_TARGET_DIR:-${BACKEND_RS_DIR}/target}"
   if [[ "${cargo_target_dir}" != /* ]]; then
@@ -341,7 +346,9 @@ managed_plugin_assets_present() {
     [[ -f "${dir}/frontend/dist/index.html" && ! -L "${dir}/frontend/dist/index.html" && -s "${dir}/frontend/dist/index.html" ]]
 }
 
-require_tool cargo
+if [[ "${SKIP_CARGO_BUILD}" != "1" ]]; then
+  require_tool cargo
+fi
 require_tool tar
 if [[ "${PACKAGE_RELEASE}" == "1" ]]; then
   require_tool gzip

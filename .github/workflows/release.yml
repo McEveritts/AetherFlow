@@ -76,13 +76,14 @@ jobs:
 
       - name: Test Release Routing, Provenance & Security Regressions
         run: |
-          python3 -m unittest discover -s tests -p 'test_release*.py' -v
-          python3 -m unittest discover -s tests -p 'test_verify_provenance.py' -v
-          python3 -m unittest discover -s tests -p 'test_modern_stack_env.py' -v
-          python3 -m unittest discover -s tests -p 'test_round3_security_regressions.py' -v
+          python3 tests/run_parallel_tests.py \
+            --pattern 'test_release*.py' \
+            --pattern 'test_verify_provenance.py' \
+            --pattern 'test_modern_stack_env.py' \
+            --pattern 'test_round3_security_regressions.py'
 
   security-python:
-    name: Python Verification & Shell Hygiene (Shard ${{ matrix.shard }}/6)
+    name: Python Verification & Shell Hygiene (Shard ${{ matrix.shard }}/4)
     needs: [validate-release]
     runs-on: ubuntu-22.04
     permissions:
@@ -90,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -113,7 +114,7 @@ jobs:
               bash -n "packages/package/remove/removepackage-${app}"
             done
           fi
-          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py --shard "${TEST_SHARD}/6"
+          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py --shard "${TEST_SHARD}/4"
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
   security-frontend:
@@ -155,10 +156,10 @@ jobs:
           workspaces: "frontend-rs -> target"
           cache-targets: "false"
 
-      - name: Install cargo-audit and cargo-deny
+      - name: Install cargo-audit, cargo-deny and cargo-nextest
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
-          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2, cargo-nextest@0.9.151
 
       - name: Verify Rust WASM Frontend
         run: |
@@ -238,10 +239,10 @@ jobs:
           test -f Cargo.lock
           test -f deny.toml
 
-      - name: Install cargo-audit and cargo-deny
+      - name: Install cargo-audit, cargo-deny and cargo-nextest
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
-          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2, cargo-nextest@0.9.151
 
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
@@ -279,7 +280,8 @@ jobs:
           AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
           TMPDIR: /tmp
         run: |
-          cargo test --workspace --locked -- --test-threads=1
+          cargo nextest run --workspace --locked --no-fail-fast
+          cargo test --workspace --doc --locked
 
       - name: Verify Updater Survives Its Caller Restart
         run: |
@@ -333,8 +335,8 @@ jobs:
           if-no-files-found: error
 
   package-amd64:
-    name: Build & Package AMD64 Release Tarball
-    needs: [validate-release, build-wasm]
+    name: Build AMD64 Release Binaries
+    needs: [validate-release]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -366,31 +368,27 @@ jobs:
           workspaces: "backend-rs -> target"
           cache-targets: "false"
 
-      - name: Download Staged WASM Frontend Artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: release-web-dist
-          path: web/dist
-
-      - name: Package Release Tarball & SHA-256 Manifest
+      - name: Build AMD64 Release Binaries
         run: |
-          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
+          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=0 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
             TARGETS=amd64 OUTPUT_DIR="${PWD}/release-dist" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
 
-      - name: Upload AMD64 Release Artifact
+      - name: Upload AMD64 Release Binaries
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: release-amd64
+          name: release-amd64-bins
           path: |
-            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/linux-amd64/aetherflow-api
+            release-dist/linux-amd64/bin/af
             release-dist/linux-amd64/bin/speedtest-backend
+            release-dist/linux-amd64/bin/af-transcode
           retention-days: 1
           if-no-files-found: error
 
   package-arm64:
-    name: Build & Package ARM64 Release Tarball
-    needs: [validate-release, build-wasm]
+    name: Build ARM64 Release Binaries
+    needs: [validate-release]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -423,25 +421,21 @@ jobs:
           workspaces: "backend-rs -> target"
           cache-targets: "false"
 
-      - name: Download Staged WASM Frontend Artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: release-web-dist
-          path: web/dist
-
-      - name: Package ARM64 Release Tarball
+      - name: Build ARM64 Release Binaries
         run: |
-          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
+          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=0 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
             TARGETS=arm64 OUTPUT_DIR="${PWD}/release-dist-arm64" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
 
-      - name: Upload ARM64 Release Artifact
+      - name: Upload ARM64 Release Binaries
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: release-arm64
+          name: release-arm64-bins
           path: |
-            release-dist-arm64/aetherflow-linux-arm64.tar.gz
+            release-dist-arm64/linux-arm64/aetherflow-api
+            release-dist-arm64/linux-arm64/bin/af
             release-dist-arm64/linux-arm64/bin/speedtest-backend
+            release-dist-arm64/linux-arm64/bin/af-transcode
           retention-days: 1
           if-no-files-found: error
 
@@ -503,7 +497,7 @@ jobs:
 
   release-build:
     name: Assemble Release Bundle & SHA-256 Manifest
-    needs: [validate-release, security-gate, security-frontend, security-python, package-amd64, package-arm64, package-armv7-speedtest]
+    needs: [validate-release, security-gate, security-frontend, security-python, build-wasm, package-amd64, package-arm64, package-armv7-speedtest]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -517,23 +511,57 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download AMD64 Release Artifact
+      - name: Download Staged WASM Frontend Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: release-amd64
-          path: release-dist
+          name: release-web-dist
+          path: web/dist
 
-      - name: Download ARM64 Release Artifact
+      - name: Download AMD64 Release Binaries
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: release-arm64
-          path: release-dist
+          name: release-amd64-bins
+          path: release-dist/prebuilt-amd64
+
+      - name: Download ARM64 Release Binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-arm64-bins
+          path: release-dist/prebuilt-arm64
 
       - name: Download ARMv7 LibreSpeed Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: release-armv7-speedtest
           path: release-dist/linux-armv7/bin
+
+      - name: Stage Prebuilt Binaries for Reproducible Packaging
+        run: |
+          set -euo pipefail
+          mkdir -p backend-rs/target/x86_64-unknown-linux-gnu/release backend-rs/target/aarch64-unknown-linux-gnu/release
+          install -m 0755 release-dist/prebuilt-amd64/aetherflow-api backend-rs/target/x86_64-unknown-linux-gnu/release/aetherflow-api
+          install -m 0755 release-dist/prebuilt-amd64/bin/af backend-rs/target/x86_64-unknown-linux-gnu/release/af
+          install -m 0755 release-dist/prebuilt-amd64/bin/speedtest-backend backend-rs/target/x86_64-unknown-linux-gnu/release/speedtest-backend
+          install -m 0755 release-dist/prebuilt-amd64/bin/af-transcode backend-rs/target/x86_64-unknown-linux-gnu/release/af-transcode
+          install -m 0755 release-dist/prebuilt-arm64/aetherflow-api backend-rs/target/aarch64-unknown-linux-gnu/release/aetherflow-api
+          install -m 0755 release-dist/prebuilt-arm64/bin/af backend-rs/target/aarch64-unknown-linux-gnu/release/af
+          install -m 0755 release-dist/prebuilt-arm64/bin/speedtest-backend backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend
+          install -m 0755 release-dist/prebuilt-arm64/bin/af-transcode backend-rs/target/aarch64-unknown-linux-gnu/release/af-transcode
+
+      - name: Package Release Tarball & SHA-256 Manifest
+        run: |
+          SKIP_CARGO_BUILD=1 BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
+            TARGETS=amd64 OUTPUT_DIR="${PWD}/release-dist" VERSION="${VERSION_STAMP}" \
+            bash scripts/build_gold.sh
+
+      - name: Package ARM64 Release Tarball
+        run: |
+          SKIP_CARGO_BUILD=1 BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
+            TARGETS=arm64 OUTPUT_DIR="${PWD}/release-dist-arm64" VERSION="${VERSION_STAMP}" \
+            bash scripts/build_gold.sh
+          cp release-dist-arm64/aetherflow-linux-arm64.tar.gz release-dist/aetherflow-linux-arm64.tar.gz
+          mkdir -p release-dist/linux-arm64/bin
+          install -m 0755 release-dist-arm64/linux-arm64/bin/speedtest-backend release-dist/linux-arm64/bin/speedtest-backend
 
       - name: Build and Package Standalone Rust LibreSpeed Archives
         run: |
@@ -599,7 +627,7 @@ jobs:
           if-no-files-found: error
 
   release-e2e-amd64:
-    name: Verify Extracted AMD64 Release E2E (${{ matrix.browser }})
+    name: Verify Extracted AMD64 Release E2E (${{ matrix.browser }} ${{ matrix.shard }}/2)
     needs: [validate-release, release-build]
     runs-on: ubuntu-22.04
     timeout-minutes: 25
@@ -609,6 +637,7 @@ jobs:
       fail-fast: false
       matrix:
         browser: [chromium, firefox, webkit]
+        shard: [1, 2]
     env:
       VERSION_STAMP: ${{ needs.validate-release.outputs.version_stamp }}
     steps:
@@ -641,7 +670,7 @@ jobs:
       - name: Execute Live E2E Against Extracted Release Artifact
         env:
           CI: "true"
-          E2E_PLAYWRIGHT_SPECS: --project=${{ matrix.browser }} [.]live[.]spec[.]ts$
+          E2E_PLAYWRIGHT_SPECS: --project=${{ matrix.browser }} [.]live[.]spec[.]ts$ --shard=${{ matrix.shard }}/2
         run: |
           RELEASE_E2E_DIR="$(mktemp -d "${RUNNER_TEMP}/aetherflow-release-e2e.XXXXXX")"
           trap 'rm -rf "${RELEASE_E2E_DIR}"' EXIT

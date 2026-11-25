@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "tests"
-CHUNK_SIZE = 12
+CHUNK_SIZE = 4
 
 WORKER_CODE = """
 import pathlib, sys, unittest
@@ -40,11 +40,12 @@ def _has_custom_class_fixture(cls: type) -> bool:
     return False
 
 
-def discover_work_units() -> Tuple[List[Tuple[List[str], int]], int]:
+def discover_work_units(
+    patterns: Sequence[str] = ("test_*.py",),
+) -> Tuple[List[Tuple[List[str], int]], int]:
     sys.path.insert(0, str(TESTS_DIR))
     sys.path.insert(1, str(ROOT))
-    suite = unittest.defaultTestLoader.discover(str(TESTS_DIR), pattern="test_*.py")
-    by_class: Dict[str, Tuple[type, List[str]]] = {}
+    by_class: Dict[str, Tuple[type, set[str]]] = {}
     errors: List[str] = []
 
     def walk(node: object) -> None:
@@ -59,17 +60,19 @@ def discover_work_units() -> Tuple[List[Tuple[List[str], int]], int]:
             method_name = getattr(node, "_testMethodName", "")
             full_id = f"{cls_id}.{method_name}"
             if cls_id not in by_class:
-                by_class[cls_id] = (cls, [])
-            by_class[cls_id][1].append(full_id)
+                by_class[cls_id] = (cls, set())
+            by_class[cls_id][1].add(full_id)
 
-    walk(suite)
+    for pattern in patterns or ("test_*.py",):
+        suite = unittest.defaultTestLoader.discover(str(TESTS_DIR), pattern=pattern)
+        walk(suite)
     if errors:
         raise RuntimeError(f"Test discovery failed: {errors}")
 
     units: List[Tuple[List[str], int]] = []
     total_tests = 0
-    for cls_id, (cls, methods) in sorted(by_class.items()):
-        methods.sort()
+    for cls_id, (cls, method_set) in sorted(by_class.items()):
+        methods = sorted(method_set)
         total_tests += len(methods)
         if _has_custom_class_fixture(cls) or len(methods) <= CHUNK_SIZE:
             units.append(([cls_id], len(methods)))
@@ -126,14 +129,33 @@ def select_shard_units(
         selected = list(units)
         return selected, sum(count for _, count in selected)
 
+    # Group work units by module so bash-heavy installer suites are spread evenly
+    # across every shard rather than clustering into a single straggler shard.
+    by_module: Dict[str, List[Tuple[List[str], int]]] = {}
+    for targets, count in units:
+        module_name = targets[0].split(".", 1)[0]
+        by_module.setdefault(module_name, []).append((targets, count))
+
+    ordered_modules = sorted(
+        by_module.items(),
+        key=lambda item: (-sum(count for _, count in item[1]), item[0]),
+    )
+
     shards: List[List[Tuple[List[str], int]]] = [[] for _ in range(shard_total)]
     shard_loads = [0] * shard_total
-    for targets, count in units:
-        target_shard = min(range(shard_total), key=lambda idx: (shard_loads[idx], idx))
-        shards[target_shard].append((targets, count))
-        shard_loads[target_shard] += count
+    for _, module_units in ordered_modules:
+        module_units.sort(key=lambda item: (-item[1], item[0][0]))
+        module_loads = [0] * shard_total
+        for targets, count in module_units:
+            target_shard = min(
+                range(shard_total),
+                key=lambda idx: (module_loads[idx], shard_loads[idx], idx),
+            )
+            shards[target_shard].append((targets, count))
+            module_loads[target_shard] += count
+            shard_loads[target_shard] += count
 
-    selected = shards[shard_index - 1]
+    selected = sorted(shards[shard_index - 1], key=lambda item: (-item[1], item[0][0]))
     return selected, shard_loads[shard_index - 1]
 
 
@@ -142,11 +164,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--shard",
         default=os.environ.get("AF_TEST_SHARD", ""),
-        help="Optional 1-based shard selector '<index>/<total>' (e.g. 1/6) to run a deterministic balanced partition.",
+        help="Optional 1-based shard selector '<index>/<total>' (e.g. 1/4) to run a deterministic balanced partition.",
+    )
+    parser.add_argument(
+        "-p",
+        "--pattern",
+        action="append",
+        dest="patterns",
+        help="Optional unittest filename pattern(s) under tests/ (repeatable; defaults to 'test_*.py').",
     )
     args = parser.parse_args(argv)
 
-    units, discovered_total = discover_work_units()
+    patterns = tuple(args.patterns) if args.patterns else ("test_*.py",)
+    units, discovered_total = discover_work_units(patterns=patterns)
     shard_label = ""
     if args.shard:
         shard_index, shard_total = parse_shard(args.shard)
@@ -164,37 +194,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     workers = int(os.environ.get("AF_TEST_WORKERS", str(default_workers)))
     workers = max(1, min(workers, len(units)))
 
-    buckets: List[List[str]] = [[] for _ in range(workers)]
-    loads = [0] * workers
-    for targets, count in units:
-        target_idx = min(range(workers), key=lambda i: loads[i])
-        buckets[target_idx].extend(targets)
-        loads[target_idx] += count
-
+    # Dynamic work-stealing: submit each work unit individually (largest first)
+    # so fast workers immediately pull remaining units instead of idling behind a
+    # slow static bucket.
+    scheduled_units = sorted(units, key=lambda item: (-item[1], item[0][0]))
     print(
-        f"[run_parallel_tests] Running {expected_total} tests across {len(units)} work units{shard_label} "
-        f"using {workers} parallel workers (loads={loads})",
+        f"[run_parallel_tests] Running {expected_total} tests across {len(scheduled_units)} dynamic work units"
+        f"{shard_label} using {workers} parallel workers",
         flush=True,
     )
 
     t0 = time.monotonic()
     total_ran = 0
-    failed_workers: List[Tuple[int, int, str]] = []
+    failed_units: List[Tuple[int, str, int, str]] = []
+    unit_timings: List[Tuple[float, int, str]] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(run_bucket, idx, b) for idx, b in enumerate(buckets) if b]
-        for fut in concurrent.futures.as_completed(futures):
-            idx, rc, ran, elapsed, output = fut.result()
+        future_map = {
+            pool.submit(run_bucket, idx, targets): (idx, targets[0])
+            for idx, (targets, _) in enumerate(scheduled_units)
+        }
+        for fut in concurrent.futures.as_completed(future_map):
+            idx, label = future_map[fut]
+            _, rc, ran, elapsed, output = fut.result()
             total_ran += ran
-            status = "PASS" if rc == 0 else f"FAIL(rc={rc})"
-            print(f"[worker {idx}] {status}: ran {ran} tests in {elapsed:.1f}s", flush=True)
+            unit_timings.append((elapsed, ran, label))
             if rc != 0:
-                failed_workers.append((idx, rc, output))
+                print(f"[unit {idx}] FAIL(rc={rc}): {label} ({ran} tests in {elapsed:.1f}s)", flush=True)
+                failed_units.append((idx, label, rc, output))
 
     wall = time.monotonic() - t0
-    if failed_workers:
-        for idx, rc, output in failed_workers:
-            print(f"\n================ WORKER {idx} FAILURE OUTPUT (rc={rc}) ================", file=sys.stderr)
+    if failed_units:
+        for idx, label, rc, output in failed_units:
+            print(
+                f"\n================ UNIT {idx} ({label}) FAILURE OUTPUT (rc={rc}) ================",
+                file=sys.stderr,
+            )
             print(output, file=sys.stderr)
         return 1
 
@@ -205,7 +240,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 1
 
-    print(f"[PASS] All {total_ran} tests passed{shard_label} in {wall:.1f}s across {workers} workers.", flush=True)
+    slowest = sorted(unit_timings, reverse=True)[:5]
+    slowest_summary = ", ".join(f"{label}={elapsed:.1f}s({ran})" for elapsed, ran, label in slowest)
+    print(
+        f"[PASS] All {total_ran} tests passed{shard_label} in {wall:.1f}s across {workers} workers "
+        f"(slowest units: {slowest_summary}).",
+        flush=True,
+    )
     return 0
 
 
