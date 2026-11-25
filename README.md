@@ -39,7 +39,7 @@ v4.0.0 is the largest release in AetherFlow's history. It promotes **373 commits
 | | Since v3.2.7 |
 | :--- | :--- |
 | 🦀 **All-Rust control plane** | The Go backend is gone. A **12-crate** Rust workspace (`backend-rs`) built on Axum and Tokio ships `aetherflow-api`, the privileged runner, the `af` admin CLI, the native LibreSpeed backend, and the new `af-transcode` worker. **Zero Go, zero Redis, zero Node.js** in the control plane. |
-| 🕸️ **WebAssembly dashboard** | The Next.js UI has been replaced by a **4-crate Leptos/WASM** application (`frontend-rs`) with dedicated Web Workers, 16 dashboard tabs, and the obsidian "open canvas" design language, served as external `web/dist` assets. |
+| 🕸️ **WebAssembly dashboard** | The Next.js UI has been replaced by a **4-crate Leptos/WASM** application (`frontend-rs`) with dedicated Web Workers, 16 dashboard tabs, and a unified dark/light flat [Design System](./docs/design-system.md), served as external `web/dist` assets. |
 | ⬡ **Peer Clustering** | Pair independent AetherFlow servers over a dedicated WireGuard mesh, grant scoped remote access, manage a peer from your own dashboard, share media folders over NFSv4.2, and offload Jellyfin transcoding to a paired worker. |
 | 📂 **Native McBrowser** | Capability-scoped (`openat2`) per-user file manager with resumable 64 GiB uploads, conflict-aware editing, archives, previews, and public shares. |
 | 🔐 **Supply-chain & sandboxing** | Sigstore/SLSA v1 provenance verification for every release artifact, a zero-sudo privileged runner socket, hardened `systemd` sandboxes, OIDC provider with PKCE and device flow, and DNS-pinned SSRF guards. |
@@ -217,7 +217,7 @@ The unprivileged API never touches root directly. Every privileged action, inclu
 | :--- | :--- |
 | **`af-web-core`** | API and WebSocket client policies, locale catalogs, draft persistence, shared algorithms. |
 | **`af-web-worker`** | Dedicated Web Worker modules for search, sorting, hashing, and chunked uploads. |
-| **`af-web-ui`** | Accessible Leptos controls, tables, code editor, charts, and topology views. |
+| **`af-web-ui`** | Accessible Leptos controls, tables, code editor, charts, and topology views implementing the [Design System](./docs/design-system.md). |
 | **`af-web-app`** | Application shell, auth and public routes, and the 16 dashboard tabs: Overview, Approval Inbox, Services, Marketplace, McBrowser, File Share, Streaming, MediaFlow, FlowAI, Network, Cluster, Users, Audit Trail, Settings, Notifications, and Quotas. |
 
 </details>
@@ -287,7 +287,7 @@ The full index lives in **[docs/README.md](./docs/README.md)**. Start here:
 | :--- | :--- | :--- |
 | [About AetherFlow](./docs/about.md) | [Operations Runbook](./docs/RUNBOOK.md) | [Peer Clustering](./docs/peer-clustering.md) |
 | [Quickstart](./docs/quickstart.md) | [Configuration](./docs/configuration.md) | [AetherMarketplace](./docs/marketplace.md) |
-| [Architecture](./docs/architecture.md) | [Upgrading & Rollbacks](./docs/upgrading.md) | [McBrowser](./docs/mcbrowser.md) |
+| [Architecture](./docs/architecture.md) · [Design System](./docs/design-system.md) | [Upgrading & Rollbacks](./docs/upgrading.md) | [McBrowser](./docs/mcbrowser.md) |
 | [Deployment Checklist](./docs/deployment_checklist.md) | [Self-Update](./docs/self-update.md) | [Streaming History](./docs/streaming-history-contract.md) |
 | [Troubleshooting & FAQ](./docs/troubleshooting.md) | [`af` CLI](./docs/rust-admin-cli.md) | [FlowAI](./docs/flowai.md) |
 | [Security & Hardening](./docs/security.md) | [Threat Model](./docs/threat_model.md) | [WireGuard & Tailscale](./docs/network-vpn.md) |

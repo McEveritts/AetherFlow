@@ -1887,15 +1887,8 @@
   "Settings": {
     "apiKeyPlaceholder": "Entrez votre clé API Gemini...",
     "apiKeyTitle": "Clé API Gemini",
-    "atmosphereTitle": "Atmosphère et physique des surfaces",
-    "auroraAnimation": "Animation d'aurore",
-    "auroraAnimationDescription": "Anime en continu l'aurore cosmique ambiante à trois sphères au lieu d'un calque statique.",
-    "auroraOpacity": "Opacité de l'aurore",
-    "auroraOpacityDescription": "Ajuste la luminance de l'aurore cosmique radiale sur l'arrière-plan.",
     "backupsRestore": "Sauvegardes et restauration",
     "baseDomain": "Domaine de base",
-    "cardLift": "Élévation des cartes au survol",
-    "cardLiftDescription": "Soulève légèrement les cartes en verre au survol du pointeur avec une physique à ressort.",
     "checkingUpdates": "Vérification des mises à jour...",
     "defaultDashboard": "Tableau de bord par défaut",
     "defaultModel": "Modèle de langage par défaut",
@@ -1907,14 +1900,12 @@
     "flowAIEngine": "Moteur FlowAI",
     "flowAIProviders": "Fournisseurs FlowAI",
     "generalLocalization": "Général et localisation",
-    "grainDisplay": "Grain tactile",
-    "grainDisplayDescription": "Affiche un micro-grain fractal subtil et un vignettage périphérique pour la profondeur visuelle.",
     "hapticFeedback": "Retour haptique",
     "highRefresh120": "120Hz haute fréquence",
     "highRefresh60": "60Hz cadence standard",
     "highRefreshAuto": "Automatique ({hz}Hz détectés)",
     "highRefreshCadence": "Cadence haute fréquence",
-    "highRefreshDescription": "Ajuste la durée des transitions interactives et des cartes (110ms / 150ms contre 160ms / 200ms) pour les écrans rapides.",
+    "highRefreshDescription": "Ajuste la durée des transitions interactives et d'interface (110ms / 150ms contre 160ms / 200ms) pour les écrans rapides.",
     "inputStatusFine": "Entrée : Pointeur précis",
     "inputStatusTouch": "Entrée : Optimisé tactile (≥44px)",
     "interfacePreferences": "Préférences d'interface",
@@ -1928,7 +1919,7 @@
     "pinSidebar": "Épingler la barre latérale du bureau",
     "profileSecurity": "Profil et sécurité",
     "reducedMotion": "Réduire les animations de l’interface",
-    "reducedMotionActiveHint": "La réduction des mouvements est active ; l'animation d'aurore, l'élévation des cartes et les courbes rapides sont désactivées.",
+    "reducedMotionActiveHint": "La réduction des mouvements est active ; la cadence haute fréquence et les transitions d'interface sont désactivées.",
     "saveConfig": "Enregistrer la configuration",
     "saveSettings": "Enregistrer les paramètres",
     "saving": "Enregistrement...",
@@ -2767,6 +2758,5 @@
     "liveLogsClosed": "Flux fermé",
     "liveLogsRevoked": "Flux de journaux en direct fermé (code {code}) ; l’accès au pair a peut-être changé ou été révoqué.",
     "remoteShareOriginUnavailable": "Les liens de partage public sont indisponibles pour {server} car son domaine de base public n’est pas configuré ou ne peut pas être lu. Configurez un domaine de base public sur {server} et accordez l’accès en lecture aux paramètres pour créer des liens de partage distants."
-  },
-  "Reset atmosphere defaults": "Réinitialiser les paramètres d'atmosphère"
+  }
 }

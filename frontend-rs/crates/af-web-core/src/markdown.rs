@@ -205,19 +205,40 @@ mod tests {
     }
     #[test]
     fn markdown_classes_cannot_impersonate_application_overlays() {
-        let rendered =
-            render_markdown("<div class=\"fixed inset-0 z-50 glass-card af-modal\">overlay</div>");
+        let rendered = render_markdown(
+            "<div class=\"fixed inset-0 z-50 glass-card af-card af-btn af-modal af-popover af-toast\">overlay</div>",
+        );
         assert!(rendered.contains("<div>overlay</div>"));
         assert!(!rendered.contains("class="));
-        assert!(!rendered.contains("fixed"));
-        assert!(!rendered.contains("glass-card"));
+        for forbidden in [
+            "fixed",
+            "glass-card",
+            "af-card",
+            "af-btn",
+            "af-modal",
+            "af-popover",
+            "af-toast",
+        ] {
+            assert!(!rendered.contains(forbidden), "{forbidden} in {rendered}");
+        }
         let highlighted = render_markdown(
-            "<span class=\"af-token-keyword fixed af-modal\">let</span>\n\n<pre class=\"whitespace-pre-wrap fixed\">code</pre>",
+            "<span class=\"af-token-keyword fixed af-modal af-popover af-toast af-card af-btn\">let</span>\n\n<pre class=\"whitespace-pre-wrap fixed af-card\">code</pre>",
         );
         assert!(highlighted.contains("class=\"af-token-keyword\""));
         assert!(highlighted.contains("class=\"whitespace-pre-wrap\""));
-        assert!(!highlighted.contains("fixed"));
-        assert!(!highlighted.contains("af-modal"));
+        for forbidden in [
+            "fixed",
+            "af-modal",
+            "af-popover",
+            "af-toast",
+            "af-card",
+            "af-btn",
+        ] {
+            assert!(
+                !highlighted.contains(forbidden),
+                "{forbidden} in {highlighted}"
+            );
+        }
     }
     #[test]
     fn markdown_images_cannot_fetch_tracking_beacons() {

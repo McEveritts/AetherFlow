@@ -37,80 +37,6 @@ pub(super) fn legacy_touch_mode_value(mode: &str) -> &'static str {
     }
 }
 
-pub fn quantize_aurora_opacity_pct(pct: f64) -> u8 {
-    if !pct.is_finite() {
-        return 55;
-    }
-    let clamped = pct.clamp(0.0, 100.0);
-    (((clamped / 5.0).round() as i32) * 5).clamp(0, 100) as u8
-}
-
-pub fn normalize_aurora_opacity_pct(raw: &str) -> u8 {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return 55;
-    }
-    if let Some(pct_str) = trimmed.strip_suffix('%') {
-        let Ok(pct) = pct_str.trim().parse::<f64>() else {
-            return 55;
-        };
-        return quantize_aurora_opacity_pct(pct);
-    }
-    let Ok(val) = trimmed.parse::<f64>() else {
-        return 55;
-    };
-    if !val.is_finite() {
-        return 55;
-    }
-    if val < 0.0 {
-        return 0;
-    }
-    let pct = if val <= 1.0 { val * 100.0 } else { val };
-    quantize_aurora_opacity_pct(pct)
-}
-
-pub fn format_aurora_opacity_unit(pct: u8) -> String {
-    let pct = quantize_aurora_opacity_pct(f64::from(pct));
-    match pct {
-        0 => "0".into(),
-        100 => "1".into(),
-        p if p % 10 == 0 => format!("0.{}", p / 10),
-        p => format!("0.{p:02}"),
-    }
-}
-
-pub fn normalize_card_lift(raw: &str) -> i8 {
-    let trimmed = raw.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return -4;
-    }
-    let stripped = trimmed.strip_suffix("px").unwrap_or(&trimmed).trim();
-    match stripped {
-        "false" | "off" | "none" | "flat" | "disabled" | "0" | "-0" => return 0,
-        "true" | "on" | "enabled" | "spring" => return -4,
-        _ => {}
-    }
-    let Ok(val) = stripped.parse::<f64>() else {
-        return -4;
-    };
-    if !val.is_finite() {
-        return -4;
-    }
-    if val.abs() < 1.0 {
-        return 0;
-    }
-    let signed = -val.abs();
-    let buckets = [-2i8, -4, -6, -8];
-    buckets
-        .into_iter()
-        .min_by(|a, b| {
-            (signed - f64::from(*a))
-                .abs()
-                .total_cmp(&(signed - f64::from(*b)).abs())
-        })
-        .unwrap_or(-4)
-}
-
 pub fn quantize_refresh_rate(fps: f64) -> u32 {
     if !fps.is_finite() || fps <= 0.0 {
         return 60;
@@ -172,10 +98,6 @@ pub(crate) struct HydratedPreferences {
     pub haptic_feedback: bool,
     pub high_refresh_mode: String,
     pub touch_mode: String,
-    pub aurora_opacity: u8,
-    pub aurora_animation: bool,
-    pub grain_display: bool,
-    pub card_lift: i8,
 }
 
 pub(crate) fn hydrate_preferences_with<F>(get: F) -> HydratedPreferences
@@ -271,46 +193,6 @@ where
         .map(|v| normalize_touch_mode(&v).to_string())
         .unwrap_or_else(|| "auto".into());
 
-    let aurora_opacity = get("aetherflow-aurora-opacity")
-        .map(|v| normalize_aurora_opacity_pct(&v))
-        .or_else(|| {
-            sys_field("auroraOpacity").and_then(|v| {
-                v.as_f64()
-                    .map(|num| normalize_aurora_opacity_pct(&num.to_string()))
-                    .or_else(|| v.as_str().map(normalize_aurora_opacity_pct))
-            })
-        })
-        .unwrap_or(55);
-
-    let aurora_animation = get("aetherflow-aurora-animation")
-        .as_deref()
-        .and_then(parse_bool_str)
-        .or_else(|| sys_field("auroraAnimation").and_then(Value::as_bool))
-        .unwrap_or(false);
-
-    let grain_display = get("aetherflow-grain-display")
-        .or_else(|| get("aetherflow-grain"))
-        .as_deref()
-        .and_then(parse_bool_str)
-        .or_else(|| {
-            sys_field("grainDisplay")
-                .and_then(|v| v.as_bool().or_else(|| v.as_str().and_then(parse_bool_str)))
-        })
-        .unwrap_or(true);
-
-    let card_lift = get("aetherflow-card-lift")
-        .map(|v| normalize_card_lift(&v))
-        .or_else(|| {
-            sys_field("cardLift").and_then(|v| {
-                v.as_i64()
-                    .map(|n| normalize_card_lift(&n.to_string()))
-                    .or_else(|| v.as_f64().map(|n| normalize_card_lift(&n.to_string())))
-                    .or_else(|| v.as_bool().map(|b| if b { -4 } else { 0 }))
-                    .or_else(|| v.as_str().map(normalize_card_lift))
-            })
-        })
-        .unwrap_or(-4);
-
     HydratedPreferences {
         locale,
         theme,
@@ -321,10 +203,6 @@ where
         haptic_feedback,
         high_refresh_mode,
         touch_mode,
-        aurora_opacity,
-        aurora_animation,
-        grain_display,
-        card_lift,
     }
 }
 
@@ -372,24 +250,24 @@ pub(super) fn theme_is_light(pref: &str) -> bool {
 }
 
 pub fn apply_theme_dom(pref: &str) {
-    let mode = if theme_is_light(pref) {
-        "light"
-    } else {
-        "dark"
-    };
-    if let Some(root) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.document_element())
-    {
-        // Keep unrelated root classes while replacing the effective theme.
-        let classes = root.class_name();
-        let mut classes: Vec<_> = classes
-            .split_whitespace()
-            .filter(|class| !matches!(*class, "dark" | "light"))
-            .collect();
-        classes.push(mode);
-        let _ = root.set_attribute("class", &classes.join(" "));
-        let _ = root.set_attribute("data-theme", mode);
+    let light = theme_is_light(pref);
+    let mode = if light { "light" } else { "dark" };
+    let theme_color = if light { "#f4f6fa" } else { "#07090e" };
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        if let Some(root) = document.document_element() {
+            // Keep unrelated root classes while replacing the effective theme.
+            let classes = root.class_name();
+            let mut classes: Vec<_> = classes
+                .split_whitespace()
+                .filter(|class| !matches!(*class, "dark" | "light"))
+                .collect();
+            classes.push(mode);
+            let _ = root.set_attribute("class", &classes.join(" "));
+            let _ = root.set_attribute("data-theme", mode);
+        }
+        if let Ok(Some(meta)) = document.query_selector(r#"meta[name="theme-color"]"#) {
+            let _ = meta.set_attribute("content", theme_color);
+        }
     }
 }
 
@@ -403,14 +281,6 @@ pub fn apply_display_preferences_dom(context: AppContext) {
     let touch_pref = context.touch_mode.get();
     let detected_touch = context.detected_touch_device.get();
     let touch_active = resolve_touch_mode_active(&touch_pref, detected_touch);
-    let aurora_opacity = quantize_aurora_opacity_pct(f64::from(context.aurora_opacity.get()));
-    let aurora_anim = context.aurora_animation.get() && !motion_suppressed;
-    let grain = context.grain_display.get();
-    let card_lift = if motion_suppressed {
-        0
-    } else {
-        context.card_lift.get()
-    };
     let density = if context.immersive_overview.get() {
         "immersive"
     } else {
@@ -440,26 +310,10 @@ pub fn apply_display_preferences_dom(context: AppContext) {
             "data-touch-mode",
             if touch_active { "true" } else { "false" },
         );
-        let _ = root.set_attribute("data-aurora-opacity", &aurora_opacity.to_string());
-        let _ = root.set_attribute(
-            "data-aurora-animation",
-            if aurora_anim { "true" } else { "false" },
-        );
-        let _ = root.set_attribute("data-grain", if grain { "true" } else { "false" });
-        let _ = root.set_attribute("data-card-lift", &card_lift.to_string());
         let _ = root.set_attribute("data-density", density);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = (
-        reduced_user,
-        high_refresh,
-        touch_active,
-        aurora_opacity,
-        aurora_anim,
-        grain,
-        card_lift,
-        density,
-    );
+    let _ = (reduced_user, high_refresh, touch_active, density);
 }
 
 pub fn apply_locale_dom(locale: &str) {

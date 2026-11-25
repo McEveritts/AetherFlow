@@ -218,7 +218,7 @@ test.describe('WASM OIDC Device Flow & Approval Inbox structured parity', () => 
     await expect(page.getByText('tc qdisc replace dev eth0 root handle 1: htb default 30')).toBeVisible();
 
     // Inspect core restart action: shows Command & Blast Radius + Core Control-Plane Impact alert.
-    await page.locator('section.glass-card', { hasText: 'restart_service:aetherflow-api:systemd' })
+    await page.locator('section.af-card', { hasText: 'restart_service:aetherflow-api:systemd' })
       .getByRole('button', { name: 'Inspect action', exact: true })
       .click();
     const detailDialog = page.getByRole('dialog', { name: 'Action details' });
@@ -231,7 +231,7 @@ test.describe('WASM OIDC Device Flow & Approval Inbox structured parity', () => 
     await detailDialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
 
     // Inspect parameterized action: shows structured Action Parameters and Execution Log.
-    await page.locator('section.glass-card', { hasText: 'Apply egress bandwidth throttle' })
+    await page.locator('section.af-card', { hasText: 'Apply egress bandwidth throttle' })
       .getByRole('button', { name: 'Inspect action', exact: true })
       .click();
     await expect(detailDialog).toBeVisible();

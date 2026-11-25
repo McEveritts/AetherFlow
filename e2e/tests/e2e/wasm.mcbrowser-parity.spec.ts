@@ -171,7 +171,7 @@ test('deep-links Settings to McBrowser Policy, renders lazy grid thumbnails, and
   const restSurface = await previewDialog.evaluate(readSurface);
   await previewDialog.locator('img').hover();
   expect(await previewDialog.evaluate(readSurface)).toEqual({
-    backgroundColor: 'rgb(15, 20, 34)',
+    backgroundColor: 'rgb(17, 22, 36)',
     backgroundImage: 'none',
     borderTopColor: restSurface.borderTopColor,
     boxShadow: restSurface.boxShadow,
@@ -228,8 +228,8 @@ async function expectEditorSurfaceContrast(
     '.af-editor-gutter',
     '.af-token-comment',
     '> [role="status"]',
-    '.af-editor-toolbar button.glass-button:not([disabled])',
-    '.af-editor-toolbar select.glass-input',
+    '.af-editor-toolbar button.af-btn:not([disabled])',
+    '.af-editor-toolbar select.af-input',
   ]) {
     const target = selector.startsWith('>')
       ? editorRoot.locator(`:scope ${selector}`).first()

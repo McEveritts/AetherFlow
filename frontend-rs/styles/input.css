@@ -81,7 +81,7 @@
   --af-input-bg-focus: #0d1220;
   --af-control-disabled-bg: #101521;
   --af-control-disabled-border: #2a3347;
-  --af-control-disabled-fg: #64748b;
+  --af-control-disabled-fg: #73849c;
 
   /* Semantic Accent & Tone Tokens */
   --af-accent-bg: #4f46e5;
@@ -202,7 +202,7 @@ html[data-theme="light"] {
   --af-input-bg-focus: #ffffff;
   --af-control-disabled-bg: #f1f5f9;
   --af-control-disabled-border: #cbd5e1;
-  --af-control-disabled-fg: #64748b;
+  --af-control-disabled-fg: #526277;
 
   /* Semantic Accent & Tone Tokens */
   --af-accent-bg: #4338ca;
@@ -323,8 +323,8 @@ html[data-theme="light"] {
     cursor: not-allowed;
   }
 
-  :disabled:not(.af-btn):not(.af-btn-primary):not(.af-input):not(.obs-checkbox):not(.glass-button):not(.glass-button-primary):not(.glass-input),
-  [aria-disabled="true"]:not(.af-btn):not(.af-btn-primary):not(.af-input):not(.obs-checkbox):not(.glass-button):not(.glass-button-primary):not(.glass-input) {
+  :disabled:not(.af-btn):not(.af-btn-primary):not(.af-input):not(.obs-checkbox),
+  [aria-disabled="true"]:not(.af-btn):not(.af-btn-primary):not(.af-input):not(.obs-checkbox) {
     opacity: 0.55;
   }
 }
@@ -332,15 +332,12 @@ html[data-theme="light"] {
 /**
  * ============================================================================
  * LAYERED FLAT SURFACES, PERSISTENT CHROME & CONTROLS
- * Temporary .glass-* / .obs-tab-pill* / .obs-telemetry-surface selector aliases
- * map to these exact flat rules during Commits 1-4 and are deleted in Commit 5.
  * ============================================================================
  */
 @layer components {
   /* Tier 1: Borderless Hairline Canvas */
   .af-canvas-section,
-  .obs-canvas-section,
-  .obs-telemetry-surface {
+  .obs-canvas-section {
     position: relative;
     min-width: 0;
     background: transparent;
@@ -351,12 +348,10 @@ html[data-theme="light"] {
   }
 
   .af-canvas-section::after,
-  .obs-canvas-section::after,
-  .obs-telemetry-surface::after {
+  .obs-canvas-section::after {
     content: none;
   }
 
-  .obs-telemetry-band > div > .obs-telemetry-surface,
   .obs-telemetry-band > div > .af-canvas-section {
     border-bottom: 0;
   }
@@ -385,8 +380,7 @@ html[data-theme="light"] {
   }
 
   /* Tier 2: Quiet Flat Cards & Recessed Wells */
-  .af-card,
-  .glass-card {
+  .af-card {
     position: relative;
     background-color: var(--af-surface-card);
     background-image: none;
@@ -397,8 +391,7 @@ html[data-theme="light"] {
     transform: none;
   }
 
-  .af-card::after,
-  .glass-card::after {
+  .af-card::after {
     content: none;
   }
 
@@ -437,10 +430,7 @@ html[data-theme="light"] {
   /* Tier 3: Crisp Opaque Overlays (steady on hover, zero translucency) */
   .af-modal,
   .af-modal:hover,
-  .af-modal:active,
-  .af-modal.glass-card,
-  .af-modal.glass-card:hover,
-  .af-modal.glass-card:active {
+  .af-modal:active {
     position: fixed;
     color: var(--af-fg-primary);
     width: min(650px, calc(100% - 32px));
@@ -457,8 +447,7 @@ html[data-theme="light"] {
     transition: none;
   }
 
-  .af-modal::after,
-  .af-modal.glass-card::after {
+  .af-modal::after {
     content: none;
   }
 
@@ -466,8 +455,7 @@ html[data-theme="light"] {
     background: var(--af-backdrop-scrim);
   }
 
-  .af-drawer .af-modal,
-  .af-drawer .af-modal.glass-card {
+  .af-drawer .af-modal {
     margin: 0 0 0 auto;
     min-height: 100dvh;
     max-height: 100dvh;
@@ -707,8 +695,7 @@ html[data-theme="light"] {
   }
 
   /* Flat Controls: Buttons, Inputs, Tab Pills & Checkboxes */
-  .af-btn,
-  .glass-button {
+  .af-btn {
     background-color: var(--af-control-bg);
     background-image: none;
     color: var(--af-fg-primary);
@@ -724,62 +711,54 @@ html[data-theme="light"] {
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-btn:hover:not(:disabled):not([aria-disabled="true"]),
-    .glass-button:hover:not(:disabled):not([aria-disabled="true"]) {
+    .af-btn:hover:not(:disabled):not([aria-disabled="true"]) {
       background-color: var(--af-control-bg-hover);
       color: var(--af-fg-primary);
       border-color: var(--af-border-control-hover);
     }
   }
 
-  .af-btn:focus-visible,
-  .glass-button:focus-visible {
+  .af-btn:focus-visible {
     outline: 2px solid var(--af-focus-ring);
     outline-offset: 2px;
   }
 
-  .af-btn[data-tone="success"],
-  .glass-button[data-tone="success"] {
+  .af-btn[data-tone="success"] {
     background-color: var(--af-success-bg);
     color: var(--af-success-fg);
     border-color: var(--af-success-border);
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-btn[data-tone="success"]:hover:not(:disabled):not([aria-disabled="true"]),
-    .glass-button[data-tone="success"]:hover:not(:disabled):not([aria-disabled="true"]) {
+    .af-btn[data-tone="success"]:hover:not(:disabled):not([aria-disabled="true"]) {
       background-color: var(--af-success-bg-hover);
       color: var(--af-success-fg);
       border-color: var(--af-success-border);
     }
   }
 
-  .af-btn[data-tone="danger"],
-  .glass-button[data-tone="danger"] {
+  .af-btn[data-tone="danger"] {
     background-color: var(--af-danger-bg);
     color: var(--af-danger-fg);
     border-color: var(--af-danger-border);
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-btn[data-tone="danger"]:hover:not(:disabled):not([aria-disabled="true"]),
-    .glass-button[data-tone="danger"]:hover:not(:disabled):not([aria-disabled="true"]) {
+    .af-btn[data-tone="danger"]:hover:not(:disabled):not([aria-disabled="true"]) {
       background-color: var(--af-danger-bg-hover);
       color: var(--af-danger-fg);
       border-color: var(--af-danger-border);
     }
   }
 
-  .af-btn[data-tone="primary"],
-  .glass-button[data-tone="primary"] {
+  .af-btn[data-tone="primary"] {
     background-color: var(--af-accent-bg);
     color: var(--af-fg-on-accent);
     border-color: var(--af-accent-border);
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-btn[data-tone="primary"]:hover:not(:disabled):not([aria-disabled="true"]),
-    .glass-button[data-tone="primary"]:hover:not(:disabled):not([aria-disabled="true"]) {
+    .af-btn[data-tone="primary"]:hover:not(:disabled):not([aria-disabled="true"]) {
       background-color: var(--af-accent-bg-hover);
       color: var(--af-fg-on-accent);
       border-color: var(--af-accent-border);
@@ -787,9 +766,7 @@ html[data-theme="light"] {
   }
 
   .af-btn:disabled,
-  .af-btn[aria-disabled="true"],
-  .glass-button:disabled,
-  .glass-button[aria-disabled="true"] {
+  .af-btn[aria-disabled="true"] {
     background-color: var(--af-control-disabled-bg);
     color: var(--af-control-disabled-fg);
     border-color: var(--af-control-disabled-border);
@@ -797,8 +774,7 @@ html[data-theme="light"] {
     cursor: not-allowed;
   }
 
-  .af-btn-primary,
-  .glass-button-primary {
+  .af-btn-primary {
     background-color: var(--af-accent-bg);
     background-image: none;
     color: var(--af-fg-on-accent);
@@ -814,24 +790,20 @@ html[data-theme="light"] {
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-btn-primary:hover:not(:disabled):not([aria-disabled="true"]),
-    .glass-button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
+    .af-btn-primary:hover:not(:disabled):not([aria-disabled="true"]) {
       background-color: var(--af-accent-bg-hover);
       color: var(--af-fg-on-accent);
       border-color: var(--af-accent-bg-hover);
     }
   }
 
-  .af-btn-primary:focus-visible,
-  .glass-button-primary:focus-visible {
+  .af-btn-primary:focus-visible {
     outline: 2px solid var(--af-focus-ring);
     outline-offset: 2px;
   }
 
   .af-btn-primary:disabled,
-  .af-btn-primary[aria-disabled="true"],
-  .glass-button-primary:disabled,
-  .glass-button-primary[aria-disabled="true"] {
+  .af-btn-primary[aria-disabled="true"] {
     background-color: var(--af-control-disabled-bg);
     color: var(--af-control-disabled-fg);
     border-color: var(--af-control-disabled-border);
@@ -839,8 +811,7 @@ html[data-theme="light"] {
     cursor: not-allowed;
   }
 
-  .af-input,
-  .glass-input {
+  .af-input {
     background-color: var(--af-input-bg);
     border: 1px solid var(--af-border-control);
     border-radius: var(--obs-radius-xl);
@@ -852,34 +823,28 @@ html[data-theme="light"] {
       background-color var(--obs-duration-fast) var(--obs-ease-out-120);
   }
 
-  .af-input::placeholder,
-  .glass-input::placeholder {
+  .af-input::placeholder {
     color: var(--af-fg-muted);
   }
 
-  .af-input option,
-  .glass-input option {
+  .af-input option {
     background-color: var(--af-input-bg);
     color: var(--af-fg-primary);
   }
 
-  .af-input:focus,
-  .glass-input:focus {
+  .af-input:focus {
     outline: none;
     border-color: var(--af-focus-ring);
     background-color: var(--af-input-bg-focus);
   }
 
-  .af-input:focus-visible,
-  .glass-input:focus-visible {
+  .af-input:focus-visible {
     outline: 2px solid var(--af-focus-ring);
     outline-offset: 2px;
   }
 
   .af-input:disabled,
-  .af-input[aria-disabled="true"],
-  .glass-input:disabled,
-  .glass-input[aria-disabled="true"] {
+  .af-input[aria-disabled="true"] {
     background-color: var(--af-control-disabled-bg);
     color: var(--af-control-disabled-fg);
     border-color: var(--af-control-disabled-border);
@@ -887,8 +852,7 @@ html[data-theme="light"] {
     cursor: not-allowed;
   }
 
-  .af-tab-pill,
-  .obs-tab-pill {
+  .af-tab-pill {
     position: relative;
     font-weight: 500;
     font-size: 0.8125rem;
@@ -906,22 +870,19 @@ html[data-theme="light"] {
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-tab-pill:hover,
-    .obs-tab-pill:hover {
+    .af-tab-pill:hover {
       color: var(--af-fg-primary);
       background-color: var(--af-control-bg);
       border-color: var(--af-border-control);
     }
   }
 
-  .af-tab-pill:focus-visible,
-  .obs-tab-pill:focus-visible {
+  .af-tab-pill:focus-visible {
     outline: 2px solid var(--af-focus-ring);
     outline-offset: 2px;
   }
 
-  .af-tab-pill-active,
-  .obs-tab-pill-active {
+  .af-tab-pill-active {
     color: var(--af-tab-active-fg);
     background-color: var(--af-tab-active-bg);
     border-color: var(--af-tab-active-border);
@@ -929,8 +890,7 @@ html[data-theme="light"] {
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .af-tab-pill-active:hover,
-    .obs-tab-pill-active:hover {
+    .af-tab-pill-active:hover {
       color: var(--af-tab-active-fg);
       background-color: var(--af-tab-active-bg);
       border-color: var(--af-tab-active-border);
@@ -1809,13 +1769,13 @@ html[data-high-refresh="true"]:not([data-reduced-motion="true"]) {
     inset-inline-end: 14px;
     top: 100%;
   }
-  .af-header :is(.af-btn, .glass-button, .af-locale-select) {
+  .af-header :is(.af-btn, .af-locale-select) {
     height: 36px;
     min-height: 36px;
     padding: 6px 8px;
     flex-shrink: 0;
   }
-  .af-header :is(.af-btn, .glass-button) {
+  .af-header .af-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1949,10 +1909,10 @@ html[data-high-refresh="true"]:not([data-reduced-motion="true"]) {
  * ============================================================================
  */
 @media (pointer: coarse), (hover: none) {
-  html:not([data-touch-mode="false"]) :is(.af-btn, .af-btn-primary, .af-tab-pill, .glass-button, .glass-button-primary, .obs-tab-pill, .af-nav-button, button:not(.obs-inline-action), [role="button"], [role="tab"], select) {
+  html:not([data-touch-mode="false"]) :is(.af-btn, .af-btn-primary, .af-tab-pill, .af-nav-button, button:not(.obs-inline-action), [role="button"], [role="tab"], select) {
     min-height: 44px;
   }
-  html:not([data-touch-mode="false"]) :is(.af-input, .glass-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea) {
+  html:not([data-touch-mode="false"]) :is(.af-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea) {
     min-height: 44px;
     font-size: 16px;
   }
@@ -1969,7 +1929,7 @@ html[data-high-refresh="true"]:not([data-reduced-motion="true"]) {
     padding: 5px 12px;
     gap: 4px;
   }
-  html:not([data-touch-mode="false"]) .af-header :is(.af-btn, .glass-button, .af-locale-select) {
+  html:not([data-touch-mode="false"]) .af-header :is(.af-btn, .af-locale-select) {
     height: 44px;
     min-height: 44px;
     min-width: 44px;
@@ -1981,11 +1941,11 @@ html[data-high-refresh="true"]:not([data-reduced-motion="true"]) {
   }
 }
 
-html[data-touch-mode="true"] :is(.af-btn, .af-btn-primary, .af-tab-pill, .glass-button, .glass-button-primary, .obs-tab-pill, .af-nav-button, button:not(.obs-inline-action), [role="button"], [role="tab"], select) {
+html[data-touch-mode="true"] :is(.af-btn, .af-btn-primary, .af-tab-pill, .af-nav-button, button:not(.obs-inline-action), [role="button"], [role="tab"], select) {
   min-height: 44px;
 }
 
-html[data-touch-mode="true"] :is(.af-input, .glass-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), input[type="range"], textarea) {
+html[data-touch-mode="true"] :is(.af-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), input[type="range"], textarea) {
   min-height: 44px;
 }
 
@@ -1998,7 +1958,7 @@ html[data-touch-mode="true"] .obs-touch-action-reveal {
     padding: 5px 12px;
     gap: 4px;
   }
-  html[data-touch-mode="true"] .af-header :is(.af-btn, .glass-button, .af-locale-select) {
+  html[data-touch-mode="true"] .af-header :is(.af-btn, .af-locale-select) {
     height: 44px;
     min-height: 44px;
     min-width: 44px;
@@ -2098,7 +2058,7 @@ html[data-theme="light"] .af-token-property { color: #be123c; }
 html[data-theme="light"] .af-token-tag { color: #0e7490; }
 
 /* Transitional dark-to-light Tailwind utility remaps (unlayered to override @layer utilities). */
-html[data-theme="light"] :is(.text-slate-100, .text-slate-200, .text-slate-300, .text-white):not(.af-btn-primary):not(.glass-button-primary):not([data-tone="primary"]):not(.af-skip-link) {
+html[data-theme="light"] :is(.text-slate-100, .text-slate-200, .text-slate-300, .text-white):not(.af-btn-primary):not([data-tone="primary"]):not(.af-skip-link) {
   color: var(--af-fg-primary);
 }
 html[data-theme="light"] :is(.text-slate-400, .text-slate-500, .text-gray-500, .text-zinc-500, .text-neutral-500) {
@@ -2162,8 +2122,7 @@ html[data-theme="light"] .bg-amber-950\/30 {
 /* ============================================================================
  * SELF-CONTAINED CODE EDITOR THEMES (CROSS-POLARITY WCAG AA >= 4.5:1)
  * Overrides semantic control tokens on .af-btn / .af-btn-primary / .af-input
- * and temporary .glass-* aliases with 100% opaque rgb() fills and zero color
- * or background-color transitions.
+ * with 100% opaque rgb() fills and zero color or background-color transitions.
  * ============================================================================
  */
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor.af-editor-theme-chrome { --af-ed-bg: #ffffff; --af-ed-fg: #1e293b; --af-ed-caret: #1d4ed8; --af-ed-gutter-bg: #f1f5f9; --af-ed-gutter-fg: #334155; --af-ed-bar-bg: #f8fafc; --af-ed-border: #cbd5e1; }
@@ -2223,7 +2182,7 @@ html[data-theme="light"] .bg-amber-950\/30 {
   --af-input-bg-focus: #ffffff;
   --af-control-disabled-bg: #f1f5f9;
   --af-control-disabled-border: #cbd5e1;
-  --af-control-disabled-fg: #64748b;
+  --af-control-disabled-fg: #526277;
   --af-accent-bg: #4338ca;
   --af-accent-bg-hover: #3730a3;
   --af-accent-border: #4338ca;
@@ -2240,7 +2199,7 @@ html[data-theme="light"] .bg-amber-950\/30 {
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="light"] .af-editor-toolbar,
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="light"] .af-editor-find,
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="light"] > [role="status"] { color: #334155; }
-:is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="light"] :is(.af-btn, .glass-button)[aria-pressed="true"] {
+:is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="light"] .af-btn[aria-pressed="true"] {
   background-color: #e0e7ff;
   color: #312e81;
   border-color: #6366f1;
@@ -2289,7 +2248,7 @@ html[data-theme="light"] .bg-amber-950\/30 {
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="dark"] .af-editor-toolbar,
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="dark"] .af-editor-find,
 :is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="dark"] > [role="status"] { color: #cbd5e1; }
-:is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="dark"] :is(.af-btn, .glass-button)[aria-pressed="true"] {
+:is(html, html[data-theme="light"], html[data-theme="dark"]) .af-editor[data-editor-tone="dark"] .af-btn[aria-pressed="true"] {
   background-color: #312e81;
   color: #e0e7ff;
   border-color: #818cf8;
@@ -2308,7 +2267,7 @@ html[data-theme="light"] .bg-amber-950\/30 {
 
 /* Exclude color and background-color from editor control transitions so cross-polarity
    switches happen atomically without mid-transition WCAG AA contrast drops. */
-.af-editor :is(.af-btn, .af-btn-primary, .af-input, .glass-button, .glass-button-primary, .glass-input) {
+.af-editor :is(.af-btn, .af-btn-primary, .af-input) {
   transition-property: border-color;
   transition-duration: var(--obs-duration-fast);
   transition-timing-function: var(--obs-ease-out-120);

@@ -52,7 +52,7 @@ The 4-tier contract harness covers 37 platform features (`F01`–`F37`):
 ### Tier 1: Feature Coverage
 
 - **Rule**: 5 test cases per feature (`F01`–`F37`).
-- **Scope**: Route presence and expected status/schema contracts, Leptos WASM component mounting, Obsidian V2 CSS token checks in `frontend-rs/styles/input.css`, and Debian 12/13 packaging conventions.
+- **Scope**: Route presence and expected status/schema contracts, Leptos WASM component mounting, Unified Flat Design System CSS token checks in `frontend-rs/styles/input.css`, and Debian 12/13 packaging conventions.
 
 ### Tier 2: Boundary & Corner Cases
 
@@ -72,7 +72,7 @@ The 4-tier contract harness covers 37 platform features (`F01`–`F37`):
 4. `T3_COMBO_04` (`TestComboQuotasRunner`): Quotas Panel (`F26`) + Runner Quota Socket (`F07`, `F08`).
 5. `T3_COMBO_05` (`TestComboNetworkVpnRunner`): Network Panel (`F24`) + Runner Network Socket (`F07`, `F08`).
 6. `T3_COMBO_06` (`TestComboPeerClusterManagement`, `feature_id="F10+F27"`): Peer runtime (`F10`), Cluster tab (`F27`), and peer admin routes.
-7. `T3_COMBO_07` (`TestComboExternalWasmSpaAtmosphere`): External WASM Build (`F32`) + `web/dist` Serving (`F32`) + Obsidian CSS (`F13`, `F14`) + Legacy Purge (`F11`).
+7. `T3_COMBO_07` (`TestComboExternalWasmSpaAtmosphere`): External WASM Build (`F32`) + `web/dist` Serving (`F32`) + Flat Design System CSS (`F13`, `F14`) + Legacy Purge (`F11`).
 8. `T3_COMBO_08` (`TestComboPrivilegeBoundarySandbox`): Systemd Privilege Units (`F33`) + Sudoers Purge (`F34`) + Runner Sandboxing (`F07`, `F08`).
 9. `T3_COMBO_09` (`TestComboDebian13AptPackaging`): APT Template (`F28`) + Core OS Detection (`F29`) + Package Modernization (`F30`) + Keyrings (`F31`).
 10. `T3_COMBO_10` (`TestComboAiTelemetryPredictions`): Predictions History (`F19`) + Bandwidth Card + Overview Mounting (`F19`).
@@ -83,7 +83,7 @@ The 4-tier contract harness covers 37 platform features (`F01`–`F37`):
 
 In `--mode contract`, Tier 4 verifies static file/route/symbol presence; in `--mode live`, `T4_SCENARIO_01` authenticates via `POST /api/v1/public/auth/login` and Tier 4 scenarios issue read-only HTTP `GET` checks against the running API without mutating host packages, quotas, or VPN interfaces:
 
-1. `T4_SCENARIO_01` (`TestScenarioOperatorBootstrap`): Contract mode checks `af-api/src/main.rs` and `af-runner/src/lib.rs` existence, `/profile/password` and `/system/topology` routes in `routes.rs`, and `--obs-bg-base` in `input.css`; live mode probes `GET /health/ready`, `POST /api/v1/public/auth/login`, and `GET /api/v1/auth/system/topology`.
+1. `T4_SCENARIO_01` (`TestScenarioOperatorBootstrap`): Contract mode checks `af-api/src/main.rs` and `af-runner/src/lib.rs` existence, `/profile/password` and `/system/topology` routes in `routes.rs`, and `--af-bg-canvas` / `--obs-bg-base` in `input.css`; live mode probes `GET /health/ready`, `POST /api/v1/public/auth/login`, and `GET /api/v1/auth/system/topology`.
 2. `T4_SCENARIO_02` (`TestScenarioAppIngressProvisioning`): Contract mode checks `/ingress`, `app_subdomain_proxy_middleware`, `/deploy/stream`, and `tailscale_ingress.rs`; live mode probes `GET /api/v1/admin/ingress/configs`.
 3. `T4_SCENARIO_03` (`TestScenarioMultitenantQuotaEnforcement`): Contract mode checks `/quotas`, runner `/v1/quota`, and `tabs/quotas.rs`; live mode probes `GET /api/v1/admin/quotas`.
 4. `T4_SCENARIO_04` (`TestScenarioMeshVpnOrchestration`): Contract mode checks `/network`, runner `/v1/network`, and `tabs/network/mod.rs`; live mode probes `GET /api/v1/admin/network/status`.
@@ -188,12 +188,12 @@ bash scripts/run_embedded_e2e.sh \
 | **F10** | Peer Runtime | The API manages peer runtime startup and shutdown (`peers::start().await` / `peers::shutdown().await`). The listener waits for a configured identity, the versioned admin router serves the peer list and pairing controls, and legacy `/cluster/` routes and `cluster_daemon.rs` are retired. |
 | **F11** | Retire Legacy Next.js Frontend | Legacy `frontend/` directory and `frontend/src/app/api/fs/route.ts` removed; UI lives in `frontend-rs/` and Playwright harness lives in `e2e/`. |
 | **F12** | Backend Unit Tests | `cargo test --workspace --locked` in `backend-rs/` passes across all 12 crates (including fs, auth, profile, ingress, runner socket, and peer lifecycle tests). |
-| **F13** | Obsidian V2 CSS Foundation | `frontend-rs/styles/input.css` defines `--obs-bg-base: #07090e;` (`--obs-black: #000000`), `body::before` 3-orb radial aurora + base gradient, `body::after` fractal micro-grain + edge vignette. |
-| **F14** | Obsidian V2 Glass Tokens | Directional specular highlight (`--obs-specular-top`), chromatic borders (`--obs-chromatic-border-*`), prism rims, 120Hz spring physics (`--obs-ease-spring-120`). |
+| **F13** | Flat Canvas Foundation | `frontend-rs/styles/input.css` defines polarity-scoped dark (`#07090e`) and light (`#f4f6fa`) `--af-bg-canvas` tokens (retaining `--obs-bg-base` alias), solid `html`/`body` canvas fill, and zero `backdrop-filter`, `body::before` aurora, or `body::after` tactile grain layers. |
+| **F14** | Semantic Flat Surface & Control Tokens | Polarity-scoped `--af-*` surface, hairline, control, and tone tokens across `:root` and `html[data-theme="light"]`, Tailwind v4 `@theme inline` + `@layer components`, static `.af-card` / opt-in `.af-card-interactive`, flat `.af-btn-primary`, and 120Hz cadence timing (`--obs-ease-spring-120`). |
 | **F15** | Responsive Navigation Shell | Single `.af-sidebar` rail across `>=768px` (`84px` collapsed by default, toggleable to `238px` via `.af-sidebar-expanded`), plus `.af-mobile-dock` bottom dock and `.af-hamburger` slide-over `<Drawer>` at `<768px` in `frontend-rs/crates/af-web-app/src/shell.rs` with safe-area padding and `>=44px` touch targets. |
 | **F16** | Scroller Containment Invariant | No blanket `html, body { overflow-x: hidden }`; horizontal overflow scoped via `min-w-0`, `max-w-full`, and `overflow-x-auto`. |
-| **F17** | Atmosphere Controls | `frontend-rs/crates/af-web-app/src/tabs/settings/` exposes aurora intensity, static vs. animated switch, micro-grain toggle, boolean `settings-card-lift` (`0` vs `-4px`), and separate `immersive_overview` (`dashboardDensity`: `compact`/`immersive`) controls. |
-| **F18** | UI Primitives Redesign | `frontend-rs/crates/af-web-ui/src/{primitives.rs,grid.rs}` and `frontend-rs/crates/af-web-app/src/routes/login.rs` implement Obsidian V2 tokens. |
+| **F17** | Display & Input Controls | `frontend-rs/crates/af-web-app/src/tabs/settings/mod.rs` exposes high-refresh cadence (`settings-high-refresh-mode`), touch mode (`settings-touch-mode`), reduced motion, haptic feedback, and `immersive_overview` (`dashboardDensity`: `compact`/`immersive`) with `localStorage` persistence and passive legacy key tolerance (retiring aurora, tactile grain, and card hover lift). |
+| **F18** | Flat UI Primitives | `frontend-rs/crates/af-web-ui/src/{primitives.rs,grid.rs}` and `frontend-rs/crates/af-web-app/src/routes/{login.rs,consent.rs}` implement `.af-card`, `.af-btn` / `.af-btn-primary`, `.af-input`, and opaque `.af-modal` without legacy `.glass-*` classes. |
 | **F19** | Mount Bandwidth & Predictions | Mounted in `tabs/overview/mod.rs`; `CapacityPredictions` reads real history from `/api/v1/admin/ai/predictions/history` (zero synthetic `Math.sin()` waves). |
 | **F20** | Mount Metadata & DirectoryPicker | `DirectoryPicker` is defined in `tabs/fileshare/local_storage.rs` and mounted in `tabs/settings/metadata.rs` (and `tabs/fileshare/local_storage.rs`), querying `/api/v1/auth/fs` with cookie auth (`tabs/mediaflow.rs` uses a plain text input for its scan directory). |
 | **F21** | Mount ExternalAccess & Deploy | `ExternalAccessSettings` is defined in `tabs/network/tailscale_ingress.rs` and mounted in `tabs/network/mod.rs` (with **External access** shortcut buttons in `tabs/services/` and `tabs/marketplace/`); `/api/v1/auth/deploy/stream` (`EventSource`) is consumed in `tabs/mediaflow.rs`, while `DeploymentStatus` in `tabs/marketplace/catalog.rs` polls `/api/v1/auth/packages/{id}/progress`. |

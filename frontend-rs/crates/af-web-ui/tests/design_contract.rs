@@ -1,22 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const DESIGN_DOC_REF: &str = "docs/design-system.md";
-
-/// Shrinking Commit-1 allowlist for Tailwind blur classes in Rust templates.
-/// Commit 2 removes `backdrop-blur` from `shell.rs` and `grid.rs` and clears this list.
-const BLUR_ALLOWLIST: &[&str] = &[];
-
-/// Shrinking Commit-1 allowlist for `<dialog class="af-modal glass-card">`.
-/// Commit 2 removes `glass-card` from `Modal` in `primitives.rs` and clears this list.
-const OVERLAY_CARD_ALLOWLIST: &[&str] = &[];
-
-/// Shrinking per-commit ratchet for legacy `.glass-*`, `.obs-tab-pill`, and
-/// `.obs-telemetry-surface` template classes across `af-web-ui` and `af-web-app`.
-/// Commit 1 locks to the exact 61 currently unmigrated files; Commits 2–4 shrink
-/// this list to empty, and Commit 5 deletes the allowlist completely.
-const LEGACY_CLASS_ALLOWLIST: &[&str] = &[];
 
 fn frontend_rs_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -448,6 +434,36 @@ fn css_forbids_glass_and_legacy_atmosphere_rules() {
             ".prototype-scroller",
             "Use .obs-scroller",
         ),
+        (
+            "no-legacy-glass-card",
+            ".glass-card",
+            "Use Tier 2 .af-card (or .af-card-interactive / .af-surface-inset)",
+        ),
+        (
+            "no-legacy-glass-button-primary",
+            ".glass-button-primary",
+            "Use flat .af-btn-primary",
+        ),
+        (
+            "no-legacy-glass-button",
+            ".glass-button",
+            "Use flat .af-btn (with optional data-tone)",
+        ),
+        (
+            "no-legacy-glass-input",
+            ".glass-input",
+            "Use flat .af-input",
+        ),
+        (
+            "no-legacy-obs-tab-pill",
+            ".obs-tab-pill",
+            "Use flat .af-tab-pill / .af-tab-pill-active",
+        ),
+        (
+            "no-legacy-obs-telemetry-surface",
+            ".obs-telemetry-surface",
+            "Use Tier 1 .af-canvas-section",
+        ),
     ];
 
     for (idx, line) in css.lines().enumerate() {
@@ -629,9 +645,6 @@ fn rust_templates_forbid_blur_and_dead_classes() {
         ("obs-vitals-grid", "Use .af-hairline-grid"),
     ];
     let blur_patterns = ["backdrop-blur", "backdrop-saturate"];
-
-    let blur_allowlist: BTreeSet<&str> = BLUR_ALLOWLIST.iter().copied().collect();
-    let mut blur_found_files: BTreeSet<String> = BTreeSet::new();
     let mut violations = Vec::new();
 
     for (rel, path) in all_template_rs_files() {
@@ -648,22 +661,11 @@ fn rust_templates_forbid_blur_and_dead_classes() {
             }
             for &blur in &blur_patterns {
                 if line.contains(blur) {
-                    blur_found_files.insert(rel.clone());
-                    if !blur_allowlist.contains(rel.as_str()) {
-                        violations.push(format!(
-                            "[no-template-backdrop-blur] frontend-rs/{rel}:{line_no} uses `{blur}` — replace with opaque `bg-[var(--af-bg-chrome)]` or `.af-surface-overlay` (see {DESIGN_DOC_REF})"
-                        ));
-                    }
+                    violations.push(format!(
+                        "[no-template-backdrop-blur] frontend-rs/{rel}:{line_no} uses `{blur}` — replace with opaque `bg-[var(--af-bg-chrome)]` or `.af-surface-overlay` (see {DESIGN_DOC_REF})"
+                    ));
                 }
             }
-        }
-    }
-
-    for &allowed in BLUR_ALLOWLIST {
-        if !blur_found_files.contains(allowed) {
-            violations.push(format!(
-                "[stale-blur-allowlist] `{allowed}` in BLUR_ALLOWLIST no longer uses `backdrop-blur` — remove it from BLUR_ALLOWLIST in frontend-rs/crates/af-web-ui/tests/design_contract.rs to tighten the CI ratchet (see {DESIGN_DOC_REF})"
-            ));
         }
     }
 
@@ -676,29 +678,20 @@ fn rust_templates_forbid_blur_and_dead_classes() {
 }
 
 #[test]
-fn legacy_glass_class_ratchet_matches_allowlist() {
+fn rust_templates_forbid_legacy_glass_classes() {
     let legacy_replacements: &[(&str, &str)] = &[
         ("glass-button-primary", ".af-btn-primary"),
         ("glass-button", ".af-btn"),
-        ("glass-card", ".af-card (or .af-card-interactive / .af-surface-inset)"),
+        (
+            "glass-card",
+            ".af-card (or .af-card-interactive / .af-surface-inset)",
+        ),
         ("glass-input", ".af-input"),
         ("obs-tab-pill", ".af-tab-pill / .af-tab-pill-active"),
         ("obs-telemetry-surface", ".af-canvas-section"),
     ];
 
-    // Confirm allowlist itself stays strictly sorted and deduplicated.
-    for pair in LEGACY_CLASS_ALLOWLIST.windows(2) {
-        assert!(
-            pair[0] < pair[1],
-            "[allowlist-order] LEGACY_CLASS_ALLOWLIST must be strictly sorted and deduplicated (`{}` >= `{}`)",
-            pair[0],
-            pair[1]
-        );
-    }
-
-    let allowlist: BTreeSet<&str> = LEGACY_CLASS_ALLOWLIST.iter().copied().collect();
-    let mut hits_by_file: BTreeMap<String, Vec<(usize, &str, &str)>> = BTreeMap::new();
-
+    let mut violations = Vec::new();
     for (rel, path) in all_template_rs_files() {
         let src = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
@@ -706,37 +699,17 @@ fn legacy_glass_class_ratchet_matches_allowlist() {
             let line_no = idx + 1;
             for &(legacy, replacement) in legacy_replacements {
                 if line.contains(legacy) {
-                    hits_by_file
-                        .entry(rel.clone())
-                        .or_default()
-                        .push((line_no, legacy, replacement));
+                    violations.push(format!(
+                        "[no-legacy-glass-class] frontend-rs/{rel}:{line_no} uses retired `{legacy}` — migrate to {replacement} (see {DESIGN_DOC_REF})"
+                    ));
                 }
             }
         }
     }
 
-    let mut violations = Vec::new();
-    for (rel, hits) in &hits_by_file {
-        if !allowlist.contains(rel.as_str()) {
-            for &(line_no, legacy, replacement) in hits {
-                violations.push(format!(
-                    "[legacy-glass-class-ratchet] frontend-rs/{rel}:{line_no} uses unlisted legacy class `{legacy}` — migrate to {replacement} (see {DESIGN_DOC_REF})"
-                ));
-            }
-        }
-    }
-
-    for &allowed in LEGACY_CLASS_ALLOWLIST {
-        if !hits_by_file.contains_key(allowed) {
-            violations.push(format!(
-                "[stale-legacy-allowlist] `{allowed}` in LEGACY_CLASS_ALLOWLIST has zero remaining legacy classes — remove it from LEGACY_CLASS_ALLOWLIST in frontend-rs/crates/af-web-ui/tests/design_contract.rs to lock the ratchet (see {DESIGN_DOC_REF})"
-            ));
-        }
-    }
-
     assert!(
         violations.is_empty(),
-        "Legacy glass class ratchet violations ({}):\n{}",
+        "Legacy glass class contract violations ({}):\n{}",
         violations.len(),
         violations.join("\n")
     );
@@ -744,12 +717,8 @@ fn legacy_glass_class_ratchet_matches_allowlist() {
 
 #[test]
 fn overlays_never_combine_with_card_classes() {
-    let strict_overlays = ["af-popover", "af-toast"];
-    let allowlisted_overlays = ["af-modal", "af-drawer"];
+    let overlays = ["af-popover", "af-toast", "af-modal", "af-drawer"];
     let card_classes = ["glass-card", "af-card"];
-
-    let allowlist: BTreeSet<&str> = OVERLAY_CARD_ALLOWLIST.iter().copied().collect();
-    let mut allowlist_hits: BTreeSet<String> = BTreeSet::new();
     let mut violations = Vec::new();
 
     for (rel, path) in all_template_rs_files() {
@@ -765,32 +734,13 @@ fn overlays_never_combine_with_card_classes() {
                 continue;
             };
 
-            for &overlay in &strict_overlays {
+            for &overlay in &overlays {
                 if line_has_token_boundary(line, overlay) {
                     violations.push(format!(
                         "[overlay-card-separation] frontend-rs/{rel}:{line_no} combines Tier 3 `{overlay}` with Tier 2 `{card}` — use `{overlay}` alone for opaque floating surfaces (see {DESIGN_DOC_REF})"
                     ));
                 }
             }
-
-            for &overlay in &allowlisted_overlays {
-                if line_has_token_boundary(line, overlay) {
-                    allowlist_hits.insert(rel.clone());
-                    if !allowlist.contains(rel.as_str()) {
-                        violations.push(format!(
-                            "[overlay-card-separation] frontend-rs/{rel}:{line_no} combines Tier 3 `{overlay}` with Tier 2 `{card}` — use `{overlay}` alone for opaque floating surfaces (see {DESIGN_DOC_REF})"
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    for &allowed in OVERLAY_CARD_ALLOWLIST {
-        if !allowlist_hits.contains(allowed) {
-            violations.push(format!(
-                "[stale-overlay-card-allowlist] `{allowed}` in OVERLAY_CARD_ALLOWLIST no longer combines `.af-modal` with `.glass-card`/`.af-card` — remove it from OVERLAY_CARD_ALLOWLIST in frontend-rs/crates/af-web-ui/tests/design_contract.rs (see {DESIGN_DOC_REF})"
-            ));
         }
     }
 

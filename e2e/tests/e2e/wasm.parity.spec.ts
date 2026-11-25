@@ -479,8 +479,8 @@ test.describe('Rust WASM appliance parity', () => {
     };
 
     for (const { theme, background } of [
-      { theme: 'dark', background: 'rgb(15, 20, 34)' },
-      { theme: 'light', background: 'rgb(248, 250, 252)' },
+      { theme: 'dark', background: 'rgb(17, 22, 36)' },
+      { theme: 'light', background: 'rgb(255, 255, 255)' },
     ]) {
       if (theme === 'light') {
         await page.locator('header').getByRole('button', { name: 'Toggle theme', exact: true }).click();

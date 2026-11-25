@@ -1887,15 +1887,8 @@
   "Settings": {
     "apiKeyPlaceholder": "Enter your Gemini API key...",
     "apiKeyTitle": "Gemini API Key",
-    "atmosphereTitle": "Atmosphere & Surface Physics",
-    "auroraAnimation": "Aurora animation",
-    "auroraAnimationDescription": "Animate the ambient three-orb cosmic aurora instead of holding a static cached layer.",
-    "auroraOpacity": "Aurora opacity",
-    "auroraOpacityDescription": "Adjust the luminance of the radial cosmic aurora on the background canvas.",
     "backupsRestore": "Backups & Restore",
     "baseDomain": "Base domain",
-    "cardLift": "Card hover lift",
-    "cardLiftDescription": "Elevate glass cards slightly on pointer hover with spring physics.",
     "checkingUpdates": "Checking for updates...",
     "defaultDashboard": "Default dashboard",
     "defaultModel": "Default Language Model",
@@ -1907,14 +1900,12 @@
     "flowAIEngine": "FlowAI Engine",
     "flowAIProviders": "FlowAI Providers",
     "generalLocalization": "General & Localization",
-    "grainDisplay": "Tactile grain",
-    "grainDisplayDescription": "Render subtle fractal micro-grain and edge vignette for physical surface depth.",
     "hapticFeedback": "Haptic feedback",
     "highRefresh120": "120Hz high refresh",
     "highRefresh60": "60Hz standard",
     "highRefreshAuto": "Auto ({hz}Hz detected)",
     "highRefreshCadence": "High refresh cadence",
-    "highRefreshDescription": "Tune interactive and card transition durations (110ms / 150ms vs 160ms / 200ms) for high-refresh panels.",
+    "highRefreshDescription": "Tune interactive and interface transition durations (110ms / 150ms vs 160ms / 200ms) for high-refresh panels.",
     "inputStatusFine": "Input: Fine pointer",
     "inputStatusTouch": "Input: Touch optimized (≥44px)",
     "interfacePreferences": "Interface Preferences",
@@ -1928,7 +1919,7 @@
     "pinSidebar": "Pin the desktop sidebar",
     "profileSecurity": "Profile & Security",
     "reducedMotion": "Reduce interface motion",
-    "reducedMotionActiveHint": "Reduced motion is active; aurora animation, card hover lift, and rapid motion curves are suppressed.",
+    "reducedMotionActiveHint": "Reduced motion is active; high-refresh cadence and interface transitions are suppressed.",
     "saveConfig": "Save Configuration",
     "saveSettings": "Save Settings",
     "saving": "Saving...",
@@ -2767,6 +2758,5 @@
     "liveLogsClosed": "Stream closed",
     "liveLogsRevoked": "Live log stream closed (code {code}); peer access may have changed or been revoked.",
     "remoteShareOriginUnavailable": "Public share links are unavailable for {server} because its public base domain is not configured or cannot be read. Configure a public base domain on {server} and grant Settings read access to create remote share links."
-  },
-  "Reset atmosphere defaults": "Reset atmosphere defaults"
+  }
 }

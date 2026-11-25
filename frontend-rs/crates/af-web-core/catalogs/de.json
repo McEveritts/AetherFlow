@@ -1887,15 +1887,8 @@
   "Settings": {
     "apiKeyPlaceholder": "Geben Sie Ihren Gemini API-Schlüssel ein...",
     "apiKeyTitle": "Gemini API-Schlüssel",
-    "atmosphereTitle": "Atmosphäre & Oberflächenphysik",
-    "auroraAnimation": "Animiertes Polarlicht",
-    "auroraAnimationDescription": "Animiert das dreiteilige Hintergrund-Polarlicht kontinuierlich statt einer statischen Ebene.",
-    "auroraOpacity": "Polarlicht-Deckkraft",
-    "auroraOpacityDescription": "Passt die Leuchtkraft des radialen Hintergrund-Polarlichts auf der Arbeitsfläche an.",
     "backupsRestore": "Sicherungen & Wiederherstellung",
     "baseDomain": "Basisdomain",
-    "cardLift": "Kartenanhebung beim Überfahren",
-    "cardLiftDescription": "Hebt Glaskarten beim Überfahren mit dem Zeiger sanft mit Federphysik an.",
     "checkingUpdates": "Nach Updates suchen...",
     "defaultDashboard": "Standard-Dashboard",
     "defaultModel": "Standard-Sprachmodell",
@@ -1907,14 +1900,12 @@
     "flowAIEngine": "FlowAI-Engine",
     "flowAIProviders": "FlowAI-Anbieter",
     "generalLocalization": "Allgemein & Lokalisierung",
-    "grainDisplay": "Taktile Körnung",
-    "grainDisplayDescription": "Zeichnet feine Mikro-Körnung und Randvignette für physische Oberflächentiefe.",
     "hapticFeedback": "Haptisches Feedback",
     "highRefresh120": "120Hz hohe Bildrate",
     "highRefresh60": "60Hz Standardrate",
     "highRefreshAuto": "Automatisch ({hz}Hz erkannt)",
     "highRefreshCadence": "Hohe Bildwiederholrate",
-    "highRefreshDescription": "Passt Interaktions- und Kartenübergänge (110ms / 150ms statt 160ms / 200ms) für schnelle Displays an.",
+    "highRefreshDescription": "Passt Interaktions- und Oberflächenübergänge (110ms / 150ms statt 160ms / 200ms) für schnelle Displays an.",
     "inputStatusFine": "Eingabe: Präzisionszeiger",
     "inputStatusTouch": "Eingabe: Touch-optimiert (≥44px)",
     "interfacePreferences": "Schnittstellenpräferenzen",
@@ -1928,7 +1919,7 @@
     "pinSidebar": "Desktop-Seitenleiste anheften",
     "profileSecurity": "Profil & Sicherheit",
     "reducedMotion": "Oberflächenbewegungen reduzieren",
-    "reducedMotionActiveHint": "Reduzierte Bewegung ist aktiv; Polarlicht-Animation, Kartenanhebung und schnelle Bewegungskurven sind deaktiviert.",
+    "reducedMotionActiveHint": "Reduzierte Bewegung ist aktiv; hohe Bildwiederholrate und Oberflächenübergänge sind deaktiviert.",
     "saveConfig": "Konfiguration Speichern",
     "saveSettings": "Einstellungen speichern",
     "saving": "Speichern...",
@@ -2767,6 +2758,5 @@
     "liveLogsClosed": "Stream geschlossen",
     "liveLogsRevoked": "Live-Log-Stream geschlossen (Code {code}); der Peer-Zugriff wurde möglicherweise geändert oder widerrufen.",
     "remoteShareOriginUnavailable": "Öffentliche Freigabelinks sind für {server} nicht verfügbar, da die öffentliche Basisdomain nicht konfiguriert ist oder nicht gelesen werden kann. Konfigurieren Sie eine öffentliche Basisdomain auf {server} und gewähren Sie Lesezugriff auf die Einstellungen, um entfernte Freigabelinks zu erstellen."
-  },
-  "Reset atmosphere defaults": "Atmosphären-Standardwerte zurücksetzen"
+  }
 }

@@ -43,8 +43,8 @@ class TestScenarioOperatorBootstrap(TestCase):
             has_auth = bool(routes and "/profile/password" in routes)
             has_topology = bool(routes and "/system/topology" in routes)
             css = inspector.read_file("frontend-rs/styles/input.css")
-            has_obsidian = bool(css and "--obs-bg-base" in css)
-            self.assert_true(has_api and has_runner and has_auth and has_topology and has_obsidian, "Scenario 01: All lifecycle components must be present")
+            has_flat_css = bool(css and "--af-bg-canvas" in css and "--obs-bg-base" in css)
+            self.assert_true(has_api and has_runner and has_auth and has_topology and has_flat_css, "Scenario 01: All lifecycle components must be present")
 
 
 class TestScenarioAppIngressProvisioning(TestCase):
