@@ -301,7 +301,7 @@ All surface and control rules consume only these semantic custom properties. `--
 | `--af-tab-active-border` | `#6366f1` | `#4f46e5` | Active `.af-tab-pill-active` border (`4.23:1` dark, `6.29:1` light) |
 | `--af-tab-active-fg` | `#e0e7ff` | `#312e81` | Active `.af-tab-pill-active` text (`12.19:1` dark, `10.22:1` light) |
 | `--af-nav-active-bg` | `#19213d` | `#e0e7ff` | Active `.af-nav-active` sidebar background |
-| `--af-nav-active-border` | `#4f46e5` | `#818cf8` | Active `.af-nav-active` border / indicator |
+| `--af-nav-active-border` | `#4f46e5` | `#4f46e5` | Active `.af-nav-active` border / indicator (`5.10:1` light) |
 | `--af-nav-active-fg` | `#e0e7ff` | `#312e81` | Active `.af-nav-active` label (`12.85:1` dark, `9.27:1` light) |
 | `--af-focus-ring` | `#818cf8` | `#4338ca` | `2px solid` `:focus-visible` outline (`6.05–6.33:1` dark, `7.30–7.90:1` light) |
 | `--af-shadow-overlay` | `0 18px 48px rgba(0, 0, 0, 0.55)` | `0 14px 36px rgba(15, 23, 42, 0.14)` | Neutral elevation shadow strictly for Tier 3 overlays |

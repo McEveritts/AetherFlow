@@ -116,7 +116,7 @@ All `--af-*` tokens are declared in `:root` (dark) and mirrored 1:1 in `html[dat
 | `--af-success-border` / `-fg` | `#10b981` / `#d1fae5` | `#047857` / `#065f46` | Success border (`7.44:1` / `5.48:1`) & label (`12.19:1` / `7.29:1`) |
 | `--af-warning-bg` / `-border` / `-fg` | `#332208` / `#d97706` / `#fde68a` | `#fffbeb` / `#b45309` / `#854d0e` | Warning banner tokens (`12.28:1` dark, `6.61:1` light) |
 | `--af-tab-active-bg` / `-border` / `-fg` | `#1e2447` / `#6366f1` / `#e0e7ff` | `#eef2ff` / `#4f46e5` / `#312e81` | Active `.af-tab-pill-active` (`12.19:1` dark, `10.22:1` light) |
-| `--af-nav-active-bg` / `-border` / `-fg` | `#19213d` / `#4f46e5` / `#e0e7ff` | `#e0e7ff` / `#818cf8` / `#312e81` | Active `.af-nav-active` (`12.85:1` dark, `9.27:1` light) |
+| `--af-nav-active-bg` / `-border` / `-fg` | `#19213d` / `#4f46e5` / `#e0e7ff` | `#e0e7ff` / `#4f46e5` / `#312e81` | Active `.af-nav-active` (`12.85:1` dark, `9.27:1` light; border `5.10:1` light) |
 | `--af-focus-ring` | `#818cf8` | `#4338ca` | `2px solid` `:focus-visible` outline (`6.05–6.33:1` dark, `7.30–7.90:1` light) |
 | `--af-shadow-overlay` | `0 18px 48px rgba(0, 0, 0, 0.55)` | `0 14px 36px rgba(15, 23, 42, 0.14)` | Neutral elevation strictly for Tier 3 overlays |
 | `--af-backdrop-scrim` | `rgba(2, 6, 23, 0.72)` | `rgba(15, 23, 42, 0.42)` | `<dialog>::backdrop` scrim |
@@ -161,7 +161,7 @@ Flat-design invariants are enforced automatically at three layers:
    - `css_forbids_glass_and_legacy_atmosphere_rules`: Rejects `backdrop-filter`, `mask-composite`, chromatic/specular/card-lift/aurora/grain tokens, `.light ` selectors, legacy `.glass-*`/`.obs-tab-pill`/`.obs-telemetry-surface` selectors, and unlayered base component declarations outside `@layer components`.
    - `semantic_tokens_have_complete_dark_light_parity`: Enforces 100% 1:1 `--af-*` token parity between `:root` and `html[data-theme="light"]`.
    - `rust_templates_forbid_blur_and_dead_classes`: Scans `frontend-rs/crates/{af-web-ui,af-web-app}/src/**/*.rs` for `backdrop-blur`, `backdrop-saturate`, and retired classes.
-   - `legacy_glass_class_ratchet_matches_allowlist`: Permanently locks Rust templates to zero `.glass-*`, `.obs-tab-pill`, and `.obs-telemetry-surface` occurrences.
+   - `rust_templates_forbid_legacy_glass_classes`: Permanently locks Rust templates to zero `.glass-*`, `.obs-tab-pill`, and `.obs-telemetry-surface` occurrences.
    - `overlays_never_combine_with_card_classes`: Prevents Tier 3 overlays from combining with Tier 2 card classes.
 2. **Playwright Cross-Browser Runtime & A11y Suites (`e2e/tests/e2e/`)**:
    - `wasm.display.spec.ts`: Verifies zero `backdropFilter`, zero static `.af-card` hover transform/shadow change, dark/light computed `--af-*` tokens & `meta[name="theme-color"]` sync, Touch Mode `>= 44px` controls within `<= 104px` mobile header, CSP-safe `html[style] === null`, legacy `localStorage` passive tolerance, and 6-locale labels.

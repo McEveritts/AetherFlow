@@ -22,57 +22,52 @@ fn read_input_css() -> String {
 /// Strips CSS `/* ... */` block comments while preserving newlines so line numbers
 /// remain exact for diagnostics, and respecting single/double quoted strings.
 fn strip_css_comments(css: &str) -> String {
-    let bytes = css.as_bytes();
     let mut out = String::with_capacity(css.len());
-    let mut i = 0;
-    let mut in_string: Option<u8> = None;
+    let mut chars = css.chars().peekable();
+    let mut in_string: Option<char> = None;
 
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some(ch) = chars.next() {
         if let Some(quote) = in_string {
-            out.push(b as char);
-            if b == b'\\' && i + 1 < bytes.len() {
-                out.push(bytes[i + 1] as char);
-                i += 2;
+            out.push(ch);
+            if ch == '\\' {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
                 continue;
             }
-            if b == quote {
+            if ch == quote {
                 in_string = None;
             }
-            i += 1;
             continue;
         }
 
-        if b == b'"' || b == b'\'' {
-            in_string = Some(b);
-            out.push(b as char);
-            i += 1;
+        if ch == '"' || ch == '\'' {
+            in_string = Some(ch);
+            out.push(ch);
             continue;
         }
 
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
             out.push(' ');
             out.push(' ');
-            i += 2;
-            while i < bytes.len() {
-                if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while let Some(c) = chars.next() {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
                     out.push(' ');
                     out.push(' ');
-                    i += 2;
                     break;
                 }
-                if bytes[i] == b'\n' {
+                if c == '\n' {
                     out.push('\n');
                 } else {
                     out.push(' ');
                 }
-                i += 1;
             }
             continue;
         }
 
-        out.push(b as char);
-        i += 1;
+        out.push(ch);
     }
 
     out
